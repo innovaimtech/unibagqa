@@ -1,0 +1,87 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>OTs</title><style>
+        *{box-sizing:border-box}
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;margin:0;background:#f6f7f9;color:#111}
+        main{padding:16px; max-width:1100px; margin:0 auto}
+        .card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px}
+        .grid{display:grid;grid-template-columns: 320px 1fr;gap:14px}
+        .trace-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+        .trace-stack{display:grid;grid-template-columns:1fr;gap:14px}
+        .trace-roll-card{border:1px solid #dbe4ea;border-radius:10px;padding:10px 12px;background:#fbfdff}
+        .trace-roll-header{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+        .trace-roll-title{font-size:15px;font-weight:800;line-height:1.2}
+        .trace-roll-subtitle{margin-top:2px}
+        .trace-roll-link{font-size:12px;font-weight:700;color:#0f766e;text-decoration:none;white-space:nowrap}
+        .trace-roll-link:hover{text-decoration:underline}
+        .trace-roll-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+        .trace-roll-stat{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:8px}
+        .trace-roll-stat .value{font-size:13px;font-weight:700;line-height:1.3}
+        .trace-roll-events{margin-top:8px;border-top:1px solid #e5e7eb;padding-top:8px}
+        .trace-roll-events .item{padding:7px 0;border-bottom:1px solid #eef2f7}
+        .trace-roll-events .item:last-child{border-bottom:none}
+        .trace-roll-event-top{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}
+        .trace-roll-event-line{margin-top:2px;font-size:13px;color:#374151;line-height:1.35}
+        .row{display:flex;gap:10px;flex-wrap:wrap}
+        .row.nowrap{flex-wrap:nowrap}
+        label{display:block;font-size:12px;color:#374151;margin-bottom:4px}
+        input,select,textarea{width:100%;padding:10px;border:1px solid #d1d5db;border-radius:8px;background:#fff;font:inherit}
+        input:disabled,select:disabled{opacity:1;background:#f3f4f6;color:#111}
+        .btn{display:inline-block;background:#0aa;color:#fff;border:none;border-radius:8px;padding:10px 12px;font-weight:600;text-decoration:none;cursor:pointer}
+        .btn.secondary{background:#374151}
+        .panel{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:12px;overflow:hidden}
+        .ot-stage-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+        .ot-stage-card{background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:10px 12px}
+        .ot-stage-card.current{border-color:#259492;background:#eef8f8}
+        .ot-stage-card.done{border-color:#b7e4d7;background:#f6fffb}
+        .ot-meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+        .ot-meta{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:10px}
+        .ot-meta .value{font-size:14px;font-weight:800;line-height:1.3}
+        .ot-tasks{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+        .ot-task{background:#fcfcfd;border:1px solid #e4e7ec;border-radius:8px;padding:10px}
+        .ot-request-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,0.8fr);gap:12px}
+        .fold{border:1px solid #e5e7eb;border-radius:10px;background:#fff;margin-top:10px;overflow:hidden}
+        .fold summary{cursor:pointer;list-style:none;padding:11px 12px;font-weight:800;background:#fbfcfd}
+        .fold summary::-webkit-details-marker{display:none}
+        .fold .fold-body{padding:12px;border-top:1px solid #eef2f7}
+        .table-compact th,.table-compact td{padding:7px 8px;font-size:12px}
+        @media (max-width: 900px){
+          .row.nowrap{flex-wrap:wrap}
+          .trace-grid{grid-template-columns:1fr}
+          .ot-stage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+          .ot-request-grid{grid-template-columns:1fr}
+        }
+        @media (max-width: 640px){
+          .ot-stage-grid{grid-template-columns:1fr}
+        }
+        table{width:100%;border-collapse:collapse}
+        th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;font-size:13px}
+        .table-wrap{overflow-x:auto}
+        .trace-table{min-width:640px}
+        .err{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px;border-radius:10px}
+        .ok{background:#ecfeff;border:1px solid #a5f3fc;color:#155e75;padding:10px;border-radius:10px}
+        .muted{color:#6b7280;font-size:12px}
+
+        .topbar{background:#009f9f;color:#fff}
+        .topbar .inner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px}
+        .menu{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+        .menu a{color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:8px 10px;border-radius:6px}
+        .menu a:hover{background:rgba(255,255,255,.12)}
+        .menu a.active{background:#f3f4f6;color:#111}
+        .top-right{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:4px 8px}
+        .top-right select{width:auto;background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.25);padding:6px 10px;border-radius:6px;font-size:12px}
+        .top-right .pill{display:flex;align-items:center;gap:8px;color:#fff;text-decoration:none;font-weight:600;font-size:13px;padding:6px 10px;border-radius:6px;background:rgba(0,0,0,.12)}
+        .top-right .pill:hover{background:rgba(0,0,0,.18)}
+        .subbar{background:#f1f5f9;border-bottom:1px solid #e5e7eb}
+        .subbar .inner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 14px}
+        .submenu{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+        .subitem{display:inline-flex;gap:8px;align-items:center;color:#111;text-decoration:none;font-weight:700;font-size:13px}
+        .subitem:hover{text-decoration:underline}
+    </style></head><body><div class="topbar"><div class="inner"><nav class="menu"><a href="/work-orders?view=pending" class="active">Producción</a><a href="/cut">Corte</a></nav><div class="top-right"><select aria-label="Sistema" disabled><option>Producción</option></select><a class="pill" href="#"><span>UNIBAG CHILE</span></a><a class="pill" href="#"><span>Operador Demo</span></a><a class="pill" href="/logout">Salir</a></div></div></div><div class="subbar"><div class="inner"><div class="submenu"><a class="subitem" href="/work-orders?view=pending"><span>OT pendientes</span></a><a class="subitem" href="/work-orders?view=active"><span>OT en proceso</span></a><a class="subitem" href="/work-orders?view=closed"><span>OT finalizadas</span></a></div></div></div><main><div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div>
+          <div style="font-size:18px;font-weight:700">Traspasos de materiales por OT</div>
+          <div class="muted">Consulta OT pendientes, en producción/corte y fabricadas completas con su trazabilidad.</div>
+        </div>
+        <div class="row">
+          <a class="btn secondary" href="/">Volver</a>
+          <a class="btn" href="/work-orders/new">Nueva OT</a>
+        </div>
+      </div><div class="card"><table><thead><tr><th>ID</th><th>OT</th><th>SKU final</th><th>Etapa</th><th>Operador</th><th>Referencia</th><th>Detalle</th><th></th><th></th></tr></thead><tbody><tr><td>2</td><td>OT-0002</td><td>SKU-FINAL-EJ-002</td><td>Producción</td><td>-</td><td>-</td><td>-</td><td><a class="btn secondary" href="/work-orders/2/start">Ver OT</a></td><td><a class="btn secondary" href="/work-orders/2/traceability">Trazabilidad</a></td></tr></tbody></table></div></main></body></html>

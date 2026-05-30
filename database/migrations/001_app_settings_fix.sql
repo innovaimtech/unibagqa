@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS app_settings;
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  setting_key VARCHAR(60) NOT NULL,
+  setting_value VARCHAR(255) NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_app_settings_key (setting_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+

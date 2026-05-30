@@ -1,0 +1,7 @@
+.env
+.tmp_*.php
+storage/**
+print/**
+scale/**
+PLAN_TRZ_UNIBAG_2026.md
+INFORME_MAPA_DATOS_UNIBAGQA_TRAZABILIDAD.md

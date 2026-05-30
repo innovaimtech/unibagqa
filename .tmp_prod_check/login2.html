@@ -1,0 +1,54 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Ingreso ERP</title><style>
+        *{box-sizing:border-box}
+        body{margin:0;background:#f2f2f2;font-family:Arial,sans-serif;color:#333}
+        .login-shell{min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:28px 14px}
+        .login-box{width:560px;border:1px solid #a6a6a6;background:#efefef;box-shadow:0 1px 0 #fff inset}
+        .login-header{background:#d7d7d7;border-bottom:1px solid #b8b8b8;padding:4px 10px;font-size:13px;font-weight:700}
+        .login-body{position:relative;padding:30px 60px 34px}
+        .login-logo{display:flex;justify-content:center;align-items:center;gap:12px;margin:6px 0 24px}
+        .logo-mark{font-size:26px;font-weight:700;color:#00A9A6}
+        .logo-text{font-size:22px;font-weight:700;color:#666}
+        .logo-sub{font-size:13px;color:#00A9A6;text-align:center;margin-top:2px}
+        .logo-badge{width:50px;height:50px;border:3px solid #10b981;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#10b981;font-size:11px;font-weight:700}
+        .mode-row{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 18px}
+        .mode-card{width:79px;height:60px;border:1px solid #d4d4d4;background:#F9F9F9;box-shadow:0 0 8px 5px rgba(0,0,0,.12);cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:12px;color:#666;line-height:1.1}
+        .mode-card .mode-icon{font-size:13px;font-weight:700;margin-bottom:6px}
+        .mode-card.active{background:#00A9A6;color:#fff;border-color:#00A9A6}
+        .area-card{width:118px}
+        .form-grid{display:grid;grid-template-columns:105px 1fr;gap:10px 14px;align-items:center}
+        .form-grid label{font-size:12px}
+        .text{width:100%;height:24px;border:1px solid #b9b9b9;background:#fff;padding:2px 7px;font:12px Arial,sans-serif}
+        .text:focus{outline:2px solid #2f2f2f;border-color:#2f2f2f;background:#eef6fb}
+        .plant-row{display:none}
+        .plant-row.visible{display:contents}
+        .status{margin-bottom:12px;padding:8px 10px;border:1px solid #d6b0b0;background:#fff4f4;color:#8b1f1f;font-size:12px}
+        .hint{margin-top:14px;font-size:12px;color:#666}
+        .submit-row{margin-top:18px}
+        .submit-btn{width:100%;height:30px;border:1px solid #8fb48f;background:#b9ddb9;color:#111;font:700 13px Arial,sans-serif;cursor:pointer}
+        .submit-btn:hover{filter:brightness(.98)}
+        .demo-note{margin-top:10px;font-size:11px;color:#666}
+        @media (max-width: 640px){
+          .login-box{width:100%}
+          .login-body{padding:24px 18px 28px}
+          .form-grid{grid-template-columns:1fr}
+        }
+      </style></head><body><div class="login-shell"><div class="login-box"><div class="login-header">Unibag ERP</div><div class="login-body"><div class="login-logo"><div><div class="logo-mark">Unibag</div><div class="logo-sub">Bolsas con vida</div></div><div class="logo-badge">TESTING</div></div><form method="post" action="/login" id="login-form"><input type="hidden" name="_csrf" value="d329d0c5fa7f532d117d477a0781b439f6bc5f7cc6acccceb389b67d3e9e7858"><input type="hidden" name="appmode" id="menu_appmode" value="0"><input type="hidden" name="erp_area" id="erp_area" value="ERP"><div class="mode-row"><button type="button" class="mode-card area-card active" data-erp-area="ERP" aria-current="true"><span class="mode-icon">ERP</span><span>ERP</span></button><button type="button" class="mode-card area-card" data-erp-area="RECEPTION"><span class="mode-icon">RECEPTION</span><span>Recepción</span></button><button type="button" class="mode-card area-card" data-erp-area="PRODUCTION"><span class="mode-icon">PRODUCTION</span><span>Producción</span></button></div><div class="form-grid"><label for="user_login">Usuario</label><input class="text" id="user_login" name="user_login" type="text" value="" autocomplete="username"><label for="user_pass">Contraseña</label><input class="text" id="user_pass" name="user_pass" type="password" autocomplete="current-password"><label for="user_company_id">Empresa</label><select class="text" id="user_company_id" name="user_company_id"><option value="1" selected>UNIBAG CHILE</option><option value="2">UNIBAG PERÚ</option><option value="3">UNIBAG MÉXICO</option></select></div><div class="submit-row"><button class="submit-btn" type="submit">Acceder</button></div><div class="demo-note">Acceso demo: usuario <b>demo</b> y clave <b>demo123</b>.</div></form></div></div></div><script>
+      document.getElementById("user_login")?.focus();
+      (function () {
+        var areaInput = document.getElementById("erp_area");
+        var areaButtons = document.querySelectorAll("[data-erp-area]");
+        if (!areaInput || !areaButtons.length) return;
+        areaButtons.forEach(function (button) {
+          button.addEventListener("click", function () {
+            var area = button.getAttribute("data-erp-area") || "RECEPTION";
+            areaInput.value = area;
+            areaButtons.forEach(function (item) {
+              item.classList.remove("active");
+              item.removeAttribute("aria-current");
+            });
+            button.classList.add("active");
+            button.setAttribute("aria-current", "true");
+          });
+        });
+      })();
+    </script></body></html>

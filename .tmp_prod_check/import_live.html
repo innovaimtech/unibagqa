@@ -1,0 +1,103 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Importación</title><style>
+        *{box-sizing:border-box}
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;margin:0;background:#f6f7f9;color:#111}
+        main{padding:16px; max-width:1100px; margin:0 auto}
+        .card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:14px}
+        .grid{display:grid;grid-template-columns: 320px 1fr;gap:14px}
+        .trace-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+        .trace-stack{display:grid;grid-template-columns:1fr;gap:14px}
+        .trace-roll-card{border:1px solid #dbe4ea;border-radius:10px;padding:10px 12px;background:#fbfdff}
+        .trace-roll-header{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+        .trace-roll-title{font-size:15px;font-weight:800;line-height:1.2}
+        .trace-roll-subtitle{margin-top:2px}
+        .trace-roll-link{font-size:12px;font-weight:700;color:#0f766e;text-decoration:none;white-space:nowrap}
+        .trace-roll-link:hover{text-decoration:underline}
+        .trace-roll-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+        .trace-roll-stat{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:8px}
+        .trace-roll-stat .value{font-size:13px;font-weight:700;line-height:1.3}
+        .trace-roll-events{margin-top:8px;border-top:1px solid #e5e7eb;padding-top:8px}
+        .trace-roll-events .item{padding:7px 0;border-bottom:1px solid #eef2f7}
+        .trace-roll-events .item:last-child{border-bottom:none}
+        .trace-roll-event-top{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}
+        .trace-roll-event-line{margin-top:2px;font-size:13px;color:#374151;line-height:1.35}
+        .row{display:flex;gap:10px;flex-wrap:wrap}
+        .row.nowrap{flex-wrap:nowrap}
+        label{display:block;font-size:12px;color:#374151;margin-bottom:4px}
+        input,select,textarea{width:100%;padding:10px;border:1px solid #d1d5db;border-radius:8px;background:#fff;font:inherit}
+        input:disabled,select:disabled{opacity:1;background:#f3f4f6;color:#111}
+        .btn{display:inline-block;background:#0aa;color:#fff;border:none;border-radius:8px;padding:10px 12px;font-weight:600;text-decoration:none;cursor:pointer}
+        .btn.secondary{background:#374151}
+        .panel{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:12px;overflow:hidden}
+        .ot-stage-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+        .ot-stage-card{background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:10px 12px}
+        .ot-stage-card.current{border-color:#259492;background:#eef8f8}
+        .ot-stage-card.done{border-color:#b7e4d7;background:#f6fffb}
+        .ot-meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+        .ot-meta{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:10px}
+        .ot-meta .value{font-size:14px;font-weight:800;line-height:1.3}
+        .ot-tasks{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+        .ot-task{background:#fcfcfd;border:1px solid #e4e7ec;border-radius:8px;padding:10px}
+        .ot-request-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,0.8fr);gap:12px}
+        .fold{border:1px solid #e5e7eb;border-radius:10px;background:#fff;margin-top:10px;overflow:hidden}
+        .fold summary{cursor:pointer;list-style:none;padding:11px 12px;font-weight:800;background:#fbfcfd}
+        .fold summary::-webkit-details-marker{display:none}
+        .fold .fold-body{padding:12px;border-top:1px solid #eef2f7}
+        .table-compact th,.table-compact td{padding:7px 8px;font-size:12px}
+        @media (max-width: 900px){
+          .row.nowrap{flex-wrap:wrap}
+          .trace-grid{grid-template-columns:1fr}
+          .ot-stage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+          .ot-request-grid{grid-template-columns:1fr}
+        }
+        @media (max-width: 640px){
+          .ot-stage-grid{grid-template-columns:1fr}
+        }
+        table{width:100%;border-collapse:collapse}
+        th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;font-size:13px}
+        .table-wrap{overflow-x:auto}
+        .trace-table{min-width:640px}
+        .err{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px;border-radius:10px}
+        .ok{background:#ecfeff;border:1px solid #a5f3fc;color:#155e75;padding:10px;border-radius:10px}
+        .muted{color:#6b7280;font-size:12px}
+
+        .topbar{background:#009f9f;color:#fff}
+        .topbar .inner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px}
+        .menu{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+        .menu a{color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:8px 10px;border-radius:6px}
+        .menu a:hover{background:rgba(255,255,255,.12)}
+        .menu a.active{background:#f3f4f6;color:#111}
+        .top-right{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:4px 8px}
+        .top-right select{width:auto;background:rgba(255,255,255,.14);color:#fff;border:1px solid rgba(255,255,255,.25);padding:6px 10px;border-radius:6px;font-size:12px}
+        .top-right .pill{display:flex;align-items:center;gap:8px;color:#fff;text-decoration:none;font-weight:600;font-size:13px;padding:6px 10px;border-radius:6px;background:rgba(0,0,0,.12)}
+        .top-right .pill:hover{background:rgba(0,0,0,.18)}
+        .subbar{background:#f1f5f9;border-bottom:1px solid #e5e7eb}
+        .subbar .inner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 14px}
+        .submenu{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+        .subitem{display:inline-flex;gap:8px;align-items:center;color:#111;text-decoration:none;font-weight:700;font-size:13px}
+        .subitem:hover{text-decoration:underline}
+    </style></head><body><div class="topbar"><div class="inner"><nav class="menu"><a href="/purchase-orders?status=active&amp;supplier_type=NATIONAL" class="active">Recepción</a><a href="/stock">Inventario</a></nav><div class="top-right"><select aria-label="Sistema" disabled><option>Recepción</option></select><a class="pill" href="#"><span>UNIBAG CHILE</span></a><a class="pill" href="#"><span>Operador Demo</span></a><a class="pill" href="/logout">Salir</a></div></div></div><div class="subbar"><div class="inner"><div class="submenu"><a class="subitem" href="/purchase-orders?status=active&supplier_type=NATIONAL"><span>Recepción nacional</span></a><a class="subitem" href="/import-containers?status=active"><span>Importación</span></a><a class="subitem" href="/purchase-orders?status=complete"><span>Recepciones finalizadas</span></a></div></div></div><main><div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div>
+          <div style="font-size:18px;font-weight:700">Importación</div>
+          <div class="muted">Selecciona por número de contenedor para recepcionar importaciones aunque un contenedor tenga varias OCs y una OC llegue en varios contenedores.</div>
+        </div>
+      </div><div class="card" style="margin-bottom:12px">
+        <form method="get" action="/import-containers">
+          <input type="hidden" name="status" value="active">
+          <div class="row" style="align-items:end">
+            <div style="flex:1;min-width:260px">
+              <label>Proveedor importación</label>
+              <select name="supplier_id">
+                <option value="">Todos</option><option value="923">BIOINICIA S.L [España]</option><option value="821">Casablanca Joint Stock Company [VIETNAM]</option><option value="808">Fitesa Washougal [USA]</option><option value="1083">FUJIAN GREENJOY BIOMATERIAL CO., LTD [CHINA]</option><option value="1085">HANGZHOU LINKWIN SMART TECHNOLOGY CO., LTD [CHINA]</option><option value="832">K T C EXPORT PVT. LTD [INDIA]</option><option value="1010">KYD (HK)GROUP CO., LTD [CHINA]</option><option value="986">Laraty Packing &amp; Crafts Co., Ltd [CHINA]</option><option value="807">Qingdao Baby Corn Environmental Protection Technology Co, LTD [CHINA]</option><option value="1056">RUIAN CHANGHONG PRINTING MACHINE CO., LTD [CHINA]</option><option value="1089">SOFAR INTERNATIONAL [PAKISTAN]</option><option value="825">WENZHOU HONGCHANG NON-WOVEN CO.,LTD [CHINA]</option><option value="827">WENZHOU YONGHONG CHEMICAL FIBER CO.,LTD [CHINA]</option><option value="1074">WENZHOU YUELI IMP&amp;EXP CO., LTD [CHINA]</option><option value="809">Wenzhou Yuze Technology Co.,Ltd [CHINA]</option><option value="1021">XIAMEN WONTONNE TECH CO., LTD [CHINA]</option><option value="859">Zhejiang Allwell Intelligent Technology CO.,LTD [CHINA]</option></select>
+            </div>
+            <div style="flex:1;min-width:260px">
+              <label>Buscar contenedor</label>
+              <input name="q" type="text" value="" placeholder="CONT-001 / BL / barco">
+            </div>
+            <div style="min-width:160px">
+              <button class="btn" type="submit">Filtrar</button>
+            </div>
+          </div>
+        </form>
+      </div><div class="card"><table><thead><tr>
+        <th>Contenedor</th><th>BL</th><th>Embarcador</th><th>OCs</th><th>Estado</th><th>Avance</th><th>ETA planta</th>
+      </tr></thead><tbody><tr><td><a href="/import-containers/106">MSKU1086133</a></td><td>227060429</td><td>MAERSK</td><td>OC0001638</td><td>OPEN</td><td>0 / 1</td><td>2023-07-17</td></tr><tr><td><a href="/import-containers/105">CMAU6458037</a></td><td>QCDO271417</td><td>LOGISTICA INTERNACIONAL</td><td>OC0001747, OC0001638</td><td>OPEN</td><td>0 / 2</td><td>2023-07-10</td></tr><tr><td><a href="/import-containers/104">EMCU1676316</a></td><td>143357153104</td><td>EVERGREEN</td><td>OC0001688</td><td>OPEN</td><td>0 / 2</td><td>2023-07-07</td></tr><tr><td><a href="/import-containers/103">TCLU3797621</a></td><td>UCLPK0733</td><td>LOGISTICA INTERNACIONAL</td><td>OC0001622, OC0001393</td><td>OPEN</td><td>0 / 3</td><td>2023-07-04</td></tr><tr><td><a href="/import-containers/102">EITU9409190</a></td><td>143357163631</td><td>EVERGREEN</td><td>OC0001682</td><td>OPEN</td><td>0 / 1</td><td>2023-06-30</td></tr><tr><td><a href="/import-containers/101">TLLU7513510 / TLLU4097322 / MRKU6446987/ MRKU5139630</a></td><td>226334690</td><td>MAERSK</td><td>0000003</td><td>OPEN</td><td>0 / 2</td><td>2023-05-28</td></tr><tr><td><a href="/import-containers/100">HLXU8469193</a></td><td>HLCUNG12303DZRT0</td><td>HAPAG LLOYD</td><td>OC0001625, OC0001595, OC0001594, OC0001583, OC0001577, OC0001575, OC0001533</td><td>OPEN</td><td>0 / 19</td><td>2023-06-22</td></tr><tr><td><a href="/import-containers/99">Contenedor #99</a></td><td>-</td><td>-</td><td>-</td><td>OPEN</td><td>0 / 0</td><td>-</td></tr><tr><td><a href="/import-containers/98">UETU5526509 / TEMU7990786</a></td><td>QDSAI2340004</td><td>LOGISTICA INTERNACIONAL</td><td>OC0001608</td><td>OPEN</td><td>0 / 2</td><td>2023-05-30</td></tr><tr><td><a href="/import-containers/97">MRKU5445179</a></td><td>226542738</td><td>MAERSK LINE</td><td>OC0001348</td><td>OPEN</td><td>0 / 1</td><td>2023-05-29</td></tr><tr><td><a href="/import-containers/96">PONU8255528</a></td><td>226542723</td><td>MERSK LINE</td><td>OC0001348</td><td>OPEN</td><td>0 / 1</td><td>2023-05-26</td></tr><tr><td><a href="/import-containers/95">CMAU7666441</a></td><td>426133048KOL</td><td>LOGISTICA INTERNACIONAL</td><td>OC0001456, OC0001034, OC0000973, OC0000765</td><td>OPEN</td><td>0 / 4</td><td>2023-05-22</td></tr><tr><td><a href="/import-containers/94">MRSU5299225</a></td><td>1KT837760</td><td>MAERSK LINE</td><td>OC0001337</td><td>OPEN</td><td>0 / 1</td><td>2023-05-15</td></tr><tr><td><a href="/import-containers/93">TCLU5537813</a></td><td>HLCUNG12301DGEN4</td><td>HAPAG LLOYD</td><td>OC0001525, OC0001444</td><td>OPEN</td><td>0 / 8</td><td>1999-12-24</td></tr><tr><td><a href="/import-containers/92">MNBU3417516</a></td><td>292996602</td><td>MAERSK</td><td>OC0001540, OC0001203</td><td>OPEN</td><td>0 / 2</td><td>2023-03-23</td></tr><tr><td><a href="/import-containers/91">Contenedor #91</a></td><td>-</td><td>MAERSK</td><td>OC0001590</td><td>OPEN</td><td>0 / 1</td><td>-</td></tr><tr><td><a href="/import-containers/90">dggdgdfgdfg</a></td><td>safsdf</td><td>rerre</td><td>OC0001569</td><td>OPEN</td><td>0 / 2</td><td>2023-03-09</td></tr><tr><td><a href="/import-containers/89">MNBU0006549</a></td><td>HJGNG00065</td><td>MAERSK</td><td>OC0001569</td><td>OPEN</td><td>0 / 2</td><td>2023-03-06</td></tr><tr><td><a href="/import-containers/88">HLBU9616455</a></td><td>HLCUNG12301DAYE6</td><td>HAPAG LLOYD</td><td>OC0001465, OC0001447, OC0001445, OC0001444</td><td>OPEN</td><td>0 / 7</td><td>2023-02-15</td></tr><tr><td><a href="/import-containers/87">Contenedor #87</a></td><td>-</td><td>-</td><td>OC0000203</td><td>OPEN</td><td>0 / 9</td><td>-</td></tr><tr><td><a href="/import-containers/86">Contenedor #86</a></td><td>-</td><td>-</td><td>-</td><td>OPEN</td><td>0 / 0</td><td>-</td></tr><tr><td><a href="/import-containers/85">HLBU9616455</a></td><td>HLCUNG12301DAYE6</td><td>HAPAG LLOYD</td><td>OC0001465, OC0001447, OC0001445, OC0001444</td><td>OPEN</td><td>0 / 7</td><td>2023-03-15</td></tr><tr><td><a href="/import-containers/84">HLBU1815070</a></td><td>HLCUNG12212DNQN0</td><td>HAPAG LLOYD</td><td>OC0001478, OC0001465, OC0001344</td><td>OPEN</td><td>0 / 3</td><td>2023-03-07</td></tr><tr><td><a href="/import-containers/83">Contenedor #83</a></td><td>-</td><td>-</td><td>OC0001344, OC0001478, OC0001465</td><td>OPEN</td><td>0 / 3</td><td>-</td></tr><tr><td><a href="/import-containers/82">Contenedor #82</a></td><td>-</td><td>-</td><td>-</td><td>OPEN</td><td>0 / 0</td><td>-</td></tr><tr><td><a href="/import-containers/81">HLBU9785985</a></td><td>HLCUNG12211DAFY6</td><td>HAPAG LLOYD</td><td>OC0001372, OC0001362, OC0001354, OC0001352, OC0001337, OC0001335</td><td>OPEN</td><td>0 / 12</td><td>2023-01-03</td></tr><tr><td><a href="/import-containers/80">Contenedor #80</a></td><td>-</td><td>-</td><td>-</td><td>OPEN</td><td>0 / 0</td><td>-</td></tr><tr><td><a href="/import-containers/79">Contenedor #79</a></td><td>-</td><td>-</td><td>-</td><td>OPEN</td><td>0 / 0</td><td>-</td></tr><tr><td><a href="/import-containers/78">SZLU9607467</a></td><td>NBOZ22448000</td><td>CMA CGM</td><td>OC0001337</td><td>OPEN</td><td>0 / 1</td><td>2022-11-09</td></tr><tr><td><a href="/import-containers/77">OERU4082351</a></td><td>COSU6888702890</td><td>COSCO SHIPPING</td><td>OC0001353, OC0001203</td><td>OPEN</td><td>0 / 2</td><td>2022-11-18</td></tr><tr><td><a href="/import-containers/76">BMOU9623791</a></td><td>NBSY088623</td><td>CMA CGM</td><td>OC0001203, OC0001202</td><td>OPEN</td><td>0 / 3</td><td>2022-11-17</td></tr><tr><td><a href="/import-containers/75">1 PALLET</a></td><td>SHSM22100460</td><td>LOGISTICA INTERNACIONAL</td><td>OC0001362</td><td>OPEN</td><td>0 / 1</td><td>2022-11-15</td></tr><tr><td><a href="/import-containers/74">TEMU9560172</a></td><td>COSU6888696210</td><td>COSCO SHIPPING</td><td>OC0001230, OC0001203, OC0001202</td><td>OPEN</td><td>0 / 23</td><td>2022-11-11</td></tr><tr><td><a href="/import-containers/73">IKSU2537043</a></td><td>ONEYNB2BEP992900</td><td>OCEAN NETWORK EXPRESS</td><td>OC0001285</td><td>OPEN</td><td>0 / 2</td><td>2022-11-03</td></tr><tr><td><a href="/import-containers/72">MNBU3503260</a></td><td>292458741</td><td>MAERSK</td><td>OC0001307, OC0001270, OC0001241, OC0001237, OC0001231, OC0001070</td><td>OPEN</td><td>0 / 11</td><td>2022-10-21</td></tr><tr><td><a href="/import-containers/71">HLBU9246387</a></td><td>HLCUNG12208USGR1</td><td>HAPAG LLOYD</td><td>OC0001202, OC0001201</td><td>OPEN</td><td>0 / 2</td><td>2022-10-17</td></tr><tr><td><a href="/import-containers/70">DHL N° 2792026904</a></td><td>DHL N° 2792026904</td><td>DHL EXPRESS</td><td>OC0001250</td><td>OPEN</td><td>0 / 2</td><td>2022-09-21</td></tr><tr><td><a href="/import-containers/69">DHL N° 2791684081</a></td><td>DHL N° 2791684081</td><td>DHL EXPRESS</td><td>OC0001269</td><td>OPEN</td><td>0 / 2</td><td>2022-09-14</td></tr><tr><td><a href="/import-containers/68">Contenedor #68</a></td><td>DHL N° 2791407791</td><td>DHL EXPRESS</td><td>OC0001289</td><td>OPEN</td><td>0 / 1</td><td>2022-09-07</td></tr><tr><td><a href="/import-containers/67">1 CAJA</a></td><td>DHL N° 6890115956</td><td>DHL EXPRESS</td><td>OC0001249</td><td>OPEN</td><td>0 / 4</td><td>2022-09-06</td></tr><tr><td><a href="/import-containers/66">Contenedor #66</a></td><td>-</td><td>-</td><td>-</td><td>OPEN</td><td>0 / 0</td><td>-</td></tr><tr><td><a href="/import-containers/65">PCIU8469632</a></td><td>321412000592</td><td>VANGUARD LOGISTICS</td><td>OC0001034, OC0000973</td><td>OPEN</td><td>0 / 4</td><td>2022-09-26</td></tr><tr><td><a href="/import-containers/64">CSNU2017168</a></td><td>COSU6340884660</td><td>COSCO</td><td>OC0001219, OC0001197, OC0001071, OC0001032, OC0001026</td><td>OPEN</td><td>0 / 13</td><td>2022-09-23</td></tr><tr><td><a href="/import-containers/63">TTNU8609075</a></td><td>ONEYNB2BEH061400</td><td>OCEAN NETWORK EXPRESS</td><td>OC0001202, OC0001201</td><td>OPEN</td><td>0 / 2</td><td>2022-09-14</td></tr><tr><td><a href="/import-containers/62">CAIU8671202</a></td><td>AHPSAI222098</td><td>LOGISTICA INTERNACIONAL</td><td>OC0001223, OC0000772</td><td>OPEN</td><td>0 / 6</td><td>2022-09-09</td></tr><tr><td><a href="/import-containers/61">YMLU5436515</a></td><td>YMLUC2320978005</td><td>YANG MING</td><td>OC0001201</td><td>OPEN</td><td>0 / 1</td><td>2022-09-07</td></tr><tr><td><a href="/import-containers/60">Contenedor #60</a></td><td>-</td><td>-</td><td>-</td><td>OPEN</td><td>0 / 0</td><td>-</td></tr><tr><td><a href="/import-containers/59">HLBU9570415</a></td><td>HLCUNG12204VDGN4</td><td>HAPAG LLOYD</td><td>OC0001201</td><td>OPEN</td><td>0 / 1</td><td>2022-08-29</td></tr><tr><td><a href="/import-containers/58">MSDU9815278 / SZLU8244206</a></td><td>MEDUIC210115</td><td>MEDITERRANEAN SHIPPING</td><td>OC0001196, OC0001074</td><td>OPEN</td><td>0 / 3</td><td>2022-08-09</td></tr><tr><td><a href="/import-containers/57">MAGU5343157 /  SEKU5525459</a></td><td>SS0245FLA22061012</td><td>SINOTRANS LIMITED</td><td>OC0001081</td><td>OPEN</td><td>0 / 2</td><td>2022-08-05</td></tr></tbody></table></div></main></body></html>
