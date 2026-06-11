@@ -148,6 +148,7 @@ if ($path === '/login' && $method === 'POST') {
     $_SESSION['erp_area_label'] = erpAreaDefinitions()[$erpArea]['label'] ?? 'ERP';
 
     $erpAreaHome = erpAreaDefinitions()[$erpArea]['home'] ?? '/';
+    session_write_close();
     header('Location: ' . $erpAreaHome);
     exit;
 }
