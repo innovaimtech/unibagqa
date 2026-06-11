@@ -1466,9 +1466,7 @@ function render(string $title, string $body): void
     echo '<div class="topbar"><div class="inner">';
     echo '<nav class="menu">';
     if ($displayArea === 'ERP' && userCanAccessArea('ERP', $areaPermissions)) {
-        echo $link('/', 'ERP', $currentPath === '/');
-        echo $link('/purchase-orders?status=active&supplier_type=NATIONAL', 'Recepción', str_starts_with($currentPath, '/purchase-orders') || str_starts_with($currentPath, '/import-containers'));
-        echo $link('/stock', 'Inventario', str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches'));
+        echo $link('/', 'Informes', $currentPath === '/');
         echo $link('/work-orders?view=pending', 'Trazabilidad', str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets'));
     } elseif ($displayArea === 'RECEPTION') {
         echo $link('/purchase-orders?status=active&supplier_type=NATIONAL', 'Recepción', str_starts_with($currentPath, '/purchase-orders') || str_starts_with($currentPath, '/import-containers'));
@@ -1487,12 +1485,29 @@ function render(string $title, string $body): void
 
     echo '<div class="subbar"><div class="inner">';
     $activeModule = 'home';
-    if (str_starts_with($currentPath, '/purchase-orders') || str_starts_with($currentPath, '/import-containers')) { $activeModule = 'reception'; }
-    elseif (str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches') || (str_starts_with($currentPath, '/pallets') && currentSessionArea() === 'RECEPTION')) { $activeModule = 'inventory'; }
-    elseif (str_starts_with($currentPath, '/production/shifts') || str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets')) { $activeModule = 'production'; }
+    if ($displayArea === 'ERP') {
+        if ($currentPath === '/') {
+            $activeModule = 'reports';
+        } elseif (str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets')) {
+            $activeModule = 'traceability';
+        }
+    } else {
+        if (str_starts_with($currentPath, '/purchase-orders') || str_starts_with($currentPath, '/import-containers')) { $activeModule = 'reception'; }
+        elseif (str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches') || (str_starts_with($currentPath, '/pallets') && currentSessionArea() === 'RECEPTION')) { $activeModule = 'inventory'; }
+        elseif (str_starts_with($currentPath, '/production/shifts') || str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets')) { $activeModule = 'production'; }
+    }
 
     echo '<div class="submenu">';
-    if ($activeModule === 'reception') {
+    if ($activeModule === 'reports') {
+        echo '<a class="subitem" href="/"><span>Panel ERP</span></a>';
+    } elseif ($activeModule === 'traceability') {
+        echo '<a class="subitem" href="/work-orders?view=pending"><span>OT pendientes</span></a>';
+        echo '<a class="subitem" href="/work-orders?view=active"><span>OT en curso</span></a>';
+        echo '<a class="subitem" href="/work-orders?view=closed"><span>Histórico OT</span></a>';
+        echo '<a class="subitem" href="/cut"><span>Corte</span></a>';
+        echo '<a class="subitem" href="/chemicals/weighings"><span>Tintas</span></a>';
+        echo '<a class="subitem" href="/pallets"><span>Pallets</span></a>';
+    } elseif ($activeModule === 'reception') {
         echo '<a class="subitem" href="/purchase-orders?status=active&supplier_type=NATIONAL"><span>Recepción nacional</span></a>';
         echo '<a class="subitem" href="/import-containers?status=active"><span>Importación</span></a>';
         echo '<a class="subitem" href="/purchase-orders?status=complete"><span>Recepciones finalizadas</span></a>';
@@ -2721,7 +2736,7 @@ if ($path === '/' && $method === 'GET') {
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
           <div style="font-size:18px;font-weight:700">Panel ERP</div>
-          <div class="muted">Resumen ejecutivo del estado de recepción, producción, corte y trazabilidad.</div>
+          <div class="muted">Informes ejecutivos y trazabilidad completa, sin accesos operativos de máquinas o turnos.</div>
         </div>
       </div>';
 
@@ -2748,10 +2763,10 @@ if ($path === '/' && $method === 'GET') {
 
     $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Accesos rápidos</div>';
     $body .= '<div class="trace-grid">';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Recepción</div><div style="font-weight:800;margin-bottom:8px">OC y contenedores pendientes</div><a class="btn secondary" href="/purchase-orders?status=active&supplier_type=NATIONAL">Recepción nacional</a></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Producción</div><div style="font-weight:800;margin-bottom:8px">OT y cambio de bobinas</div><a class="btn secondary" href="/work-orders?view=pending">Órdenes de trabajo</a></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Corte</div><div style="font-weight:800;margin-bottom:8px">Bobinas listas, cajas y pallets</div><a class="btn secondary" href="/cut">Ir a corte</a></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Inventario</div><div style="font-weight:800;margin-bottom:8px">Inventario por bodega y especificación</div><a class="btn secondary" href="/stock">Ver inventario</a></div>';
+    $body .= '<div class="kpi-card"><div class="kpi-label">Trazabilidad</div><div style="font-weight:800;margin-bottom:8px">Órdenes y avance por etapa</div><a class="btn secondary" href="/work-orders?view=pending">Ver órdenes</a></div>';
+    $body .= '<div class="kpi-card"><div class="kpi-label">Corte</div><div style="font-weight:800;margin-bottom:8px">Seguimiento de bobinas, cajas y pallets</div><a class="btn secondary" href="/cut">Ver corte</a></div>';
+    $body .= '<div class="kpi-card"><div class="kpi-label">Tintas</div><div style="font-weight:800;margin-bottom:8px">Pesajes y consumo por OT</div><a class="btn secondary" href="/chemicals/weighings">Ver pesajes</a></div>';
+    $body .= '<div class="kpi-card"><div class="kpi-label">Pallets</div><div style="font-weight:800;margin-bottom:8px">Seguimiento de salida final</div><a class="btn secondary" href="/pallets">Ver pallets</a></div>';
     $body .= '</div></div>';
     $body .= '</div>';
 
