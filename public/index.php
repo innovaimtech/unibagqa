@@ -2724,14 +2724,8 @@ if ($path === '/' && $method === 'GET') {
     }
 
     $summary = $service->getErpDashboardSummary();
-    $alerts = $service->listErpDashboardAlerts();
     $recentTraceability = $service->listDashboardRecentTraceability(8);
     $recentEvents = $service->listRecentOperationalEvents(8);
-    $stockSummary = $service->stockSummary();
-    $maxWeight = 0.0;
-    foreach ($stockSummary as $stockRow) {
-        $maxWeight = max($maxWeight, (float)($stockRow['total_weight_kg'] ?? 0));
-    }
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
@@ -2741,26 +2735,15 @@ if ($path === '/' && $method === 'GET') {
       </div>';
 
     $body .= '<div class="kpi-grid" style="margin-bottom:12px">';
-    $body .= '<div class="kpi-card"><div class="kpi-label">OC pendientes</div><div class="kpi-value">' . h((string)$summary['reception']['purchase_orders_pending']) . '</div><div class="kpi-sub">Recepción nacional por completar</div></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Contenedores pendientes</div><div class="kpi-value">' . h((string)$summary['reception']['containers_pending']) . '</div><div class="kpi-sub">Importaciones aún abiertas</div></div>';
     $body .= '<div class="kpi-card"><div class="kpi-label">OT activas</div><div class="kpi-value">' . h((string)$summary['work_orders']['active']) . '</div><div class="kpi-sub">En producción ahora</div></div>';
     $body .= '<div class="kpi-card"><div class="kpi-label">OT en corte</div><div class="kpi-value">' . h((string)$summary['work_orders']['cutting']) . '</div><div class="kpi-sub">Impresas y pendientes de cierre</div></div>';
     $body .= '<div class="kpi-card"><div class="kpi-label">Bobinas listas corte</div><div class="kpi-value">' . h((string)$summary['rolls']['ready_for_cut']) . '</div><div class="kpi-sub">Salida de impresión disponible</div></div>';
     $body .= '<div class="kpi-card"><div class="kpi-label">Cajas / pallets</div><div class="kpi-value">' . h((string)$summary['packaging']['boxes']) . ' / ' . h((string)$summary['packaging']['pallets']) . '</div><div class="kpi-sub">Empaque total generado</div></div>';
+    $body .= '<div class="kpi-card"><div class="kpi-label">OT fabricadas</div><div class="kpi-value">' . h((string)$summary['work_orders']['completed']) . '</div><div class="kpi-sub">Órdenes cerradas correctamente</div></div>';
+    $body .= '<div class="kpi-card"><div class="kpi-label">Bobinas bloqueadas</div><div class="kpi-value">' . h((string)$summary['rolls']['blocked']) . '</div><div class="kpi-sub">Revisión o contingencia operativa</div></div>';
     $body .= '</div>';
 
     $body .= '<div class="dashboard-grid" style="margin-bottom:12px">';
-    $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Alertas y foco del día</div>';
-    foreach ($alerts as $alert) {
-        $level = (string)($alert['level'] ?? 'info');
-        $body .= '<div class="dashboard-alert ' . h($level) . '" style="margin-bottom:10px">';
-        $body .= '<div style="font-weight:800;margin-bottom:4px">' . h((string)$alert['title']) . '</div>';
-        $body .= '<div class="muted" style="margin-bottom:8px">' . h((string)$alert['detail']) . '</div>';
-        $body .= '<a class="btn secondary" href="' . h((string)$alert['link']) . '">Revisar</a>';
-        $body .= '</div>';
-    }
-    $body .= '</div>';
-
     $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Accesos rápidos</div>';
     $body .= '<div class="trace-grid">';
     $body .= '<div class="kpi-card"><div class="kpi-label">Trazabilidad</div><div style="font-weight:800;margin-bottom:8px">Órdenes y avance por etapa</div><a class="btn secondary" href="/work-orders?view=pending">Ver órdenes</a></div>';
@@ -2770,22 +2753,7 @@ if ($path === '/' && $method === 'GET') {
     $body .= '</div></div>';
     $body .= '</div>';
 
-    $body .= '<div class="dashboard-grid" style="margin-bottom:12px">';
-    $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Inventario por bodega</div>';
-    foreach ($stockSummary as $stockRow) {
-        $weight = (float)($stockRow['total_weight_kg'] ?? 0);
-        $ratio = $maxWeight > 0 ? min(100, ($weight / $maxWeight) * 100) : 0;
-        $body .= '<div style="margin-bottom:10px">';
-        $body .= '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px"><div style="font-weight:700">' . h((string)$stockRow['warehouse_code']) . ' - ' . h((string)$stockRow['warehouse_name']) . '</div><div class="muted">' . h((string)$stockRow['rolls_count']) . ' IDs · ' . h(number_format($weight, 1, ',', '.')) . ' Kg</div></div>';
-        $body .= '<div class="bar-track"><div class="bar-fill" style="width:' . h(number_format($ratio, 2, '.', '')) . '%"></div></div>';
-        $body .= '</div>';
-    }
-    if ($stockSummary === []) {
-        $body .= '<div class="muted">Sin stock registrado todavía.</div>';
-    }
-    $body .= '</div>';
-
-    $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Actividad reciente</div><div class="table-wrap"><table class="trace-table"><thead><tr><th>Fecha</th><th>Evento</th><th>Detalle</th></tr></thead><tbody>';
+    $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Actividad reciente de trazabilidad</div><div class="table-wrap"><table class="trace-table"><thead><tr><th>Fecha</th><th>Evento</th><th>Detalle</th></tr></thead><tbody>';
     foreach ($recentEvents as $event) {
         $payload = $event['payload_data'] ?? [];
         $detailParts = [];
