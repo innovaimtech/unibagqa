@@ -154,7 +154,8 @@ if ($path === '/login' && $method === 'POST') {
 
     $erpAreaHome = erpAreaDefinitions()[$erpArea]['home'] ?? '/';
     session_write_close();
-    redirectResponse($erpAreaHome);
+    header('Location: ' . $erpAreaHome);
+    exit;
 }
 
 $isAuthenticated = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 0) > 0;
@@ -162,7 +163,8 @@ if ($path === '/login' && $method === 'GET') {
     if ($isAuthenticated) {
         $currentArea = normalizeErpArea((string)($_SESSION['erp_area'] ?? 'ERP'));
         $areaHome = erpAreaDefinitions()[$currentArea]['home'] ?? '/';
-        redirectResponse($areaHome);
+        header('Location: ' . $areaHome);
+        exit;
     }
     renderLoginPage();
     exit;
