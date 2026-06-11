@@ -156,7 +156,9 @@ if ($path === '/login' && $method === 'POST') {
 $isAuthenticated = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 0) > 0;
 if ($path === '/login' && $method === 'GET') {
     if ($isAuthenticated) {
-        header('Location: /');
+        $currentArea = normalizeErpArea((string)($_SESSION['erp_area'] ?? 'ERP'));
+        $areaHome = erpAreaDefinitions()[$currentArea]['home'] ?? '/';
+        header('Location: ' . $areaHome);
         exit;
     }
     renderLoginPage();
