@@ -50,7 +50,7 @@ if ($path === '') {
     $path = '/';
 }
 
-function redirectResponse(string $location, int $statusCode = 303): never
+function redirectResponse(string $location, int $statusCode = 303): void
 {
     while (ob_get_level() > 0) {
         ob_end_clean();
@@ -58,7 +58,6 @@ function redirectResponse(string $location, int $statusCode = 303): never
     header('Cache-Control: no-store, no-cache, must-revalidate');
     header('Pragma: no-cache');
     header('Location: ' . $location, true, $statusCode);
-    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=' . h($location) . '"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Redirigiendo...</title></head><body><p>Redirigiendo. Si no avanzas automaticamente, <a href="' . h($location) . '">haz clic aqui</a>.</p><script>window.location.replace(' . json_encode($location, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . ');</script></body></html>';
     exit;
 }
 
