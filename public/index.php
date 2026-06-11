@@ -53,10 +53,22 @@ if ($path === '') {
 if ($path === '/logout') {
     $_SESSION = [];
     if (session_status() === PHP_SESSION_ACTIVE) {
+        session_unset();
         session_destroy();
     }
+    if (ini_get('session.use_cookies')) {
+        $params = session_get_cookie_params();
+        setcookie(
+            session_name(),
+            '',
+            time() - 42000,
+            $params['path'] ?: '/',
+            $params['domain'] ?? '',
+            (bool)($params['secure'] ?? false),
+            (bool)($params['httponly'] ?? true)
+        );
+    }
     expireCsrfCookie();
-    session_start();
     header('Location: /login');
     exit;
 }
