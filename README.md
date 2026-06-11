@@ -18,6 +18,18 @@ Desde la carpeta del proyecto:
 - Abrir:
   - `http://localhost:8000`
 
+## Seed Demo Completo
+- Para poblar trazabilidad local, recepción ERP, producción ERP y sincronización de planificación en un solo paso:
+  - `php scripts/seed_full_demo.php`
+- El orquestador primero limpia demos anteriores y luego ejecuta en este orden:
+  - `scripts/cleanup_demo_data.php`
+  - `scripts/seed_demo_flow.php`
+  - `scripts/seed_reception_demo.php`
+  - `scripts/seed_erp_production_demo.php`
+  - `scripts/sync_erp_production_plan.php`
+- Requisito:
+  - `.env` debe apuntar correctamente a la base local TRZ y a `unibagqa`
+
 ## Notas para XAMPP (Windows)
 - Iniciar MySQL desde el panel de XAMPP (Start en MySQL).
 - Si MySQL usa otro puerto, actualizar `DB_PORT` en `.env`.

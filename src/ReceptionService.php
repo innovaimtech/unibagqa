@@ -4,9 +4,10 @@ declare(strict_types=1);
 
 final class ReceptionService
 {
-    private const RECEPTION_SCHEMA_VERSION = 'reception_v1';
+    private const RECEPTION_SCHEMA_VERSION = 'reception_v5';
     private static bool $schemaEnsured = false;
     private bool $erpWarehousesSynced = false;
+    private bool $erpProductionPlanSynced = false;
 
     /** @var array<int, array<string, mixed>> */
     private array $erpItemsCache = [];
@@ -182,6 +183,185 @@ final class ReceptionService
         );
 
         $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS maquila_orders (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                pallet_id BIGINT UNSIGNED NOT NULL,
+                work_order_id BIGINT UNSIGNED NULL,
+                source_roll_id BIGINT UNSIGNED NULL,
+                workshop_name VARCHAR(160) NOT NULL,
+                outgoing_weight_kg DECIMAL(12,3) NOT NULL,
+                outgoing_box_count INT UNSIGNED NOT NULL DEFAULT 0,
+                outgoing_units_qty DECIMAL(12,3) NOT NULL DEFAULT 0.000,
+                outgoing_warehouse_id INT UNSIGNED NOT NULL,
+                external_warehouse_id INT UNSIGNED NOT NULL,
+                return_warehouse_id INT UNSIGNED NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'OPEN',
+                notes VARCHAR(255) NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                closed_at TIMESTAMP NULL DEFAULT NULL,
+                PRIMARY KEY (id),
+                KEY idx_maquila_orders_pallet_status (pallet_id, status),
+                KEY idx_maquila_orders_work_order (work_order_id),
+                KEY idx_maquila_orders_status (status),
+                CONSTRAINT fk_maquila_orders_pallet FOREIGN KEY (pallet_id) REFERENCES pallets(id) ON DELETE CASCADE,
+                CONSTRAINT fk_maquila_orders_wo FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS maquila_order_returns (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                maquila_order_id BIGINT UNSIGNED NOT NULL,
+                return_weight_kg DECIMAL(12,3) NOT NULL DEFAULT 0.000,
+                returned_box_count INT UNSIGNED NOT NULL DEFAULT 0,
+                returned_units_qty DECIMAL(12,3) NOT NULL DEFAULT 0.000,
+                waste_weight_kg DECIMAL(12,3) NOT NULL DEFAULT 0.000,
+                notes VARCHAR(255) NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_maquila_returns_order (maquila_order_id),
+                CONSTRAINT fk_maquila_returns_order FOREIGN KEY (maquila_order_id) REFERENCES maquila_orders(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS cliches (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                code VARCHAR(60) NOT NULL,
+                description VARCHAR(180) NOT NULL,
+                location_code VARCHAR(60) NOT NULL,
+                location_detail VARCHAR(180) NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'AVAILABLE',
+                current_work_order_id BIGINT UNSIGNED NULL,
+                current_operator_name VARCHAR(120) NULL,
+                current_assigned_at TIMESTAMP NULL DEFAULT NULL,
+                notes VARCHAR(255) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_cliches_code (code),
+                KEY idx_cliches_status (status),
+                KEY idx_cliches_location (location_code),
+                KEY idx_cliches_work_order (current_work_order_id),
+                CONSTRAINT fk_cliches_work_order FOREIGN KEY (current_work_order_id) REFERENCES work_orders(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS cliche_usage_logs (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                cliche_id BIGINT UNSIGNED NOT NULL,
+                work_order_id BIGINT UNSIGNED NULL,
+                action_type VARCHAR(20) NOT NULL,
+                from_location_code VARCHAR(60) NULL,
+                to_location_code VARCHAR(60) NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                notes VARCHAR(255) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_cliche_logs_cliche (cliche_id),
+                KEY idx_cliche_logs_work_order (work_order_id),
+                KEY idx_cliche_logs_action (action_type),
+                CONSTRAINT fk_cliche_logs_cliche FOREIGN KEY (cliche_id) REFERENCES cliches(id) ON DELETE CASCADE,
+                CONSTRAINT fk_cliche_logs_work_order FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS erp_work_order_sync (
+                work_order_id BIGINT UNSIGNED NOT NULL,
+                erp_prod_header_id BIGINT UNSIGNED NOT NULL,
+                erp_agenda_id BIGINT UNSIGNED NOT NULL,
+                erp_worker_ot_id BIGINT UNSIGNED NULL,
+                erp_worker_init_id BIGINT UNSIGNED NULL,
+                erp_worker_id BIGINT UNSIGNED NULL,
+                erp_worker_name VARCHAR(160) NULL,
+                erp_user_id BIGINT UNSIGNED NULL,
+                erp_user_login VARCHAR(120) NULL,
+                erp_prod_number VARCHAR(80) NOT NULL,
+                erp_req_id VARCHAR(80) NULL,
+                erp_plan_desc VARCHAR(255) NULL,
+                erp_plan_date VARCHAR(40) NULL,
+                erp_plan_timestamp BIGINT NULL,
+                erp_machine_id BIGINT NULL,
+                erp_machine_label VARCHAR(120) NULL,
+                erp_machine_type_id BIGINT NULL,
+                erp_planta_id BIGINT NULL,
+                erp_target_qty DECIMAL(12,3) NULL,
+                erp_header_status VARCHAR(40) NULL,
+                erp_agenda_status VARCHAR(40) NULL,
+                erp_agenda_active TINYINT(1) NOT NULL DEFAULT 0,
+                erp_worker_status VARCHAR(40) NULL,
+                last_synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (work_order_id),
+                UNIQUE KEY uq_erp_work_order_sync_agenda (erp_agenda_id),
+                UNIQUE KEY uq_erp_work_order_sync_header_agenda (erp_prod_header_id, erp_agenda_id),
+                KEY idx_erp_work_order_sync_prod_number (erp_prod_number),
+                KEY idx_erp_work_order_sync_plan_ts (erp_plan_timestamp),
+                CONSTRAINT fk_erp_work_order_sync_wo FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS production_machine_types (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                code VARCHAR(40) NOT NULL,
+                name VARCHAR(120) NOT NULL,
+                production_area VARCHAR(30) NOT NULL DEFAULT 'PRODUCTION',
+                erp_machine_type_id BIGINT NULL,
+                display_order INT UNSIGNED NOT NULL DEFAULT 0,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_production_machine_types_code (code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS production_machines (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                machine_type_id INT UNSIGNED NOT NULL,
+                code VARCHAR(40) NOT NULL,
+                name VARCHAR(120) NOT NULL,
+                production_area VARCHAR(30) NOT NULL DEFAULT 'PRODUCTION',
+                erp_machine_id BIGINT NULL,
+                plant_label VARCHAR(120) NULL,
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_production_machines_code (code),
+                KEY idx_production_machines_type (machine_type_id),
+                KEY idx_production_machines_erp (erp_machine_id),
+                CONSTRAINT fk_production_machines_type FOREIGN KEY (machine_type_id) REFERENCES production_machine_types(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS production_shift_sessions (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                machine_id INT UNSIGNED NOT NULL,
+                work_order_id BIGINT UNSIGNED NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                helper_name VARCHAR(120) NULL,
+                shift_label VARCHAR(60) NULL,
+                process_stage VARCHAR(30) NOT NULL DEFAULT 'PRODUCTION',
+                comments TEXT NULL,
+                started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ended_at TIMESTAMP NULL DEFAULT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_shift_sessions_machine_status (machine_id, status),
+                KEY idx_shift_sessions_operator_status (operator_name, status),
+                KEY idx_shift_sessions_work_order (work_order_id),
+                CONSTRAINT fk_shift_sessions_machine FOREIGN KEY (machine_id) REFERENCES production_machines(id),
+                CONSTRAINT fk_shift_sessions_work_order FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
             "INSERT IGNORE INTO warehouses (code, name) VALUES
                 (100, 'Bodega 100 - Recepción MP'),
                 (200, 'Bodega 200 - Recepción MP'),
@@ -191,6 +371,94 @@ final class ReceptionService
                 (900, 'Bodega 900 - Tintas'),
                 (1000, 'Bodega 1000 - Retail')"
         );
+
+        $this->ensureProductionMachineCatalog();
+    }
+
+    private function ensureProductionMachineCatalog(): void
+    {
+        $machineTypes = [
+            ['code' => 'EMBALAJE', 'name' => 'EMBALAJE', 'production_area' => 'PACKAGING', 'erp_machine_type_id' => null, 'display_order' => 10],
+            ['code' => 'FLEXOGRAFIA', 'name' => 'IMPRESORA FLEXOGRAFIA', 'production_area' => 'PRINTING', 'erp_machine_type_id' => 1, 'display_order' => 20],
+            ['code' => 'SERIGRAFIA', 'name' => 'IMPRESORA SERIGRAFIA', 'production_area' => 'PRINTING', 'erp_machine_type_id' => 2, 'display_order' => 30],
+            ['code' => 'REBOBINADO', 'name' => 'REBOBINADORA', 'production_area' => 'REWINDING', 'erp_machine_type_id' => 3, 'display_order' => 40],
+            ['code' => 'SELLADO', 'name' => 'SELLADORAS', 'production_area' => 'SEALING', 'erp_machine_type_id' => 4, 'display_order' => 50],
+        ];
+
+        $typeStmt = $this->pdo->prepare(
+            'INSERT INTO production_machine_types (code, name, production_area, erp_machine_type_id, display_order, is_active)
+             VALUES (:code, :name, :production_area, :erp_machine_type_id, :display_order, 1)
+             ON DUPLICATE KEY UPDATE
+                name = VALUES(name),
+                production_area = VALUES(production_area),
+                erp_machine_type_id = VALUES(erp_machine_type_id),
+                display_order = VALUES(display_order),
+                is_active = 1'
+        );
+        foreach ($machineTypes as $machineType) {
+            $typeStmt->execute([
+                ':code' => $machineType['code'],
+                ':name' => $machineType['name'],
+                ':production_area' => $machineType['production_area'],
+                ':erp_machine_type_id' => $machineType['erp_machine_type_id'],
+                ':display_order' => $machineType['display_order'],
+            ]);
+        }
+
+        $typeMap = [];
+        $typeAreaMap = [];
+        $typeRows = $this->pdo->query('SELECT id, code FROM production_machine_types')->fetchAll();
+        foreach ($machineTypes as $machineType) {
+            $typeAreaMap[(string)$machineType['code']] = (string)$machineType['production_area'];
+        }
+        foreach ($typeRows as $typeRow) {
+            $typeMap[(string)$typeRow['code']] = (int)$typeRow['id'];
+        }
+
+        $machines = [
+            ['type' => 'EMBALAJE', 'code' => 'EMB-01', 'name' => 'EMBALAJE', 'erp_machine_id' => 201, 'sort_order' => 10],
+            ['type' => 'FLEXOGRAFIA', 'code' => 'FLEXO-01', 'name' => 'FLEXO I.', 'erp_machine_id' => 101, 'sort_order' => 20],
+            ['type' => 'FLEXOGRAFIA', 'code' => 'FLEXO-02', 'name' => 'FLEXO II.', 'erp_machine_id' => 102, 'sort_order' => 21],
+            ['type' => 'SERIGRAFIA', 'code' => 'SERI-PULPO', 'name' => 'PULPO SERIGRAFICO', 'erp_machine_id' => 111, 'sort_order' => 30],
+            ['type' => 'SERIGRAFIA', 'code' => 'SERI-01', 'name' => 'SERI I.', 'erp_machine_id' => 112, 'sort_order' => 31],
+            ['type' => 'SERIGRAFIA', 'code' => 'SERI-02', 'name' => 'SERI II.', 'erp_machine_id' => 113, 'sort_order' => 32],
+            ['type' => 'SERIGRAFIA', 'code' => 'SERI-03', 'name' => 'SERI III.', 'erp_machine_id' => 114, 'sort_order' => 33],
+            ['type' => 'REBOBINADO', 'code' => 'REBO-02', 'name' => 'REBO II.', 'erp_machine_id' => 121, 'sort_order' => 40],
+            ['type' => 'SELLADO', 'code' => 'SELLA-01', 'name' => 'SELLADORA I.', 'erp_machine_id' => 131, 'sort_order' => 50],
+            ['type' => 'SELLADO', 'code' => 'SELLA-02', 'name' => 'SELLADORA II.', 'erp_machine_id' => 132, 'sort_order' => 51],
+            ['type' => 'SELLADO', 'code' => 'SELLA-04', 'name' => 'SELLADORA IV.', 'erp_machine_id' => 134, 'sort_order' => 52],
+            ['type' => 'SELLADO', 'code' => 'SELLA-05', 'name' => 'SELLADORA V.', 'erp_machine_id' => 135, 'sort_order' => 53],
+            ['type' => 'SELLADO', 'code' => 'SELLA-06', 'name' => 'SELLADORA VI.', 'erp_machine_id' => 136, 'sort_order' => 54],
+        ];
+
+        $machineStmt = $this->pdo->prepare(
+            'INSERT INTO production_machines (machine_type_id, code, name, production_area, erp_machine_id, plant_label, sort_order, is_active)
+             VALUES (:machine_type_id, :code, :name, :production_area, :erp_machine_id, :plant_label, :sort_order, 1)
+             ON DUPLICATE KEY UPDATE
+                machine_type_id = VALUES(machine_type_id),
+                name = VALUES(name),
+                production_area = VALUES(production_area),
+                erp_machine_id = VALUES(erp_machine_id),
+                plant_label = VALUES(plant_label),
+                sort_order = VALUES(sort_order),
+                is_active = 1'
+        );
+        foreach ($machines as $machine) {
+            $machineTypeId = (int)($typeMap[$machine['type']] ?? 0);
+            if ($machineTypeId <= 0) {
+                continue;
+            }
+            $productionArea = $typeAreaMap[$machine['type']] ?? 'PRODUCTION';
+            $machineStmt->execute([
+                ':machine_type_id' => $machineTypeId,
+                ':code' => $machine['code'],
+                ':name' => $machine['name'],
+                ':production_area' => $productionArea,
+                ':erp_machine_id' => $machine['erp_machine_id'],
+                ':plant_label' => 'SANTIAGO CM',
+                ':sort_order' => $machine['sort_order'],
+            ]);
+        }
     }
 
     private function columnExists(string $table, string $column): bool
@@ -300,6 +568,466 @@ final class ReceptionService
         $insert = $this->pdo->prepare('INSERT INTO warehouses (code, name) VALUES (:code, :name)');
         $insert->execute([':code' => $code, ':name' => $name]);
         return (int)$this->pdo->lastInsertId();
+    }
+
+    public function syncErpProductionPlan(bool $force = false): array
+    {
+        return $this->syncWorkOrdersFromErpProductionPlan($force);
+    }
+
+    private function syncWorkOrdersFromErpProductionPlan(bool $force = false): array
+    {
+        if ($this->erpProductionPlanSynced && !$force) {
+            return ['ok' => true, 'processed' => 0, 'synced' => 0];
+        }
+
+        if (!$force && $this->shouldSkipProductionPlanSync()) {
+            $this->erpProductionPlanSynced = true;
+            return ['ok' => true, 'processed' => 0, 'synced' => 0];
+        }
+
+        $sql = <<<SQL
+SELECT
+    ph.id AS erp_prod_header_id,
+    ph.prd_number,
+    ph.prd_reqid,
+    ph.prd_desc,
+    ph.prd_status,
+    ph.prd_plantaid,
+    pa.id AS erp_agenda_id,
+    pa.ag_date,
+    pa.ag_date_stamp,
+    pa.ag_equipo_id,
+    pa.ag_equipotype_id,
+    pa.ag_amount,
+    pa.ag_reqid,
+    pa.ag_plantaid,
+    pa.ag_status,
+    pa.ag_active,
+    pwo.id AS erp_worker_ot_id,
+    pwo.wok_init_id,
+    pwo.wok_status,
+    pwo.wok_crtdat,
+    pwo.wok_enddat,
+    pwi.id AS erp_worker_init_id,
+    pwi.win_wrkid,
+    w.id AS erp_worker_id,
+    w.wrk_firstname,
+    w.wrk_lastname,
+    w.wrk_status,
+    u.id AS erp_user_id,
+    u.user_login
+FROM prod_agenda pa
+INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+LEFT JOIN (
+    SELECT pwo1.*
+    FROM prod_worker_ot pwo1
+    INNER JOIN (
+        SELECT wok_ag_id, MAX(id) AS max_id
+        FROM prod_worker_ot
+        GROUP BY wok_ag_id
+    ) latest_pwo ON latest_pwo.max_id = pwo1.id
+) pwo ON pwo.wok_ag_id = pa.id
+LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+LEFT JOIN workers w ON w.id = pwi.win_wrkid
+LEFT JOIN user u ON u.id = w.wrk_uid
+ORDER BY pa.id DESC
+LIMIT 250
+SQL;
+
+        try {
+            $rows = $this->erpPdo->query($sql)->fetchAll();
+        } catch (PDOException $e) {
+            $sqlState = (string)($e->errorInfo[0] ?? $e->getCode() ?? '');
+            $message = $e->getMessage();
+            if ($sqlState === '42S02' || str_contains($message, 'Base table or view not found')) {
+                return [
+                    'ok' => false,
+                    'processed' => 0,
+                    'synced' => 0,
+                    'warning' => 'erp_production_tables_missing',
+                ];
+            }
+
+            throw $e;
+        }
+        $processed = 0;
+        $synced = 0;
+
+        $this->pdo->beginTransaction();
+        try {
+            foreach ($rows as $row) {
+                $processed++;
+                $planDate = $this->resolveErpPlanDate(
+                    $row['ag_date'] ?? null,
+                    $row['ag_date_stamp'] ?? null
+                );
+                $otCode = $this->buildErpWorkOrderCode($row);
+                $skuFinal = $this->buildErpWorkOrderSku($row);
+                $targetQty = isset($row['ag_amount']) ? (int)round((float)$row['ag_amount']) : null;
+                $machineId = isset($row['ag_equipo_id']) ? (int)$row['ag_equipo_id'] : null;
+                $machineTypeId = isset($row['ag_equipotype_id']) ? (int)$row['ag_equipotype_id'] : null;
+                $machineLabel = $this->buildErpMachineLabel($machineId, $machineTypeId);
+                $workerName = $this->buildErpWorkerName($row);
+                $workOrder = $this->findExistingWorkOrderForErpAgenda((int)$row['erp_agenda_id'], $otCode);
+                $workOrderId = $workOrder['id'] ?? null;
+                $existingStatus = $workOrder['status'] ?? null;
+                $status = $this->mapErpPlanToWorkOrderStatus($existingStatus, $row);
+
+                if ($workOrderId === null) {
+                    $insert = $this->pdo->prepare(
+                        'INSERT INTO work_orders (ot_code, sku_final, target_qty, status)
+                         VALUES (:ot_code, :sku_final, :target_qty, :status)'
+                    );
+                    $insert->execute([
+                        ':ot_code' => $otCode,
+                        ':sku_final' => $skuFinal,
+                        ':target_qty' => $targetQty,
+                        ':status' => $status,
+                    ]);
+                    $workOrderId = (int)$this->pdo->lastInsertId();
+                    $synced++;
+                } else {
+                    $update = $this->pdo->prepare(
+                        'UPDATE work_orders
+                         SET ot_code = :ot_code,
+                             sku_final = :sku_final,
+                             target_qty = :target_qty,
+                             status = :status
+                         WHERE id = :id'
+                    );
+                    $update->execute([
+                        ':id' => $workOrderId,
+                        ':ot_code' => $otCode,
+                        ':sku_final' => $skuFinal,
+                        ':target_qty' => $targetQty,
+                        ':status' => $status,
+                    ]);
+                }
+
+                $sync = $this->pdo->prepare(
+                    'INSERT INTO erp_work_order_sync (
+                        work_order_id,
+                        erp_prod_header_id,
+                        erp_agenda_id,
+                        erp_worker_ot_id,
+                        erp_worker_init_id,
+                        erp_worker_id,
+                        erp_worker_name,
+                        erp_user_id,
+                        erp_user_login,
+                        erp_prod_number,
+                        erp_req_id,
+                        erp_plan_desc,
+                        erp_plan_date,
+                        erp_plan_timestamp,
+                        erp_machine_id,
+                        erp_machine_label,
+                        erp_machine_type_id,
+                        erp_planta_id,
+                        erp_target_qty,
+                        erp_header_status,
+                        erp_agenda_status,
+                        erp_agenda_active,
+                        erp_worker_status
+                    ) VALUES (
+                        :work_order_id,
+                        :erp_prod_header_id,
+                        :erp_agenda_id,
+                        :erp_worker_ot_id,
+                        :erp_worker_init_id,
+                        :erp_worker_id,
+                        :erp_worker_name,
+                        :erp_user_id,
+                        :erp_user_login,
+                        :erp_prod_number,
+                        :erp_req_id,
+                        :erp_plan_desc,
+                        :erp_plan_date,
+                        :erp_plan_timestamp,
+                        :erp_machine_id,
+                        :erp_machine_label,
+                        :erp_machine_type_id,
+                        :erp_planta_id,
+                        :erp_target_qty,
+                        :erp_header_status,
+                        :erp_agenda_status,
+                        :erp_agenda_active,
+                        :erp_worker_status
+                    )
+                    ON DUPLICATE KEY UPDATE
+                        work_order_id = VALUES(work_order_id),
+                        erp_worker_ot_id = VALUES(erp_worker_ot_id),
+                        erp_worker_init_id = VALUES(erp_worker_init_id),
+                        erp_worker_id = VALUES(erp_worker_id),
+                        erp_worker_name = VALUES(erp_worker_name),
+                        erp_user_id = VALUES(erp_user_id),
+                        erp_user_login = VALUES(erp_user_login),
+                        erp_prod_number = VALUES(erp_prod_number),
+                        erp_req_id = VALUES(erp_req_id),
+                        erp_plan_desc = VALUES(erp_plan_desc),
+                        erp_plan_date = VALUES(erp_plan_date),
+                        erp_plan_timestamp = VALUES(erp_plan_timestamp),
+                        erp_machine_id = VALUES(erp_machine_id),
+                        erp_machine_label = VALUES(erp_machine_label),
+                        erp_machine_type_id = VALUES(erp_machine_type_id),
+                        erp_planta_id = VALUES(erp_planta_id),
+                        erp_target_qty = VALUES(erp_target_qty),
+                        erp_header_status = VALUES(erp_header_status),
+                        erp_agenda_status = VALUES(erp_agenda_status),
+                        erp_agenda_active = VALUES(erp_agenda_active),
+                        erp_worker_status = VALUES(erp_worker_status)'
+                );
+                $sync->execute([
+                    ':work_order_id' => $workOrderId,
+                    ':erp_prod_header_id' => (int)$row['erp_prod_header_id'],
+                    ':erp_agenda_id' => (int)$row['erp_agenda_id'],
+                    ':erp_worker_ot_id' => isset($row['erp_worker_ot_id']) ? (int)$row['erp_worker_ot_id'] : null,
+                    ':erp_worker_init_id' => isset($row['erp_worker_init_id']) ? (int)$row['erp_worker_init_id'] : null,
+                    ':erp_worker_id' => isset($row['erp_worker_id']) ? (int)$row['erp_worker_id'] : null,
+                    ':erp_worker_name' => $workerName !== '' ? $workerName : null,
+                    ':erp_user_id' => isset($row['erp_user_id']) ? (int)$row['erp_user_id'] : null,
+                    ':erp_user_login' => trim((string)($row['user_login'] ?? '')) !== '' ? trim((string)$row['user_login']) : null,
+                    ':erp_prod_number' => $otCode,
+                    ':erp_req_id' => trim((string)($row['prd_reqid'] ?? $row['ag_reqid'] ?? '')) !== ''
+                        ? trim((string)($row['prd_reqid'] ?? $row['ag_reqid']))
+                        : null,
+                    ':erp_plan_desc' => trim((string)($row['prd_desc'] ?? '')) !== '' ? trim((string)$row['prd_desc']) : null,
+                    ':erp_plan_date' => $planDate['label'] !== '' ? $planDate['label'] : null,
+                    ':erp_plan_timestamp' => $planDate['timestamp'],
+                    ':erp_machine_id' => $machineId,
+                    ':erp_machine_label' => $machineLabel !== '' ? $machineLabel : null,
+                    ':erp_machine_type_id' => $machineTypeId,
+                    ':erp_planta_id' => isset($row['ag_plantaid']) && (int)$row['ag_plantaid'] > 0
+                        ? (int)$row['ag_plantaid']
+                        : (isset($row['prd_plantaid']) ? (int)$row['prd_plantaid'] : null),
+                    ':erp_target_qty' => isset($row['ag_amount']) ? (float)$row['ag_amount'] : null,
+                    ':erp_header_status' => trim((string)($row['prd_status'] ?? '')) !== '' ? trim((string)$row['prd_status']) : null,
+                    ':erp_agenda_status' => trim((string)($row['ag_status'] ?? '')) !== '' ? trim((string)$row['ag_status']) : null,
+                    ':erp_agenda_active' => (int)($row['ag_active'] ?? 0),
+                    ':erp_worker_status' => trim((string)($row['wok_status'] ?? '')) !== '' ? trim((string)$row['wok_status']) : null,
+                ]);
+            }
+
+            $this->setAppSetting('erp_production_plan_synced_at', (string)time());
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        $this->erpProductionPlanSynced = true;
+        return ['ok' => true, 'processed' => $processed, 'synced' => $synced];
+    }
+
+    private function shouldSkipProductionPlanSync(): bool
+    {
+        $tableExists = $this->pdo->query("SHOW TABLES LIKE 'erp_work_order_sync'")->fetchColumn();
+        if ($tableExists === false) {
+            return false;
+        }
+
+        $rowCount = (int)$this->pdo->query('SELECT COUNT(*) FROM erp_work_order_sync')->fetchColumn();
+        if ($rowCount <= 0) {
+            return false;
+        }
+
+        $lastSyncedAt = (int)$this->getAppSetting('erp_production_plan_synced_at', '0');
+        return $lastSyncedAt > 0 && $lastSyncedAt >= (time() - 300);
+    }
+
+    /**
+     * @return array{id:int,status:string}|null
+     */
+    private function findExistingWorkOrderForErpAgenda(int $agendaId, string $otCode): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT wo.id, wo.status
+             FROM erp_work_order_sync sync
+             INNER JOIN work_orders wo ON wo.id = sync.work_order_id
+             WHERE sync.erp_agenda_id = :agenda_id
+             LIMIT 1'
+        );
+        $stmt->execute([':agenda_id' => $agendaId]);
+        $row = $stmt->fetch();
+        if ($row !== false) {
+            return [
+                'id' => (int)$row['id'],
+                'status' => (string)$row['status'],
+            ];
+        }
+
+        $fallback = $this->pdo->prepare('SELECT id, status FROM work_orders WHERE ot_code = :ot_code LIMIT 1');
+        $fallback->execute([':ot_code' => $otCode]);
+        $row = $fallback->fetch();
+        if ($row === false) {
+            return null;
+        }
+
+        return [
+            'id' => (int)$row['id'],
+            'status' => (string)$row['status'],
+        ];
+    }
+
+    /**
+     * @return array{label:string,timestamp:?int}
+     */
+    private function resolveErpPlanDate(mixed $agDate, mixed $agDateStamp): array
+    {
+        foreach ([$agDateStamp, $agDate] as $candidate) {
+            if (is_numeric($candidate)) {
+                $timestamp = (int)$candidate;
+                if ($timestamp > 0) {
+                    return [
+                        'label' => date('Y-m-d H:i', $timestamp),
+                        'timestamp' => $timestamp,
+                    ];
+                }
+            }
+        }
+
+        $raw = trim((string)($agDate ?? ''));
+        if ($raw !== '') {
+            return ['label' => $raw, 'timestamp' => null];
+        }
+
+        return ['label' => '', 'timestamp' => null];
+    }
+
+    private function buildErpWorkOrderCode(array $row): string
+    {
+        $number = trim((string)($row['prd_number'] ?? ''));
+        if ($number !== '') {
+            return $number;
+        }
+
+        return 'ERP-PRD-' . (int)($row['erp_prod_header_id'] ?? 0) . '-AG-' . (int)($row['erp_agenda_id'] ?? 0);
+    }
+
+    private function buildErpWorkOrderSku(array $row): string
+    {
+        $description = trim((string)($row['prd_desc'] ?? ''));
+        if ($description !== '') {
+            return $description;
+        }
+
+        $requestId = trim((string)($row['prd_reqid'] ?? $row['ag_reqid'] ?? ''));
+        if ($requestId !== '') {
+            return 'Req ERP ' . $requestId;
+        }
+
+        return 'Producción ERP';
+    }
+
+    private function buildErpMachineLabel(?int $machineId, ?int $machineTypeId): string
+    {
+        $parts = [];
+        if ($machineId !== null && $machineId > 0) {
+            $parts[] = 'Equipo ' . $machineId;
+        }
+        if ($machineTypeId !== null && $machineTypeId > 0) {
+            $parts[] = 'Tipo ' . $machineTypeId;
+        }
+
+        return implode(' - ', $parts);
+    }
+
+    private function normalizeMachineProcessStage(string $value): string
+    {
+        $value = strtoupper(trim($value));
+        return match ($value) {
+            'PRINTING', 'PRINT', 'PRODUCCION', 'PRODUCTION' => 'PRODUCTION',
+            'REWIND', 'REWINDING', 'REBOBINADO', 'REBOBINADORA' => 'REWINDING',
+            'PACKAGING', 'EMBALAJE' => 'PACKAGING',
+            'SEALING', 'SELLADO', 'SELLADORA', 'SELLADORAS' => 'SEALING',
+            'CUT', 'CORTE', 'CUTTING' => 'CUTTING',
+            default => 'PRODUCTION',
+        };
+    }
+
+    private function getShiftSession(int $sessionId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT pss.*, pm.name AS machine_name, pm.code AS machine_code, pmt.name AS machine_type_name
+             FROM production_shift_sessions pss
+             INNER JOIN production_machines pm ON pm.id = pss.machine_id
+             INNER JOIN production_machine_types pmt ON pmt.id = pm.machine_type_id
+             WHERE pss.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute([':id' => $sessionId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    private function getActiveShiftSessionByMachine(int $machineId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT pss.*, pm.name AS machine_name, pm.code AS machine_code, pmt.name AS machine_type_name
+             FROM production_shift_sessions pss
+             INNER JOIN production_machines pm ON pm.id = pss.machine_id
+             INNER JOIN production_machine_types pmt ON pmt.id = pm.machine_type_id
+             WHERE pss.machine_id = :machine_id
+               AND pss.status = "ACTIVE"
+             ORDER BY pss.id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':machine_id' => $machineId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    private function buildErpWorkerName(array $row): string
+    {
+        return trim(
+            trim((string)($row['wrk_firstname'] ?? ''))
+            . ' '
+            . trim((string)($row['wrk_lastname'] ?? ''))
+        );
+    }
+
+    private function mapErpPlanToWorkOrderStatus(?string $existingStatus, array $row): string
+    {
+        $existingStatus = strtoupper(trim((string)$existingStatus));
+        if (in_array($existingStatus, ['CUTTING', 'CLOSED'], true)) {
+            return $existingStatus;
+        }
+        if ($existingStatus === 'ACTIVE') {
+            return 'ACTIVE';
+        }
+
+        $workerStatus = strtoupper(trim((string)($row['wok_status'] ?? '')));
+        $headerStatus = strtoupper(trim((string)($row['prd_status'] ?? '')));
+        $agendaStatus = strtoupper(trim((string)($row['ag_status'] ?? '')));
+        $agendaActive = (int)($row['ag_active'] ?? 0) === 1;
+        $workerOpen = isset($row['erp_worker_ot_id'])
+            && (int)$row['erp_worker_ot_id'] > 0
+            && !$this->hasErpProcessEnded($row['wok_enddat'] ?? null);
+        $workerEnded = isset($row['erp_worker_ot_id'])
+            && (int)$row['erp_worker_ot_id'] > 0
+            && $this->hasErpProcessEnded($row['wok_enddat'] ?? null);
+
+        if ($agendaActive || $workerOpen || in_array($workerStatus, ['ACTIVE', 'STARTED', 'RUNNING', 'IN_PROGRESS', '1'], true)) {
+            return 'ACTIVE';
+        }
+
+        if (
+            $workerEnded
+            || in_array($workerStatus, ['2', '3', 'COMPLETE', 'COMPLETED', 'FINISHED', 'DONE', 'CLOSED'], true)
+            || in_array($headerStatus, ['2', '3', 'COMPLETE', 'COMPLETED', 'FINISHED', 'DONE', 'CLOSED'], true)
+            || in_array($agendaStatus, ['2', '3', 'COMPLETE', 'COMPLETED', 'FINISHED', 'DONE', 'CLOSED'], true)
+        ) {
+            return 'CLOSED';
+        }
+
+        return 'OPEN';
+    }
+
+    private function hasErpProcessEnded(mixed $value): bool
+    {
+        $raw = trim((string)$value);
+        return $raw !== '' && $raw !== '0' && $raw !== '0000-00-00 00:00:00';
     }
 
     /**
@@ -437,7 +1165,8 @@ final class ReceptionService
 
     private function inferReceptionModeFromErpLine(array $line): string
     {
-        return 'QUANTITY';
+        $orderedWeight = (float)($line['ordered_weight_kg'] ?? $line['item_kgs'] ?? $line['sord_kgs_amount'] ?? 0);
+        return $orderedWeight > 0 ? 'WEIGHT' : 'QUANTITY';
     }
 
     /**
@@ -479,7 +1208,7 @@ final class ReceptionService
             'supplier_country_name' => trim((string)($line['supplier_country_name'] ?? '')),
         ];
 
-        $row['reception_mode'] = 'QUANTITY';
+        $row['reception_mode'] = $this->inferReceptionModeFromErpLine($line);
         $row['supplier_type'] = $this->classifySupplierType((string)$row['supplier_country_name']);
         return $row;
     }
@@ -519,7 +1248,11 @@ final class ReceptionService
      */
     private function applySavedReceptionMode(array $line): array
     {
-        $line['reception_mode'] = 'QUANTITY';
+        $savedMode = $this->getSavedReceptionMode(
+            (int)($line['id'] ?? 0),
+            isset($line['import_container_item_id']) ? (int)$line['import_container_item_id'] : null
+        );
+        $line['reception_mode'] = $savedMode ?? $this->inferReceptionModeFromErpLine($line);
         return $line;
     }
 
@@ -763,10 +1496,16 @@ final class ReceptionService
 
     private function summarizeReceptionLine(array $line): array
     {
-        $mode = 'QUANTITY';
-        $ordered = round((float)($line['ordered_rolls'] ?? 0), 3);
-        $received = round((float)($line['received_qty'] ?? $line['received_rolls'] ?? 0), 3);
-        $unit = 'Unid.';
+        $mode = $this->normalizeReceptionMode((string)($line['reception_mode'] ?? $this->inferReceptionModeFromErpLine($line)));
+        if ($mode === 'WEIGHT') {
+            $ordered = round((float)($line['ordered_weight_kg'] ?? 0), 3);
+            $received = round((float)($line['received_weight_kg'] ?? 0), 3);
+            $unit = 'Kg';
+        } else {
+            $ordered = round((float)($line['ordered_rolls'] ?? 0), 3);
+            $received = round((float)($line['received_qty'] ?? $line['received_rolls'] ?? 0), 3);
+            $unit = 'Unid.';
+        }
 
         $pending = max(0, round($ordered - $received, 3));
         $complete = $ordered > 0 && $received >= $ordered;
@@ -1610,24 +2349,30 @@ final class ReceptionService
             return ['ok' => false, 'errors' => ['purchase_order_line_id' => 'Esta recepción ya está finalizada y no permite agregar más.'], 'id' => null];
         }
 
-        $selectedMode = 'QUANTITY';
-        $line['reception_mode'] = 'QUANTITY';
+        $selectedMode = $this->normalizeReceptionMode((string)($receptionMode ?? ($line['reception_mode'] ?? 'QUANTITY')));
+        $line['reception_mode'] = $selectedMode;
         $summary = $this->summarizeReceptionLine($line);
         if ($weightKg <= 0) {
             return ['ok' => false, 'errors' => ['weight_kg' => 'Peso real (Kg) debe ser mayor a 0.'], 'id' => null];
         }
-        if ($receivedQty <= 0) {
+        if ($selectedMode === 'QUANTITY' && $receivedQty <= 0) {
             return ['ok' => false, 'errors' => ['received_qty' => 'Cantidad recibida debe ser mayor a 0.'], 'id' => null];
         }
         if ($summary['is_complete']) {
             return ['ok' => false, 'errors' => ['purchase_order_line_id' => 'Esta línea ya está completa y no permite más recepciones.'], 'id' => null];
+        }
+        if ($selectedMode === 'WEIGHT' && $weightKg > ((float)$summary['pending_value'] + 0.0001)) {
+            return ['ok' => false, 'errors' => ['weight_kg' => 'El peso recibido supera lo pendiente por recepcionar en esta línea.'], 'id' => null];
+        }
+        if ($selectedMode === 'QUANTITY' && $receivedQty > ((float)$summary['pending_value'] + 0.0001)) {
+            return ['ok' => false, 'errors' => ['received_qty' => 'La cantidad recibida supera lo pendiente por recepcionar en esta línea.'], 'id' => null];
         }
 
         $input = [
             'sku_id' => (int)$line['sku_id'],
             'warehouse_id' => $warehouseId,
             'weight_kg' => $weightKg,
-            'received_qty' => $receivedQty,
+            'received_qty' => $selectedMode === 'WEIGHT' ? 1.0 : $receivedQty,
             'reception_mode' => $selectedMode,
             'microns' => $line['grams'],
             'width_mm' => $line['width_mm'],
@@ -1684,24 +2429,30 @@ final class ReceptionService
             return ['ok' => false, 'errors' => ['purchase_order_line_id' => 'Esta recepción ya está finalizada y no permite agregar más.'], 'id' => null];
         }
 
-        $selectedMode = 'QUANTITY';
-        $line['reception_mode'] = 'QUANTITY';
+        $selectedMode = $this->normalizeReceptionMode((string)($receptionMode ?? ($line['reception_mode'] ?? 'QUANTITY')));
+        $line['reception_mode'] = $selectedMode;
         $summary = $this->summarizeReceptionLine($line);
         if ($weightKg <= 0) {
             return ['ok' => false, 'errors' => ['weight_kg' => 'Peso real (Kg) debe ser mayor a 0.'], 'id' => null];
         }
-        if ($receivedQty <= 0) {
+        if ($selectedMode === 'QUANTITY' && $receivedQty <= 0) {
             return ['ok' => false, 'errors' => ['received_qty' => 'Cantidad recibida debe ser mayor a 0.'], 'id' => null];
         }
         if ($summary['is_complete']) {
             return ['ok' => false, 'errors' => ['import_container_item_id' => 'Esta línea de contenedor ya está completa y no permite más recepciones.'], 'id' => null];
+        }
+        if ($selectedMode === 'WEIGHT' && $weightKg > ((float)$summary['pending_value'] + 0.0001)) {
+            return ['ok' => false, 'errors' => ['weight_kg' => 'El peso recibido supera lo pendiente por recepcionar en esta línea.'], 'id' => null];
+        }
+        if ($selectedMode === 'QUANTITY' && $receivedQty > ((float)$summary['pending_value'] + 0.0001)) {
+            return ['ok' => false, 'errors' => ['received_qty' => 'La cantidad recibida supera lo pendiente por recepcionar en esta línea.'], 'id' => null];
         }
 
         $input = [
             'sku_id' => (int)$line['sku_id'],
             'warehouse_id' => $warehouseId,
             'weight_kg' => $weightKg,
-            'received_qty' => $receivedQty,
+            'received_qty' => $selectedMode === 'WEIGHT' ? 1.0 : $receivedQty,
             'reception_mode' => $selectedMode,
             'microns' => $line['grams'],
             'width_mm' => $line['width_mm'],
@@ -1783,6 +2534,7 @@ final class ReceptionService
 
     public function listWorkOrdersByView(string $view, int $limit = 50): array
     {
+        $this->syncWorkOrdersFromErpProductionPlan();
         $view = strtolower(trim($view));
         $statuses = match ($view) {
             'active' => ['ACTIVE', 'CUTTING'],
@@ -1795,14 +2547,21 @@ final class ReceptionService
         }
 
         $stmt = $this->pdo->prepare(
-            'SELECT id, ot_code, sku_final, target_qty, status, created_at
-             FROM work_orders
-             WHERE status IN (' . implode(',', $placeholderNames) . ')
+            'SELECT wo.id, wo.ot_code, wo.sku_final, wo.target_qty, wo.status, wo.created_at,
+                    sync.erp_prod_header_id, sync.erp_agenda_id, sync.erp_prod_number, sync.erp_req_id,
+                    sync.erp_plan_desc, sync.erp_plan_date, sync.erp_plan_timestamp,
+                    sync.erp_machine_id, sync.erp_machine_label, sync.erp_machine_type_id,
+                    sync.erp_worker_name, sync.erp_target_qty, sync.erp_header_status, sync.erp_agenda_status
+             FROM work_orders wo
+             LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
+             WHERE wo.status IN (' . implode(',', $placeholderNames) . ')
              ORDER BY CASE
-                 WHEN status = "ACTIVE" THEN 0
-                 WHEN status = "CUTTING" THEN 1
+                 WHEN wo.status = "ACTIVE" THEN 0
+                 WHEN wo.status = "CUTTING" THEN 1
                  ELSE 2
-             END, id DESC
+             END,
+             COALESCE(sync.erp_plan_timestamp, UNIX_TIMESTAMP(wo.created_at)) DESC,
+             wo.id DESC
              LIMIT :limit'
         );
         foreach ($statuses as $index => $status) {
@@ -1814,18 +2573,31 @@ final class ReceptionService
 
         foreach ($rows as &$row) {
             $workOrderId = (int)$row['id'];
+            $activeShiftSession = $this->getActiveShiftSessionByWorkOrder($workOrderId);
             $row['operator_name'] = '';
             $row['operator_label'] = '-';
             $row['current_roll_code'] = '-';
             $row['current_chemical_label'] = '-';
             $row['finished_at'] = '';
             $row['box_qty'] = '';
+            $row['erp_plan_label'] = trim((string)($row['erp_plan_date'] ?? ''));
+            $row['erp_machine_label'] = trim((string)($row['erp_machine_label'] ?? ''));
+            $row['erp_reference_label'] = trim((string)($row['erp_req_id'] ?? ''));
+            $row['active_machine_label'] = trim((string)($activeShiftSession['machine_name'] ?? ''));
+            $row['active_machine_type_label'] = trim((string)($activeShiftSession['machine_type_name'] ?? ''));
+            $row['active_shift_label'] = trim((string)($activeShiftSession['shift_label'] ?? ''));
             $row['status_label'] = match ((string)$row['status']) {
                 'ACTIVE' => 'Producción',
                 'CUTTING' => 'Corte',
                 'CLOSED' => 'Fabricada',
                 default => 'Pendiente',
             };
+
+            if ($row['active_machine_label'] !== '') {
+                $row['erp_machine_label'] = $row['active_machine_type_label'] !== ''
+                    ? $row['active_machine_type_label'] . ' - ' . $row['active_machine_label']
+                    : $row['active_machine_label'];
+            }
 
             if ((string)$row['status'] === 'ACTIVE') {
                 $lastStart = $this->getLastWorkOrderStart($workOrderId);
@@ -1843,6 +2615,13 @@ final class ReceptionService
                     $row['current_chemical_label'] = (string)$latestChemical['chemical_code']
                         . ' (' . (string)$latestChemical['weight_kg'] . ' Kg)';
                 }
+                if (trim((string)($activeShiftSession['operator_name'] ?? '')) !== '') {
+                    $row['operator_name'] = trim((string)$activeShiftSession['operator_name']);
+                    $row['operator_label'] = $row['operator_name'];
+                }
+            } elseif ((string)$row['status'] === 'OPEN') {
+                $row['operator_name'] = trim((string)($row['erp_worker_name'] ?? ''));
+                $row['operator_label'] = $row['operator_name'] !== '' ? $row['operator_name'] : '-';
             } elseif ((string)$row['status'] === 'CUTTING') {
                 $lastFinish = $this->getLastWorkOrderFinish($workOrderId);
                 $row['operator_name'] = (string)($lastFinish['operator_name'] ?? '');
@@ -1873,15 +2652,391 @@ final class ReceptionService
 
     public function getWorkOrder(int $id): ?array
     {
+        $this->syncWorkOrdersFromErpProductionPlan();
         $stmt = $this->pdo->prepare(
-            'SELECT id, ot_code, sku_final, target_qty, status, created_at
+            'SELECT wo.id, wo.ot_code, wo.sku_final, wo.target_qty, wo.status, wo.created_at,
+                    sync.erp_prod_header_id, sync.erp_agenda_id, sync.erp_worker_ot_id,
+                    sync.erp_worker_init_id, sync.erp_worker_id, sync.erp_worker_name,
+                    sync.erp_user_id, sync.erp_user_login, sync.erp_prod_number, sync.erp_req_id,
+                    sync.erp_plan_desc, sync.erp_plan_date, sync.erp_plan_timestamp,
+                    sync.erp_machine_id, sync.erp_machine_label, sync.erp_machine_type_id,
+                    sync.erp_planta_id, sync.erp_target_qty, sync.erp_header_status,
+                    sync.erp_agenda_status, sync.erp_agenda_active, sync.erp_worker_status
+             FROM work_orders wo
+             LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
+             WHERE wo.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute([':id' => $id]);
+        $row = $stmt->fetch();
+        if ($row !== false) {
+            $activeShiftSession = $this->getActiveShiftSessionByWorkOrder((int)$row['id']);
+            if ($activeShiftSession !== null) {
+                $row['shift_session_id'] = (int)$activeShiftSession['id'];
+                $row['shift_machine_name'] = (string)($activeShiftSession['machine_name'] ?? '');
+                $row['shift_machine_code'] = (string)($activeShiftSession['machine_code'] ?? '');
+                $row['shift_machine_type_name'] = (string)($activeShiftSession['machine_type_name'] ?? '');
+                $row['shift_operator_name'] = (string)($activeShiftSession['operator_name'] ?? '');
+                $row['shift_helper_name'] = (string)($activeShiftSession['helper_name'] ?? '');
+                $row['shift_label'] = (string)($activeShiftSession['shift_label'] ?? '');
+                $row['shift_process_stage'] = (string)($activeShiftSession['process_stage'] ?? '');
+                $row['shift_comments'] = (string)($activeShiftSession['comments'] ?? '');
+                if (trim((string)($row['shift_machine_name'] ?? '')) !== '') {
+                    $row['erp_machine_label'] = trim((string)($row['shift_machine_type_name'] ?? '')) !== ''
+                        ? trim((string)$row['shift_machine_type_name']) . ' - ' . trim((string)$row['shift_machine_name'])
+                        : trim((string)$row['shift_machine_name']);
+                }
+            }
+        }
+        return $row === false ? null : $row;
+    }
+
+    public function listWorkOrdersForClicheAssignment(): array
+    {
+        $this->syncWorkOrdersFromErpProductionPlan();
+        $stmt = $this->pdo->prepare(
+            "SELECT id, ot_code, sku_final, status, created_at
              FROM work_orders
-             WHERE id = :id
+             WHERE status IN ('OPEN', 'ACTIVE', 'CUTTING')
+             ORDER BY CASE
+                 WHEN status = 'ACTIVE' THEN 0
+                 WHEN status = 'CUTTING' THEN 1
+                 ELSE 2
+             END, id DESC"
+        );
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    public function listCliches(?string $search = null, ?string $location = null, ?string $status = null): array
+    {
+        $params = [];
+        $where = [];
+        $search = trim((string)$search);
+        $location = trim((string)$location);
+        $status = strtoupper(trim((string)$status));
+
+        if ($search !== '') {
+            $where[] = '(c.code LIKE :search OR c.description LIKE :search OR wo.ot_code LIKE :search)';
+            $params[':search'] = '%' . $search . '%';
+        }
+        if ($location !== '') {
+            $where[] = '(c.location_code LIKE :location OR c.location_detail LIKE :location)';
+            $params[':location'] = '%' . $location . '%';
+        }
+        if ($status !== '' && $status !== 'ALL') {
+            $where[] = 'c.status = :status';
+            $params[':status'] = $status;
+        }
+
+        $sql = 'SELECT c.*,
+                       wo.ot_code, wo.sku_final
+                FROM cliches c
+                LEFT JOIN work_orders wo ON wo.id = c.current_work_order_id';
+        if ($where !== []) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $sql .= ' ORDER BY CASE
+                    WHEN c.status = "IN_USE" THEN 0
+                    WHEN c.status = "AVAILABLE" THEN 1
+                    WHEN c.status = "MAINTENANCE" THEN 2
+                    ELSE 3
+                  END, c.code ASC';
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
+    }
+
+    public function getCliche(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT c.*, wo.ot_code, wo.sku_final
+             FROM cliches c
+             LEFT JOIN work_orders wo ON wo.id = c.current_work_order_id
+             WHERE c.id = :id
              LIMIT 1'
         );
         $stmt->execute([':id' => $id]);
         $row = $stmt->fetch();
         return $row === false ? null : $row;
+    }
+
+    public function createCliche(
+        string $code,
+        string $description,
+        string $locationCode,
+        string $locationDetail,
+        string $notes,
+        string $operatorName
+    ): array {
+        $code = strtoupper(trim($code));
+        $description = trim($description);
+        $locationCode = strtoupper(trim($locationCode));
+        $locationDetail = trim($locationDetail);
+        $notes = trim($notes);
+        $operatorName = trim($operatorName);
+        $errors = [];
+
+        if ($code === '') {
+            $errors['code'] = 'Código de clisé es obligatorio.';
+        }
+        if ($description === '') {
+            $errors['description'] = 'Descripción del clisé es obligatoria.';
+        }
+        if ($locationCode === '') {
+            $errors['location_code'] = 'Ubicación física es obligatoria.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO cliches (
+                code, description, location_code, location_detail, status, notes
+             ) VALUES (
+                :code, :description, :location_code, :location_detail, :status, :notes
+             )'
+        );
+        try {
+            $stmt->execute([
+                ':code' => $code,
+                ':description' => $description,
+                ':location_code' => $locationCode,
+                ':location_detail' => $locationDetail !== '' ? $locationDetail : null,
+                ':status' => 'AVAILABLE',
+                ':notes' => $notes !== '' ? $notes : null,
+            ]);
+            $clicheId = (int)$this->pdo->lastInsertId();
+
+            $log = $this->pdo->prepare(
+                'INSERT INTO cliche_usage_logs (
+                    cliche_id, work_order_id, action_type, from_location_code, to_location_code, operator_name, notes
+                 ) VALUES (
+                    :cliche_id, NULL, :action_type, NULL, :to_location_code, :operator_name, :notes
+                 )'
+            );
+            $log->execute([
+                ':cliche_id' => $clicheId,
+                ':action_type' => 'CREATED',
+                ':to_location_code' => $locationCode,
+                ':operator_name' => $operatorName,
+                ':notes' => $notes !== '' ? $notes : null,
+            ]);
+
+            $this->insertEvent('CLICHE_CREATED', [
+                'cliche_id' => $clicheId,
+                'cliche_code' => $code,
+                'location_code' => $locationCode,
+                'operator_name' => $operatorName,
+            ]);
+
+            return ['ok' => true, 'errors' => [], 'cliche_id' => $clicheId];
+        } catch (PDOException $e) {
+            if (str_contains($e->getMessage(), 'uq_cliches_code')) {
+                return ['ok' => false, 'errors' => ['code' => 'Ese código de clisé ya existe.']];
+            }
+            throw $e;
+        }
+    }
+
+    public function assignClicheToWorkOrder(int $clicheId, int $workOrderId, string $notes, string $operatorName): array
+    {
+        $notes = trim($notes);
+        $operatorName = trim($operatorName);
+        $cliche = $this->getCliche($clicheId);
+        $workOrder = $this->getWorkOrder($workOrderId);
+        $errors = [];
+
+        if ($cliche === null) {
+            $errors['cliche_id'] = 'El clisé no existe.';
+        }
+        if ($workOrder === null) {
+            $errors['work_order_id'] = 'La OT no existe.';
+        } elseif (!in_array((string)($workOrder['status'] ?? ''), ['OPEN', 'ACTIVE', 'CUTTING'], true)) {
+            $errors['work_order_id'] = 'La OT no está disponible para asignar clisés.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+        if ($cliche !== null) {
+            $clicheStatus = strtoupper(trim((string)($cliche['status'] ?? '')));
+            $currentWorkOrderId = (int)($cliche['current_work_order_id'] ?? 0);
+            if ($clicheStatus === 'IN_USE' && $currentWorkOrderId > 0 && $currentWorkOrderId !== $workOrderId) {
+                $errors['cliche_id'] = 'El clisé ya está en uso en la OT ' . ((string)($cliche['ot_code'] ?? '') !== '' ? (string)$cliche['ot_code'] : ('#' . $currentWorkOrderId)) . '.';
+            } elseif ($clicheStatus === 'IN_USE' && $currentWorkOrderId === $workOrderId) {
+                $errors['cliche_id'] = 'El clisé ya está asignado a esta OT.';
+            } elseif (!in_array($clicheStatus, ['AVAILABLE'], true)) {
+                $errors['cliche_id'] = 'Solo se pueden asignar clisés disponibles.';
+            }
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $fromLocationCode = (string)($cliche['location_code'] ?? '');
+        $toLocationCode = 'OT ' . (string)$workOrder['ot_code'];
+        $stmt = $this->pdo->prepare(
+            'UPDATE cliches
+             SET status = :status,
+                 current_work_order_id = :current_work_order_id,
+                 current_operator_name = :current_operator_name,
+                 current_assigned_at = CURRENT_TIMESTAMP,
+                 location_code = :location_code,
+                 location_detail = :location_detail
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            ':status' => 'IN_USE',
+            ':current_work_order_id' => $workOrderId,
+            ':current_operator_name' => $operatorName,
+            ':location_code' => 'EN_USO',
+            ':location_detail' => $toLocationCode,
+            ':id' => $clicheId,
+        ]);
+
+        $log = $this->pdo->prepare(
+            'INSERT INTO cliche_usage_logs (
+                cliche_id, work_order_id, action_type, from_location_code, to_location_code, operator_name, notes
+             ) VALUES (
+                :cliche_id, :work_order_id, :action_type, :from_location_code, :to_location_code, :operator_name, :notes
+             )'
+        );
+        $log->execute([
+            ':cliche_id' => $clicheId,
+            ':work_order_id' => $workOrderId,
+            ':action_type' => 'ASSIGNED',
+            ':from_location_code' => $fromLocationCode !== '' ? $fromLocationCode : null,
+            ':to_location_code' => $toLocationCode,
+            ':operator_name' => $operatorName,
+            ':notes' => $notes !== '' ? $notes : null,
+        ]);
+
+        $this->insertEvent('CLICHE_ASSIGNED', [
+            'cliche_id' => $clicheId,
+            'cliche_code' => (string)$cliche['code'],
+            'work_order_id' => $workOrderId,
+            'ot_code' => (string)$workOrder['ot_code'],
+            'operator_name' => $operatorName,
+            'notes' => $notes,
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function returnCliche(int $clicheId, string $locationCode, string $locationDetail, string $notes, string $operatorName): array
+    {
+        $locationCode = strtoupper(trim($locationCode));
+        $locationDetail = trim($locationDetail);
+        $notes = trim($notes);
+        $operatorName = trim($operatorName);
+        $cliche = $this->getCliche($clicheId);
+        $errors = [];
+
+        if ($cliche === null) {
+            $errors['cliche_id'] = 'El clisé no existe.';
+        }
+        if ($locationCode === '') {
+            $errors['location_code'] = 'Debes indicar la ubicación de retorno.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+        if ($cliche !== null && strtoupper(trim((string)($cliche['status'] ?? ''))) !== 'IN_USE') {
+            $errors['cliche_id'] = 'Solo se pueden devolver clisés que estén en uso.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $workOrderId = (int)($cliche['current_work_order_id'] ?? 0);
+        $fromLocationCode = trim((string)($cliche['location_detail'] ?? $cliche['location_code'] ?? ''));
+        $stmt = $this->pdo->prepare(
+            'UPDATE cliches
+             SET status = :status,
+                 current_work_order_id = NULL,
+                 current_operator_name = NULL,
+                 current_assigned_at = NULL,
+                 location_code = :location_code,
+                 location_detail = :location_detail
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            ':status' => 'AVAILABLE',
+            ':location_code' => $locationCode,
+            ':location_detail' => $locationDetail !== '' ? $locationDetail : null,
+            ':id' => $clicheId,
+        ]);
+
+        $log = $this->pdo->prepare(
+            'INSERT INTO cliche_usage_logs (
+                cliche_id, work_order_id, action_type, from_location_code, to_location_code, operator_name, notes
+             ) VALUES (
+                :cliche_id, :work_order_id, :action_type, :from_location_code, :to_location_code, :operator_name, :notes
+             )'
+        );
+        $log->execute([
+            ':cliche_id' => $clicheId,
+            ':work_order_id' => $workOrderId > 0 ? $workOrderId : null,
+            ':action_type' => 'RETURNED',
+            ':from_location_code' => $fromLocationCode !== '' ? $fromLocationCode : null,
+            ':to_location_code' => $locationCode,
+            ':operator_name' => $operatorName,
+            ':notes' => $notes !== '' ? $notes : null,
+        ]);
+
+        $this->insertEvent('CLICHE_RETURNED', [
+            'cliche_id' => $clicheId,
+            'cliche_code' => (string)$cliche['code'],
+            'work_order_id' => $workOrderId > 0 ? $workOrderId : null,
+            'operator_name' => $operatorName,
+            'location_code' => $locationCode,
+            'notes' => $notes,
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function listClicheUsageLogsByCliche(int $clicheId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT log.*, wo.ot_code
+             FROM cliche_usage_logs log
+             LEFT JOIN work_orders wo ON wo.id = log.work_order_id
+             WHERE log.cliche_id = :cliche_id
+             ORDER BY log.id DESC'
+        );
+        $stmt->execute([':cliche_id' => $clicheId]);
+        return $stmt->fetchAll();
+    }
+
+    public function listClicheUsageLogsByWorkOrder(int $workOrderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT log.*, c.code AS cliche_code, c.description AS cliche_description
+             FROM cliche_usage_logs log
+             INNER JOIN cliches c ON c.id = log.cliche_id
+             WHERE log.work_order_id = :work_order_id
+             ORDER BY log.id DESC'
+        );
+        $stmt->execute([':work_order_id' => $workOrderId]);
+        return $stmt->fetchAll();
+    }
+
+    public function listClichesAssignedToWorkOrder(int $workOrderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT *
+             FROM cliches
+             WHERE current_work_order_id = :work_order_id
+               AND status = "IN_USE"
+             ORDER BY code ASC'
+        );
+        $stmt->execute([':work_order_id' => $workOrderId]);
+        return $stmt->fetchAll();
     }
 
     public function createWorkOrder(string $otCode, string $skuFinal, ?int $targetQty): array
@@ -1926,12 +3081,19 @@ final class ReceptionService
 
     public function getActiveWorkOrder(): ?array
     {
+        $this->syncWorkOrdersFromErpProductionPlan();
         $id = (int)$this->getAppSetting('active_work_order_id', '0');
         if ($id === null || $id <= 0) {
             return null;
         }
 
-        $stmt = $this->pdo->prepare('SELECT id, ot_code, sku_final, target_qty, status, created_at FROM work_orders WHERE id = :id');
+        $stmt = $this->pdo->prepare(
+            'SELECT wo.id, wo.ot_code, wo.sku_final, wo.target_qty, wo.status, wo.created_at,
+                    sync.erp_plan_date, sync.erp_machine_label, sync.erp_worker_name
+             FROM work_orders wo
+             LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
+             WHERE wo.id = :id'
+        );
         $stmt->execute([':id' => $id]);
         $wo = $stmt->fetch();
         return $wo === false ? null : $wo;
@@ -1939,6 +3101,7 @@ final class ReceptionService
 
     public function listWorkOrdersForTransfer(): array
     {
+        $this->syncWorkOrdersFromErpProductionPlan();
         $stmt = $this->pdo->prepare(
             "SELECT id, ot_code, sku_final, target_qty, status, created_at
              FROM work_orders
@@ -2275,6 +3438,7 @@ final class ReceptionService
         }
 
         $this->setActiveWorkOrder($workOrderId, $operatorName);
+        $this->assignActiveShiftSessionToWorkOrder($workOrderId, $operatorName);
         $this->insertEvent('WORK_ORDER_STARTED', [
             'work_order_id' => $workOrderId,
             'operator_name' => $operatorName,
@@ -2406,6 +3570,9 @@ final class ReceptionService
         }
         if ((string)$request['status'] !== 'PENDING') {
             return ['ok' => false, 'errors' => ['status' => 'La solicitud ya fue tomada por bodega o ya tiene entregas.']];
+        }
+        if (!in_array((string)($request['work_order_status'] ?? ''), ['OPEN', 'ACTIVE', 'CUTTING'], true)) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT ya no está disponible para atender esta solicitud.']];
         }
 
         $stmt = $this->pdo->prepare(
@@ -2629,8 +3796,14 @@ final class ReceptionService
         if ((string)($request['request_type'] ?? 'ROLL') === 'ROLL') {
             return ['ok' => false, 'errors' => ['request_type' => 'Esta solicitud debe atenderse con bobinas escaneadas.']];
         }
-        if (!in_array((string)$request['status'], ['PENDING', 'ACCEPTED', 'PARTIAL'], true)) {
+        if (!in_array((string)$request['status'], ['ACCEPTED', 'PARTIAL'], true)) {
+            if ((string)$request['status'] === 'PENDING') {
+                return ['ok' => false, 'errors' => ['request_id' => 'La solicitud debe ser tomada por bodega antes de registrar la entrega.']];
+            }
             return ['ok' => false, 'errors' => ['request_id' => 'La solicitud ya fue atendida.']];
+        }
+        if (!in_array((string)($request['work_order_status'] ?? ''), ['OPEN', 'ACTIVE', 'CUTTING'], true)) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT ya no está disponible para recibir esta entrega.']];
         }
         if ($deliveredQty <= 0) {
             return ['ok' => false, 'errors' => ['delivered_qty' => 'La cantidad entregada debe ser mayor a 0.']];
@@ -2685,8 +3858,14 @@ final class ReceptionService
         if ($request === false) {
             return ['ok' => false, 'errors' => ['request_id' => 'Solicitud no existe.']];
         }
-        if (!in_array((string)$request['status'], ['PENDING', 'ACCEPTED', 'PARTIAL'], true)) {
+        if (!in_array((string)$request['status'], ['ACCEPTED', 'PARTIAL'], true)) {
+            if ((string)$request['status'] === 'PENDING') {
+                return ['ok' => false, 'errors' => ['request_id' => 'La solicitud debe ser tomada por bodega antes de entregar bobinas.']];
+            }
             return ['ok' => false, 'errors' => ['request_id' => 'La solicitud ya fue atendida.']];
+        }
+        if (!in_array((string)($request['work_order_status'] ?? ''), ['OPEN', 'ACTIVE', 'CUTTING'], true)) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT ya no está disponible para recibir bobinas.']];
         }
 
         $resolvedRollId = $rollId !== null && $rollId > 0
@@ -3102,6 +4281,7 @@ final class ReceptionService
             if ((int)$this->getAppSetting('active_work_order_id', '0') === $workOrderId) {
                 $this->setAppSetting('active_work_order_id', '0');
             }
+            $this->releaseActiveShiftSessionFromWorkOrder($workOrderId, $operatorName);
 
             $this->insertEvent('WORK_ORDER_FINISHED', [
                 'work_order_id' => $workOrderId,
@@ -3421,7 +4601,7 @@ final class ReceptionService
             $params[':warehouse_id'] = $warehouseId;
         }
         if ($onlyPendingAssignment) {
-            $where[] = '(p.warehouse_id IS NULL OR COALESCE(p.status, "") <> "STORED")';
+            $where[] = '(p.warehouse_id IS NULL OR COALESCE(p.status, "") NOT IN ("STORED","IN_MAQUILA"))';
         }
 
         $sql = 'SELECT p.*, r.roll_code AS source_roll_code, wo.ot_code,
@@ -3460,11 +4640,489 @@ final class ReceptionService
         return $stmt->fetchAll();
     }
 
+    private function getPalletBoxStats(int $palletId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(*) AS box_count, COALESCE(SUM(units_qty), 0) AS units_total
+             FROM boxes
+             WHERE pallet_id = :pallet'
+        );
+        $stmt->execute([':pallet' => $palletId]);
+        $row = $stmt->fetch();
+
+        return [
+            'box_count' => (int)($row['box_count'] ?? 0),
+            'units_total' => (float)($row['units_total'] ?? 0),
+        ];
+    }
+
+    public function listPalletsAvailableForMaquila(int $limit = 200): array
+    {
+        $this->syncWarehousesFromErp();
+        $stmt = $this->pdo->prepare(
+            'SELECT p.*, r.roll_code AS source_roll_code, wo.ot_code,
+                    w.code AS warehouse_code, w.name AS warehouse_name,
+                    COALESCE(box_stats.units_total, 0) AS units_total,
+                    active_order.id AS active_maquila_order_id
+             FROM pallets p
+             LEFT JOIN rolls r ON r.id = p.source_roll_id
+             LEFT JOIN work_orders wo ON wo.id = p.work_order_id
+             LEFT JOIN warehouses w ON w.id = p.warehouse_id
+             LEFT JOIN (
+                SELECT pallet_id, COALESCE(SUM(units_qty), 0) AS units_total
+                FROM boxes
+                WHERE pallet_id IS NOT NULL
+                GROUP BY pallet_id
+             ) box_stats ON box_stats.pallet_id = p.id
+             LEFT JOIN maquila_orders active_order
+               ON active_order.pallet_id = p.id
+              AND active_order.status IN ("OPEN","PARTIAL")
+             WHERE active_order.id IS NULL
+               AND p.warehouse_id IS NOT NULL
+               AND COALESCE(w.code, 0) <> 2000
+             ORDER BY p.id DESC
+             LIMIT :limit'
+        );
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    public function listMaquilaOrders(?string $status = null): array
+    {
+        $this->syncWarehousesFromErp();
+        $params = [];
+        $where = [];
+        $normalizedStatus = strtoupper(trim((string)$status));
+        if ($normalizedStatus !== '' && $normalizedStatus !== 'ALL') {
+            $where[] = 'mo.status = :status';
+            $params[':status'] = $normalizedStatus;
+        }
+
+        $sql = 'SELECT mo.*,
+                       p.pallet_code, p.final_sku, p.box_count AS pallet_box_count,
+                       wo.ot_code,
+                       r.roll_code AS source_roll_code,
+                       ow.code AS outgoing_warehouse_code, ow.name AS outgoing_warehouse_name,
+                       ew.code AS external_warehouse_code, ew.name AS external_warehouse_name,
+                       rw.code AS return_warehouse_code, rw.name AS return_warehouse_name,
+                       COALESCE(ret.returned_weight_kg, 0) AS returned_weight_kg,
+                       COALESCE(ret.returned_box_count, 0) AS returned_box_count,
+                       COALESCE(ret.returned_units_qty, 0) AS returned_units_qty,
+                       COALESCE(ret.waste_weight_kg, 0) AS waste_weight_kg
+                FROM maquila_orders mo
+                INNER JOIN pallets p ON p.id = mo.pallet_id
+                LEFT JOIN work_orders wo ON wo.id = mo.work_order_id
+                LEFT JOIN rolls r ON r.id = mo.source_roll_id
+                LEFT JOIN warehouses ow ON ow.id = mo.outgoing_warehouse_id
+                LEFT JOIN warehouses ew ON ew.id = mo.external_warehouse_id
+                LEFT JOIN warehouses rw ON rw.id = mo.return_warehouse_id
+                LEFT JOIN (
+                    SELECT maquila_order_id,
+                           COALESCE(SUM(return_weight_kg), 0) AS returned_weight_kg,
+                           COALESCE(SUM(returned_box_count), 0) AS returned_box_count,
+                           COALESCE(SUM(returned_units_qty), 0) AS returned_units_qty,
+                           COALESCE(SUM(waste_weight_kg), 0) AS waste_weight_kg
+                    FROM maquila_order_returns
+                    GROUP BY maquila_order_id
+                ) ret ON ret.maquila_order_id = mo.id';
+        if ($where !== []) {
+            $sql .= ' WHERE ' . implode(' AND ', $where);
+        }
+        $sql .= ' ORDER BY FIELD(mo.status, "OPEN", "PARTIAL", "RETURNED", "CANCELLED"), mo.id DESC';
+
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt->fetchAll();
+    }
+
+    public function getMaquilaOrder(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT mo.*,
+                    p.pallet_code, p.final_sku, p.box_count AS pallet_box_count,
+                    wo.ot_code,
+                    r.roll_code AS source_roll_code,
+                    ow.code AS outgoing_warehouse_code, ow.name AS outgoing_warehouse_name,
+                    ew.code AS external_warehouse_code, ew.name AS external_warehouse_name,
+                    rw.code AS return_warehouse_code, rw.name AS return_warehouse_name,
+                    COALESCE(ret.returned_weight_kg, 0) AS returned_weight_kg,
+                    COALESCE(ret.returned_box_count, 0) AS returned_box_count,
+                    COALESCE(ret.returned_units_qty, 0) AS returned_units_qty,
+                    COALESCE(ret.waste_weight_kg, 0) AS waste_weight_kg
+             FROM maquila_orders mo
+             INNER JOIN pallets p ON p.id = mo.pallet_id
+             LEFT JOIN work_orders wo ON wo.id = mo.work_order_id
+             LEFT JOIN rolls r ON r.id = mo.source_roll_id
+             LEFT JOIN warehouses ow ON ow.id = mo.outgoing_warehouse_id
+             LEFT JOIN warehouses ew ON ew.id = mo.external_warehouse_id
+             LEFT JOIN warehouses rw ON rw.id = mo.return_warehouse_id
+             LEFT JOIN (
+                SELECT maquila_order_id,
+                       COALESCE(SUM(return_weight_kg), 0) AS returned_weight_kg,
+                       COALESCE(SUM(returned_box_count), 0) AS returned_box_count,
+                       COALESCE(SUM(returned_units_qty), 0) AS returned_units_qty,
+                       COALESCE(SUM(waste_weight_kg), 0) AS waste_weight_kg
+                FROM maquila_order_returns
+                GROUP BY maquila_order_id
+             ) ret ON ret.maquila_order_id = mo.id
+             WHERE mo.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute([':id' => $id]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function listMaquilaOrdersByPallet(int $palletId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT mo.*,
+                    COALESCE(ret.returned_weight_kg, 0) AS returned_weight_kg,
+                    COALESCE(ret.returned_box_count, 0) AS returned_box_count,
+                    COALESCE(ret.returned_units_qty, 0) AS returned_units_qty,
+                    COALESCE(ret.waste_weight_kg, 0) AS waste_weight_kg
+             FROM maquila_orders mo
+             LEFT JOIN (
+                SELECT maquila_order_id,
+                       COALESCE(SUM(return_weight_kg), 0) AS returned_weight_kg,
+                       COALESCE(SUM(returned_box_count), 0) AS returned_box_count,
+                       COALESCE(SUM(returned_units_qty), 0) AS returned_units_qty,
+                       COALESCE(SUM(waste_weight_kg), 0) AS waste_weight_kg
+                FROM maquila_order_returns
+                GROUP BY maquila_order_id
+             ) ret ON ret.maquila_order_id = mo.id
+             WHERE mo.pallet_id = :pallet_id
+             ORDER BY mo.id DESC'
+        );
+        $stmt->execute([':pallet_id' => $palletId]);
+        return $stmt->fetchAll();
+    }
+
+    public function getOpenMaquilaOrderByPallet(int $palletId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, status
+             FROM maquila_orders
+             WHERE pallet_id = :pallet_id
+               AND status IN ("OPEN","PARTIAL")
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':pallet_id' => $palletId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function listMaquilaReturns(int $orderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT *
+             FROM maquila_order_returns
+             WHERE maquila_order_id = :order_id
+             ORDER BY id DESC'
+        );
+        $stmt->execute([':order_id' => $orderId]);
+        return $stmt->fetchAll();
+    }
+
+    public function createMaquilaOrder(int $palletId, string $workshopName, float $outgoingWeightKg, string $notes, string $operatorName): array
+    {
+        $workshopName = trim($workshopName);
+        $notes = trim($notes);
+        $operatorName = trim($operatorName);
+        $errors = [];
+
+        $pallet = $this->getPallet($palletId);
+        if ($pallet === null) {
+            $errors['pallet_id'] = 'El pallet seleccionado no existe.';
+        }
+        if ($workshopName === '') {
+            $errors['workshop_name'] = 'Debes indicar el taller externo.';
+        }
+        if ($outgoingWeightKg <= 0) {
+            $errors['outgoing_weight_kg'] = 'El peso de salida debe ser mayor a 0.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+
+        $activeOrder = $palletId > 0 ? $this->getOpenMaquilaOrderByPallet($palletId) : null;
+        if ($activeOrder !== null) {
+            $errors['pallet_id'] = 'El pallet ya tiene una orden activa de maquila.';
+        }
+
+        $this->syncWarehousesFromErp();
+        $externalWarehouseId = $this->findWarehouseIdByCode(2000);
+        $returnWarehouseId = $this->findWarehouseIdByCode(400);
+        if ($externalWarehouseId === null) {
+            $errors['external_warehouse'] = 'No existe la bodega 2000 para talleres externos.';
+        }
+        if ($returnWarehouseId === null) {
+            $errors['return_warehouse'] = 'No existe la bodega 400 para retorno de maquila.';
+        }
+
+        if ($pallet !== null) {
+            $currentWarehouseId = (int)($pallet['warehouse_id'] ?? 0);
+            $currentWarehouseCode = (int)($pallet['warehouse_code'] ?? 0);
+            if ($currentWarehouseId <= 0) {
+                $errors['pallet_id'] = 'El pallet debe estar asignado a una bodega interna antes de salir a maquila.';
+            } elseif ($currentWarehouseCode === 2000) {
+                $errors['pallet_id'] = 'El pallet ya está en talleres externos.';
+            }
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $currentWarehouseId = (int)$pallet['warehouse_id'];
+        $boxStats = $this->getPalletBoxStats($palletId);
+
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare(
+                'INSERT INTO maquila_orders (
+                    pallet_id, work_order_id, source_roll_id, workshop_name,
+                    outgoing_weight_kg, outgoing_box_count, outgoing_units_qty,
+                    outgoing_warehouse_id, external_warehouse_id, return_warehouse_id,
+                    status, notes, operator_name
+                 ) VALUES (
+                    :pallet_id, :work_order_id, :source_roll_id, :workshop_name,
+                    :outgoing_weight_kg, :outgoing_box_count, :outgoing_units_qty,
+                    :outgoing_warehouse_id, :external_warehouse_id, :return_warehouse_id,
+                    :status, :notes, :operator_name
+                 )'
+            );
+            $stmt->execute([
+                ':pallet_id' => $palletId,
+                ':work_order_id' => (int)($pallet['work_order_id'] ?? 0) > 0 ? (int)$pallet['work_order_id'] : null,
+                ':source_roll_id' => (int)($pallet['source_roll_id'] ?? 0) > 0 ? (int)$pallet['source_roll_id'] : null,
+                ':workshop_name' => $workshopName,
+                ':outgoing_weight_kg' => number_format($outgoingWeightKg, 3, '.', ''),
+                ':outgoing_box_count' => (int)$boxStats['box_count'],
+                ':outgoing_units_qty' => number_format((float)$boxStats['units_total'], 3, '.', ''),
+                ':outgoing_warehouse_id' => $currentWarehouseId,
+                ':external_warehouse_id' => $externalWarehouseId,
+                ':return_warehouse_id' => $returnWarehouseId,
+                ':status' => 'OPEN',
+                ':notes' => $notes !== '' ? $notes : null,
+                ':operator_name' => $operatorName,
+            ]);
+            $orderId = (int)$this->pdo->lastInsertId();
+
+            $stmt = $this->pdo->prepare('UPDATE pallets SET warehouse_id = :warehouse_id, status = :status WHERE id = :id');
+            $stmt->execute([
+                ':warehouse_id' => $externalWarehouseId,
+                ':status' => 'IN_MAQUILA',
+                ':id' => $palletId,
+            ]);
+
+            $stmt = $this->pdo->prepare('UPDATE boxes SET warehouse_id = :warehouse_id, status = :status WHERE pallet_id = :pallet_id');
+            $stmt->execute([
+                ':warehouse_id' => $externalWarehouseId,
+                ':status' => 'IN_MAQUILA',
+                ':pallet_id' => $palletId,
+            ]);
+
+            $stmt = $this->pdo->prepare(
+                'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                 VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+            );
+            $stmt->execute([
+                ':entity_type' => 'PALLET',
+                ':entity_id' => $palletId,
+                ':movement_type' => 'TRANSFER',
+                ':from_warehouse_id' => $currentWarehouseId,
+                ':to_warehouse_id' => $externalWarehouseId,
+                ':payload' => json_encode([
+                    'operator_name' => $operatorName,
+                    'movement_context' => 'MAQUILA_OUT',
+                    'maquila_order_id' => $orderId,
+                    'workshop_name' => $workshopName,
+                    'outgoing_weight_kg' => round($outgoingWeightKg, 3),
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            $this->insertEvent('MAQUILA_SENT', [
+                'maquila_order_id' => $orderId,
+                'pallet_id' => $palletId,
+                'pallet_code' => (string)($pallet['pallet_code'] ?? ''),
+                'work_order_id' => (int)($pallet['work_order_id'] ?? 0) > 0 ? (int)$pallet['work_order_id'] : null,
+                'workshop_name' => $workshopName,
+                'outgoing_weight_kg' => round($outgoingWeightKg, 3),
+                'outgoing_box_count' => (int)$boxStats['box_count'],
+                'outgoing_units_qty' => round((float)$boxStats['units_total'], 3),
+                'from_warehouse_id' => $currentWarehouseId,
+                'to_warehouse_id' => $externalWarehouseId,
+                'operator_name' => $operatorName,
+                'notes' => $notes,
+            ]);
+
+            $this->pdo->commit();
+            return ['ok' => true, 'errors' => [], 'maquila_order_id' => $orderId];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
+    public function registerMaquilaReturn(
+        int $orderId,
+        float $returnWeightKg,
+        int $returnedBoxCount,
+        float $returnedUnitsQty,
+        float $wasteWeightKg,
+        string $notes,
+        string $operatorName
+    ): array {
+        $notes = trim($notes);
+        $operatorName = trim($operatorName);
+        $errors = [];
+
+        $order = $this->getMaquilaOrder($orderId);
+        if ($order === null) {
+            $errors['maquila_order_id'] = 'La orden de maquila no existe.';
+        }
+        if ($returnWeightKg <= 0 && $wasteWeightKg <= 0) {
+            $errors['return_weight_kg'] = 'Debes registrar retorno, merma o ambos.';
+        }
+        if ($returnedBoxCount < 0) {
+            $errors['returned_box_count'] = 'La cantidad de cajas retornadas no puede ser negativa.';
+        }
+        if ($returnedUnitsQty < 0) {
+            $errors['returned_units_qty'] = 'Las unidades retornadas no pueden ser negativas.';
+        }
+        if ($wasteWeightKg < 0) {
+            $errors['waste_weight_kg'] = 'La merma no puede ser negativa.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+
+        if ($order !== null && !in_array((string)($order['status'] ?? ''), ['OPEN', 'PARTIAL'], true)) {
+            $errors['maquila_order_id'] = 'La orden de maquila ya fue cerrada.';
+        }
+
+        $currentReturnedWeight = (float)($order['returned_weight_kg'] ?? 0);
+        $currentWasteWeight = (float)($order['waste_weight_kg'] ?? 0);
+        $outgoingWeight = (float)($order['outgoing_weight_kg'] ?? 0);
+        $remainingWeight = max(0, $outgoingWeight - $currentReturnedWeight - $currentWasteWeight);
+        if ($order !== null && ($returnWeightKg + $wasteWeightKg) > ($remainingWeight + 0.0001)) {
+            $errors['return_weight_kg'] = 'El retorno más la merma supera el peso pendiente por conciliar.';
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $nextReturnedWeight = $currentReturnedWeight + $returnWeightKg;
+        $nextWasteWeight = $currentWasteWeight + $wasteWeightKg;
+        $isFullyReturned = ($nextReturnedWeight + $nextWasteWeight) >= ($outgoingWeight - 0.0001);
+        $nextStatus = $isFullyReturned ? 'RETURNED' : 'PARTIAL';
+
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare(
+                'INSERT INTO maquila_order_returns (
+                    maquila_order_id, return_weight_kg, returned_box_count, returned_units_qty,
+                    waste_weight_kg, notes, operator_name
+                 ) VALUES (
+                    :maquila_order_id, :return_weight_kg, :returned_box_count, :returned_units_qty,
+                    :waste_weight_kg, :notes, :operator_name
+                 )'
+            );
+            $stmt->execute([
+                ':maquila_order_id' => $orderId,
+                ':return_weight_kg' => number_format($returnWeightKg, 3, '.', ''),
+                ':returned_box_count' => $returnedBoxCount,
+                ':returned_units_qty' => number_format($returnedUnitsQty, 3, '.', ''),
+                ':waste_weight_kg' => number_format($wasteWeightKg, 3, '.', ''),
+                ':notes' => $notes !== '' ? $notes : null,
+                ':operator_name' => $operatorName,
+            ]);
+
+            $stmt = $this->pdo->prepare(
+                'UPDATE maquila_orders
+                 SET status = :status,
+                     closed_at = :closed_at
+                 WHERE id = :id'
+            );
+            $stmt->execute([
+                ':status' => $nextStatus,
+                ':closed_at' => $nextStatus === 'RETURNED' ? date('Y-m-d H:i:s') : null,
+                ':id' => $orderId,
+            ]);
+
+            if ($nextStatus === 'RETURNED') {
+                $returnWarehouseId = (int)$order['return_warehouse_id'];
+                $externalWarehouseId = (int)$order['external_warehouse_id'];
+                $palletId = (int)$order['pallet_id'];
+
+                $stmt = $this->pdo->prepare('UPDATE pallets SET warehouse_id = :warehouse_id, status = :status WHERE id = :id');
+                $stmt->execute([
+                    ':warehouse_id' => $returnWarehouseId,
+                    ':status' => 'MAQUILA_RETURNED',
+                    ':id' => $palletId,
+                ]);
+
+                $stmt = $this->pdo->prepare('UPDATE boxes SET warehouse_id = :warehouse_id, status = :status WHERE pallet_id = :pallet_id');
+                $stmt->execute([
+                    ':warehouse_id' => $returnWarehouseId,
+                    ':status' => 'MAQUILA_RETURNED',
+                    ':pallet_id' => $palletId,
+                ]);
+
+                $stmt = $this->pdo->prepare(
+                    'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                     VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+                );
+                $stmt->execute([
+                    ':entity_type' => 'PALLET',
+                    ':entity_id' => $palletId,
+                    ':movement_type' => 'TRANSFER',
+                    ':from_warehouse_id' => $externalWarehouseId,
+                    ':to_warehouse_id' => $returnWarehouseId,
+                    ':payload' => json_encode([
+                        'operator_name' => $operatorName,
+                        'movement_context' => 'MAQUILA_RETURN',
+                        'maquila_order_id' => $orderId,
+                        'return_weight_kg' => round($returnWeightKg, 3),
+                        'waste_weight_kg' => round($wasteWeightKg, 3),
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+            }
+
+            $this->insertEvent('MAQUILA_RETURN_RECORDED', [
+                'maquila_order_id' => $orderId,
+                'pallet_id' => (int)$order['pallet_id'],
+                'pallet_code' => (string)($order['pallet_code'] ?? ''),
+                'work_order_id' => (int)($order['work_order_id'] ?? 0) > 0 ? (int)$order['work_order_id'] : null,
+                'workshop_name' => (string)($order['workshop_name'] ?? ''),
+                'return_weight_kg' => round($returnWeightKg, 3),
+                'returned_box_count' => $returnedBoxCount,
+                'returned_units_qty' => round($returnedUnitsQty, 3),
+                'waste_weight_kg' => round($wasteWeightKg, 3),
+                'pending_weight_kg' => max(0, round($outgoingWeight - $nextReturnedWeight - $nextWasteWeight, 3)),
+                'status' => $nextStatus,
+                'operator_name' => $operatorName,
+                'notes' => $notes,
+            ]);
+
+            $this->pdo->commit();
+            return ['ok' => true, 'errors' => []];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
     public function movePalletToWarehouse(int $palletId, int $toWarehouseId, string $operatorName): array
     {
         $operatorName = trim($operatorName);
         $pallet = $this->getPallet($palletId);
         $errors = [];
+        $activeMaquilaOrder = $this->getOpenMaquilaOrderByPallet($palletId);
 
         if ($pallet === null) {
             $errors['pallet_id'] = 'El pallet no existe.';
@@ -3488,6 +5146,9 @@ final class ReceptionService
 
         if ($pallet !== null && $toWarehouseId > 0 && (int)($pallet['warehouse_id'] ?? 0) === $toWarehouseId) {
             $errors['warehouse_id'] = 'El pallet ya está en esa bodega.';
+        }
+        if ($activeMaquilaOrder !== null) {
+            $errors['pallet_id'] = 'El pallet está con una orden activa de maquila y no se puede mover manualmente.';
         }
 
         if ($errors !== []) {
@@ -3827,22 +5488,302 @@ final class ReceptionService
         return $stmt->fetchAll();
     }
 
+    public function listProductionMachinesWithSessions(): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT pm.id, pm.code, pm.name, pm.production_area, pm.erp_machine_id, pm.plant_label, pm.sort_order,
+                    pmt.name AS machine_type_name, pmt.code AS machine_type_code, pmt.production_area AS machine_type_area,
+                    pss.id AS active_session_id, pss.work_order_id AS active_work_order_id, pss.operator_name, pss.helper_name,
+                    pss.shift_label, pss.process_stage, pss.comments, pss.started_at, pss.ended_at, pss.status AS session_status,
+                    wo.ot_code AS active_work_order_code, wo.sku_final AS active_work_order_sku
+             FROM production_machines pm
+             INNER JOIN production_machine_types pmt ON pmt.id = pm.machine_type_id
+             LEFT JOIN production_shift_sessions pss
+               ON pss.machine_id = pm.id
+              AND pss.status = "ACTIVE"
+              AND pss.id = (
+                    SELECT MAX(pss2.id)
+                    FROM production_shift_sessions pss2
+                    WHERE pss2.machine_id = pm.id
+                      AND pss2.status = "ACTIVE"
+               )
+             LEFT JOIN work_orders wo ON wo.id = pss.work_order_id
+             WHERE pm.is_active = 1
+             ORDER BY pmt.display_order ASC, pm.sort_order ASC, pm.id ASC'
+        );
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    public function listProductionMachineTypes(): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, code, name, production_area, erp_machine_type_id, display_order
+             FROM production_machine_types
+             WHERE is_active = 1
+             ORDER BY display_order ASC, name ASC'
+        );
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    public function getProductionMachine(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT pm.*, pmt.name AS machine_type_name, pmt.code AS machine_type_code, pmt.production_area AS machine_type_area
+             FROM production_machines pm
+             INNER JOIN production_machine_types pmt ON pmt.id = pm.machine_type_id
+             WHERE pm.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute([':id' => $id]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function getActiveShiftSessionByOperator(string $operatorName): ?array
+    {
+        $operatorName = trim($operatorName);
+        if ($operatorName === '') {
+            return null;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'SELECT pss.*, pm.name AS machine_name, pm.code AS machine_code, pm.production_area AS machine_area,
+                    pm.erp_machine_id, pmt.name AS machine_type_name, pmt.code AS machine_type_code,
+                    pmt.erp_machine_type_id, wo.ot_code, wo.sku_final
+             FROM production_shift_sessions pss
+             INNER JOIN production_machines pm ON pm.id = pss.machine_id
+             INNER JOIN production_machine_types pmt ON pmt.id = pm.machine_type_id
+             LEFT JOIN work_orders wo ON wo.id = pss.work_order_id
+             WHERE pss.operator_name = :operator_name
+               AND pss.status = "ACTIVE"
+             ORDER BY pss.id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':operator_name' => $operatorName]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function getActiveShiftSessionByWorkOrder(int $workOrderId): ?array
+    {
+        if ($workOrderId <= 0) {
+            return null;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'SELECT pss.*, pm.name AS machine_name, pm.code AS machine_code, pm.production_area AS machine_area,
+                    pm.erp_machine_id, pmt.name AS machine_type_name, pmt.code AS machine_type_code,
+                    pmt.erp_machine_type_id
+             FROM production_shift_sessions pss
+             INNER JOIN production_machines pm ON pm.id = pss.machine_id
+             INNER JOIN production_machine_types pmt ON pmt.id = pm.machine_type_id
+             WHERE pss.work_order_id = :work_order_id
+               AND pss.status = "ACTIVE"
+             ORDER BY pss.id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':work_order_id' => $workOrderId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function startShiftSession(
+        int $machineId,
+        string $operatorName,
+        ?string $helperName = null,
+        ?string $shiftLabel = null,
+        ?string $processStage = null,
+        ?string $comments = null
+    ): array {
+        $operatorName = trim($operatorName);
+        $helperName = trim((string)$helperName);
+        $shiftLabel = trim((string)$shiftLabel);
+        $comments = trim((string)$comments);
+        $machine = $this->getProductionMachine($machineId);
+
+        $errors = [];
+        if ($machineId <= 0 || $machine === null) {
+            $errors['machine_id'] = 'La máquina seleccionada no existe.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+        if ($machine !== null) {
+            $currentMachineSession = $this->getActiveShiftSessionByMachine($machineId);
+            if ($currentMachineSession !== null) {
+                $errors['machine_id'] = 'La máquina ya tiene un turno activo.';
+            }
+            $currentOperatorSession = $this->getActiveShiftSessionByOperator($operatorName);
+            if ($currentOperatorSession !== null) {
+                $errors['operator_name'] = 'El operador ya tiene un turno activo en otra máquina.';
+            }
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $resolvedStage = $this->normalizeMachineProcessStage(
+            $processStage !== null && trim($processStage) !== '' ? $processStage : (string)($machine['production_area'] ?? '')
+        );
+        $resolvedShiftLabel = $shiftLabel !== '' ? $shiftLabel : 'Turno general';
+
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO production_shift_sessions (
+                machine_id, work_order_id, operator_name, helper_name, shift_label, process_stage, comments, started_at, ended_at, status
+             ) VALUES (
+                :machine_id, NULL, :operator_name, :helper_name, :shift_label, :process_stage, :comments, CURRENT_TIMESTAMP, NULL, "ACTIVE"
+             )'
+        );
+        $stmt->execute([
+            ':machine_id' => $machineId,
+            ':operator_name' => $operatorName,
+            ':helper_name' => $helperName !== '' ? $helperName : null,
+            ':shift_label' => $resolvedShiftLabel,
+            ':process_stage' => $resolvedStage,
+            ':comments' => $comments !== '' ? $comments : null,
+        ]);
+
+        $sessionId = (int)$this->pdo->lastInsertId();
+        $this->insertEvent('SHIFT_SESSION_STARTED', [
+            'shift_session_id' => $sessionId,
+            'machine_id' => $machineId,
+            'machine_name' => (string)($machine['name'] ?? ''),
+            'machine_type' => (string)($machine['machine_type_name'] ?? ''),
+            'operator_name' => $operatorName,
+            'helper_name' => $helperName !== '' ? $helperName : null,
+            'shift_label' => $resolvedShiftLabel,
+            'process_stage' => $resolvedStage,
+            'comments' => $comments !== '' ? $comments : null,
+        ]);
+
+        return ['ok' => true, 'errors' => [], 'id' => $sessionId];
+    }
+
+    public function endShiftSession(int $sessionId, string $operatorName, ?string $comments = null): array
+    {
+        $operatorName = trim($operatorName);
+        $comments = trim((string)$comments);
+        $session = $this->getShiftSession($sessionId);
+        $errors = [];
+        if ($sessionId <= 0 || $session === null) {
+            $errors['session_id'] = 'El turno no existe.';
+        } elseif ((string)($session['status'] ?? '') !== 'ACTIVE') {
+            $errors['session_id'] = 'El turno ya está cerrado.';
+        } elseif ($operatorName !== '' && trim((string)($session['operator_name'] ?? '')) !== $operatorName) {
+            $errors['operator_name'] = 'Solo el operador activo puede cerrar este turno.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $existingComments = trim((string)($session['comments'] ?? ''));
+        $resolvedComments = $existingComments;
+        if ($comments !== '') {
+            $resolvedComments = $existingComments !== ''
+                ? $existingComments . "\n" . $comments
+                : $comments;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'UPDATE production_shift_sessions
+             SET status = "CLOSED",
+                 ended_at = CURRENT_TIMESTAMP,
+                 comments = :comments
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            ':id' => $sessionId,
+            ':comments' => $resolvedComments !== '' ? $resolvedComments : null,
+        ]);
+
+        $this->insertEvent('SHIFT_SESSION_ENDED', [
+            'shift_session_id' => $sessionId,
+            'machine_id' => (int)($session['machine_id'] ?? 0),
+            'machine_name' => (string)($session['machine_name'] ?? ''),
+            'operator_name' => (string)($session['operator_name'] ?? ''),
+            'work_order_id' => (int)($session['work_order_id'] ?? 0) > 0 ? (int)$session['work_order_id'] : null,
+            'comments' => $comments !== '' ? $comments : null,
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function assignActiveShiftSessionToWorkOrder(int $workOrderId, string $operatorName): void
+    {
+        $session = $this->getActiveShiftSessionByOperator($operatorName);
+        if ($session === null) {
+            return;
+        }
+        if ((int)($session['work_order_id'] ?? 0) === $workOrderId) {
+            return;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'UPDATE production_shift_sessions
+             SET work_order_id = :work_order_id
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            ':work_order_id' => $workOrderId,
+            ':id' => (int)$session['id'],
+        ]);
+
+        $this->insertEvent('SHIFT_SESSION_WORK_ORDER_ASSIGNED', [
+            'shift_session_id' => (int)$session['id'],
+            'machine_id' => (int)($session['machine_id'] ?? 0),
+            'work_order_id' => $workOrderId,
+            'operator_name' => trim((string)($session['operator_name'] ?? '')),
+        ]);
+    }
+
+    public function releaseActiveShiftSessionFromWorkOrder(int $workOrderId, string $operatorName): void
+    {
+        $session = $this->getActiveShiftSessionByOperator($operatorName);
+        if ($session === null || (int)($session['work_order_id'] ?? 0) !== $workOrderId) {
+            return;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'UPDATE production_shift_sessions
+             SET work_order_id = NULL
+             WHERE id = :id'
+        );
+        $stmt->execute([':id' => (int)$session['id']]);
+
+        $this->insertEvent('SHIFT_SESSION_WORK_ORDER_RELEASED', [
+            'shift_session_id' => (int)$session['id'],
+            'machine_id' => (int)($session['machine_id'] ?? 0),
+            'work_order_id' => $workOrderId,
+            'operator_name' => trim((string)($session['operator_name'] ?? '')),
+        ]);
+    }
+
     public function stockSummary(): array
     {
         $stmt = $this->pdo->prepare(
             "SELECT w.id AS warehouse_id, w.code AS warehouse_code, w.name AS warehouse_name,
                     COALESCE(roll_stats.rolls_count, 0) AS rolls_count,
                     COALESCE(roll_stats.roll_units_total, 0) AS roll_units_total,
+                    COALESCE(roll_stats.available_rolls_count, 0) AS available_rolls_count,
+                    COALESCE(roll_stats.available_roll_units_total, 0) AS available_roll_units_total,
+                    COALESCE(roll_stats.unavailable_rolls_count, 0) AS unavailable_rolls_count,
+                    COALESCE(roll_stats.unavailable_roll_units_total, 0) AS unavailable_roll_units_total,
                     COALESCE(roll_stats.total_weight_kg, 0) AS total_weight_kg,
                     COALESCE(box_stats.boxes_count, 0) AS boxes_count,
                     COALESCE(box_stats.box_units_total, 0) AS box_units_total,
                     COALESCE(pallet_stats.pallets_count, 0) AS pallets_count,
-                    COALESCE(roll_stats.roll_units_total, 0) + COALESCE(box_stats.box_units_total, 0) AS stock_units_total
+                    COALESCE(roll_stats.available_roll_units_total, 0) + COALESCE(box_stats.box_units_total, 0) AS stock_units_total
              FROM warehouses w
              LEFT JOIN (
                 SELECT warehouse_id,
                        COUNT(*) AS rolls_count,
                        COALESCE(SUM(received_qty), 0) AS roll_units_total,
+                       SUM(CASE WHEN status = 'RECEIVED' THEN 1 ELSE 0 END) AS available_rolls_count,
+                       COALESCE(SUM(CASE WHEN status = 'RECEIVED' THEN received_qty ELSE 0 END), 0) AS available_roll_units_total,
+                       SUM(CASE WHEN status <> 'RECEIVED' THEN 1 ELSE 0 END) AS unavailable_rolls_count,
+                       COALESCE(SUM(CASE WHEN status <> 'RECEIVED' THEN received_qty ELSE 0 END), 0) AS unavailable_roll_units_total,
                        COALESCE(SUM(weight_kg), 0) AS total_weight_kg
                 FROM rolls
                 WHERE status IN ('RECEIVED','IN_PROCESS','BLOCKED')
@@ -3959,14 +5900,13 @@ final class ReceptionService
         $errors = [];
         $operatorName = trim($operatorName);
 
-        $stmt = $this->pdo->prepare('SELECT id, warehouse_id FROM rolls WHERE id = :id');
-        $stmt->execute([':id' => $rollId]);
-        $roll = $stmt->fetch();
-        if ($roll === false) {
+        $roll = $this->getRoll($rollId);
+        if ($roll === null) {
             return ['ok' => false, 'errors' => ['roll' => 'Bobina no existe.']];
         }
 
         $fromWarehouseId = (int)$roll['warehouse_id'];
+        $targetWorkOrder = null;
         if ($toWarehouseId <= 0 && !($workOrderId !== null && $workOrderId > 0)) {
             $errors['warehouse_id'] = 'Bodega destino es obligatoria.';
         } elseif ($toWarehouseId > 0 && $toWarehouseId === $fromWarehouseId && !($workOrderId !== null && $workOrderId > 0)) {
@@ -3982,10 +5922,31 @@ final class ReceptionService
             $errors['operator_name'] = 'Operador es obligatorio.';
         }
         if ($workOrderId !== null && $workOrderId > 0) {
-            $stmt = $this->pdo->prepare('SELECT id FROM work_orders WHERE id = :id');
-            $stmt->execute([':id' => $workOrderId]);
-            if ($stmt->fetch() === false) {
+            $targetWorkOrder = $this->getWorkOrder($workOrderId);
+            if ($targetWorkOrder === null) {
                 $errors['work_order_id'] = 'OT no existe.';
+            } elseif (!in_array((string)($targetWorkOrder['status'] ?? ''), ['OPEN', 'ACTIVE', 'CUTTING'], true)) {
+                $errors['work_order_id'] = 'La OT destino no está disponible para recibir bobinas.';
+            }
+        }
+
+        $rollStatus = strtoupper(trim((string)($roll['status'] ?? '')));
+        $rollCurrentWorkOrderId = (int)($roll['current_work_order_id'] ?? 0);
+        if ($workOrderId !== null && $workOrderId > 0) {
+            if (!in_array($rollStatus, ['RECEIVED'], true)) {
+                $errors['roll'] = 'Solo se pueden transferir a OT bobinas disponibles.';
+            } elseif ($rollCurrentWorkOrderId > 0 && $rollCurrentWorkOrderId !== $workOrderId) {
+                $errors['roll'] = 'La bobina ya está asignada a otra OT.';
+            } elseif ($rollCurrentWorkOrderId === $workOrderId) {
+                $errors['roll'] = 'La bobina ya está asignada a esta OT.';
+            } elseif (!in_array((string)($roll['process_stage'] ?? 'RAW'), ['RAW', 'PRINTED'], true)) {
+                $errors['roll'] = 'La etapa actual de la bobina no permite ingresarla a una OT.';
+            }
+        } else {
+            if ($rollCurrentWorkOrderId > 0) {
+                $errors['roll'] = 'La bobina está asignada a una OT y no se puede trasladar a bodega.';
+            } elseif (!in_array($rollStatus, ['RECEIVED'], true)) {
+                $errors['roll'] = 'Solo se pueden trasladar a bodega bobinas disponibles.';
             }
         }
 
@@ -4066,7 +6027,8 @@ final class ReceptionService
     {
         $stmt = $this->pdo->prepare(
             'SELECT m.id, m.movement_type, m.created_at,
-                    wf.code AS from_warehouse_code, wt.code AS to_warehouse_code,
+                    wf.code AS from_warehouse_code, wf.name AS from_warehouse_name,
+                    wt.code AS to_warehouse_code, wt.name AS to_warehouse_name,
                     m.payload
              FROM movements m
              LEFT JOIN warehouses wf ON wf.id = m.from_warehouse_id

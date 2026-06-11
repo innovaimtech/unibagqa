@@ -1,1 +1,46 @@
-.vercel
+.vercel/
+
+# Entorno local y secretos
+.env
+.env.*
+!.env.example
+
+# Artefactos temporales del proyecto
+.tmp_*
+.tmp_*.php
+.tmp_*.sql
+.tmp_*.txt
+.tmp_perf/
+.tmp_prod_check/
+.tmp_prod_shell/
+
+# Sesiones y runtime local
+storage/sessions/*
+!storage/sessions/.keep
+storage/logs/
+
+# Salidas locales no versionables
+*.log
+*.tmp
+*.bak
+*.cache
+
+# Capturas, exports y auxiliares de pruebas
+*.html
+*.txt
+cookies.txt
+cookies_*.txt
+
+# Informes y documentos operativos generados
+CHECKLIST_FASES_CIERRE_*.md
+INFORME_*.md
+RESUMEN_EJECUTIVO_*.md
+MAPA_COMPLETO_*.md
+PLAN_*.md
+DEPLOY_*.md
+GUIA_*.md
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+desktop.ini

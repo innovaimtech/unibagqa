@@ -7,7 +7,7 @@ $pdo = new PDO('mysql:host=yamabiko.proxy.rlwy.net;port=52311;dbname=railway;cha
 $base = 'C:/Users/Axiliarmu/Desktop/unibag proyecto';
 $pdo->exec('SET FOREIGN_KEY_CHECKS=0');
 foreach ([
-    'chemical_weighings','chemicals','movements','events','rolls','purchase_order_lines','purchase_orders','suppliers','app_settings','work_orders','skus','warehouses'
+    'production_shift_sessions','production_machines','production_machine_types','erp_work_order_sync','chemical_weighings','chemicals','movements','events','rolls','purchase_order_lines','purchase_orders','suppliers','app_settings','work_orders','skus','warehouses'
 ] as $table) {
     $pdo->exec("DROP TABLE IF EXISTS {$table}");
 }
@@ -19,6 +19,8 @@ $files = [
     $base . '/database/migrations/003_chemicals_and_weighings.sql',
     $base . '/database/migrations/004_purchase_orders.sql',
     $base . '/database/migrations/005_inventory_traceability.sql',
+    $base . '/database/migrations/006_erp_production_sync.sql',
+    $base . '/database/migrations/007_production_machine_shifts.sql',
     $base . '/database/seeds/demo_more.sql',
 ];
 foreach ($files as $file) {

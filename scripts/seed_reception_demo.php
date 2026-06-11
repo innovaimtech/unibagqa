@@ -126,8 +126,8 @@ $result = [
     'national_po_partial' => 'OC-DEM-NAC-PART-' . $suffix,
     'import_po' => 'OC-DEM-IMP-' . $suffix,
     'import_container' => 'CONT-DEM-' . $suffix,
-    'national_partial_roll_id' => (int)($partialNationalReceipt['roll_id'] ?? 0),
-    'import_partial_roll_id' => (int)($partialImportReceipt['roll_id'] ?? 0),
+    'national_partial_roll_id' => (int)($partialNationalReceipt['id'] ?? 0),
+    'import_partial_roll_id' => (int)($partialImportReceipt['id'] ?? 0),
 ];
 
 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
@@ -196,6 +196,15 @@ function createSupplier(PDO $pdo, array $data): int
 
 function createItem(PDO $pdo, string $code, string $title): int
 {
+    $number = preg_replace('/[^A-Z0-9]/', '', strtoupper($code)) ?: ('ITEM' . time());
+
+    $existing = $pdo->prepare('SELECT id FROM item WHERE item_number = :number LIMIT 1');
+    $existing->execute([':number' => $number]);
+    $found = $existing->fetchColumn();
+    if ($found !== false) {
+        return (int)$found;
+    }
+
     $stmt = $pdo->prepare(
         'INSERT INTO item (
             item_title, item_desc, item_unit, item_unit_amount, item_purchasable, item_sellable,
@@ -207,7 +216,7 @@ function createItem(PDO $pdo, string $code, string $title): int
             item_fabricate_prefix, item_fabricate_fabrictext, item_fabricate_fuelletext,
             item_reg_width, item_reg_gsm, item_reg_length, item_reg_kg
          ) VALUES (
-            :title, :title, "KG", 1.00, 1, 0,
+            :title, :description, "KG", 1.00, 1, 0,
             1, 1, :crt_ts, 1, :upd_ts,
             "", "", "", "", "",
             :number, :number_prod, "", 0, 0,
@@ -218,9 +227,9 @@ function createItem(PDO $pdo, string $code, string $title): int
          )'
     );
     $ts = time();
-    $number = preg_replace('/[^A-Z0-9]/', '', strtoupper($code)) ?: ('ITEM' . $ts);
     $stmt->execute([
         ':title' => $title,
+        ':description' => $title,
         ':crt_ts' => $ts,
         ':upd_ts' => $ts,
         ':number' => $number,
