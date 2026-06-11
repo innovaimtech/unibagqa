@@ -1150,6 +1150,7 @@ function ensureAuthSchema(PDO $pdo): void
 
 function renderLoginPage(?string $error = null, array $state = []): void
 {
+    http_response_code(200);
     $companies = authCompanyDefinitions();
     $plants = authPlantDefinitions();
     $areas = erpAreaDefinitions();
@@ -1257,6 +1258,7 @@ function renderLoginPage(?string $error = null, array $state = []): void
 
 function render(string $title, string $body): void
 {
+    http_response_code(200);
     echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
     echo '<title>' . h($title) . '</title>';
     echo '<style>
