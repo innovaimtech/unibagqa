@@ -69,7 +69,13 @@ if ($path === '/logout') {
         );
     }
     expireCsrfCookie();
-    header('Location: /login');
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
+    header('Location: /login', true, 303);
+    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/login"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Saliendo...</title></head><body><p>Saliendo del sistema. Si no eres redirigido, <a href="/login">haz clic aquí</a>.</p><script>window.location.replace("/login");</script></body></html>';
     exit;
 }
 
