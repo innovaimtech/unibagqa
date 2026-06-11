@@ -1460,7 +1460,7 @@ function render(string $title, string $body): void
     if ($currentArea === 'PRODUCTION' && isProductionPath($currentPath)) {
         renderProductionShell($body, $currentPath, $displayName, $companyName);
         echo '</body></html>';
-        return;
+        exit;
     }
 
     echo '<div class="topbar"><div class="inner">';
@@ -1514,6 +1514,7 @@ function render(string $title, string $body): void
     echo '</div>';
     echo '</div></div>';
     echo '<main>' . $body . '</main></body></html>';
+    exit;
 }
 
 function renderWorkOrderStartScreen(
