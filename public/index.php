@@ -153,8 +153,7 @@ if ($path === '/login' && $method === 'POST') {
 
     $erpAreaHome = erpAreaDefinitions()[$erpArea]['home'] ?? '/';
     session_write_close();
-    header('Location: ' . $erpAreaHome);
-    exit;
+    redirectResponse($erpAreaHome);
 }
 
 $isAuthenticated = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 0) > 0;
@@ -162,23 +161,20 @@ if ($path === '/login' && $method === 'GET') {
     if ($isAuthenticated) {
         $currentArea = normalizeErpArea((string)($_SESSION['erp_area'] ?? 'ERP'));
         $areaHome = erpAreaDefinitions()[$currentArea]['home'] ?? '/';
-        header('Location: ' . $areaHome);
-        exit;
+        redirectResponse($areaHome);
     }
     renderLoginPage();
     exit;
 }
 
 if (!$isAuthenticated) {
-    header('Location: /login');
-    exit;
+    redirectResponse('/login');
 }
 
 $sessionAreaPermissions = sessionAreaPermissions();
 $requestedArea = detectRequestedArea($path);
 if (!userCanAccessArea($requestedArea, $sessionAreaPermissions)) {
-    header('Location: ' . firstAllowedAreaHome($sessionAreaPermissions));
-    exit;
+    redirectResponse(firstAllowedAreaHome($sessionAreaPermissions));
 }
 
 try {
@@ -1256,6 +1252,7 @@ function renderLoginPage(?string $error = null, array $state = []): void
       })();
     </script>';
     echo '</body></html>';
+    exit;
 }
 
 function render(string $title, string $body): void
