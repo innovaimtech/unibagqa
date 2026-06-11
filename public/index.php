@@ -50,6 +50,18 @@ if ($path === '') {
     $path = '/';
 }
 
+function redirectResponse(string $location, int $statusCode = 303): never
+{
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
+    header('Location: ' . $location, true, $statusCode);
+    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=' . h($location) . '"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Redirigiendo...</title></head><body><p>Redirigiendo. Si no avanzas automaticamente, <a href="' . h($location) . '">haz clic aqui</a>.</p><script>window.location.replace(' . json_encode($location, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . ');</script></body></html>';
+    exit;
+}
+
 if ($path === '/logout') {
     $_SESSION = [];
     if (session_status() === PHP_SESSION_ACTIVE) {
@@ -69,14 +81,7 @@ if ($path === '/logout') {
         );
     }
     expireCsrfCookie();
-    while (ob_get_level() > 0) {
-        ob_end_clean();
-    }
-    header('Cache-Control: no-store, no-cache, must-revalidate');
-    header('Pragma: no-cache');
-    header('Location: /login', true, 303);
-    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/login"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Saliendo...</title></head><body><p>Saliendo del sistema. Si no eres redirigido, <a href="/login">haz clic aquí</a>.</p><script>window.location.replace("/login");</script></body></html>';
-    exit;
+    redirectResponse('/login');
 }
 
 if ($path === '/login' && $method === 'POST') {
@@ -149,8 +154,7 @@ if ($path === '/login' && $method === 'POST') {
 
     $erpAreaHome = erpAreaDefinitions()[$erpArea]['home'] ?? '/';
     session_write_close();
-    header('Location: ' . $erpAreaHome);
-    exit;
+    redirectResponse($erpAreaHome);
 }
 
 $isAuthenticated = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 0) > 0;
@@ -158,8 +162,7 @@ if ($path === '/login' && $method === 'GET') {
     if ($isAuthenticated) {
         $currentArea = normalizeErpArea((string)($_SESSION['erp_area'] ?? 'ERP'));
         $areaHome = erpAreaDefinitions()[$currentArea]['home'] ?? '/';
-        header('Location: ' . $areaHome);
-        exit;
+        redirectResponse($areaHome);
     }
     renderLoginPage();
     exit;
