@@ -2,9 +2,13 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/InventoryCountService.php';
+require_once __DIR__ . '/RollReceptionService.php';
+
 final class ReceptionService
 {
-    private const RECEPTION_SCHEMA_VERSION = 'reception_v5';
+    private const RECEPTION_SCHEMA_VERSION = 'reception_v7';
+    private const PRODUCTION_WAREHOUSE_SYNC_VERSION = 'production_warehouse_sync_v1';
     private static bool $schemaEnsured = false;
     private bool $erpWarehousesSynced = false;
     private bool $erpProductionPlanSynced = false;
@@ -24,12 +28,21 @@ final class ReceptionService
     /** @var array<int, array{code:string,eta_plant:string}> */
     private array $erpImportContainersCache = [];
 
+    private InventoryCountService $inventoryCountService;
+    private RollReceptionService $rollReceptionService;
+
     public function __construct(private PDO $pdo, private PDO $erpPdo)
     {
+        $this->inventoryCountService = new InventoryCountService($this->pdo);
+        $this->rollReceptionService = new RollReceptionService($this->pdo);
         if (!self::$schemaEnsured) {
             if ($this->getAppSetting('reception_schema_version', '') !== self::RECEPTION_SCHEMA_VERSION) {
                 $this->ensureReceptionSchema();
                 $this->setAppSetting('reception_schema_version', self::RECEPTION_SCHEMA_VERSION);
+            }
+            if ($this->getAppSetting('production_warehouse_sync_version', '') !== self::PRODUCTION_WAREHOUSE_SYNC_VERSION) {
+                $this->syncLegacyProductionRollWarehouses();
+                $this->setAppSetting('production_warehouse_sync_version', self::PRODUCTION_WAREHOUSE_SYNC_VERSION);
             }
             self::$schemaEnsured = true;
         }
@@ -227,6 +240,88 @@ final class ReceptionService
         );
 
         $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS inventory_counts (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                warehouse_id INT UNSIGNED NULL,
+                warehouse_code INT UNSIGNED NOT NULL,
+                warehouse_name VARCHAR(160) NOT NULL,
+                total_skus INT UNSIGNED NOT NULL DEFAULT 0,
+                total_available_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                total_system_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                total_physical_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                total_diff_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                created_by VARCHAR(120) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_inventory_counts_warehouse (warehouse_code),
+                KEY idx_inventory_counts_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS inventory_count_items (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                inventory_count_id BIGINT UNSIGNED NOT NULL,
+                sku_code VARCHAR(120) NOT NULL,
+                sku_description VARCHAR(255) NOT NULL DEFAULT '',
+                article_code VARCHAR(20) NOT NULL DEFAULT '',
+                family_color VARCHAR(80) NOT NULL DEFAULT '',
+                color_code VARCHAR(80) NOT NULL DEFAULT '',
+                height_mm DECIMAL(12,3) NULL,
+                grams DECIMAL(12,3) NULL,
+                meters DECIMAL(12,3) NULL,
+                unit_code VARCHAR(20) NOT NULL DEFAULT 'BOB',
+                system_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                physical_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                diff_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                available_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                PRIMARY KEY (id),
+                KEY idx_inventory_count_items_count (inventory_count_id),
+                KEY idx_inventory_count_items_sku (sku_code),
+                CONSTRAINT fk_inventory_count_items_count FOREIGN KEY (inventory_count_id) REFERENCES inventory_counts(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        if (!$this->columnExists('inventory_counts', 'total_system_qty')) {
+            $this->pdo->exec("ALTER TABLE inventory_counts ADD COLUMN total_system_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000 AFTER total_available_qty");
+        }
+        if (!$this->columnExists('inventory_counts', 'total_physical_qty')) {
+            $this->pdo->exec("ALTER TABLE inventory_counts ADD COLUMN total_physical_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000 AFTER total_system_qty");
+        }
+        if (!$this->columnExists('inventory_counts', 'total_diff_qty')) {
+            $this->pdo->exec("ALTER TABLE inventory_counts ADD COLUMN total_diff_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000 AFTER total_physical_qty");
+        }
+        if (!$this->columnExists('inventory_count_items', 'article_code')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN article_code VARCHAR(20) NOT NULL DEFAULT '' AFTER sku_description");
+        }
+        if (!$this->columnExists('inventory_count_items', 'family_color')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN family_color VARCHAR(80) NOT NULL DEFAULT '' AFTER article_code");
+        }
+        if (!$this->columnExists('inventory_count_items', 'color_code')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN color_code VARCHAR(80) NOT NULL DEFAULT '' AFTER family_color");
+        }
+        if (!$this->columnExists('inventory_count_items', 'height_mm')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN height_mm DECIMAL(12,3) NULL AFTER color_code");
+        }
+        if (!$this->columnExists('inventory_count_items', 'grams')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN grams DECIMAL(12,3) NULL AFTER height_mm");
+        }
+        if (!$this->columnExists('inventory_count_items', 'meters')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN meters DECIMAL(12,3) NULL AFTER grams");
+        }
+        if (!$this->columnExists('inventory_count_items', 'unit_code')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN unit_code VARCHAR(20) NOT NULL DEFAULT 'BOB' AFTER meters");
+        }
+        if (!$this->columnExists('inventory_count_items', 'system_qty')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN system_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000 AFTER unit_code");
+        }
+        if (!$this->columnExists('inventory_count_items', 'physical_qty')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN physical_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000 AFTER system_qty");
+        }
+        if (!$this->columnExists('inventory_count_items', 'diff_qty')) {
+            $this->pdo->exec("ALTER TABLE inventory_count_items ADD COLUMN diff_qty DECIMAL(14,3) NOT NULL DEFAULT 0.000 AFTER physical_qty");
+        }
+
+        $this->pdo->exec(
             "CREATE TABLE IF NOT EXISTS cliches (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 code VARCHAR(60) NOT NULL,
@@ -373,6 +468,84 @@ final class ReceptionService
         );
 
         $this->ensureProductionMachineCatalog();
+    }
+
+    private function syncLegacyProductionRollWarehouses(): void
+    {
+        $this->syncWarehousesFromErp();
+        $productionWarehouseId = $this->findWarehouseIdByCode(3000);
+        if ($productionWarehouseId === null) {
+            return;
+        }
+
+        $stmt = $this->pdo->prepare(
+            'SELECT id, warehouse_id, current_work_order_id
+             FROM rolls
+             WHERE (status = :status OR current_work_order_id IS NOT NULL)
+               AND warehouse_id <> :production_warehouse_id'
+        );
+        $stmt->execute([
+            ':status' => 'IN_PROCESS',
+            ':production_warehouse_id' => $productionWarehouseId,
+        ]);
+        $rows = $stmt->fetchAll();
+        if ($rows === []) {
+            return;
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $update = $this->pdo->prepare('UPDATE rolls SET warehouse_id = :warehouse_id WHERE id = :id');
+            $insertMovement = $this->pdo->prepare(
+                'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                 VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+            );
+
+            foreach ($rows as $row) {
+                $rollId = (int)($row['id'] ?? 0);
+                $fromWarehouseId = (int)($row['warehouse_id'] ?? 0);
+                $workOrderId = (int)($row['current_work_order_id'] ?? 0);
+                if ($rollId <= 0 || $fromWarehouseId <= 0 || $fromWarehouseId === $productionWarehouseId) {
+                    continue;
+                }
+
+                $update->execute([
+                    ':warehouse_id' => $productionWarehouseId,
+                    ':id' => $rollId,
+                ]);
+
+                $payload = json_encode([
+                    'operator_name' => 'Sistema',
+                    'work_order_id' => $workOrderId > 0 ? $workOrderId : null,
+                    'auto_sync' => true,
+                    'reason' => 'SYNC_PRODUCTION_WAREHOUSE',
+                ], JSON_UNESCAPED_UNICODE);
+
+                $insertMovement->execute([
+                    ':entity_type' => 'ROLL',
+                    ':entity_id' => $rollId,
+                    ':movement_type' => 'TRANSFER',
+                    ':from_warehouse_id' => $fromWarehouseId,
+                    ':to_warehouse_id' => $productionWarehouseId,
+                    ':payload' => $payload,
+                ]);
+
+                $this->insertEvent('ROLL_TRANSFERRED', [
+                    'roll_id' => $rollId,
+                    'from_warehouse_id' => $fromWarehouseId,
+                    'to_warehouse_id' => $productionWarehouseId,
+                    'operator_name' => 'Sistema',
+                    'work_order_id' => $workOrderId > 0 ? $workOrderId : null,
+                    'auto_sync' => true,
+                    'reason' => 'SYNC_PRODUCTION_WAREHOUSE',
+                ]);
+            }
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
     }
 
     private function ensureProductionMachineCatalog(): void
@@ -4061,6 +4234,7 @@ SQL;
         $operatorName = trim($operatorName);
         $workOrder = $this->getWorkOrder($workOrderId);
         $roll = $this->getRoll($rollId);
+        $productionWarehouseId = $this->findWarehouseIdByCode(3000);
 
         if ($workOrder === null) {
             $errors['work_order_id'] = 'OT no existe.';
@@ -4079,6 +4253,9 @@ SQL;
         if ($operatorName === '') {
             $errors['operator_name'] = 'Operador es obligatorio.';
         }
+        if ($productionWarehouseId === null) {
+            $errors['warehouse_id'] = 'No existe la bodega 3000 de producción.';
+        }
         if ($this->getCurrentRollInWorkOrder($workOrderId) !== null) {
             $errors['roll_active'] = 'Ya existe una bobina activa en esta OT. Debes cambiarla o finalizar la OT.';
         }
@@ -4086,20 +4263,56 @@ SQL;
             return ['ok' => false, 'errors' => $errors];
         }
 
-        $stmt = $this->pdo->prepare('UPDATE rolls SET current_work_order_id = :wo, status = :status WHERE id = :id');
-        $stmt->execute([
-            ':wo' => $workOrderId,
-            ':status' => 'IN_PROCESS',
-            ':id' => $rollId,
-        ]);
+        $fromWarehouseId = (int)($roll['warehouse_id'] ?? 0);
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare('UPDATE rolls SET warehouse_id = :warehouse_id, current_work_order_id = :wo, status = :status WHERE id = :id');
+            $stmt->execute([
+                ':warehouse_id' => $productionWarehouseId,
+                ':wo' => $workOrderId,
+                ':status' => 'IN_PROCESS',
+                ':id' => $rollId,
+            ]);
 
-        $this->insertEvent('WORK_ORDER_ROLL_ATTACHED', [
-            'work_order_id' => $workOrderId,
-            'roll_id' => $rollId,
-            'process_weight_kg' => round($processWeightKg, 3),
-            'waste_kg' => round($wasteKg, 3),
-            'operator_name' => $operatorName,
-        ]);
+            if ($fromWarehouseId > 0 && $fromWarehouseId !== $productionWarehouseId) {
+                $stmt = $this->pdo->prepare(
+                    'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                     VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+                );
+                $stmt->execute([
+                    ':entity_type' => 'ROLL',
+                    ':entity_id' => $rollId,
+                    ':movement_type' => 'TRANSFER',
+                    ':from_warehouse_id' => $fromWarehouseId,
+                    ':to_warehouse_id' => $productionWarehouseId,
+                    ':payload' => json_encode([
+                        'operator_name' => $operatorName,
+                        'work_order_id' => $workOrderId,
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+
+                $this->insertEvent('ROLL_TRANSFERRED', [
+                    'roll_id' => $rollId,
+                    'from_warehouse_id' => $fromWarehouseId,
+                    'to_warehouse_id' => $productionWarehouseId,
+                    'operator_name' => $operatorName,
+                    'work_order_id' => $workOrderId,
+                ]);
+            }
+
+            $this->insertEvent('WORK_ORDER_ROLL_ATTACHED', [
+                'work_order_id' => $workOrderId,
+                'roll_id' => $rollId,
+                'process_weight_kg' => round($processWeightKg, 3),
+                'waste_kg' => round($wasteKg, 3),
+                'operator_name' => $operatorName,
+            ]);
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
 
         return ['ok' => true, 'errors' => []];
     }
@@ -4111,6 +4324,7 @@ SQL;
         $workOrder = $this->getWorkOrder($workOrderId);
         $currentRoll = $this->getCurrentRollInWorkOrder($workOrderId);
         $nextRoll = $this->getRoll($nextRollId);
+        $productionWarehouseId = $this->findWarehouseIdByCode(3000);
 
         if ($workOrder === null) {
             $errors['work_order_id'] = 'OT no existe.';
@@ -4146,6 +4360,9 @@ SQL;
         if ($operatorName === '') {
             $errors['operator_name'] = 'Operador es obligatorio.';
         }
+        if ($productionWarehouseId === null) {
+            $errors['warehouse_id'] = 'No existe la bodega 3000 de producción.';
+        }
         if ($errors !== []) {
             return ['ok' => false, 'errors' => $errors];
         }
@@ -4175,12 +4392,40 @@ SQL;
                 $operatorName
             );
 
-            $stmt = $this->pdo->prepare('UPDATE rolls SET current_work_order_id = :wo, status = :status WHERE id = :id');
+            $fromWarehouseId = (int)($nextRoll['warehouse_id'] ?? 0);
+            $stmt = $this->pdo->prepare('UPDATE rolls SET warehouse_id = :warehouse_id, current_work_order_id = :wo, status = :status WHERE id = :id');
             $stmt->execute([
+                ':warehouse_id' => $productionWarehouseId,
                 ':wo' => $workOrderId,
                 ':status' => 'IN_PROCESS',
                 ':id' => $nextRollId,
             ]);
+
+            if ($fromWarehouseId > 0 && $fromWarehouseId !== $productionWarehouseId) {
+                $stmt = $this->pdo->prepare(
+                    'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                     VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+                );
+                $stmt->execute([
+                    ':entity_type' => 'ROLL',
+                    ':entity_id' => $nextRollId,
+                    ':movement_type' => 'TRANSFER',
+                    ':from_warehouse_id' => $fromWarehouseId,
+                    ':to_warehouse_id' => $productionWarehouseId,
+                    ':payload' => json_encode([
+                        'operator_name' => $operatorName,
+                        'work_order_id' => $workOrderId,
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+
+                $this->insertEvent('ROLL_TRANSFERRED', [
+                    'roll_id' => $nextRollId,
+                    'from_warehouse_id' => $fromWarehouseId,
+                    'to_warehouse_id' => $productionWarehouseId,
+                    'operator_name' => $operatorName,
+                    'work_order_id' => $workOrderId,
+                ]);
+            }
 
             $this->insertEvent('WORK_ORDER_ROLL_ATTACHED', [
                 'work_order_id' => $workOrderId,
@@ -5290,6 +5535,7 @@ SQL;
             'active' => 0,
             'cutting' => 0,
             'closed' => 0,
+            'completed' => 0,
         ];
         $stmt = $this->pdo->query(
             "SELECT
@@ -5304,6 +5550,7 @@ SQL;
         $workOrders['active'] = (int)($row['active_count'] ?? 0);
         $workOrders['cutting'] = (int)($row['cutting_count'] ?? 0);
         $workOrders['closed'] = (int)($row['closed_count'] ?? 0);
+        $workOrders['completed'] = $workOrders['closed'];
 
         $rolls = [
             'total' => 0,
@@ -5311,12 +5558,14 @@ SQL;
             'in_process' => 0,
             'ready_for_cut' => 0,
             'output' => 0,
+            'blocked' => 0,
         ];
         $stmt = $this->pdo->query(
             "SELECT
                 COUNT(*) AS total_count,
                 SUM(CASE WHEN status IN ('RECEIVED','IN_PROCESS','BLOCKED') THEN 1 ELSE 0 END) AS in_stock_count,
                 SUM(CASE WHEN status = 'IN_PROCESS' THEN 1 ELSE 0 END) AS in_process_count,
+                SUM(CASE WHEN status = 'BLOCKED' THEN 1 ELSE 0 END) AS blocked_count,
                 SUM(CASE WHEN process_stage = 'PRINTED' AND status <> 'CONSUMED' THEN 1 ELSE 0 END) AS ready_cut_count,
                 SUM(CASE WHEN parent_roll_id IS NOT NULL THEN 1 ELSE 0 END) AS output_count
              FROM rolls"
@@ -5325,6 +5574,7 @@ SQL;
         $rolls['total'] = (int)($row['total_count'] ?? 0);
         $rolls['in_stock'] = (int)($row['in_stock_count'] ?? 0);
         $rolls['in_process'] = (int)($row['in_process_count'] ?? 0);
+        $rolls['blocked'] = (int)($row['blocked_count'] ?? 0);
         $rolls['ready_for_cut'] = (int)($row['ready_cut_count'] ?? 0);
         $rolls['output'] = (int)($row['output_count'] ?? 0);
 
@@ -5813,6 +6063,36 @@ SQL;
         return $stmt->fetchAll();
     }
 
+    public function inventoryAvailableSkuRowsByWarehouseCode(int $warehouseCode): array
+    {
+        return $this->inventoryCountService->inventoryAvailableSkuRowsByWarehouseCode($warehouseCode);
+    }
+
+    public function inventoryCountDraftRowsByWarehouseCode(int $warehouseCode): array
+    {
+        return $this->inventoryCountService->inventoryCountDraftRowsByWarehouseCode($warehouseCode);
+    }
+
+    public function createInventoryCount(int $warehouseCode, string $warehouseName, string $createdBy, array $items): array
+    {
+        return $this->inventoryCountService->createInventoryCount($warehouseCode, $warehouseName, $createdBy, $items);
+    }
+
+    public function listInventoryCounts(int $limit = 100): array
+    {
+        return $this->inventoryCountService->listInventoryCounts($limit);
+    }
+
+    public function getInventoryCount(int $inventoryCountId): ?array
+    {
+        return $this->inventoryCountService->getInventoryCount($inventoryCountId);
+    }
+
+    public function listInventoryCountItems(int $inventoryCountId): array
+    {
+        return $this->inventoryCountService->listInventoryCountItems($inventoryCountId);
+    }
+
     public function listRollsByWarehouseCode(int $warehouseCode, int $limit = 200): array
     {
         $stmt = $this->pdo->prepare(
@@ -5957,6 +6237,13 @@ SQL;
         $this->pdo->beginTransaction();
         try {
             $targetWarehouseId = $toWarehouseId > 0 ? $toWarehouseId : $fromWarehouseId;
+            if ($workOrderId !== null && $workOrderId > 0) {
+                $productionWarehouseId = $this->findWarehouseIdByCode(3000);
+                if ($productionWarehouseId === null) {
+                    throw new RuntimeException('No existe la bodega 3000 de producción.');
+                }
+                $targetWarehouseId = $productionWarehouseId;
+            }
             $stmt = $this->pdo->prepare('UPDATE rolls SET warehouse_id = :to, current_work_order_id = :wo, status = :status WHERE id = :id');
             $stmt->execute([
                 ':to' => $targetWarehouseId,
@@ -6244,107 +6531,7 @@ SQL;
 
     public function createRoll(array $input): array
     {
-        $errors = $this->validateCreate($input);
-        if ($errors !== []) {
-            return ['ok' => false, 'errors' => $errors, 'id' => null];
-        }
-
-        $rollCode = $this->generateRollCode();
-
-        $microns = isset($input['microns']) && $input['microns'] !== '' && $input['microns'] !== null ? (int)$input['microns'] : null;
-        $width = isset($input['width_mm']) && $input['width_mm'] !== '' && $input['width_mm'] !== null ? (int)$input['width_mm'] : null;
-        $color = isset($input['color']) && trim((string)$input['color']) !== '' ? trim((string)$input['color']) : null;
-        $meters = isset($input['meters']) && $input['meters'] !== '' && $input['meters'] !== null ? (float)$input['meters'] : null;
-        $receivedQty = isset($input['received_qty']) ? (float)$input['received_qty'] : 1.0;
-        $poId = isset($input['purchase_order_id']) ? (int)$input['purchase_order_id'] : null;
-        $polId = isset($input['purchase_order_line_id']) ? (int)$input['purchase_order_line_id'] : null;
-        $importContainerId = isset($input['import_container_id']) ? (int)$input['import_container_id'] : null;
-        $importContainerItemId = isset($input['import_container_item_id']) ? (int)$input['import_container_item_id'] : null;
-        $supplierId = isset($input['supplier_id']) ? (int)$input['supplier_id'] : null;
-        $operatorName = trim((string)($input['operator_name'] ?? ''));
-        $receptionMode = $this->normalizeReceptionMode((string)($input['reception_mode'] ?? 'QUANTITY'));
-
-        $this->pdo->beginTransaction();
-        try {
-            $stmt = $this->pdo->prepare(
-                'INSERT INTO rolls (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, microns, width_mm, color, meters, status, purchase_order_id, purchase_order_line_id, import_container_id, import_container_item_id, supplier_id, current_work_order_id)
-                 VALUES (:roll_code, :sku_id, :warehouse_id, :weight_kg, :received_qty, :reception_mode, :microns, :width_mm, :color, :meters, :status, :po_id, :pol_id, :import_container_id, :import_container_item_id, :supplier_id, :work_order_id)'
-            );
-            $stmt->execute([
-                ':roll_code' => $rollCode,
-                ':sku_id' => (int)$input['sku_id'],
-                ':warehouse_id' => (int)$input['warehouse_id'],
-                ':weight_kg' => (string)$input['weight_kg'],
-                ':received_qty' => number_format($receivedQty, 3, '.', ''),
-                ':reception_mode' => $receptionMode,
-                ':microns' => $microns,
-                ':width_mm' => $width,
-                ':color' => $color,
-                ':meters' => $meters,
-                ':status' => 'RECEIVED',
-                ':po_id' => $poId > 0 ? $poId : null,
-                ':pol_id' => $polId > 0 ? $polId : null,
-                ':import_container_id' => $importContainerId !== null && $importContainerId > 0 ? $importContainerId : null,
-                ':import_container_item_id' => $importContainerItemId !== null && $importContainerItemId > 0 ? $importContainerItemId : null,
-                ':supplier_id' => $supplierId > 0 ? $supplierId : null,
-                ':work_order_id' => null,
-            ]);
-
-            $rollId = (int)$this->pdo->lastInsertId();
-
-            $this->insertMovement($rollId, (int)$input['warehouse_id'], $input);
-            $this->insertEvent('ROLL_RECEIVED', [
-                'roll_id' => $rollId,
-                'roll_code' => $rollCode,
-                'warehouse_id' => (int)$input['warehouse_id'],
-                'sku_id' => (int)$input['sku_id'],
-                'purchase_order_id' => $poId,
-                'purchase_order_line_id' => $polId,
-                'import_container_id' => $importContainerId,
-                'import_container_item_id' => $importContainerItemId,
-                'reception_mode' => $receptionMode,
-                'supplier_id' => $supplierId,
-                'operator_name' => $operatorName,
-            ]);
-
-            $this->pdo->commit();
-            return ['ok' => true, 'errors' => [], 'id' => $rollId];
-        } catch (Throwable $e) {
-            $this->pdo->rollBack();
-            throw $e;
-        }
-    }
-
-    private function insertMovement(int $rollId, int $toWarehouseId, array $input): void
-    {
-        $stmt = $this->pdo->prepare(
-            'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
-             VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
-        );
-
-        $payload = json_encode([
-            'weight_kg' => (string)$input['weight_kg'],
-            'received_qty' => isset($input['received_qty']) ? (float)$input['received_qty'] : 1.0,
-            'reception_mode' => $this->normalizeReceptionMode((string)($input['reception_mode'] ?? 'QUANTITY')),
-            'microns' => isset($input['microns']) && $input['microns'] !== '' ? (int)$input['microns'] : null,
-            'width_mm' => isset($input['width_mm']) && $input['width_mm'] !== '' ? (int)$input['width_mm'] : null,
-            'color' => isset($input['color']) && trim((string)$input['color']) !== '' ? trim((string)$input['color']) : null,
-            'meters' => isset($input['meters']) && $input['meters'] !== '' ? (float)$input['meters'] : null,
-            'purchase_order_id' => isset($input['purchase_order_id']) ? (int)$input['purchase_order_id'] : null,
-            'purchase_order_line_id' => isset($input['purchase_order_line_id']) ? (int)$input['purchase_order_line_id'] : null,
-            'import_container_id' => isset($input['import_container_id']) ? (int)$input['import_container_id'] : null,
-            'import_container_item_id' => isset($input['import_container_item_id']) ? (int)$input['import_container_item_id'] : null,
-            'operator_name' => trim((string)($input['operator_name'] ?? '')),
-        ], JSON_UNESCAPED_UNICODE);
-
-        $stmt->execute([
-            ':entity_type' => 'ROLL',
-            ':entity_id' => $rollId,
-            ':movement_type' => 'RECEIPT',
-            ':from_warehouse_id' => null,
-            ':to_warehouse_id' => $toWarehouseId,
-            ':payload' => $payload,
-        ]);
+        return $this->rollReceptionService->createRoll($input);
     }
 
     private function insertEvent(string $type, array $payload): void
@@ -6434,84 +6621,6 @@ SQL;
         ]);
 
         return $outputRollId;
-    }
-
-    private function validateCreate(array $input): array
-    {
-        $errors = [];
-
-        $skuId = isset($input['sku_id']) ? (int)$input['sku_id'] : 0;
-        if ($skuId <= 0) {
-            $errors['sku_id'] = 'SKU es obligatorio.';
-        }
-
-        $warehouseId = isset($input['warehouse_id']) ? (int)$input['warehouse_id'] : 0;
-        if ($warehouseId <= 0) {
-            $errors['warehouse_id'] = 'Bodega es obligatoria.';
-        } else {
-            $stmt = $this->pdo->prepare('SELECT code FROM warehouses WHERE id = :id');
-            $stmt->execute([':id' => $warehouseId]);
-            $row = $stmt->fetch();
-            if ($row === false) {
-                $errors['warehouse_id'] = 'La bodega seleccionada no existe.';
-            }
-        }
-
-        $mode = $this->normalizeReceptionMode((string)($input['reception_mode'] ?? 'QUANTITY'));
-        $weight = isset($input['weight_kg']) ? (float)$input['weight_kg'] : 0.0;
-        if ($mode === 'WEIGHT' && $weight <= 0) {
-            $errors['weight_kg'] = 'Peso real (Kg) debe ser mayor a 0.';
-        }
-        if ($mode !== 'WEIGHT' && $weight < 0) {
-            $errors['weight_kg'] = 'Peso real (Kg) no puede ser negativo.';
-        }
-
-        $receivedQty = isset($input['received_qty']) ? (float)$input['received_qty'] : 1.0;
-        if ($mode === 'QUANTITY' && $receivedQty <= 0) {
-            $errors['received_qty'] = 'Cantidad recibida debe ser mayor a 0.';
-        }
-
-        $operatorName = trim((string)($input['operator_name'] ?? ''));
-        if ($operatorName === '') {
-            $errors['operator_name'] = 'Operador es obligatorio.';
-        }
-
-        if (isset($input['microns']) && $input['microns'] !== '') {
-            $microns = (int)$input['microns'];
-            if ($microns <= 0) {
-                $errors['microns'] = 'Gramos debe ser mayor a 0.';
-            }
-        }
-
-        if (isset($input['width_mm']) && $input['width_mm'] !== '') {
-            $width = (int)$input['width_mm'];
-            if ($width <= 0) {
-                $errors['width_mm'] = 'Ancho (mm) debe ser mayor a 0.';
-            }
-        }
-
-        if (isset($input['color']) && trim((string)$input['color']) !== '') {
-            $color = trim((string)$input['color']);
-            if ($color === '') {
-                $errors['color'] = 'Color es inválido.';
-            }
-        }
-
-        if (isset($input['meters']) && $input['meters'] !== '') {
-            $meters = (float)$input['meters'];
-            if ($meters <= 0) {
-                $errors['meters'] = 'Metros lineales debe ser mayor a 0.';
-            }
-        }
-
-        return $errors;
-    }
-
-    private function generateRollCode(): string
-    {
-        $date = gmdate('Ymd');
-        $rand = bin2hex(random_bytes(3));
-        return 'RB-' . $date . '-' . strtoupper($rand);
     }
 
     private function generateProcessRollCode(): string

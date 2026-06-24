@@ -7,6 +7,10 @@ require_once __DIR__ . '/../src/Db.php';
 require_once __DIR__ . '/../src/ReceptionService.php';
 require_once __DIR__ . '/../src/ScaleService.php';
 require_once __DIR__ . '/../src/PrintService.php';
+require_once __DIR__ . '/../src/Http/AuthModule.php';
+require_once __DIR__ . '/../src/Http/ApiModule.php';
+require_once __DIR__ . '/../src/Http/InventoryModule.php';
+require_once __DIR__ . '/../src/Http/ErpReportsModule.php';
 
 Env::load(__DIR__ . '/../.env');
 
@@ -61,121 +65,11 @@ function redirectResponse(string $location, int $statusCode = 303): void
     exit;
 }
 
-if ($path === '/logout') {
-    $_SESSION = [];
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        session_unset();
-        session_destroy();
-    }
-    if (ini_get('session.use_cookies')) {
-        $params = session_get_cookie_params();
-        setcookie(
-            session_name(),
-            '',
-            time() - 42000,
-            $params['path'] ?: '/',
-            $params['domain'] ?? '',
-            (bool)($params['secure'] ?? false),
-            (bool)($params['httponly'] ?? true)
-        );
-    }
-    expireCsrfCookie();
-    redirectResponse('/login');
-}
-
-if ($path === '/login' && $method === 'POST') {
-    requireCsrf();
-
-    try {
-        $trzPdo = Db::trzPdo();
-    } catch (Throwable $e) {
-        renderDatabaseConnectionError($e);
-    }
-    ensureAuthSchema($trzPdo);
-
-    $username = trim((string)($_POST['user_login'] ?? ''));
-    $password = (string)($_POST['user_pass'] ?? '');
-    $companyId = isset($_POST['user_company_id']) ? (int)$_POST['user_company_id'] : 1;
-    $erpArea = normalizeErpArea((string)($_POST['erp_area'] ?? 'ERP'));
-    $appMode = 0;
-    $plantId = 0;
-
-    $modes = authModeDefinitions();
-    $companies = authCompanyDefinitions();
-    $plants = authPlantDefinitions();
-    $mode = $modes[$appMode] ?? $modes[0];
-    $company = $companies[$companyId] ?? $companies[1];
-    $plant = null;
-
-    $user = null;
-    if ($username !== '') {
-        $stmt = $trzPdo->prepare('SELECT * FROM auth_users WHERE username = :username AND is_active = 1 LIMIT 1');
-        $stmt->execute(['username' => $username]);
-        $found = $stmt->fetch();
-        if (is_array($found) && password_verify($password, (string)$found['password_hash'])) {
-            $permissionColumn = authPermissionColumn($appMode);
-            $areaPermissions = userAreaPermissions($found);
-            if ($permissionColumn !== '' && (int)($found[$permissionColumn] ?? 0) === 1 && userCanAccessArea($erpArea, $areaPermissions)) {
-                $user = $found;
-            }
-        }
-    }
-
-    if (!is_array($user)) {
-        renderLoginPage('Usuario, clave o modo sin acceso.', [
-            'user_login' => $username,
-            'user_company_id' => $companyId,
-            'erp_area' => $erpArea,
-            'appmode' => $appMode,
-            'user_planta_id' => $plantId,
-        ]);
-        exit;
-    }
-
-    session_regenerate_id(true);
-    $_SESSION['user_id'] = (int)$user['id'];
-    $_SESSION['auth_user_id'] = (int)$user['id'];
-    $_SESSION['auth_username'] = (string)$user['username'];
-    $_SESSION['auth_display_name'] = (string)$user['display_name'];
-    $_SESSION['operator_name'] = (string)$user['display_name'];
-    $_SESSION['menu_appmode'] = (int)$mode['id'];
-    $_SESSION['app_mode_label'] = (string)$mode['label'];
-    $_SESSION['user_company_id'] = (int)$company['id'];
-    $_SESSION['company_name'] = (string)$company['label'];
-    $_SESSION['user_planta_id'] = $plant !== null ? (int)$plant['id'] : 0;
-    $_SESSION['plant_name'] = $plant !== null ? (string)$plant['label'] : '';
-    $areaPermissions = userAreaPermissions($user);
-    $_SESSION['perm_area_erp'] = $areaPermissions['ERP'] ? 1 : 0;
-    $_SESSION['perm_area_reception'] = $areaPermissions['RECEPTION'] ? 1 : 0;
-    $_SESSION['perm_area_production'] = $areaPermissions['PRODUCTION'] ? 1 : 0;
-    $_SESSION['erp_area'] = $erpArea;
-    $_SESSION['erp_area_label'] = erpAreaDefinitions()[$erpArea]['label'] ?? 'ERP';
-
-    $erpAreaHome = erpAreaDefinitions()[$erpArea]['home'] ?? '/';
-    session_write_close();
-    redirectResponse($erpAreaHome);
-}
-
-$isAuthenticated = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 0) > 0;
-if ($path === '/login' && $method === 'GET') {
-    if ($isAuthenticated) {
-        $currentArea = normalizeErpArea((string)($_SESSION['erp_area'] ?? 'ERP'));
-        $areaHome = erpAreaDefinitions()[$currentArea]['home'] ?? '/';
-        redirectResponse($areaHome);
-    }
-    renderLoginPage();
+if (handleAuthRoutes($path, $method)) {
     exit;
 }
 
-if (!$isAuthenticated) {
-    redirectResponse('/login');
-}
-
-$sessionAreaPermissions = sessionAreaPermissions();
-$requestedArea = detectRequestedArea($path);
-if (!userCanAccessArea($requestedArea, $sessionAreaPermissions)) {
-    redirectResponse(firstAllowedAreaHome($sessionAreaPermissions));
-}
+unibagEnforceAuthenticatedAreaAccess($path);
 
 try {
     $trzPdo = Db::trzPdo();
@@ -188,57 +82,15 @@ $service = new ReceptionService($trzPdo, $erpPdo);
 $scale = new ScaleService($_ENV);
 $printer = new PrintService($_ENV);
 
-if ($path === '/api/scale/weight' && $method === 'GET') {
-    header('Content-Type: application/json; charset=utf-8');
-    $result = $scale->readWeightKg();
-    if ($result['ok'] !== true) {
-        http_response_code(502);
-    }
-    echo json_encode($result, JSON_UNESCAPED_UNICODE);
+if (handleApiRoutes($path, $method, $service, $scale, $printer, $currentOperatorName)) {
     exit;
 }
 
-if ($path === '/api/receptions/receive' && $method === 'POST') {
-    requireCsrf();
-    header('Content-Type: application/json; charset=utf-8');
+if (handleInventoryRoutes($path, $method, $service, $currentOperatorName)) {
+    exit;
+}
 
-    $lineId = isset($_POST['purchase_order_line_id']) ? (int)$_POST['purchase_order_line_id'] : 0;
-    $containerItemId = isset($_POST['import_container_item_id']) ? (int)$_POST['import_container_item_id'] : 0;
-    $warehouseId = isset($_POST['warehouse_id']) ? (int)$_POST['warehouse_id'] : 0;
-    $weight = isset($_POST['weight_kg']) ? (float)$_POST['weight_kg'] : 0.0;
-    $receivedQty = isset($_POST['received_qty']) ? (float)$_POST['received_qty'] : 1.0;
-    $receptionMode = isset($_POST['reception_mode']) ? (string)$_POST['reception_mode'] : 'QUANTITY';
-    if ($containerItemId > 0) {
-        $result = $service->createRollFromImportContainerLine($containerItemId, $warehouseId, $weight, $currentOperatorName, $receivedQty, $receptionMode);
-    } else {
-        $result = $service->createRollFromPurchaseOrderLine($lineId, $warehouseId, $weight, $currentOperatorName, $receivedQty, $receptionMode);
-    }
-    if ($result['ok'] !== true) {
-        http_response_code(422);
-        echo json_encode($result, JSON_UNESCAPED_UNICODE);
-        exit;
-    }
-
-    $rollId = (int)$result['id'];
-    $printed = false;
-    $printError = null;
-    if ($printer->isEnabled()) {
-        $roll = $service->getRoll($rollId);
-        if (is_array($roll)) {
-            $p = $printer->printRollLabel($roll);
-            $printed = ($p['ok'] ?? false) === true;
-            $printError = $printed ? null : (string)($p['error'] ?? 'No se pudo imprimir.');
-        } else {
-            $printError = 'No se encontró la bobina para imprimir.';
-        }
-    }
-    echo json_encode([
-        'ok' => true,
-        'id' => $rollId,
-        'label_url' => '/rolls/' . $rollId . '/label?auto_print=1',
-        'printed' => $printed,
-        'print_error' => $printError,
-    ], JSON_UNESCAPED_UNICODE);
+if (handleErpReportRoutes($path, $method, $service)) {
     exit;
 }
 
@@ -841,6 +693,107 @@ function currentSessionArea(): string
     return normalizeErpArea((string)($_SESSION['erp_area'] ?? 'ERP'));
 }
 
+function inventoryNavigationContext(): bool
+{
+    return currentSessionArea() === 'RECEPTION'
+        && strtolower(trim((string)($_GET['nav'] ?? ''))) === 'inventory';
+}
+
+/**
+ * @return array<string, string>
+ */
+function inventoryNavigationParams(?int $warehouseCode = null): array
+{
+    if (currentSessionArea() !== 'RECEPTION') {
+        return [];
+    }
+    $params = ['nav' => 'inventory'];
+    $resolvedWarehouseCode = $warehouseCode ?? (isset($_GET['bodega']) ? (int)$_GET['bodega'] : 0);
+    if ($resolvedWarehouseCode > 0) {
+        $params['bodega'] = (string)$resolvedWarehouseCode;
+    }
+    return $params;
+}
+
+/**
+ * @param array<string, scalar|null> $params
+ */
+function withQuery(string $path, array $params = []): string
+{
+    $params = array_filter($params, static fn($value): bool => $value !== null && $value !== '');
+    if ($params === []) {
+        return $path;
+    }
+    return $path . (str_contains($path, '?') ? '&' : '?') . http_build_query($params);
+}
+
+function inventoryReturnUrl(): string
+{
+    $warehouseCode = isset($_GET['bodega']) ? (int)$_GET['bodega'] : 0;
+    return withQuery('/stock', $warehouseCode > 0 ? ['bodega' => (string)$warehouseCode] : []);
+}
+
+/**
+ * @param array<int, array<string, mixed>> $rows
+ */
+function outputInventoryExcel(string $filename, array $rows): void
+{
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Cache-Control: max-age=0');
+    echo '<html><head><meta charset="UTF-8"></head><body>';
+    echo '<table border="1">';
+    echo '<tr><th>Codigo SKU</th><th>Cantidad disponible</th></tr>';
+    foreach ($rows as $row) {
+        echo '<tr>';
+        echo '<td>' . h((string)($row['sku_code'] ?? '')) . '</td>';
+        echo '<td>' . h(number_format((float)($row['available_qty'] ?? 0), 3, '.', '')) . '</td>';
+        echo '</tr>';
+    }
+    if ($rows === []) {
+        echo '<tr><td colspan="2">Sin stock disponible</td></tr>';
+    }
+    echo '</table>';
+    echo '</body></html>';
+    exit;
+}
+
+/**
+ * @param array<int, array<string, mixed>> $rows
+ */
+function outputInventoryCountDetailExcel(string $filename, array $rows, array $inventoryCount): void
+{
+    $warehouseLabel = trim((string)($inventoryCount['warehouse_code'] ?? '')) . ' (' . trim((string)($inventoryCount['warehouse_name'] ?? '')) . ')';
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Cache-Control: max-age=0');
+    echo '<html><head><meta charset="UTF-8"></head><body>';
+    echo '<table border="1">';
+    echo '<tr><th>Numero</th><th>Articulo</th><th>Familia</th><th>Cod. color</th><th>Alto</th><th>Gramos</th><th>Metros</th><th>Unidad</th><th>Bodega</th><th>Sistema</th><th>Fisico</th><th>Dif</th></tr>';
+    foreach ($rows as $row) {
+        echo '<tr>';
+        echo '<td>' . h((string)($row['sku_code'] ?? '')) . '</td>';
+        echo '<td>' . h((string)($row['article_code'] ?? '')) . '</td>';
+        echo '<td>' . h((string)($row['family_color'] ?? '')) . '</td>';
+        echo '<td>' . h((string)($row['color_code'] ?? '')) . '</td>';
+        echo '<td>' . h((string)($row['height_mm'] ?? '')) . '</td>';
+        echo '<td>' . h((string)($row['grams'] ?? '')) . '</td>';
+        echo '<td>' . h((string)($row['meters'] ?? '')) . '</td>';
+        echo '<td>' . h((string)($row['unit_code'] ?? '')) . '</td>';
+        echo '<td>' . h(trim($warehouseLabel) !== '()' ? $warehouseLabel : '') . '</td>';
+        echo '<td>' . h(number_format((float)($row['system_qty'] ?? 0), 3, '.', '')) . '</td>';
+        echo '<td>' . h(number_format((float)($row['physical_qty'] ?? 0), 3, '.', '')) . '</td>';
+        echo '<td>' . h(number_format((float)($row['diff_qty'] ?? 0), 3, '.', '')) . '</td>';
+        echo '</tr>';
+    }
+    if ($rows === []) {
+        echo '<tr><td colspan="12">Sin registros</td></tr>';
+    }
+    echo '</table>';
+    echo '</body></html>';
+    exit;
+}
+
 function userAreaPermissions(array $user): array
 {
     $canErp = (int)($user['can_erp'] ?? 0) === 1;
@@ -886,6 +839,17 @@ function detectRequestedArea(string $path): string
         return 'ERP';
     }
     if (
+        inventoryNavigationContext()
+        && (
+            str_starts_with($path, '/work-orders')
+            || str_starts_with($path, '/rolls')
+            || str_starts_with($path, '/boxes')
+            || str_starts_with($path, '/pallets')
+        )
+    ) {
+        return 'RECEPTION';
+    }
+    if (
         str_starts_with($path, '/purchase-orders')
         || str_starts_with($path, '/import-containers')
         || str_starts_with($path, '/stock')
@@ -922,7 +886,7 @@ function isErpProductionReadOnlyMode(?string $path = null): bool
 
 function canAccessWorkOrderTraceability(): bool
 {
-    return currentSessionArea() === 'ERP' && userCanAccessArea('ERP', sessionAreaPermissions());
+    return userCanAccessArea('ERP', sessionAreaPermissions());
 }
 
 /**
@@ -1466,11 +1430,11 @@ function render(string $title, string $body): void
     echo '<div class="topbar"><div class="inner">';
     echo '<nav class="menu">';
     if ($displayArea === 'ERP' && userCanAccessArea('ERP', $areaPermissions)) {
-        echo $link('/', 'Informes', $currentPath === '/');
+        echo $link('/', 'Informes', $currentPath === '/' || str_starts_with($currentPath, '/reports/inventory'));
         echo $link('/work-orders?view=pending', 'Trazabilidad', str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets'));
     } elseif ($displayArea === 'RECEPTION') {
         echo $link('/purchase-orders?status=active&supplier_type=NATIONAL', 'Recepción', str_starts_with($currentPath, '/purchase-orders') || str_starts_with($currentPath, '/import-containers'));
-        echo $link('/stock', 'Inventario', str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/pallets') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches'));
+        echo $link('/stock', 'Inventario', str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/pallets') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches') || (inventoryNavigationContext() && (str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/rolls') || str_starts_with($currentPath, '/boxes'))));
     } else {
         echo $link('/production/shifts', 'Producción', str_starts_with($currentPath, '/production/shifts') || str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets'));
     }
@@ -1486,20 +1450,21 @@ function render(string $title, string $body): void
     echo '<div class="subbar"><div class="inner">';
     $activeModule = 'home';
     if ($displayArea === 'ERP') {
-        if ($currentPath === '/') {
+        if ($currentPath === '/' || str_starts_with($currentPath, '/reports/inventory')) {
             $activeModule = 'reports';
         } elseif (str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets')) {
             $activeModule = 'traceability';
         }
     } else {
         if (str_starts_with($currentPath, '/purchase-orders') || str_starts_with($currentPath, '/import-containers')) { $activeModule = 'reception'; }
-        elseif (str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches') || (str_starts_with($currentPath, '/pallets') && currentSessionArea() === 'RECEPTION')) { $activeModule = 'inventory'; }
+        elseif (str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches') || (str_starts_with($currentPath, '/pallets') && currentSessionArea() === 'RECEPTION') || (inventoryNavigationContext() && (str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/rolls') || str_starts_with($currentPath, '/boxes')))) { $activeModule = 'inventory'; }
         elseif (str_starts_with($currentPath, '/production/shifts') || str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets')) { $activeModule = 'production'; }
     }
 
     echo '<div class="submenu">';
     if ($activeModule === 'reports') {
         echo '<a class="subitem" href="/"><span>Panel ERP</span></a>';
+        echo '<a class="subitem" href="/reports/inventory"><span>Informe inventario</span></a>';
     } elseif ($activeModule === 'traceability') {
         echo '<a class="subitem" href="/work-orders?view=pending"><span>OT pendientes</span></a>';
         echo '<a class="subitem" href="/work-orders?view=active"><span>OT en curso</span></a>';
@@ -1513,6 +1478,7 @@ function render(string $title, string $body): void
         echo '<a class="subitem" href="/purchase-orders?status=complete"><span>Recepciones finalizadas</span></a>';
     } elseif ($activeModule === 'inventory') {
         echo '<a class="subitem" href="/stock"><span>Inventario</span></a>';
+        echo '<a class="subitem" href="/stock/inventory-counts"><span>Toma inventario</span></a>';
         echo '<a class="subitem" href="/stock/material-requests"><span>Solicitudes</span></a>';
         echo '<a class="subitem" href="/stock/transfers"><span>Traspaso</span></a>';
         echo '<a class="subitem" href="/pallets"><span>Asignación de pallets</span></a>';
@@ -2712,93 +2678,6 @@ function renderProductionShiftSessionsScreen(
     render('Iniciar / Terminar turno', $body);
 }
 
-if ($path === '/' && $method === 'GET') {
-    $currentArea = normalizeErpArea((string)($_SESSION['erp_area'] ?? 'ERP'));
-    if ($currentArea === 'PRODUCTION') {
-        header('Location: /production/shifts');
-        exit;
-    }
-    if ($currentArea === 'RECEPTION') {
-        header('Location: /purchase-orders?status=active&supplier_type=NATIONAL');
-        exit;
-    }
-
-    $summary = $service->getErpDashboardSummary();
-    $recentTraceability = $service->listDashboardRecentTraceability(8);
-    $recentEvents = $service->listRecentOperationalEvents(8);
-
-    $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div>
-          <div style="font-size:18px;font-weight:700">Panel ERP</div>
-          <div class="muted">Informes ejecutivos y trazabilidad completa, sin accesos operativos de máquinas o turnos.</div>
-        </div>
-      </div>';
-
-    $body .= '<div class="kpi-grid" style="margin-bottom:12px">';
-    $body .= '<div class="kpi-card"><div class="kpi-label">OT activas</div><div class="kpi-value">' . h((string)$summary['work_orders']['active']) . '</div><div class="kpi-sub">En producción ahora</div></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">OT en corte</div><div class="kpi-value">' . h((string)$summary['work_orders']['cutting']) . '</div><div class="kpi-sub">Impresas y pendientes de cierre</div></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Bobinas listas corte</div><div class="kpi-value">' . h((string)$summary['rolls']['ready_for_cut']) . '</div><div class="kpi-sub">Salida de impresión disponible</div></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Cajas / pallets</div><div class="kpi-value">' . h((string)$summary['packaging']['boxes']) . ' / ' . h((string)$summary['packaging']['pallets']) . '</div><div class="kpi-sub">Empaque total generado</div></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">OT fabricadas</div><div class="kpi-value">' . h((string)$summary['work_orders']['completed']) . '</div><div class="kpi-sub">Órdenes cerradas correctamente</div></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Bobinas bloqueadas</div><div class="kpi-value">' . h((string)$summary['rolls']['blocked']) . '</div><div class="kpi-sub">Revisión o contingencia operativa</div></div>';
-    $body .= '</div>';
-
-    $body .= '<div class="dashboard-grid" style="margin-bottom:12px">';
-    $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Accesos rápidos</div>';
-    $body .= '<div class="trace-grid">';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Trazabilidad</div><div style="font-weight:800;margin-bottom:8px">Órdenes y avance por etapa</div><a class="btn secondary" href="/work-orders?view=pending">Ver órdenes</a></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Corte</div><div style="font-weight:800;margin-bottom:8px">Seguimiento de bobinas, cajas y pallets</div><a class="btn secondary" href="/cut">Ver corte</a></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Tintas</div><div style="font-weight:800;margin-bottom:8px">Pesajes y consumo por OT</div><a class="btn secondary" href="/chemicals/weighings">Ver pesajes</a></div>';
-    $body .= '<div class="kpi-card"><div class="kpi-label">Pallets</div><div style="font-weight:800;margin-bottom:8px">Seguimiento de salida final</div><a class="btn secondary" href="/pallets">Ver pallets</a></div>';
-    $body .= '</div></div>';
-    $body .= '</div>';
-
-    $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Actividad reciente de trazabilidad</div><div class="table-wrap"><table class="trace-table"><thead><tr><th>Fecha</th><th>Evento</th><th>Detalle</th></tr></thead><tbody>';
-    foreach ($recentEvents as $event) {
-        $payload = $event['payload_data'] ?? [];
-        $detailParts = [];
-        if (isset($payload['work_order_id']) && (int)$payload['work_order_id'] > 0) { $detailParts[] = 'OT #' . (int)$payload['work_order_id']; }
-        if (isset($payload['roll_id']) && (int)$payload['roll_id'] > 0) { $detailParts[] = 'Bobina #' . (int)$payload['roll_id']; }
-        if (isset($payload['output_roll_id']) && (int)$payload['output_roll_id'] > 0) { $detailParts[] = 'Salida #' . (int)$payload['output_roll_id']; }
-        if (isset($payload['operator_name']) && (string)$payload['operator_name'] !== '') { $detailParts[] = 'Operador ' . (string)$payload['operator_name']; }
-        $body .= '<tr>';
-        $body .= '<td>' . h((string)$event['created_at']) . '</td>';
-        $body .= '<td>' . h(eventTypeLabel((string)$event['type'])) . '</td>';
-        $body .= '<td>' . h($detailParts === [] ? '-' : implode(' · ', $detailParts)) . '</td>';
-        $body .= '</tr>';
-    }
-    if ($recentEvents === []) {
-        $body .= '<tr><td colspan="3" class="muted">Sin actividad reciente.</td></tr>';
-    }
-    $body .= '</tbody></table></div></div>';
-    $body .= '</div>';
-
-    $body .= '<div class="card"><div style="font-weight:800;margin-bottom:8px">Trazabilidad reciente</div><div class="table-wrap"><table class="trace-table"><thead><tr><th>OT</th><th>Bobina entrada</th><th>Bobina salida</th><th>Etapa</th><th>Cajas</th><th>Pallets</th><th></th></tr></thead><tbody>';
-    foreach ($recentTraceability as $traceRow) {
-        $traceStageLabel = rollProcessStageLabel((string)($traceRow['process_stage'] ?? ''));
-        $traceStatusLabel = rollStatusLabel((string)($traceRow['status'] ?? ''));
-        $body .= '<tr>';
-        $traceWorkOrderLabel = (string)($traceRow['ot_code'] ?? ('OT #' . (int)($traceRow['work_order_id'] ?? 0)));
-        $body .= '<td>' . ((int)($traceRow['work_order_id'] ?? 0) > 0
-            ? (canAccessWorkOrderTraceability()
-                ? '<a href="/work-orders/' . (int)$traceRow['work_order_id'] . '/traceability">' . h($traceWorkOrderLabel) . '</a>'
-                : h($traceWorkOrderLabel))
-            : '-') . '</td>';
-        $body .= '<td>' . h((string)($traceRow['parent_roll_code'] ?? '-')) . '</td>';
-        $body .= '<td><a href="/rolls/' . (int)$traceRow['id'] . '">' . h((string)$traceRow['roll_code']) . '</a></td>';
-        $body .= '<td>' . h($traceStageLabel) . ' / ' . h($traceStatusLabel) . '</td>';
-        $body .= '<td>' . h((string)($traceRow['box_count'] ?? '0')) . '</td>';
-        $body .= '<td>' . h((string)($traceRow['pallet_count'] ?? '0')) . '</td>';
-        $body .= '<td><a class="btn secondary" href="/rolls/' . (int)$traceRow['id'] . '">Ver</a></td>';
-        $body .= '</tr>';
-    }
-    if ($recentTraceability === []) {
-        $body .= '<tr><td colspan="7" class="muted">Aún no hay bobinas de salida generadas.</td></tr>';
-    }
-    $body .= '</tbody></table></div></div>';
-    render('ERP', $body);
-    exit;
-}
 
 if ($path === '/production/shifts' && $method === 'GET') {
     $machines = $service->listProductionMachinesWithSessions();
@@ -3136,6 +3015,13 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               <div class="panel" style="padding:10px 12px;font-weight:700">' . h($currentOperatorName) . '</div>
             </div>
             <div style="flex:1;min-width:220px">
+              <label>Modo recepción</label>
+              <select id="reception_mode_selector">
+                <option value="WEIGHT"' . ($isWeightMode ? ' selected' : '') . '>Por peso</option>
+                <option value="QUANTITY"' . (!$isWeightMode ? ' selected' : '') . '>Por unidades</option>
+              </select>
+            </div>
+            <div style="flex:1;min-width:220px">
               <label>Bodega</label>
               <select name="warehouse_id" required>
                 <option value="">Seleccionar</option>';
@@ -3149,8 +3035,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="0" value=""' . ($pendingInputMax !== '' ? ' max="' . h($pendingInputMax) . '"' : '') . '>
             </div>
             <div id="qty_field_wrapper" style="flex:1;min-width:220px">
-              <label>Control</label>
-              <div class="panel" style="padding:10px 12px;font-weight:700">' . h(((string)$line['reception_mode']) === 'WEIGHT' ? 'Cada recepción registra el peso real medido en balanza' : 'Cada recepción registra la cantidad recibida') . '</div>
+              <label id="qty_value_label">Cantidad recibida (Unid.)</label>
+              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1">
             </div>
             <div id="action_buttons_wrapper" style="flex:0 0 ' . ($isWeightMode ? '300px' : '190px') . ';display:flex;flex-direction:row;gap:8px;align-items:flex-end;justify-content:flex-end;flex-wrap:nowrap">';
     $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . (!$isWeightMode ? ' style="display:none"' : '') . '>Activar balanza</button>
@@ -3205,20 +3091,24 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
       (function () {
         var form = document.getElementById("receive_form");
         var modeField = document.getElementById("reception_mode");
+        var modeSelector = document.getElementById("reception_mode_selector");
         var weight = document.getElementById("weight_kg");
         var qty = document.getElementById("received_qty");
+        var qtyInput = document.getElementById("received_qty_input");
         var toggle = document.getElementById("toggle_scale");
         var saveBtn = document.getElementById("save_print");
         var submitPrimary = document.getElementById("submit_primary");
         var actionButtonsWrapper = document.getElementById("action_buttons_wrapper");
         var weightFieldWrapper = document.getElementById("weight_field_wrapper");
         var qtyFieldWrapper = document.getElementById("qty_field_wrapper");
+        var primaryValueLabel = document.getElementById("primary_value_label");
+        var qtyValueLabel = document.getElementById("qty_value_label");
         var scaleStatusRow = document.getElementById("scale_status_row");
         var scaleStatusSpacer = document.getElementById("scale_status_spacer");
         var status = document.getElementById("scale_status");
         var tbody = document.getElementById("recent_tbody");
         var preview = document.getElementById("label_preview");
-        if (!form || !modeField || !weight || !qty || !toggle || !saveBtn || !status) return;
+        if (!form || !modeField || !weight || !qty || !qtyInput || !toggle || !saveBtn || !status) return;
 
         var active = false;
         var timer = null;
@@ -3257,6 +3147,10 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
 
         function getMode() { return modeField.value === "WEIGHT" ? "WEIGHT" : "QUANTITY"; }
 
+        function syncQtyValue() {
+          qty.value = qtyInput.value && Number(qtyInput.value) > 0 ? qtyInput.value : "1";
+        }
+
         function canManualWeightSave() {
           var wh = getWarehouseSelect();
           var weightValue = Number(weight.value);
@@ -3288,12 +3182,15 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         }
 
         function applyModeUI() {
-          qty.value = "1";
+          if (modeSelector) modeSelector.value = getMode();
           weight.step = "0.001";
           weight.required = true;
           if (weightFieldWrapper) weightFieldWrapper.style.display = "";
-          if (qtyFieldWrapper) qtyFieldWrapper.style.display = "";
           if (getMode() === "WEIGHT") {
+            qty.value = "1";
+            qtyInput.value = "1";
+            if (primaryValueLabel) primaryValueLabel.textContent = "Peso real (Kg)";
+            if (qtyFieldWrapper) qtyFieldWrapper.style.display = "none";
             if (toggle) toggle.style.display = "";
             if (saveBtn) saveBtn.style.display = "";
             if (submitPrimary) submitPrimary.style.display = "none";
@@ -3304,13 +3201,17 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
             }
           } else {
+            syncQtyValue();
+            if (primaryValueLabel) primaryValueLabel.textContent = "Peso real de la recepción (Kg)";
+            if (qtyValueLabel) qtyValueLabel.textContent = "Cantidad recibida (Unid.)";
+            if (qtyFieldWrapper) qtyFieldWrapper.style.display = "";
             if (toggle) toggle.style.display = "none";
             if (saveBtn) saveBtn.style.display = "none";
             if (submitPrimary) submitPrimary.style.display = "";
             if (scaleStatusRow) scaleStatusRow.style.display = "none";
             if (actionButtonsWrapper) actionButtonsWrapper.style.flexBasis = "190px";
             if (scaleStatusSpacer) scaleStatusSpacer.style.flexBasis = "190px";
-            setStatus("Ingresa el peso real y guarda la recepción");
+            setStatus("Ingresa unidades y peso real para guardar la recepción");
           }
           syncWeightSaveButton();
         }
@@ -3570,6 +3471,23 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           }
           syncWeightSaveButton();
         });
+        if (modeSelector) {
+          modeSelector.addEventListener("change", function () {
+            modeField.value = modeSelector.value === "WEIGHT" ? "WEIGHT" : "QUANTITY";
+            stopScale();
+            applyModeUI();
+          });
+        }
+        qtyInput.addEventListener("input", function () {
+          syncQtyValue();
+        });
+        form.addEventListener("submit", function () {
+          if (getMode() === "WEIGHT") {
+            qty.value = "1";
+          } else {
+            syncQtyValue();
+          }
+        });
         modeField.value = modeField.value === "WEIGHT" ? "WEIGHT" : "QUANTITY";
         applyModeUI();
         saveBtn.addEventListener("click", function () { saveAndPrint(); });
@@ -3728,6 +3646,13 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               <div class="panel" style="padding:10px 12px;font-weight:700">' . h($currentOperatorName) . '</div>
             </div>
             <div style="flex:1;min-width:220px">
+              <label>Modo recepción</label>
+              <select id="reception_mode_selector">
+                <option value="WEIGHT"' . ($isWeightMode ? ' selected' : '') . '>Por peso</option>
+                <option value="QUANTITY"' . (!$isWeightMode ? ' selected' : '') . '>Por unidades</option>
+              </select>
+            </div>
+            <div style="flex:1;min-width:220px">
               <label>Bodega</label>
               <select name="warehouse_id" required>
                 <option value="">Seleccionar</option>';
@@ -3741,8 +3666,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="0" value=""' . ($pendingInputMax !== '' ? ' max="' . h($pendingInputMax) . '"' : '') . '>
             </div>
             <div id="qty_field_wrapper" style="flex:1;min-width:220px">
-              <label>Control</label>
-              <div class="panel" style="padding:10px 12px;font-weight:700">' . h(((string)$line['reception_mode']) === 'WEIGHT' ? 'Cada recepción registra el peso real medido en balanza' : 'Cada recepción registra la cantidad recibida') . '</div>
+              <label id="qty_value_label">Cantidad recibida (Unid.)</label>
+              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1">
             </div>
             <div id="action_buttons_wrapper" style="flex:0 0 ' . ($isWeightMode ? '300px' : '190px') . ';display:flex;flex-direction:row;gap:8px;align-items:flex-end;justify-content:flex-end;flex-wrap:nowrap">';
     $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . (!$isWeightMode ? ' style="display:none"' : '') . '>Activar balanza</button>
@@ -3797,20 +3722,24 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
       (function () {
         var form = document.getElementById("receive_form");
         var modeField = document.getElementById("reception_mode");
+        var modeSelector = document.getElementById("reception_mode_selector");
         var weight = document.getElementById("weight_kg");
         var qty = document.getElementById("received_qty");
+        var qtyInput = document.getElementById("received_qty_input");
         var toggle = document.getElementById("toggle_scale");
         var saveBtn = document.getElementById("save_print");
         var submitPrimary = document.getElementById("submit_primary");
         var actionButtonsWrapper = document.getElementById("action_buttons_wrapper");
         var weightFieldWrapper = document.getElementById("weight_field_wrapper");
         var qtyFieldWrapper = document.getElementById("qty_field_wrapper");
+        var primaryValueLabel = document.getElementById("primary_value_label");
+        var qtyValueLabel = document.getElementById("qty_value_label");
         var scaleStatusRow = document.getElementById("scale_status_row");
         var scaleStatusSpacer = document.getElementById("scale_status_spacer");
         var status = document.getElementById("scale_status");
         var tbody = document.getElementById("recent_tbody");
         var preview = document.getElementById("label_preview");
-        if (!form || !modeField || !weight || !qty || !toggle || !saveBtn || !status) return;
+        if (!form || !modeField || !weight || !qty || !qtyInput || !toggle || !saveBtn || !status) return;
 
         var active = false;
         var timer = null;
@@ -3849,6 +3778,10 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
 
         function getMode() { return modeField.value === "WEIGHT" ? "WEIGHT" : "QUANTITY"; }
 
+        function syncQtyValue() {
+          qty.value = qtyInput.value && Number(qtyInput.value) > 0 ? qtyInput.value : "1";
+        }
+
         function canManualWeightSave() {
           var wh = getWarehouseSelect();
           var weightValue = Number(weight.value);
@@ -3880,12 +3813,15 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         }
 
         function applyModeUI() {
-          qty.value = "1";
+          if (modeSelector) modeSelector.value = getMode();
           weight.step = "0.001";
           weight.required = true;
           if (weightFieldWrapper) weightFieldWrapper.style.display = "";
-          if (qtyFieldWrapper) qtyFieldWrapper.style.display = "";
           if (getMode() === "WEIGHT") {
+            qty.value = "1";
+            qtyInput.value = "1";
+            if (primaryValueLabel) primaryValueLabel.textContent = "Peso real (Kg)";
+            if (qtyFieldWrapper) qtyFieldWrapper.style.display = "none";
             if (toggle) toggle.style.display = "";
             if (saveBtn) saveBtn.style.display = "";
             if (submitPrimary) submitPrimary.style.display = "none";
@@ -3896,13 +3832,17 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
             }
           } else {
+            syncQtyValue();
+            if (primaryValueLabel) primaryValueLabel.textContent = "Peso real de la recepción (Kg)";
+            if (qtyValueLabel) qtyValueLabel.textContent = "Cantidad recibida (Unid.)";
+            if (qtyFieldWrapper) qtyFieldWrapper.style.display = "";
             if (toggle) toggle.style.display = "none";
             if (saveBtn) saveBtn.style.display = "none";
             if (submitPrimary) submitPrimary.style.display = "";
             if (scaleStatusRow) scaleStatusRow.style.display = "none";
             if (actionButtonsWrapper) actionButtonsWrapper.style.flexBasis = "190px";
             if (scaleStatusSpacer) scaleStatusSpacer.style.flexBasis = "190px";
-            setStatus("Ingresa el peso real y guarda la recepción");
+            setStatus("Ingresa unidades y peso real para guardar la recepción");
           }
           syncWeightSaveButton();
         }
@@ -4210,6 +4150,23 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
             setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
           }
           syncWeightSaveButton();
+        });
+        if (modeSelector) {
+          modeSelector.addEventListener("change", function () {
+            modeField.value = modeSelector.value === "WEIGHT" ? "WEIGHT" : "QUANTITY";
+            stopScale();
+            applyModeUI();
+          });
+        }
+        qtyInput.addEventListener("input", function () {
+          syncQtyValue();
+        });
+        form.addEventListener("submit", function () {
+          if (getMode() === "WEIGHT") {
+            qty.value = "1";
+          } else {
+            syncQtyValue();
+          }
         });
         modeField.value = modeField.value === "WEIGHT" ? "WEIGHT" : "QUANTITY";
         applyModeUI();
@@ -4586,6 +4543,8 @@ if (preg_match('#^/work-orders/(\d+)/traceability$#', $path, $m) === 1 && $metho
             $inputRolls[$rollId] = $rollEvent;
         }
     }
+    $traceabilityNavParams = inventoryNavigationContext() ? inventoryNavigationParams() : [];
+    $traceabilityBackUrl = inventoryNavigationContext() ? inventoryReturnUrl() : '/work-orders';
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
@@ -4593,8 +4552,8 @@ if (preg_match('#^/work-orders/(\d+)/traceability$#', $path, $m) === 1 && $metho
           <div class="muted">Seguimiento completo de bobinas, tintas y eventos de la orden de trabajo.</div>
         </div>
         <div class="row">
-          <a class="btn secondary" href="/work-orders/' . (int)$ot['id'] . '/start">Volver a OT</a>
-          <a class="btn secondary" href="/work-orders">Volver a listado</a>
+          <a class="btn secondary" href="' . h(withQuery('/work-orders/' . (int)$ot['id'] . '/start', $traceabilityNavParams)) . '">Volver a OT</a>
+          <a class="btn secondary" href="' . h($traceabilityBackUrl) . '">' . h(inventoryNavigationContext() ? 'Volver a inventario' : 'Volver a listado') . '</a>
         </div>
       </div>';
 
@@ -4616,26 +4575,26 @@ if (preg_match('#^/work-orders/(\d+)/traceability$#', $path, $m) === 1 && $metho
         $isCut = strtoupper((string)($outputRoll['process_stage'] ?? '')) === 'CUT' || strtoupper((string)($outputRoll['status'] ?? '')) === 'CONSUMED';
         $body .= '<tr>';
         if ($parentRollId > 0) {
-            $body .= '<td><a href="/rolls/' . $parentRollId . '">' . h((string)($outputRoll['parent_roll_code'] ?? ('#' . $parentRollId))) . '</a></td>';
+            $body .= '<td><a href="' . h(withQuery('/rolls/' . $parentRollId, $traceabilityNavParams)) . '">' . h((string)($outputRoll['parent_roll_code'] ?? ('#' . $parentRollId))) . '</a></td>';
         } else {
             $body .= '<td>-</td>';
         }
-        $body .= '<td><a href="/rolls/' . (int)$outputRoll['id'] . '">' . h((string)$outputRoll['roll_code']) . '</a></td>';
+        $body .= '<td><a href="' . h(withQuery('/rolls/' . (int)$outputRoll['id'], $traceabilityNavParams)) . '">' . h((string)$outputRoll['roll_code']) . '</a></td>';
         $body .= '<td>' . h($isCut ? 'Cortada' : 'Pendiente') . '</td>';
         $body .= '<td>' . h((string)($outputRoll['box_count'] ?? '0')) . '</td>';
         $body .= '<td>' . h((string)($outputRoll['pallet_count'] ?? '0')) . '</td>';
-        $body .= '<td><a class="btn secondary" href="/rolls/' . (int)$outputRoll['id'] . '">Ver bobina</a></td>';
+        $body .= '<td><a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$outputRoll['id'], $traceabilityNavParams)) . '">Ver bobina</a></td>';
         $body .= '</tr>';
     }
     if ($outputRolls === []) {
         foreach ($inputRolls as $inputRoll) {
             $body .= '<tr>';
-            $body .= '<td><a href="/rolls/' . (int)$inputRoll['roll_id'] . '">' . h((string)$inputRoll['roll_code']) . '</a></td>';
+            $body .= '<td><a href="' . h(withQuery('/rolls/' . (int)$inputRoll['roll_id'], $traceabilityNavParams)) . '">' . h((string)$inputRoll['roll_code']) . '</a></td>';
             $body .= '<td class="muted">Pendiente de generar</td>';
             $body .= '<td>Pendiente</td>';
             $body .= '<td>0</td>';
             $body .= '<td>0</td>';
-            $body .= '<td><a class="btn secondary" href="/rolls/' . (int)$inputRoll['roll_id'] . '">Ver bobina</a></td>';
+            $body .= '<td><a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$inputRoll['roll_id'], $traceabilityNavParams)) . '">Ver bobina</a></td>';
             $body .= '</tr>';
         }
     }
@@ -4678,12 +4637,19 @@ if (preg_match('#^/work-orders/(\d+)/traceability$#', $path, $m) === 1 && $metho
 
         foreach ($rollGroups as $rollGroup) {
             $roll = $rollGroup['roll'];
-            $origin = '-';
-            if ((string)($roll['po_code'] ?? '') !== '' || (string)($roll['supplier_name'] ?? '') !== '') {
-                $origin = trim((string)($roll['po_code'] ?? '-') . ' · ' . (string)($roll['supplier_name'] ?? '-'));
-            } elseif ((string)($roll['warehouse_code'] ?? '') !== '') {
-                $origin = 'Bodega ' . (string)$roll['warehouse_code'];
+            $originParts = [];
+            if ((string)($roll['container_code'] ?? '') !== '') {
+                $originParts[] = 'Contenedor ' . (string)$roll['container_code'];
             }
+            if ((string)($roll['po_code'] ?? '') !== '') {
+                $originParts[] = (string)$roll['po_code'];
+            }
+            if ((string)($roll['supplier_name'] ?? '') !== '') {
+                $originParts[] = (string)$roll['supplier_name'];
+            }
+            $origin = $originParts !== []
+                ? implode(' · ', $originParts)
+                : ((string)($roll['warehouse_code'] ?? '') !== '' ? 'Bodega ' . (string)$roll['warehouse_code'] : '-');
 
             $body .= '<div class="trace-roll-card">';
             $body .= '<div class="trace-roll-header">';
@@ -4691,11 +4657,12 @@ if (preg_match('#^/work-orders/(\d+)/traceability$#', $path, $m) === 1 && $metho
             $body .= '<div class="trace-roll-title">' . h((string)$roll['roll_code']) . '</div>';
             $body .= '<div class="muted trace-roll-subtitle">Código SKU ' . h((string)$roll['sku_code']) . ' · ID ' . (int)$roll['roll_id'] . '</div>';
             $body .= '</div>';
-            $body .= '<div><a class="trace-roll-link" href="/rolls/' . (int)$roll['roll_id'] . '">Ver trazabilidad bobina</a></div>';
+            $body .= '<div><a class="trace-roll-link" href="' . h(withQuery('/rolls/' . (int)$roll['roll_id'], $traceabilityNavParams)) . '">Ver trazabilidad bobina</a></div>';
             $body .= '</div>';
 
             $body .= '<div class="trace-roll-meta">';
             $body .= '<div class="trace-roll-stat"><div class="muted">Origen</div><div class="value">' . h($origin) . '</div></div>';
+            $body .= '<div class="trace-roll-stat"><div class="muted">Contenedor</div><div class="value">' . h(trim((string)($roll['container_code'] ?? '')) !== '' ? (string)$roll['container_code'] : '-') . '</div></div>';
             $body .= '<div class="trace-roll-stat"><div class="muted">Bodega actual</div><div class="value">' . h((string)($roll['warehouse_code'] ?? '-')) . '</div></div>';
             $body .= '<div class="trace-roll-stat"><div class="muted">Peso actual</div><div class="value">' . h((string)($roll['weight_kg'] ?? '-')) . ' Kg</div></div>';
             $body .= '</div>';
@@ -4751,7 +4718,7 @@ if (preg_match('#^/work-orders/(\d+)/traceability$#', $path, $m) === 1 && $metho
             $warehouseLabel = '-';
         }
         $body .= '<tr>';
-        $body .= '<td><a href="/boxes/' . (int)$box['id'] . '">' . h((string)$box['box_code']) . '</a></td>';
+        $body .= '<td><a href="' . h(withQuery('/boxes/' . (int)$box['id'], $traceabilityNavParams)) . '">' . h((string)$box['box_code']) . '</a></td>';
         $body .= '<td>' . h((string)($box['source_roll_code'] ?? '-')) . '</td>';
         $body .= '<td>' . h((string)($box['units_qty'] ?? '-')) . '</td>';
         $body .= '<td>' . h($destination) . '</td>';
@@ -4777,7 +4744,7 @@ if (preg_match('#^/work-orders/(\d+)/traceability$#', $path, $m) === 1 && $metho
             $warehouseLabel = '-';
         }
         $body .= '<tr>';
-        $body .= '<td><a href="/pallets/' . (int)$pallet['id'] . '">' . h((string)$pallet['pallet_code']) . '</a></td>';
+        $body .= '<td><a href="' . h(withQuery('/pallets/' . (int)$pallet['id'], $traceabilityNavParams)) . '">' . h((string)$pallet['pallet_code']) . '</a></td>';
         $body .= '<td>' . h((string)($pallet['source_roll_code'] ?? '-')) . '</td>';
         $body .= '<td>' . h((string)($pallet['box_count'] ?? '-')) . '</td>';
         $body .= '<td>' . h($destination) . '</td>';
@@ -5283,222 +5250,6 @@ if ($path === '/chemicals/weighings' && $method === 'POST') {
     exit;
 }
 
-if ($path === '/stock' && $method === 'GET') {
-    $summary = $service->stockSummary();
-    $code = isset($_GET['bodega']) ? (int)$_GET['bodega'] : 100;
-    $selectedSku = trim((string)($_GET['sku'] ?? ''));
-    $rolls = $service->listRollsByWarehouseCode($code);
-    $warehousePallets = $service->listPalletsByWarehouseCode($code);
-    $chemicalWeighings = $service->listRecentChemicalWeighings(12);
-    $selectedWarehouseName = '';
-    $selectedWarehouseStockUnits = 0.0;
-    $selectedWarehousePalletsCount = 0;
-    $selectedWarehouseAvailableRolls = 0;
-    $selectedWarehouseUnavailableRolls = 0;
-    foreach ($summary as $summaryRow) {
-        if ((int)($summaryRow['warehouse_code'] ?? 0) === $code) {
-            $selectedWarehouseName = trim((string)($summaryRow['warehouse_name'] ?? ''));
-            $selectedWarehouseStockUnits = (float)($summaryRow['stock_units_total'] ?? 0);
-            $selectedWarehousePalletsCount = (int)($summaryRow['pallets_count'] ?? 0);
-            $selectedWarehouseAvailableRolls = (int)($summaryRow['available_rolls_count'] ?? 0);
-            $selectedWarehouseUnavailableRolls = (int)($summaryRow['unavailable_rolls_count'] ?? 0);
-            break;
-        }
-    }
-    $selectedWarehouseLabel = (string)$code;
-    $skuSummary = [];
-    foreach ($rolls as $roll) {
-        $skuCode = trim((string)($roll['sku_code'] ?? ''));
-        if ($skuCode === '') {
-            $skuCode = 'SIN-SKU';
-        }
-        if (!isset($skuSummary[$skuCode])) {
-            $skuSummary[$skuCode] = [
-                'summary_key' => $skuCode,
-                'sku_code' => $skuCode,
-                'sku_description' => trim((string)($roll['sku_description'] ?? '')),
-                'count' => 0,
-                'available_count' => 0,
-                'unavailable_count' => 0,
-                'total_weight_kg' => 0.0,
-                'rolls' => [],
-                'pallets' => [],
-            ];
-        }
-        $skuSummary[$skuCode]['count']++;
-        if (strtoupper(trim((string)($roll['status'] ?? ''))) === 'RECEIVED') {
-            $skuSummary[$skuCode]['available_count']++;
-        } else {
-            $skuSummary[$skuCode]['unavailable_count']++;
-        }
-        $skuSummary[$skuCode]['total_weight_kg'] += (float)($roll['weight_kg'] ?? 0);
-        $skuSummary[$skuCode]['rolls'][] = $roll;
-    }
-    foreach ($warehousePallets as $palletRow) {
-        $specification = trim((string)($palletRow['final_sku'] ?? ''));
-        if ($specification === '') {
-            $specification = 'SIN-ESPECIFICACION';
-        }
-        $summaryKey = 'PALLET|' . $specification;
-        if (!isset($skuSummary[$summaryKey])) {
-            $skuSummary[$summaryKey] = [
-                'summary_key' => $summaryKey,
-                'sku_code' => 'PALLET',
-                'sku_description' => $specification,
-                'count' => 0,
-                'available_count' => 0,
-                'unavailable_count' => 0,
-                'total_weight_kg' => 0.0,
-                'rolls' => [],
-                'pallets' => [],
-            ];
-        }
-        $skuSummary[$summaryKey]['count']++;
-        $skuSummary[$summaryKey]['available_count']++;
-        $skuSummary[$summaryKey]['pallets'][] = $palletRow;
-    }
-    ksort($skuSummary);
-    $selectedSkuRolls = $selectedSku !== '' && isset($skuSummary[$selectedSku])
-        ? $skuSummary[$selectedSku]['rolls']
-        : [];
-    $selectedSkuPallets = $selectedSku !== '' && isset($skuSummary[$selectedSku])
-        ? ($skuSummary[$selectedSku]['pallets'] ?? [])
-        : [];
-    $selectedSkuInfo = $selectedSku !== '' && isset($skuSummary[$selectedSku])
-        ? $skuSummary[$selectedSku]
-        : null;
-
-    $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div>
-          <div style="font-size:18px;font-weight:700">Inventario por bodega</div>
-        </div>
-        <a class="btn secondary" href="/">Volver</a>
-      </div>';
-
-    $body .= '<div class="card" style="margin-bottom:12px">
-        <div class="row">
-          <div style="flex:1;min-width:220px"><div class="muted">Bodega seleccionada</div><div style="font-weight:800">' . h($selectedWarehouseLabel) . '</div></div>
-          <div style="flex:2;min-width:280px"><div class="muted">Nombre bodega</div><div style="font-weight:800">' . h($selectedWarehouseName !== '' ? $selectedWarehouseName : '-') . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Especificaciones</div><div style="font-weight:800">' . count($skuSummary) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Unidades disponibles</div><div style="font-weight:800">' . h(number_format($selectedWarehouseStockUnits, 0, ',', '.')) . ' Unid.</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Bobinas disponibles</div><div style="font-weight:800">' . h((string)$selectedWarehouseAvailableRolls) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Bloqueadas / en proceso</div><div style="font-weight:800">' . h((string)$selectedWarehouseUnavailableRolls) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Pallets almacenados</div><div style="font-weight:800">' . h((string)$selectedWarehousePalletsCount) . '</div></div>
-        </div>
-      </div>';
-
-    $body .= '<div class="grid">
-        <div class="card">
-          <div style="font-weight:800;margin-bottom:8px">Bodegas</div>
-          <table><thead><tr><th>Bodega</th><th>Nombre bodega</th><th>Unidades disponibles</th><th>Bobinas bloqueadas / proceso</th><th></th></tr></thead><tbody>';
-    foreach ($summary as $s) {
-        $selected = ((int)$s['warehouse_code'] === $code) ? ' style="font-weight:800"' : '';
-        $warehouseName = trim((string)($s['warehouse_name'] ?? ''));
-        $body .= '<tr' . $selected . '>';
-        $body .= '<td>' . h((string)$s['warehouse_code']) . '</td>';
-        $body .= '<td>' . h($warehouseName !== '' ? $warehouseName : '-') . '</td>';
-        $body .= '<td>' . h(number_format((float)($s['stock_units_total'] ?? 0), 0, ',', '.')) . '</td>';
-        $body .= '<td>' . h((string)($s['unavailable_rolls_count'] ?? 0)) . '</td>';
-        $body .= '<td><a class="btn secondary" href="/stock?bodega=' . (int)$s['warehouse_code'] . '">Ver</a></td>';
-        $body .= '</tr>';
-    }
-    $body .= '</tbody></table></div>';
-
-    $body .= '<div class="card">
-        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
-          <div style="font-weight:800">Productos por especificación</div>
-          <div class="muted">Haz clic en un producto para ver sus bobinas y pallets, separando lo disponible de lo bloqueado o en proceso.</div>
-        </div>
-        <table><thead><tr>
-            <th>Especificación</th><th>Código SKU</th><th>IDs en bodega</th><th>Disponibles</th><th>Bloqueadas / proceso</th><th>Peso total (Kg)</th><th></th>
-          </tr></thead><tbody>';
-    foreach ($skuSummary as $skuRow) {
-        $skuLink = '/stock?bodega=' . $code . '&sku=' . rawurlencode((string)($skuRow['summary_key'] ?? $skuRow['sku_code']));
-        $detailLabel = ($skuRow['pallets'] ?? []) !== [] && ($skuRow['rolls'] ?? []) === [] ? 'Ver pallets' : 'Ver detalle';
-        $body .= '<tr>';
-        $body .= '<td><a href="' . h($skuLink) . '">' . h((string)($skuRow['sku_description'] !== '' ? $skuRow['sku_description'] : '-')) . '</a></td>';
-        $body .= '<td>' . h((string)$skuRow['sku_code']) . '</td>';
-        $body .= '<td>' . h((string)$skuRow['count']) . '</td>';
-        $body .= '<td>' . h((string)$skuRow['available_count']) . '</td>';
-        $body .= '<td>' . h((string)$skuRow['unavailable_count']) . '</td>';
-        $body .= '<td>' . h(number_format((float)$skuRow['total_weight_kg'], 3, '.', '')) . '</td>';
-        $body .= '<td><a class="btn secondary" href="' . h($skuLink) . '">' . h($detailLabel) . '</a></td>';
-        $body .= '</tr>';
-    }
-    if ($skuSummary === []) {
-        $body .= '<tr><td colspan="7" class="muted">Sin productos disponibles en esta bodega.</td></tr>';
-    }
-    $body .= '</tbody></table></div>';
-
-    $body .= '</div>';
-
-    if ($selectedSkuInfo !== null) {
-        $closeLink = '/stock?bodega=' . $code;
-        $body .= '<div id="stock_ids_modal" style="position:fixed;inset:0;z-index:9998;padding:40px 20px;overflow:auto">
-            <a href="' . h($closeLink) . '" aria-label="Cerrar ventana" style="position:fixed;inset:0;background:rgba(15,23,42,.45);display:block"></a>
-            <div class="card" style="width:min(1100px,100%);margin:0 auto;position:relative;z-index:9999">
-              <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-                <div>
-                  <div style="font-size:18px;font-weight:700">Detalle por especificación</div>
-                  <div class="muted">Código SKU ' . h((string)$selectedSkuInfo['sku_code']) . ' · Especificación '
-                    . h((string)($selectedSkuInfo['sku_description'] !== '' ? $selectedSkuInfo['sku_description'] : '-')) . '</div>
-                </div>
-                <a class="btn secondary" href="' . h($closeLink) . '">Cerrar</a>
-              </div>
-              <div style="font-weight:800;margin-bottom:8px">Bobinas en bodega</div>
-              <table><thead><tr>
-                  <th>ID</th><th>Código</th><th>Recibió</th><th>OT activa</th><th>Peso (Kg)</th><th>Estado</th><th>Disponibilidad</th><th></th>
-                </tr></thead><tbody>';
-        foreach ($selectedSkuRolls as $r) {
-            $isAvailable = strtoupper(trim((string)($r['status'] ?? ''))) === 'RECEIVED';
-            $body .= '<tr>';
-            $body .= '<td><a href="/rolls/' . (int)$r['id'] . '">' . (int)$r['id'] . '</a></td>';
-            $body .= '<td>' . h((string)$r['roll_code']) . '</td>';
-            $body .= '<td>' . h((string)($r['received_by'] ?? '-')) . '</td>';
-            $body .= '<td>' . h((string)($r['work_order_code'] ?? '-')) . '</td>';
-            $body .= '<td>' . h((string)$r['weight_kg']) . '</td>';
-            $body .= '<td>' . h(rollStatusLabel((string)$r['status'])) . '</td>';
-            $body .= '<td>' . h($isAvailable ? 'Disponible' : 'No disponible') . '</td>';
-            $body .= '<td><a class="btn secondary" href="/rolls/' . (int)$r['id'] . '">Trazabilidad</a></td>';
-            $body .= '</tr>';
-        }
-        if ($selectedSkuRolls === []) {
-            $body .= '<tr><td colspan="8" class="muted">No hay IDs registrados para este producto en esta bodega.</td></tr>';
-        }
-        $body .= '</tbody></table>';
-        $body .= '<div style="font-weight:800;margin:16px 0 8px">Pallets almacenados</div>';
-        $body .= '<table><thead><tr><th>Pallet</th><th>OT</th><th>Bobina origen</th><th>SKU final</th><th>Cajas</th><th>Unidades</th><th></th></tr></thead><tbody>';
-        foreach ($selectedSkuPallets as $palletRow) {
-            $body .= '<tr>';
-            $body .= '<td>' . h((string)$palletRow['pallet_code']) . '</td>';
-            $body .= '<td>' . h((string)($palletRow['ot_code'] ?? '-')) . '</td>';
-            $body .= '<td>' . h((string)($palletRow['source_roll_code'] ?? '-')) . '</td>';
-            $body .= '<td>' . h((string)($palletRow['final_sku'] ?? '-')) . '</td>';
-            $body .= '<td>' . h((string)($palletRow['box_count'] ?? '0')) . '</td>';
-            $body .= '<td>' . h(number_format((float)($palletRow['units_total'] ?? 0), 3, '.', '')) . '</td>';
-            $body .= '<td><a class="btn secondary" href="/pallets/' . (int)$palletRow['id'] . '">Ver pallet</a></td>';
-            $body .= '</tr>';
-        }
-        if ($selectedSkuPallets === []) {
-            $body .= '<tr><td colspan="7" class="muted">No hay pallets almacenados para esta especificación.</td></tr>';
-        }
-        $body .= '</tbody></table></div></div>';
-        $body .= '<script>
-          (function () {
-            var modal = document.getElementById("stock_ids_modal");
-            if (!modal) return;
-            document.addEventListener("keydown", function (event) {
-              if (event.key === "Escape") {
-                window.location.href = ' . json_encode($closeLink, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . ';
-              }
-            });
-          })();
-        </script>';
-    }
-
-    render('Stock', $body);
-    exit;
-}
 
 if ($path === '/stock/chemicals' && $method === 'GET') {
     header('Location: /stock');
@@ -6817,13 +6568,15 @@ if (preg_match('#^/rolls/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
     $palletsFromRoll = $service->listPalletsBySourceRoll($id);
     $sourceWorkOrder = (int)($roll['source_work_order_id'] ?? 0) > 0 ? $service->getWorkOrder((int)$roll['source_work_order_id']) : null;
     $transferAvailability = rollTransferAvailability($roll);
+    $rollNavParams = inventoryNavigationContext() ? inventoryNavigationParams() : [];
+    $rollBackUrl = inventoryNavigationContext() ? inventoryReturnUrl() : ('/stock?bodega=' . (int)$roll['warehouse_code']);
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Recepción #' . (int)$roll['id'] . '</div>
         <div class="row">
-          <a class="btn secondary" href="/stock?bodega=' . (int)$roll['warehouse_code'] . '">Volver</a>
+          <a class="btn secondary" href="' . h($rollBackUrl) . '">' . h(inventoryNavigationContext() ? 'Volver a inventario' : 'Volver') . '</a>
           ' . ($transferAvailability['can_transfer']
-            ? '<a class="btn secondary" href="/rolls/' . (int)$roll['id'] . '/transfer">Transferir</a>'
+            ? '<a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$roll['id'] . '/transfer', $rollNavParams)) . '">Transferir</a>'
             : '<span class="btn secondary" style="opacity:.55;cursor:not-allowed" title="' . h((string)($transferAvailability['warehouse']['reason'] ?: $transferAvailability['work_order']['reason'])) . '">Transferir</span>') . '
           <a class="btn" href="/rolls/' . (int)$roll['id'] . '/label">Etiqueta</a>
         </div>
@@ -6861,6 +6614,7 @@ if (preg_match('#^/rolls/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
         <div class="row" style="margin-top:10px">
           <div style="flex:1;min-width:240px"><div class="muted">Estado</div><div style="font-weight:700">' . h(rollStatusLabel((string)$roll['status'])) . '</div></div>
           <div style="flex:1;min-width:240px"><div class="muted">Fecha</div><div style="font-weight:700">' . h((string)$roll['created_at']) . '</div></div>
+          <div style="flex:1;min-width:240px"><div class="muted">Contenedor</div><div style="font-weight:700">' . h(trim((string)($roll['container_code'] ?? '')) !== '' ? (string)$roll['container_code'] : '-') . '</div></div>
           <div style="flex:1;min-width:240px"><div class="muted">OT activa</div><div style="font-weight:700">' . h((string)($roll['work_order_code'] ?? '-')) . '</div></div>
         </div>
       </div>';
@@ -6872,7 +6626,7 @@ if (preg_match('#^/rolls/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
     if (is_array($sourceWorkOrder)) {
         $sourceOtLabel = (string)$sourceWorkOrder['ot_code'];
         $body .= canAccessWorkOrderTraceability()
-            ? '<a href="/work-orders/' . (int)$sourceWorkOrder['id'] . '/traceability">' . h($sourceOtLabel) . '</a>'
+            ? '<a href="' . h(withQuery('/work-orders/' . (int)$sourceWorkOrder['id'] . '/traceability', $rollNavParams)) . '">' . h($sourceOtLabel) . '</a>'
             : h($sourceOtLabel);
     } else {
         $body .= '-';
@@ -6953,6 +6707,7 @@ if (preg_match('#^/rolls/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
         if (is_array($payload) && isset($payload['width_mm'])) { $detail[] = 'Ancho ' . h((string)$payload['width_mm']) . ' mm'; }
         if (is_array($payload) && isset($payload['color']) && (string)$payload['color'] !== '') { $detail[] = 'Color ' . h((string)$payload['color']); }
         if (is_array($payload) && isset($payload['meters'])) { $detail[] = 'Metros ' . h((string)$payload['meters']); }
+        if ((string)($roll['container_code'] ?? '') !== '' && (string)($t['movement_type'] ?? '') === 'RECEIPT') { $detail[] = 'Contenedor ' . h((string)$roll['container_code']); }
         $fromWarehouseLabel = trim((string)($t['from_warehouse_code'] ?? '')) !== ''
             ? ((string)$t['from_warehouse_code'] . ' - ' . (string)($t['from_warehouse_name'] ?? ''))
             : '-';
@@ -7028,10 +6783,11 @@ if (preg_match('#^/rolls/(\d+)/transfer$#', $path, $m) === 1 && $method === 'GET
         : ($transferWorkOrders === [] ? 'No hay OTs disponibles para recibir bobinas.' : '');
     $selectedTransferMode = $warehouseTransferEnabled ? 'warehouse' : ($workOrderTransferEnabled ? 'work_order' : 'warehouse');
     $canSubmitTransfer = $warehouseTransferEnabled || $workOrderTransferEnabled;
+    $transferNavParams = inventoryNavigationContext() ? inventoryNavigationParams() : [];
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Transferir bobina</div>
-        <a class="btn secondary" href="/rolls/' . (int)$roll['id'] . '">Volver</a>
+        <a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$roll['id'], $transferNavParams)) . '">Volver</a>
       </div>';
 
     $body .= '<div class="card">
@@ -7457,10 +7213,12 @@ if (preg_match('#^/boxes/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
         exit;
     }
     $boxSourceRoll = $service->getRoll((int)$box['source_roll_id']);
+    $boxNavParams = inventoryNavigationContext() ? inventoryNavigationParams() : [];
+    $boxBackUrl = inventoryNavigationContext() ? inventoryReturnUrl() : '/cut';
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Caja ' . h((string)$box['box_code']) . '</div>
-        <div class="row"><a class="btn secondary" href="/cut">Volver</a><a class="btn secondary" href="/rolls/' . (int)$box['source_roll_id'] . '">Bobina origen</a><a class="btn" href="/boxes/' . (int)$box['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a><a class="btn secondary" href="/boxes/' . (int)$box['id'] . '/label?server_print=1" target="_blank" rel="noopener">Imprimir Zebra</a></div>
+        <div class="row"><a class="btn secondary" href="' . h($boxBackUrl) . '">' . h(inventoryNavigationContext() ? 'Volver a inventario' : 'Volver') . '</a><a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$box['source_roll_id'], $boxNavParams)) . '">Bobina origen</a><a class="btn" href="/boxes/' . (int)$box['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a><a class="btn secondary" href="/boxes/' . (int)$box['id'] . '/label?server_print=1" target="_blank" rel="noopener">Imprimir Zebra</a></div>
       </div>';
     $body .= '<div class="card"><div class="row">
         <div style="flex:1;min-width:180px"><div class="muted">OT</div><div style="font-weight:800">' . h((string)($box['ot_code'] ?? '-')) . '</div></div>
@@ -7476,23 +7234,23 @@ if (preg_match('#^/boxes/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
     if ((int)($box['work_order_id'] ?? 0) > 0) {
         $boxOtLabel = (string)($box['ot_code'] ?? ('OT #' . (int)$box['work_order_id']));
         $body .= canAccessWorkOrderTraceability()
-            ? '<a href="/work-orders/' . (int)$box['work_order_id'] . '/traceability">' . h($boxOtLabel) . '</a>'
+            ? '<a href="' . h(withQuery('/work-orders/' . (int)$box['work_order_id'] . '/traceability', $boxNavParams)) . '">' . h($boxOtLabel) . '</a>'
             : h($boxOtLabel);
     } else {
         $body .= '-';
     }
     $body .= '</div></div>';
-    $body .= '<div style="flex:1;min-width:180px"><div class="muted">Bobina salida</div><div style="font-weight:700"><a href="/rolls/' . (int)$box['source_roll_id'] . '">' . h((string)$box['source_roll_code']) . '</a></div></div>';
+    $body .= '<div style="flex:1;min-width:180px"><div class="muted">Bobina salida</div><div style="font-weight:700"><a href="' . h(withQuery('/rolls/' . (int)$box['source_roll_id'], $boxNavParams)) . '">' . h((string)$box['source_roll_code']) . '</a></div></div>';
     $body .= '<div style="flex:1;min-width:180px"><div class="muted">Bobina entrada</div><div style="font-weight:700">';
     if (is_array($boxSourceRoll) && (int)($boxSourceRoll['parent_roll_id'] ?? 0) > 0) {
-        $body .= '<a href="/rolls/' . (int)$boxSourceRoll['parent_roll_id'] . '">' . h((string)($boxSourceRoll['parent_roll_code'] ?? ('#' . (int)$boxSourceRoll['parent_roll_id']))) . '</a>';
+        $body .= '<a href="' . h(withQuery('/rolls/' . (int)$boxSourceRoll['parent_roll_id'], $boxNavParams)) . '">' . h((string)($boxSourceRoll['parent_roll_code'] ?? ('#' . (int)$boxSourceRoll['parent_roll_id']))) . '</a>';
     } else {
         $body .= '-';
     }
     $body .= '</div></div>';
     $body .= '<div style="flex:1;min-width:180px"><div class="muted">Pallet</div><div style="font-weight:700">';
     if ((int)($box['pallet_id'] ?? 0) > 0) {
-        $body .= '<a href="/pallets/' . (int)$box['pallet_id'] . '">' . h((string)($box['pallet_code'] ?? ('#' . (int)$box['pallet_id']))) . '</a>';
+        $body .= '<a href="' . h(withQuery('/pallets/' . (int)$box['pallet_id'], $boxNavParams)) . '">' . h((string)($box['pallet_code'] ?? ('#' . (int)$box['pallet_id']))) . '</a>';
     } else {
         $body .= '-';
     }
@@ -7646,6 +7404,8 @@ if (preg_match('#^/pallets/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
     $palletWarehouses = $service->listWarehouses();
     $palletMessage = trim((string)($_GET['msg'] ?? ''));
     $palletError = trim((string)($_GET['error'] ?? ''));
+    $palletNavParams = inventoryNavigationContext() ? inventoryNavigationParams() : [];
+    $palletBackUrl = inventoryNavigationContext() ? inventoryReturnUrl() : '/pallets';
     $currentWarehouseLabel = trim((string)($pallet['warehouse_code'] ?? ''));
     if ($currentWarehouseLabel === '') {
         $currentWarehouseLabel = 'Sin bodega';
@@ -7662,7 +7422,7 @@ if (preg_match('#^/pallets/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Pallet ' . h((string)$pallet['pallet_code']) . '</div>
-        <div class="row"><a class="btn secondary" href="/pallets">Volver</a>' . $maquilaAction . '<a class="btn secondary" href="/rolls/' . (int)$pallet['source_roll_id'] . '">Bobina origen</a><a class="btn" href="/pallets/' . (int)$pallet['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a><a class="btn secondary" href="/pallets/' . (int)$pallet['id'] . '/label?server_print=1" target="_blank" rel="noopener">Imprimir Zebra</a></div>
+        <div class="row"><a class="btn secondary" href="' . h($palletBackUrl) . '">' . h(inventoryNavigationContext() ? 'Volver a inventario' : 'Volver') . '</a>' . $maquilaAction . '<a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$pallet['source_roll_id'], $palletNavParams)) . '">Bobina origen</a><a class="btn" href="/pallets/' . (int)$pallet['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a><a class="btn secondary" href="/pallets/' . (int)$pallet['id'] . '/label?server_print=1" target="_blank" rel="noopener">Imprimir Zebra</a></div>
       </div>';
     if ($palletMessage !== '') {
         $body .= '<div class="ok" style="margin-bottom:12px">' . h($palletMessage) . '</div>';
@@ -7724,16 +7484,16 @@ if (preg_match('#^/pallets/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
     if ((int)($pallet['work_order_id'] ?? 0) > 0) {
         $palletOtLabel = (string)($pallet['ot_code'] ?? ('OT #' . (int)$pallet['work_order_id']));
         $body .= canAccessWorkOrderTraceability()
-            ? '<a href="/work-orders/' . (int)$pallet['work_order_id'] . '/traceability">' . h($palletOtLabel) . '</a>'
+            ? '<a href="' . h(withQuery('/work-orders/' . (int)$pallet['work_order_id'] . '/traceability', $palletNavParams)) . '">' . h($palletOtLabel) . '</a>'
             : h($palletOtLabel);
     } else {
         $body .= '-';
     }
     $body .= '</div></div>';
-    $body .= '<div style="flex:1;min-width:180px"><div class="muted">Bobina salida</div><div style="font-weight:700"><a href="/rolls/' . (int)$pallet['source_roll_id'] . '">' . h((string)$pallet['source_roll_code']) . '</a></div></div>';
+    $body .= '<div style="flex:1;min-width:180px"><div class="muted">Bobina salida</div><div style="font-weight:700"><a href="' . h(withQuery('/rolls/' . (int)$pallet['source_roll_id'], $palletNavParams)) . '">' . h((string)$pallet['source_roll_code']) . '</a></div></div>';
     $body .= '<div style="flex:1;min-width:180px"><div class="muted">Bobina entrada</div><div style="font-weight:700">';
     if (is_array($palletSourceRoll) && (int)($palletSourceRoll['parent_roll_id'] ?? 0) > 0) {
-        $body .= '<a href="/rolls/' . (int)$palletSourceRoll['parent_roll_id'] . '">' . h((string)($palletSourceRoll['parent_roll_code'] ?? ('#' . (int)$palletSourceRoll['parent_roll_id']))) . '</a>';
+        $body .= '<a href="' . h(withQuery('/rolls/' . (int)$palletSourceRoll['parent_roll_id'], $palletNavParams)) . '">' . h((string)($palletSourceRoll['parent_roll_code'] ?? ('#' . (int)$palletSourceRoll['parent_roll_id']))) . '</a>';
     } else {
         $body .= '-';
     }
@@ -7748,11 +7508,11 @@ if (preg_match('#^/pallets/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
             $warehouseLabel .= ' - ' . (string)$palletBox['warehouse_name'];
         }
         $body .= '<tr>';
-        $body .= '<td><a href="/boxes/' . (int)$palletBox['id'] . '">' . h((string)$palletBox['box_code']) . '</a></td>';
+        $body .= '<td><a href="' . h(withQuery('/boxes/' . (int)$palletBox['id'], $palletNavParams)) . '">' . h((string)$palletBox['box_code']) . '</a></td>';
         $body .= '<td>' . h((string)($palletBox['units_qty'] ?? '-')) . '</td>';
         $body .= '<td>' . h($warehouseLabel) . '</td>';
         $body .= '<td>' . h(boxStatusLabel((string)($palletBox['status'] ?? ''))) . '</td>';
-        $body .= '<td><a class="btn secondary" href="/boxes/' . (int)$palletBox['id'] . '">Ver caja</a></td>';
+        $body .= '<td><a class="btn secondary" href="' . h(withQuery('/boxes/' . (int)$palletBox['id'], $palletNavParams)) . '">Ver caja</a></td>';
         $body .= '</tr>';
     }
     if ($palletBoxes === []) {
