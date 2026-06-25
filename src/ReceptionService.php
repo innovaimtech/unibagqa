@@ -6623,6 +6623,38 @@ SQL;
         return $outputRollId;
     }
 
+    private function insertMovement(int $rollId, int $toWarehouseId, array $input): void
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+             VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+        );
+
+        $payload = json_encode([
+            'weight_kg' => isset($input['weight_kg']) ? (string)$input['weight_kg'] : '0',
+            'received_qty' => isset($input['received_qty']) ? (float)$input['received_qty'] : 1.0,
+            'reception_mode' => strtoupper(trim((string)($input['reception_mode'] ?? 'QUANTITY'))) === 'WEIGHT' ? 'WEIGHT' : 'QUANTITY',
+            'microns' => isset($input['microns']) && $input['microns'] !== '' ? (int)$input['microns'] : null,
+            'width_mm' => isset($input['width_mm']) && $input['width_mm'] !== '' ? (int)$input['width_mm'] : null,
+            'color' => isset($input['color']) && trim((string)$input['color']) !== '' ? trim((string)$input['color']) : null,
+            'meters' => isset($input['meters']) && $input['meters'] !== '' ? (float)$input['meters'] : null,
+            'purchase_order_id' => isset($input['purchase_order_id']) ? (int)$input['purchase_order_id'] : null,
+            'purchase_order_line_id' => isset($input['purchase_order_line_id']) ? (int)$input['purchase_order_line_id'] : null,
+            'import_container_id' => isset($input['import_container_id']) ? (int)$input['import_container_id'] : null,
+            'import_container_item_id' => isset($input['import_container_item_id']) ? (int)$input['import_container_item_id'] : null,
+            'operator_name' => trim((string)($input['operator_name'] ?? '')),
+        ], JSON_UNESCAPED_UNICODE);
+
+        $stmt->execute([
+            ':entity_type' => 'ROLL',
+            ':entity_id' => $rollId,
+            ':movement_type' => 'RECEIPT',
+            ':from_warehouse_id' => null,
+            ':to_warehouse_id' => $toWarehouseId,
+            ':payload' => $payload,
+        ]);
+    }
+
     private function generateProcessRollCode(): string
     {
         $date = gmdate('Ymd');

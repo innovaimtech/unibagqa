@@ -24,6 +24,7 @@ storage/logs/
 *.tmp
 *.bak
 *.cache
+backups/
 
 # Capturas, exports y auxiliares de pruebas
 *.html
