@@ -55,19 +55,7 @@ function unibagHandleLoginPost(): void
     $company = $companies[$companyId] ?? $companies[1];
     $plant = null;
 
-    $user = null;
-    if ($username !== '') {
-        $stmt = $trzPdo->prepare('SELECT * FROM auth_users WHERE username = :username AND is_active = 1 LIMIT 1');
-        $stmt->execute(['username' => $username]);
-        $found = $stmt->fetch();
-        if (is_array($found) && password_verify($password, (string)$found['password_hash'])) {
-            $permissionColumn = authPermissionColumn($appMode);
-            $areaPermissions = userAreaPermissions($found);
-            if ($permissionColumn !== '' && (int)($found[$permissionColumn] ?? 0) === 1 && userCanAccessArea($erpArea, $areaPermissions)) {
-                $user = $found;
-            }
-        }
-    }
+    $user = unibagFindAuthorizedUser($trzPdo, $username, $password, $erpArea, $appMode);
 
     if (!is_array($user)) {
         renderLoginPage('Usuario, clave o modo sin acceso.', [
@@ -102,6 +90,32 @@ function unibagHandleLoginPost(): void
     $erpAreaHome = erpAreaDefinitions()[$erpArea]['home'] ?? '/';
     session_write_close();
     redirectResponse($erpAreaHome);
+}
+
+function unibagFindAuthorizedUser(PDO $trzPdo, string $username, string $password, string $erpArea = 'ERP', int $appMode = 0): ?array
+{
+    ensureAuthSchema($trzPdo);
+
+    $username = trim($username);
+    $erpArea = normalizeErpArea($erpArea);
+    if ($username === '' || $password === '') {
+        return null;
+    }
+
+    $stmt = $trzPdo->prepare('SELECT * FROM auth_users WHERE username = :username AND is_active = 1 LIMIT 1');
+    $stmt->execute(['username' => $username]);
+    $found = $stmt->fetch();
+    if (!is_array($found) || !password_verify($password, (string)$found['password_hash'])) {
+        return null;
+    }
+
+    $permissionColumn = authPermissionColumn($appMode);
+    $areaPermissions = userAreaPermissions($found);
+    if ($permissionColumn === '' || (int)($found[$permissionColumn] ?? 0) !== 1 || !userCanAccessArea($erpArea, $areaPermissions)) {
+        return null;
+    }
+
+    return $found;
 }
 
 function unibagHandleLoginGet(): void

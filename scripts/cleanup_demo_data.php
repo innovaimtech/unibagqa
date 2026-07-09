@@ -257,8 +257,8 @@ function deleteEventsByWorkOrders(PDO $pdo, array $workOrderIds): int
 
     $placeholders = implode(', ', array_fill(0, count($workOrderIds), '?'));
     $sql = 'DELETE FROM events
-            WHERE CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) IN (' . $placeholders . ')
-               OR CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.source_work_order_id")) AS UNSIGNED) IN (' . $placeholders . ')';
+            WHERE CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")), "null") AS UNSIGNED) IN (' . $placeholders . ')
+               OR CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.source_work_order_id")), "null") AS UNSIGNED) IN (' . $placeholders . ')';
     $params = array_merge(array_map('intval', $workOrderIds), array_map('intval', $workOrderIds));
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
@@ -276,8 +276,8 @@ function deleteEventsByRolls(PDO $pdo, array $rollIds): int
 
     $placeholders = implode(', ', array_fill(0, count($rollIds), '?'));
     $sql = 'DELETE FROM events
-            WHERE CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.roll_id")) AS UNSIGNED) IN (' . $placeholders . ')
-               OR CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.output_roll_id")) AS UNSIGNED) IN (' . $placeholders . ')';
+            WHERE CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.roll_id")), "null") AS UNSIGNED) IN (' . $placeholders . ')
+               OR CAST(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.output_roll_id")), "null") AS UNSIGNED) IN (' . $placeholders . ')';
     $params = array_merge(array_map('intval', $rollIds), array_map('intval', $rollIds));
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);

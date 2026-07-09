@@ -17,7 +17,7 @@ $operator = ensureErpOperatorContext($erp);
 
 $plans = [
     [
-        'number' => 'PRD-PLAN-' . $suffix,
+        'number' => 'PRD-PLAN-A-' . $suffix,
         'desc' => 'BOLSA 45X60 IMPRESA - PLANIFICADA',
         'req_id' => $reqBase + 1,
         'planta_id' => 1,
@@ -30,9 +30,22 @@ $plans = [
         'finished' => false,
     ],
     [
-        'number' => 'PRD-ACT-' . $suffix,
-        'desc' => 'BOLSA 50X70 IMPRESA - EN PRODUCCION',
+        'number' => 'PRD-PLAN-B-' . $suffix,
+        'desc' => 'BOLSA 35X45 NATURAL - PLANIFICADA',
         'req_id' => $reqBase + 2,
+        'planta_id' => 1,
+        'amount' => 9500,
+        'machine_id' => 104,
+        'machine_type_id' => 2,
+        'date' => $now + 5400,
+        'active' => 0,
+        'with_execution' => false,
+        'finished' => false,
+    ],
+    [
+        'number' => 'PRD-ACT-A-' . $suffix,
+        'desc' => 'BOLSA 50X70 IMPRESA - EN PRODUCCION',
+        'req_id' => $reqBase + 3,
         'planta_id' => 1,
         'amount' => 18000,
         'machine_id' => 102,
@@ -43,14 +56,66 @@ $plans = [
         'finished' => false,
     ],
     [
-        'number' => 'PRD-END-' . $suffix,
-        'desc' => 'BOLSA 60X90 IMPRESA - EJECUTADA',
-        'req_id' => $reqBase + 3,
+        'number' => 'PRD-ACT-B-' . $suffix,
+        'desc' => 'BOLSA 60X90 RETAIL - EN PRODUCCION',
+        'req_id' => $reqBase + 4,
         'planta_id' => 1,
-        'amount' => 9000,
+        'amount' => 15500,
         'machine_id' => 103,
         'machine_type_id' => 2,
+        'date' => $now - 1800,
+        'active' => 1,
+        'with_execution' => true,
+        'finished' => false,
+    ],
+    [
+        'number' => 'PRD-ACT-C-' . $suffix,
+        'desc' => 'BOLSA 70X100 SACO - EN AJUSTE',
+        'req_id' => $reqBase + 5,
+        'planta_id' => 1,
+        'amount' => 13200,
+        'machine_id' => 105,
+        'machine_type_id' => 3,
+        'date' => $now - 2700,
+        'active' => 1,
+        'with_execution' => true,
+        'finished' => false,
+    ],
+    [
+        'number' => 'PRD-END-A-' . $suffix,
+        'desc' => 'BOLSA 60X90 IMPRESA - EJECUTADA',
+        'req_id' => $reqBase + 6,
+        'planta_id' => 1,
+        'amount' => 9000,
+        'machine_id' => 106,
+        'machine_type_id' => 2,
         'date' => $now - 7200,
+        'active' => 0,
+        'with_execution' => true,
+        'finished' => true,
+    ],
+    [
+        'number' => 'PRD-END-B-' . $suffix,
+        'desc' => 'BOLSA 40X50 IMPRESA - EJECUTADA',
+        'req_id' => $reqBase + 7,
+        'planta_id' => 1,
+        'amount' => 11200,
+        'machine_id' => 107,
+        'machine_type_id' => 1,
+        'date' => $now - 9600,
+        'active' => 0,
+        'with_execution' => true,
+        'finished' => true,
+    ],
+    [
+        'number' => 'PRD-END-C-' . $suffix,
+        'desc' => 'BOLSA 25X35 TROQUELADA - EJECUTADA',
+        'req_id' => $reqBase + 8,
+        'planta_id' => 1,
+        'amount' => 8700,
+        'machine_id' => 108,
+        'machine_type_id' => 3,
+        'date' => $now - 12600,
         'active' => 0,
         'with_execution' => true,
         'finished' => true,
@@ -60,7 +125,11 @@ $plans = [
 $erp->beginTransaction();
 try {
     $result = [];
-    foreach ($plans as $plan) {
+    $plannedCount = 0;
+    $activeCount = 0;
+    $finishedCount = 0;
+    foreach ($plans as $index => $plan) {
+        $plan['ag_order'] = $index + 1;
         $headerId = createProdHeader($erp, $plan);
         $agendaId = createProdAgenda($erp, $headerId, $plan);
         $workerInitId = null;
@@ -83,6 +152,14 @@ try {
             'prd_number' => $plan['number'],
             'prd_desc' => $plan['desc'],
         ];
+
+        if ($plan['finished'] === true) {
+            $finishedCount++;
+        } elseif ($plan['with_execution'] === true) {
+            $activeCount++;
+        } else {
+            $plannedCount++;
+        }
     }
 
     $erp->commit();
@@ -91,6 +168,12 @@ try {
         'tables' => $tables,
         'worker_id' => $operator['worker_id'],
         'user_id' => $operator['user_id'],
+        'summary' => [
+            'planned' => $plannedCount,
+            'active' => $activeCount,
+            'finished' => $finishedCount,
+            'total' => count($result),
+        ],
         'plans' => $result,
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . PHP_EOL;
 } catch (Throwable $e) {
@@ -144,7 +227,7 @@ function createProdAgenda(PDO $pdo, int $headerId, array $plan): int
         ':created_at' => (int)$plan['date'],
         ':status' => $plan['active'] === 1 ? 1 : 0,
         ':active' => (int)$plan['active'],
-        ':ag_order' => 1,
+        ':ag_order' => (int)($plan['ag_order'] ?? 1),
     ]);
 
     return (int)$pdo->lastInsertId();

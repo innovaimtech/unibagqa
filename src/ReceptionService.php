@@ -7,7 +7,7 @@ require_once __DIR__ . '/RollReceptionService.php';
 
 final class ReceptionService
 {
-    private const RECEPTION_SCHEMA_VERSION = 'reception_v7';
+    private const RECEPTION_SCHEMA_VERSION = 'reception_v8';
     private const PRODUCTION_WAREHOUSE_SYNC_VERSION = 'production_warehouse_sync_v1';
     private static bool $schemaEnsured = false;
     private bool $erpWarehousesSynced = false;
@@ -454,6 +454,57 @@ final class ReceptionService
                 CONSTRAINT fk_shift_sessions_machine FOREIGN KEY (machine_id) REFERENCES production_machines(id),
                 CONSTRAINT fk_shift_sessions_work_order FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE SET NULL
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS production_anilox_catalog (
+                id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+                code VARCHAR(40) NOT NULL,
+                name VARCHAR(120) NOT NULL,
+                bcm VARCHAR(40) NULL,
+                lpi VARCHAR(40) NULL,
+                sort_order INT UNSIGNED NOT NULL DEFAULT 0,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_production_anilox_catalog_code (code),
+                KEY idx_production_anilox_catalog_active_sort (is_active, sort_order)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS work_order_anilox_assignments (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                work_order_id BIGINT UNSIGNED NOT NULL,
+                unit_no TINYINT UNSIGNED NOT NULL,
+                color_name VARCHAR(120) NOT NULL DEFAULT '',
+                anilox_id INT UNSIGNED NULL,
+                updated_by VARCHAR(120) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uq_work_order_anilox_unit (work_order_id, unit_no),
+                KEY idx_work_order_anilox_work_order (work_order_id),
+                KEY idx_work_order_anilox_catalog (anilox_id),
+                CONSTRAINT fk_work_order_anilox_work_order FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE CASCADE,
+                CONSTRAINT fk_work_order_anilox_catalog FOREIGN KEY (anilox_id) REFERENCES production_anilox_catalog(id) ON DELETE SET NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "INSERT IGNORE INTO production_anilox_catalog (code, name, bcm, lpi, sort_order, is_active) VALUES
+                ('ANI0001', 'ANILOX 100', '2.2', '100', 10, 1),
+                ('ANI0002', 'ANILOX 120', '2.5', '120', 20, 1),
+                ('ANI0003', 'ANILOX 300', '3.0', '300', 30, 1),
+                ('ANI0004', 'ANILOX 360', '3.3', '360', 40, 1),
+                ('ANI0005', 'ANILOX 400', '3.6', '400', 50, 1),
+                ('ANI0006', 'ANILOX 500', '4.0', '500', 60, 1),
+                ('ANI0007', 'ANILOX 550', '4.3', '550', 70, 1),
+                ('ANI0008', 'ANILOX 650', '4.8', '650', 80, 1),
+                ('ANI0009', 'ANILOX 700', '5.0', '700', 90, 1),
+                ('ANI0010', 'ANILOX 800', '5.4', '800', 100, 1),
+                ('ANI0011', 'ANILOX 1000', '6.0', '1000', 110, 1),
+                ('ANI0012', 'ANILOX 1200', '6.8', '1200', 120, 1)"
         );
 
         $this->pdo->exec(
@@ -3338,6 +3389,155 @@ SQL;
         return $stmt->fetchAll();
     }
 
+    public function listAniloxCatalog(): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, code, name, bcm, lpi,
+                    CONCAT(code, " - ", name, CASE
+                        WHEN COALESCE(lpi, "") <> "" THEN CONCAT(" / ", lpi)
+                        ELSE ""
+                    END) AS display_label
+             FROM production_anilox_catalog
+             WHERE is_active = 1
+             ORDER BY sort_order ASC, code ASC'
+        );
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    public function getWorkOrderAniloxAssignments(int $workOrderId): array
+    {
+        if ($workOrderId <= 0) {
+            return [];
+        }
+
+        $stmt = $this->pdo->prepare(
+            'SELECT wa.id, wa.work_order_id, wa.unit_no, wa.color_name, wa.anilox_id, wa.updated_by, wa.updated_at,
+                    ac.code AS anilox_code, ac.name AS anilox_name,
+                    CONCAT(ac.code, " - ", ac.name, CASE
+                        WHEN COALESCE(ac.lpi, "") <> "" THEN CONCAT(" / ", ac.lpi)
+                        ELSE ""
+                    END) AS anilox_label
+             FROM work_order_anilox_assignments wa
+             LEFT JOIN production_anilox_catalog ac ON ac.id = wa.anilox_id
+             WHERE wa.work_order_id = :work_order_id
+             ORDER BY wa.unit_no ASC'
+        );
+        $stmt->execute([':work_order_id' => $workOrderId]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * @param array<int,array{unit_no:int,color_name:string,anilox_id:int|null}> $slots
+     */
+    public function saveWorkOrderAniloxAssignments(int $workOrderId, array $slots, string $operatorName): array
+    {
+        $errors = [];
+        $operatorName = trim($operatorName);
+
+        if ($workOrderId <= 0 || $this->getWorkOrder($workOrderId) === null) {
+            $errors['work_order_id'] = 'La OT no existe.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'El operador es obligatorio.';
+        }
+        if ($slots === []) {
+            $errors['slots'] = 'Debes enviar al menos una unidad.';
+        }
+
+        $normalizedSlots = [];
+        $seenUnits = [];
+        foreach ($slots as $index => $slot) {
+            $unitNo = isset($slot['unit_no']) ? (int)$slot['unit_no'] : ($index + 1);
+            $colorName = trim((string)($slot['color_name'] ?? ''));
+            $aniloxId = isset($slot['anilox_id']) && (int)$slot['anilox_id'] > 0 ? (int)$slot['anilox_id'] : null;
+
+            if ($unitNo < 1 || $unitNo > 6) {
+                $errors['unit_' . $index] = 'Las unidades de anilox deben estar entre 1 y 6.';
+                continue;
+            }
+            if (isset($seenUnits[$unitNo])) {
+                $errors['unit_dup_' . $unitNo] = 'La unidad ' . $unitNo . ' está repetida.';
+                continue;
+            }
+            $seenUnits[$unitNo] = true;
+
+            if (mb_strlen($colorName) > 120) {
+                $errors['color_' . $unitNo] = 'El color de la unidad ' . $unitNo . ' supera el largo permitido.';
+            }
+            if ($aniloxId !== null) {
+                $stmt = $this->pdo->prepare('SELECT id FROM production_anilox_catalog WHERE id = :id AND is_active = 1');
+                $stmt->execute([':id' => $aniloxId]);
+                if ($stmt->fetch() === false) {
+                    $errors['anilox_' . $unitNo] = 'El anilox seleccionado en la unidad ' . $unitNo . ' no existe.';
+                }
+            }
+
+            $normalizedSlots[] = [
+                'unit_no' => $unitNo,
+                'color_name' => $colorName,
+                'anilox_id' => $aniloxId,
+            ];
+        }
+
+        if (count($normalizedSlots) !== 6) {
+            $errors['slots_count'] = 'La configuración debe tener exactamente 6 unidades.';
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        usort(
+            $normalizedSlots,
+            static fn(array $left, array $right): int => (int)$left['unit_no'] <=> (int)$right['unit_no']
+        );
+
+        $this->pdo->beginTransaction();
+        try {
+            $delete = $this->pdo->prepare('DELETE FROM work_order_anilox_assignments WHERE work_order_id = :work_order_id');
+            $delete->execute([':work_order_id' => $workOrderId]);
+
+            $insert = $this->pdo->prepare(
+                'INSERT INTO work_order_anilox_assignments (
+                    work_order_id, unit_no, color_name, anilox_id, updated_by
+                 ) VALUES (
+                    :work_order_id, :unit_no, :color_name, :anilox_id, :updated_by
+                 )'
+            );
+
+            foreach ($normalizedSlots as $slot) {
+                $insert->execute([
+                    ':work_order_id' => $workOrderId,
+                    ':unit_no' => (int)$slot['unit_no'],
+                    ':color_name' => (string)$slot['color_name'],
+                    ':anilox_id' => $slot['anilox_id'],
+                    ':updated_by' => $operatorName,
+                ]);
+            }
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        $this->insertEvent('WORK_ORDER_ANILOX_UPDATED', [
+            'work_order_id' => $workOrderId,
+            'operator_name' => $operatorName,
+            'slots' => array_map(
+                static fn(array $slot): array => [
+                    'unit_no' => (int)$slot['unit_no'],
+                    'color_name' => (string)$slot['color_name'],
+                    'anilox_id' => $slot['anilox_id'],
+                ],
+                $normalizedSlots
+            ),
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
     public function listRecentChemicalWeighings(int $limit = 50): array
     {
         $stmt = $this->pdo->prepare(
@@ -3513,7 +3713,7 @@ SQL;
     {
         $stmt = $this->pdo->prepare(
             'SELECT e.id, e.type, e.created_at, e.payload,
-                    r.id AS roll_id, r.roll_code, r.weight_kg, w.code AS warehouse_code,
+                    r.id AS roll_id, r.roll_code, r.weight_kg, r.meters, w.code AS warehouse_code,
                     s.code AS sku_code, s.description AS sku_description,
                     r.purchase_order_id, r.supplier_id
              FROM events e
@@ -3533,6 +3733,917 @@ SQL;
         }
         unset($row);
         return $rows;
+    }
+
+    public function listWorkOrderProcessEvents(int $workOrderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, type, created_at, payload
+             FROM events
+             WHERE type IN ("WORK_ORDER_PAUSE_STARTED","WORK_ORDER_PAUSE_ENDED","WORK_ORDER_MAINTENANCE_STARTED","WORK_ORDER_MAINTENANCE_ENDED")
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id ASC'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $rows = $stmt->fetchAll();
+
+        $items = [];
+        $itemIndexByStartEvent = [];
+        foreach ($rows as $row) {
+            $payload = json_decode((string)($row['payload'] ?? '{}'), true);
+            $payload = is_array($payload) ? $payload : [];
+            $eventType = strtoupper(trim((string)($row['type'] ?? '')));
+            $eventKey = strtoupper(trim((string)($payload['event_key'] ?? '')));
+            if ($eventKey === '') {
+                $eventKey = str_contains($eventType, 'MAINTENANCE') ? 'MAINTENANCE' : 'PAUSE';
+            }
+            if (str_ends_with($eventType, '_STARTED')) {
+                $items[] = [
+                    'start_event_id' => (int)($row['id'] ?? 0),
+                    'event_key' => $eventKey,
+                    'event_label' => $eventKey === 'MAINTENANCE' ? 'Mantención' : 'Pausa',
+                    'started_at' => trim((string)($payload['started_at'] ?? '')) !== '' ? (string)$payload['started_at'] : (string)($row['created_at'] ?? ''),
+                    'ended_at' => null,
+                    'comments' => trim((string)($payload['comments'] ?? '')),
+                    'status' => 'OPEN',
+                ];
+                $itemIndexByStartEvent[(int)($row['id'] ?? 0)] = count($items) - 1;
+                continue;
+            }
+
+            $startEventId = (int)($payload['start_event_id'] ?? 0);
+            if ($startEventId <= 0 || !isset($itemIndexByStartEvent[$startEventId])) {
+                continue;
+            }
+            $itemIndex = $itemIndexByStartEvent[$startEventId];
+            $items[$itemIndex]['ended_at'] = trim((string)($payload['ended_at'] ?? '')) !== '' ? (string)$payload['ended_at'] : (string)($row['created_at'] ?? '');
+            $items[$itemIndex]['status'] = 'CLOSED';
+        }
+
+        return array_reverse($items);
+    }
+
+    public function listWorkOrderSealingSetupEvents(int $workOrderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, type, created_at, payload
+             FROM events
+             WHERE type IN ("WORK_ORDER_SEALING_SETUP_STARTED","WORK_ORDER_SEALING_SETUP_ENDED")
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id ASC'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $rows = $stmt->fetchAll();
+
+        $items = [];
+        $itemIndexByStartEvent = [];
+        foreach ($rows as $row) {
+            $payload = json_decode((string)($row['payload'] ?? '{}'), true);
+            $payload = is_array($payload) ? $payload : [];
+            $eventType = strtoupper(trim((string)($row['type'] ?? '')));
+            if ($eventType === 'WORK_ORDER_SEALING_SETUP_STARTED') {
+                $items[] = [
+                    'start_event_id' => (int)($row['id'] ?? 0),
+                    'event_key' => 'SEALING_SETUP',
+                    'event_label' => 'Alistamiento',
+                    'started_at' => trim((string)($payload['started_at'] ?? '')) !== '' ? (string)$payload['started_at'] : (string)($row['created_at'] ?? ''),
+                    'ended_at' => null,
+                    'comments' => trim((string)($payload['comments'] ?? '')),
+                    'detail' => trim((string)($payload['detail'] ?? '')),
+                    'status' => 'OPEN',
+                ];
+                $itemIndexByStartEvent[(int)($row['id'] ?? 0)] = count($items) - 1;
+                continue;
+            }
+
+            $startEventId = (int)($payload['start_event_id'] ?? 0);
+            if ($startEventId <= 0 || !isset($itemIndexByStartEvent[$startEventId])) {
+                continue;
+            }
+            $itemIndex = $itemIndexByStartEvent[$startEventId];
+            $items[$itemIndex]['ended_at'] = trim((string)($payload['ended_at'] ?? '')) !== '' ? (string)$payload['ended_at'] : (string)($row['created_at'] ?? '');
+            $items[$itemIndex]['status'] = 'CLOSED';
+        }
+
+        return array_reverse($items);
+    }
+
+    public function listWorkOrderPackagingSetupEvents(int $workOrderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, type, created_at, payload
+             FROM events
+             WHERE type IN ("WORK_ORDER_PACKAGING_SETUP_STARTED","WORK_ORDER_PACKAGING_SETUP_ENDED")
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id ASC'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $rows = $stmt->fetchAll();
+
+        $items = [];
+        $itemIndexByStartEvent = [];
+        foreach ($rows as $row) {
+            $payload = json_decode((string)($row['payload'] ?? '{}'), true);
+            $payload = is_array($payload) ? $payload : [];
+            $eventType = strtoupper(trim((string)($row['type'] ?? '')));
+            if ($eventType === 'WORK_ORDER_PACKAGING_SETUP_STARTED') {
+                $items[] = [
+                    'start_event_id' => (int)($row['id'] ?? 0),
+                    'event_key' => 'PACKAGING_SETUP',
+                    'event_label' => 'Alistamiento',
+                    'started_at' => trim((string)($payload['started_at'] ?? '')) !== '' ? (string)$payload['started_at'] : (string)($row['created_at'] ?? ''),
+                    'ended_at' => null,
+                    'comments' => trim((string)($payload['comments'] ?? '')),
+                    'detail' => trim((string)($payload['detail'] ?? '')),
+                    'status' => 'OPEN',
+                ];
+                $itemIndexByStartEvent[(int)($row['id'] ?? 0)] = count($items) - 1;
+                continue;
+            }
+
+            $startEventId = (int)($payload['start_event_id'] ?? 0);
+            if ($startEventId <= 0 || !isset($itemIndexByStartEvent[$startEventId])) {
+                continue;
+            }
+            $itemIndex = $itemIndexByStartEvent[$startEventId];
+            $items[$itemIndex]['ended_at'] = trim((string)($payload['ended_at'] ?? '')) !== '' ? (string)$payload['ended_at'] : (string)($row['created_at'] ?? '');
+            $items[$itemIndex]['status'] = 'CLOSED';
+        }
+
+        return array_reverse($items);
+    }
+
+    public function startWorkOrderProcessEvent(int $workOrderId, string $eventKey, string $comments, string $operatorName): array
+    {
+        $eventKey = strtoupper(trim($eventKey));
+        if (!in_array($eventKey, ['PAUSE', 'MAINTENANCE'], true)) {
+            throw new RuntimeException('El evento solicitado no es válido.');
+        }
+        if (trim($comments) === '') {
+            throw new RuntimeException('Debes ingresar un comentario para registrar este evento.');
+        }
+        foreach ($this->listWorkOrderProcessEvents($workOrderId) as $existingEvent) {
+            if ((string)($existingEvent['status'] ?? '') !== 'OPEN') {
+                continue;
+            }
+            if (strtoupper((string)($existingEvent['event_key'] ?? '')) !== $eventKey) {
+                continue;
+            }
+            throw new RuntimeException($eventKey === 'PAUSE'
+                ? 'Ya existe una pausa en curso para esta OT.'
+                : 'Ya existe una mantención en curso para esta OT.');
+        }
+
+        $startedAt = date('Y-m-d H:i:s');
+        $this->insertEvent(
+            $eventKey === 'PAUSE' ? 'WORK_ORDER_PAUSE_STARTED' : 'WORK_ORDER_MAINTENANCE_STARTED',
+            [
+                'work_order_id' => $workOrderId,
+                'event_key' => $eventKey,
+                'started_at' => $startedAt,
+                'comments' => trim($comments),
+                'operator_name' => trim($operatorName),
+            ]
+        );
+
+        return [
+            'ok' => true,
+            'event_key' => $eventKey,
+            'started_at' => $startedAt,
+        ];
+    }
+
+    public function finishWorkOrderProcessEvent(int $workOrderId, int $startEventId, string $operatorName): array
+    {
+        $targetEvent = null;
+        foreach ($this->listWorkOrderProcessEvents($workOrderId) as $processEvent) {
+            if ((int)($processEvent['start_event_id'] ?? 0) !== $startEventId) {
+                continue;
+            }
+            $targetEvent = $processEvent;
+            break;
+        }
+        if (!is_array($targetEvent)) {
+            throw new RuntimeException('No se encontró el evento a terminar.');
+        }
+        if ((string)($targetEvent['status'] ?? '') !== 'OPEN') {
+            throw new RuntimeException('Este evento ya fue terminado.');
+        }
+
+        $eventKey = strtoupper(trim((string)($targetEvent['event_key'] ?? '')));
+        $endedAt = date('Y-m-d H:i:s');
+        $this->insertEvent(
+            $eventKey === 'PAUSE' ? 'WORK_ORDER_PAUSE_ENDED' : 'WORK_ORDER_MAINTENANCE_ENDED',
+            [
+                'work_order_id' => $workOrderId,
+                'event_key' => $eventKey,
+                'start_event_id' => $startEventId,
+                'started_at' => (string)($targetEvent['started_at'] ?? ''),
+                'ended_at' => $endedAt,
+                'operator_name' => trim($operatorName),
+            ]
+        );
+
+        return [
+            'ok' => true,
+            'event_key' => $eventKey,
+            'ended_at' => $endedAt,
+        ];
+    }
+
+    public function startWorkOrderPackagingSetupEvent(int $workOrderId, string $comments, string $operatorName, string $detail = ''): array
+    {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT no existe.']];
+        }
+        foreach ($this->listWorkOrderPackagingSetupEvents($workOrderId) as $existingEvent) {
+            if ((string)($existingEvent['status'] ?? '') === 'OPEN') {
+                return ['ok' => false, 'errors' => ['event' => 'Ya existe un alistamiento de Embalaje en curso para esta OT.']];
+            }
+        }
+
+        $startedAt = date('Y-m-d H:i:s');
+        $this->insertEvent('WORK_ORDER_PACKAGING_SETUP_STARTED', [
+            'work_order_id' => $workOrderId,
+            'started_at' => $startedAt,
+            'comments' => trim($comments),
+            'detail' => trim($detail),
+            'operator_name' => trim($operatorName),
+        ]);
+
+        return [
+            'ok' => true,
+            'started_at' => $startedAt,
+        ];
+    }
+
+    public function finishWorkOrderPackagingSetupEvent(int $workOrderId, int $startEventId, string $operatorName): array
+    {
+        $targetEvent = null;
+        foreach ($this->listWorkOrderPackagingSetupEvents($workOrderId) as $setupEvent) {
+            if ((int)($setupEvent['start_event_id'] ?? 0) !== $startEventId) {
+                continue;
+            }
+            $targetEvent = $setupEvent;
+            break;
+        }
+        if (!is_array($targetEvent)) {
+            throw new RuntimeException('No fue posible encontrar el evento de alistamiento indicado.');
+        }
+        if ((string)($targetEvent['status'] ?? '') !== 'OPEN') {
+            throw new RuntimeException('Este evento de alistamiento ya fue terminado.');
+        }
+
+        $endedAt = date('Y-m-d H:i:s');
+        $this->insertEvent('WORK_ORDER_PACKAGING_SETUP_ENDED', [
+            'work_order_id' => $workOrderId,
+            'start_event_id' => $startEventId,
+            'started_at' => (string)($targetEvent['started_at'] ?? ''),
+            'ended_at' => $endedAt,
+            'operator_name' => trim($operatorName),
+        ]);
+
+        return [
+            'ok' => true,
+            'ended_at' => $endedAt,
+        ];
+    }
+
+    public function listWorkOrderPackagingProductionEvents(int $workOrderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, type, created_at, payload
+             FROM events
+             WHERE type IN ("WORK_ORDER_PACKAGING_PRODUCTION_STARTED","WORK_ORDER_PACKAGING_PRODUCTION_FINISHED")
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id ASC'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $rows = $stmt->fetchAll();
+
+        $items = [];
+        $itemIndexByStartEvent = [];
+        foreach ($rows as $row) {
+            $payload = json_decode((string)($row['payload'] ?? '{}'), true);
+            $payload = is_array($payload) ? $payload : [];
+            $eventType = strtoupper(trim((string)($row['type'] ?? '')));
+            if ($eventType === 'WORK_ORDER_PACKAGING_PRODUCTION_STARTED') {
+                $items[] = [
+                    'start_event_id' => (int)($row['id'] ?? 0),
+                    'event_key' => 'PACKAGING_PRODUCTION',
+                    'event_label' => 'Producción',
+                    'started_at' => trim((string)($payload['started_at'] ?? '')) !== '' ? (string)$payload['started_at'] : (string)($row['created_at'] ?? ''),
+                    'ended_at' => null,
+                    'comments' => trim((string)($payload['comments'] ?? '')),
+                    'detail' => trim((string)($payload['detail'] ?? '')),
+                    'status' => 'OPEN',
+                    'produced_units' => null,
+                    'waste_kg' => null,
+                ];
+                $itemIndexByStartEvent[(int)($row['id'] ?? 0)] = count($items) - 1;
+                continue;
+            }
+
+            $startEventId = (int)($payload['start_event_id'] ?? 0);
+            if ($startEventId <= 0 || !isset($itemIndexByStartEvent[$startEventId])) {
+                continue;
+            }
+            $itemIndex = $itemIndexByStartEvent[$startEventId];
+            $items[$itemIndex]['ended_at'] = trim((string)($payload['ended_at'] ?? '')) !== '' ? (string)$payload['ended_at'] : (string)($row['created_at'] ?? '');
+            $items[$itemIndex]['status'] = 'CLOSED';
+            $items[$itemIndex]['produced_units'] = isset($payload['produced_units']) ? (float)$payload['produced_units'] : null;
+            $items[$itemIndex]['waste_kg'] = isset($payload['waste_kg']) ? (float)$payload['waste_kg'] : null;
+            if (trim((string)($payload['comments'] ?? '')) !== '') {
+                $items[$itemIndex]['detail'] = trim((string)$payload['comments']);
+            }
+        }
+
+        return array_reverse($items);
+    }
+
+    public function getOpenWorkOrderPackagingProductionEvent(int $workOrderId): ?array
+    {
+        foreach ($this->listWorkOrderPackagingProductionEvents($workOrderId) as $productionEvent) {
+            if ((string)($productionEvent['status'] ?? '') === 'OPEN') {
+                return $productionEvent;
+            }
+        }
+
+        return null;
+    }
+
+    public function getLastWorkOrderPackagingFinish(int $workOrderId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, created_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.started_at")) AS started_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.ended_at")) AS ended_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.comments")) AS comments,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.produced_units")) AS produced_units,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.waste_kg")) AS waste_kg,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.package_measure")) AS package_measure
+             FROM events
+             WHERE type = "WORK_ORDER_PACKAGING_PRODUCTION_FINISHED"
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function startWorkOrderPackagingProductionEvent(int $workOrderId, string $operatorName, string $comments = ''): array
+    {
+        $operatorName = trim($operatorName);
+        $comments = trim($comments);
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'OT no existe.']];
+        }
+        if ((string)$workOrder['status'] === 'CLOSED') {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT ya está cerrada.']];
+        }
+        if ($this->getLastWorkOrderPackagingSetupApproval($workOrderId) === null) {
+            return ['ok' => false, 'errors' => ['setup' => 'Debes validar el alistamiento de Embalaje antes de iniciar la producción.']];
+        }
+        if ($this->getOpenWorkOrderPackagingProductionEvent($workOrderId) !== null) {
+            return ['ok' => false, 'errors' => ['event' => 'Ya existe una producción de Embalaje en curso para esta OT.']];
+        }
+        if ($this->getLastWorkOrderPackagingFinish($workOrderId) !== null) {
+            return ['ok' => false, 'errors' => ['event' => 'La producción de Embalaje ya fue cerrada para esta OT.']];
+        }
+        if ($operatorName === '') {
+            return ['ok' => false, 'errors' => ['operator_name' => 'Operador es obligatorio.']];
+        }
+        if ($comments === '') {
+            return ['ok' => false, 'errors' => ['comments' => 'Debes ingresar un comentario para iniciar la producción de Embalaje.']];
+        }
+
+        $startedAt = date('Y-m-d H:i:s');
+        $this->insertEvent('WORK_ORDER_PACKAGING_PRODUCTION_STARTED', [
+            'work_order_id' => $workOrderId,
+            'started_at' => $startedAt,
+            'comments' => $comments,
+            'operator_name' => $operatorName,
+            'detail' => 'Producción de Embalaje iniciada.',
+        ]);
+
+        return [
+            'ok' => true,
+            'started_at' => $startedAt,
+        ];
+    }
+
+    public function finishWorkOrderPackagingProduction(
+        int $workOrderId,
+        float $producedUnits,
+        string $comments,
+        array $wasteWeights,
+        array $wasteComments,
+        array $packagingData,
+        string $operatorName
+    ): array {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        $openProductionEvent = $this->getOpenWorkOrderPackagingProductionEvent($workOrderId);
+        $comments = trim($comments);
+        $operatorName = trim($operatorName);
+        $errors = [];
+
+        if ($workOrder === null) {
+            $errors['work_order_id'] = 'OT no existe.';
+        } elseif ((string)$workOrder['status'] === 'CLOSED') {
+            $errors['work_order_id'] = 'La OT ya está cerrada.';
+        }
+        if ($openProductionEvent === null) {
+            $errors['event'] = 'No hay una producción activa de Embalaje para finalizar.';
+        }
+        if ($producedUnits < 0) {
+            $errors['produced_units'] = 'La producción no puede ser negativa.';
+        }
+
+        $wasteItems = [];
+        $wasteTotal = 0.0;
+        foreach (['setup', 'printing', 'other', 'repair'] as $wasteKey) {
+            $weight = isset($wasteWeights[$wasteKey]) ? round((float)$wasteWeights[$wasteKey], 3) : 0.0;
+            if ($weight < 0) {
+                $errors['waste_' . $wasteKey] = 'Las mermas no pueden ser negativas.';
+                continue;
+            }
+            $comment = trim((string)($wasteComments[$wasteKey] ?? ''));
+            $wasteItems[$wasteKey] = [
+                'weight_kg' => $weight,
+                'comments' => $comment,
+            ];
+            $wasteTotal += $weight;
+        }
+
+        $numericPackagingKeys = [
+            'units_per_box',
+            'boxes_per_pallet',
+            'complete_pallets',
+            'incomplete_pallet_boxes',
+            'total_complete_boxes',
+            'final_box_units',
+            'leftover_bags',
+            'showroom_bags',
+        ];
+        $normalizedPackagingData = [
+            'package_measure' => trim((string)($packagingData['package_measure'] ?? '')),
+        ];
+        foreach ($numericPackagingKeys as $key) {
+            $value = round((float)($packagingData[$key] ?? 0), 3);
+            if ($value < 0) {
+                $errors['packaging_' . $key] = 'Los valores de embalaje no pueden ser negativos.';
+                continue;
+            }
+            $normalizedPackagingData[$key] = $value;
+        }
+
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $endedAt = date('Y-m-d H:i:s');
+        $this->insertEvent('WORK_ORDER_PACKAGING_PRODUCTION_FINISHED', [
+            'work_order_id' => $workOrderId,
+            'start_event_id' => (int)($openProductionEvent['start_event_id'] ?? 0),
+            'started_at' => (string)($openProductionEvent['started_at'] ?? ''),
+            'ended_at' => $endedAt,
+            'produced_units' => round($producedUnits, 3),
+            'comments' => $comments,
+            'waste_kg' => round($wasteTotal, 3),
+            'waste_items' => $wasteItems,
+            'package_measure' => (string)$normalizedPackagingData['package_measure'],
+            'packaging_data' => $normalizedPackagingData,
+            'operator_name' => $operatorName,
+        ]);
+
+        return [
+            'ok' => true,
+            'ended_at' => $endedAt,
+            'waste_kg' => round($wasteTotal, 3),
+            'produced_units' => round($producedUnits, 3),
+        ];
+    }
+
+    public function closePackagingWorkOrder(
+        int $workOrderId,
+        int $warehouseId,
+        string $closureClassification,
+        string $supervisorUsername,
+        string $supervisorDisplayName,
+        string $supervisorObservation,
+        float $totalUnits,
+        array $packagingData,
+        string $operatorName
+    ): array {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        $lastPackagingFinish = $this->getLastWorkOrderPackagingFinish($workOrderId);
+        $operatorName = trim($operatorName);
+        $closureClassification = trim($closureClassification);
+        $supervisorUsername = trim($supervisorUsername);
+        $supervisorDisplayName = trim($supervisorDisplayName);
+        $supervisorObservation = trim($supervisorObservation);
+        $errors = [];
+
+        if ($workOrder === null) {
+            $errors['work_order_id'] = 'OT no existe.';
+        } elseif ((string)$workOrder['status'] === 'CLOSED') {
+            $errors['work_order_id'] = 'La OT ya está cerrada.';
+        }
+        if ($lastPackagingFinish === null) {
+            $errors['finish'] = 'Debes terminar la producción de Embalaje antes de cerrar la OT.';
+        }
+        if ($warehouseId <= 0) {
+            $errors['warehouse_id'] = 'Debes seleccionar la bodega destino.';
+        }
+        if ($closureClassification === '') {
+            $errors['closure_classification'] = 'Debes seleccionar la clasificación de cierre.';
+        }
+        if ($supervisorUsername === '') {
+            $errors['supervisor_username'] = 'Usuario supervisor es obligatorio.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+        if ($totalUnits < 0) {
+            $errors['total_units'] = 'El total no puede ser negativo.';
+        }
+
+        $warehouse = null;
+        if ($warehouseId > 0) {
+            $stmt = $this->pdo->prepare('SELECT id, code, name FROM warehouses WHERE id = :id LIMIT 1');
+            $stmt->execute([':id' => $warehouseId]);
+            $warehouse = $stmt->fetch();
+            if (!is_array($warehouse)) {
+                $errors['warehouse_id'] = 'La bodega destino no existe.';
+            }
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $normalizedPackagingData = [];
+        foreach ([
+            'package_measure',
+            'units_per_box',
+            'boxes_per_pallet',
+            'complete_pallets',
+            'incomplete_pallet_boxes',
+            'total_complete_boxes',
+            'final_box_units',
+            'leftover_bags',
+            'showroom_bags',
+        ] as $key) {
+            $normalizedPackagingData[$key] = $packagingData[$key] ?? null;
+        }
+
+        $pallets = $this->listPalletsByWorkOrder($workOrderId);
+        $closedAt = date('Y-m-d H:i:s');
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare('UPDATE work_orders SET status = :status WHERE id = :id');
+            $stmt->execute([
+                ':status' => 'CLOSED',
+                ':id' => $workOrderId,
+            ]);
+
+            if (is_array($warehouse)) {
+                $stmt = $this->pdo->prepare('UPDATE boxes SET warehouse_id = :warehouse_id, status = :status WHERE work_order_id = :work_order_id');
+                $stmt->execute([
+                    ':warehouse_id' => (int)$warehouse['id'],
+                    ':status' => 'STORED',
+                    ':work_order_id' => $workOrderId,
+                ]);
+
+                $updatePallet = $this->pdo->prepare('UPDATE pallets SET warehouse_id = :warehouse_id, status = :status WHERE id = :id');
+                $insertMovement = $this->pdo->prepare(
+                    'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                     VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+                );
+                foreach ($pallets as $pallet) {
+                    $palletId = (int)($pallet['id'] ?? 0);
+                    if ($palletId <= 0) {
+                        continue;
+                    }
+                    $fromWarehouseId = (int)($pallet['warehouse_id'] ?? 0);
+                    $updatePallet->execute([
+                        ':warehouse_id' => (int)$warehouse['id'],
+                        ':status' => 'STORED',
+                        ':id' => $palletId,
+                    ]);
+                    if ($fromWarehouseId !== (int)$warehouse['id']) {
+                        $insertMovement->execute([
+                            ':entity_type' => 'PALLET',
+                            ':entity_id' => $palletId,
+                            ':movement_type' => 'TRANSFER',
+                            ':from_warehouse_id' => $fromWarehouseId > 0 ? $fromWarehouseId : null,
+                            ':to_warehouse_id' => (int)$warehouse['id'],
+                            ':payload' => json_encode([
+                                'operator_name' => $operatorName,
+                                'work_order_id' => $workOrderId,
+                                'reason' => 'PACKAGING_CLOSE',
+                            ], JSON_UNESCAPED_UNICODE),
+                        ]);
+                    }
+                }
+            }
+
+            $this->insertEvent('WORK_ORDER_PACKAGING_CLOSED', [
+                'work_order_id' => $workOrderId,
+                'closed_at' => $closedAt,
+                'warehouse_id' => (int)($warehouse['id'] ?? 0),
+                'warehouse_code' => (string)($warehouse['code'] ?? ''),
+                'warehouse_name' => (string)($warehouse['name'] ?? ''),
+                'closure_classification' => $closureClassification,
+                'supervisor_username' => $supervisorUsername,
+                'supervisor_display_name' => $supervisorDisplayName,
+                'supervisor_observation' => $supervisorObservation,
+                'total_units' => round($totalUnits, 3),
+                'packaging_data' => $normalizedPackagingData,
+                'operator_name' => $operatorName,
+            ]);
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        return [
+            'ok' => true,
+            'closed_at' => $closedAt,
+            'warehouse_code' => (string)($warehouse['code'] ?? ''),
+        ];
+    }
+
+    public function startWorkOrderSealingSetupEvent(int $workOrderId, string $comments, string $operatorName, string $detail = ''): array
+    {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT no existe.']];
+        }
+        foreach ($this->listWorkOrderSealingSetupEvents($workOrderId) as $existingEvent) {
+            if ((string)($existingEvent['status'] ?? '') === 'OPEN') {
+                return ['ok' => false, 'errors' => ['event' => 'Ya existe un alistamiento de Selladora en curso para esta OT.']];
+            }
+        }
+
+        $startedAt = date('Y-m-d H:i:s');
+        $this->insertEvent('WORK_ORDER_SEALING_SETUP_STARTED', [
+            'work_order_id' => $workOrderId,
+            'started_at' => $startedAt,
+            'comments' => trim($comments),
+            'detail' => trim($detail),
+            'operator_name' => trim($operatorName),
+        ]);
+
+        return [
+            'ok' => true,
+            'started_at' => $startedAt,
+        ];
+    }
+
+    public function finishWorkOrderSealingSetupEvent(int $workOrderId, int $startEventId, string $operatorName): array
+    {
+        $targetEvent = null;
+        foreach ($this->listWorkOrderSealingSetupEvents($workOrderId) as $setupEvent) {
+            if ((int)($setupEvent['start_event_id'] ?? 0) !== $startEventId) {
+                continue;
+            }
+            $targetEvent = $setupEvent;
+            break;
+        }
+        if (!is_array($targetEvent)) {
+            throw new RuntimeException('No fue posible encontrar el evento de alistamiento indicado.');
+        }
+        if ((string)($targetEvent['status'] ?? '') !== 'OPEN') {
+            throw new RuntimeException('Este evento de alistamiento ya fue terminado.');
+        }
+
+        $endedAt = date('Y-m-d H:i:s');
+        $this->insertEvent('WORK_ORDER_SEALING_SETUP_ENDED', [
+            'work_order_id' => $workOrderId,
+            'start_event_id' => $startEventId,
+            'started_at' => (string)($targetEvent['started_at'] ?? ''),
+            'ended_at' => $endedAt,
+            'operator_name' => trim($operatorName),
+        ]);
+
+        return [
+            'ok' => true,
+            'ended_at' => $endedAt,
+        ];
+    }
+
+    public function listWorkOrderSealingProductionEvents(int $workOrderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, type, created_at, payload
+             FROM events
+             WHERE type IN ("WORK_ORDER_SEALING_PRODUCTION_STARTED","WORK_ORDER_SEALING_PRODUCTION_FINISHED")
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id ASC'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $rows = $stmt->fetchAll();
+
+        $items = [];
+        $itemIndexByStartEvent = [];
+        foreach ($rows as $row) {
+            $payload = json_decode((string)($row['payload'] ?? '{}'), true);
+            $payload = is_array($payload) ? $payload : [];
+            $eventType = strtoupper(trim((string)($row['type'] ?? '')));
+            if ($eventType === 'WORK_ORDER_SEALING_PRODUCTION_STARTED') {
+                $items[] = [
+                    'start_event_id' => (int)($row['id'] ?? 0),
+                    'event_key' => 'SEALING_PRODUCTION',
+                    'event_label' => 'Producción',
+                    'started_at' => trim((string)($payload['started_at'] ?? '')) !== '' ? (string)$payload['started_at'] : (string)($row['created_at'] ?? ''),
+                    'ended_at' => null,
+                    'comments' => trim((string)($payload['comments'] ?? '')),
+                    'detail' => trim((string)($payload['detail'] ?? '')),
+                    'status' => 'OPEN',
+                    'principal_counter' => null,
+                    'receiver_counter' => null,
+                    'waste_kg' => null,
+                ];
+                $itemIndexByStartEvent[(int)($row['id'] ?? 0)] = count($items) - 1;
+                continue;
+            }
+
+            $startEventId = (int)($payload['start_event_id'] ?? 0);
+            if ($startEventId <= 0 || !isset($itemIndexByStartEvent[$startEventId])) {
+                continue;
+            }
+            $itemIndex = $itemIndexByStartEvent[$startEventId];
+            $items[$itemIndex]['ended_at'] = trim((string)($payload['ended_at'] ?? '')) !== '' ? (string)$payload['ended_at'] : (string)($row['created_at'] ?? '');
+            $items[$itemIndex]['status'] = 'CLOSED';
+            $items[$itemIndex]['principal_counter'] = isset($payload['principal_counter']) ? (int)$payload['principal_counter'] : null;
+            $items[$itemIndex]['receiver_counter'] = isset($payload['receiver_counter']) ? (int)$payload['receiver_counter'] : null;
+            $items[$itemIndex]['waste_kg'] = isset($payload['waste_kg']) ? (float)$payload['waste_kg'] : null;
+            if (trim((string)($payload['comments'] ?? '')) !== '') {
+                $items[$itemIndex]['detail'] = trim((string)$payload['comments']);
+            }
+        }
+
+        return array_reverse($items);
+    }
+
+    public function getOpenWorkOrderSealingProductionEvent(int $workOrderId): ?array
+    {
+        foreach ($this->listWorkOrderSealingProductionEvents($workOrderId) as $productionEvent) {
+            if ((string)($productionEvent['status'] ?? '') === 'OPEN') {
+                return $productionEvent;
+            }
+        }
+
+        return null;
+    }
+
+    public function getLastWorkOrderSealingFinish(int $workOrderId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, created_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.started_at")) AS started_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.ended_at")) AS ended_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.comments")) AS comments,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.principal_counter")) AS principal_counter,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.receiver_counter")) AS receiver_counter,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.waste_kg")) AS waste_kg
+             FROM events
+             WHERE type = "WORK_ORDER_SEALING_PRODUCTION_FINISHED"
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function startWorkOrderSealingProductionEvent(int $workOrderId, string $operatorName, string $comments = ''): array
+    {
+        $operatorName = trim($operatorName);
+        $comments = trim($comments);
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'OT no existe.']];
+        }
+        if ((string)$workOrder['status'] === 'CLOSED') {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT ya está cerrada.']];
+        }
+        if ($this->getLastWorkOrderSealingSetupApproval($workOrderId) === null) {
+            return ['ok' => false, 'errors' => ['setup' => 'Debes validar el alistamiento de Selladora antes de iniciar la producción.']];
+        }
+        if ($this->getOpenWorkOrderSealingProductionEvent($workOrderId) !== null) {
+            return ['ok' => false, 'errors' => ['event' => 'Ya existe una producción de Selladora en curso para esta OT.']];
+        }
+        if ($this->getLastWorkOrderSealingFinish($workOrderId) !== null) {
+            return ['ok' => false, 'errors' => ['event' => 'La producción de Selladora ya fue cerrada para esta OT.']];
+        }
+        if ($operatorName === '') {
+            return ['ok' => false, 'errors' => ['operator_name' => 'Operador es obligatorio.']];
+        }
+        if ($comments === '') {
+            return ['ok' => false, 'errors' => ['comments' => 'Debes ingresar un comentario para iniciar la producción de Selladora.']];
+        }
+
+        $startedAt = date('Y-m-d H:i:s');
+        $this->insertEvent('WORK_ORDER_SEALING_PRODUCTION_STARTED', [
+            'work_order_id' => $workOrderId,
+            'started_at' => $startedAt,
+            'comments' => $comments,
+            'operator_name' => $operatorName,
+            'detail' => 'Producción de Selladora iniciada.',
+        ]);
+
+        return [
+            'ok' => true,
+            'started_at' => $startedAt,
+        ];
+    }
+
+    public function finishWorkOrderSealingProduction(
+        int $workOrderId,
+        int $principalCounter,
+        int $receiverCounter,
+        string $comments,
+        array $wasteWeights,
+        array $wasteComments,
+        string $operatorName
+    ): array {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        $openProductionEvent = $this->getOpenWorkOrderSealingProductionEvent($workOrderId);
+        $comments = trim($comments);
+        $operatorName = trim($operatorName);
+        $errors = [];
+
+        if ($workOrder === null) {
+            $errors['work_order_id'] = 'OT no existe.';
+        } elseif ((string)$workOrder['status'] === 'CLOSED') {
+            $errors['work_order_id'] = 'La OT ya está cerrada.';
+        }
+        if ($openProductionEvent === null) {
+            $errors['event'] = 'No hay una producción activa de Selladora para finalizar.';
+        }
+        if ($principalCounter < 0) {
+            $errors['principal_counter'] = 'El contador tablero principal no puede ser negativo.';
+        }
+        if ($receiverCounter < 0) {
+            $errors['receiver_counter'] = 'El contador módulo recibidor no puede ser negativo.';
+        }
+
+        $wasteItems = [];
+        $wasteTotal = 0.0;
+        foreach (['setup', 'printing', 'other', 'repair'] as $wasteKey) {
+            $weight = isset($wasteWeights[$wasteKey]) ? round((float)$wasteWeights[$wasteKey], 3) : 0.0;
+            if ($weight < 0) {
+                $errors['waste_' . $wasteKey] = 'Las mermas no pueden ser negativas.';
+                continue;
+            }
+            $comment = trim((string)($wasteComments[$wasteKey] ?? ''));
+            $wasteItems[$wasteKey] = [
+                'weight_kg' => $weight,
+                'comments' => $comment,
+            ];
+            $wasteTotal += $weight;
+        }
+
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $endedAt = date('Y-m-d H:i:s');
+        $this->insertEvent('WORK_ORDER_SEALING_PRODUCTION_FINISHED', [
+            'work_order_id' => $workOrderId,
+            'start_event_id' => (int)($openProductionEvent['start_event_id'] ?? 0),
+            'started_at' => (string)($openProductionEvent['started_at'] ?? ''),
+            'ended_at' => $endedAt,
+            'principal_counter' => $principalCounter,
+            'receiver_counter' => $receiverCounter,
+            'comments' => $comments,
+            'waste_kg' => round($wasteTotal, 3),
+            'waste_items' => $wasteItems,
+            'operator_name' => $operatorName,
+        ]);
+
+        return [
+            'ok' => true,
+            'ended_at' => $endedAt,
+            'waste_kg' => round($wasteTotal, 3),
+        ];
     }
 
     public function listOutputRollsByWorkOrder(int $workOrderId): array
@@ -3590,9 +4701,10 @@ SQL;
         return $stmt->fetchAll();
     }
 
-    public function startWorkOrder(int $workOrderId, string $operatorName): array
+    public function startWorkOrder(int $workOrderId, string $operatorName, string $comments = ''): array
     {
         $operatorName = trim($operatorName);
+        $comments = trim($comments);
         $workOrder = $this->getWorkOrder($workOrderId);
         if ($workOrderId <= 0 || $workOrder === null) {
             return ['ok' => false, 'errors' => ['work_order_id' => 'OT no existe.']];
@@ -3602,6 +4714,9 @@ SQL;
         }
         if ((string)$workOrder['status'] === 'CUTTING') {
             return ['ok' => false, 'errors' => ['work_order_id' => 'La OT ya terminó impresión y está pendiente de corte.']];
+        }
+        if ($this->getLastWorkOrderStart($workOrderId) !== null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La producción ya fue iniciada para esta OT.']];
         }
         if ($this->getCurrentRollInWorkOrder($workOrderId) === null) {
             return ['ok' => false, 'errors' => ['roll' => 'Debes asignar y pesar una bobina antes de iniciar la OT.']];
@@ -3615,6 +4730,43 @@ SQL;
         $this->insertEvent('WORK_ORDER_STARTED', [
             'work_order_id' => $workOrderId,
             'operator_name' => $operatorName,
+            'comments' => $comments,
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function startWorkOrderProductionEvent(int $workOrderId, string $operatorName, string $comments = ''): array
+    {
+        $operatorName = trim($operatorName);
+        $comments = trim($comments);
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'OT no existe.']];
+        }
+        if ((string)$workOrder['status'] === 'CLOSED') {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT ya está cerrada.']];
+        }
+        if ((string)$workOrder['status'] === 'CUTTING') {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La producción ya fue cerrada para esta OT.']];
+        }
+        if ($this->getLastWorkOrderStart($workOrderId) !== null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La producción ya fue iniciada para esta OT.']];
+        }
+        if ($operatorName === '') {
+            return ['ok' => false, 'errors' => ['operator_name' => 'Operador es obligatorio.']];
+        }
+        if ($comments === '') {
+            return ['ok' => false, 'errors' => ['comments' => 'Debes ingresar un comentario para iniciar la producción.']];
+        }
+
+        $this->setActiveWorkOrder($workOrderId, $operatorName);
+        $this->assignActiveShiftSessionToWorkOrder($workOrderId, $operatorName);
+        $this->insertEvent('WORK_ORDER_STARTED', [
+            'work_order_id' => $workOrderId,
+            'operator_name' => $operatorName,
+            'comments' => $comments,
+            'source' => 'SETUP',
         ]);
 
         return ['ok' => true, 'errors' => []];
@@ -3624,9 +4776,139 @@ SQL;
     {
         $stmt = $this->pdo->prepare(
             'SELECT id, created_at,
-                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.operator_name")) AS operator_name
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.operator_name")) AS operator_name,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.comments")) AS comments
              FROM events
              WHERE type = "WORK_ORDER_STARTED"
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function approveWorkOrderSetup(int $workOrderId, string $role, string $approvedUsername, string $approvedDisplayName): array
+    {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT no existe.']];
+        }
+
+        $role = strtoupper(trim($role)) === 'LEADER' ? 'LEADER' : 'SUPERVISOR';
+        $approvedUsername = trim($approvedUsername);
+        $approvedDisplayName = trim($approvedDisplayName);
+        if ($approvedUsername === '') {
+            return ['ok' => false, 'errors' => ['approval_username' => 'Usuario aprobador inválido.']];
+        }
+
+        $this->insertEvent('WORK_ORDER_SETUP_APPROVED', [
+            'work_order_id' => $workOrderId,
+            'role' => $role,
+            'approved_username' => $approvedUsername,
+            'approved_display_name' => $approvedDisplayName !== '' ? $approvedDisplayName : $approvedUsername,
+            'detail' => 'La máquina quedó configurada para producción.',
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function approveWorkOrderSealingSetup(int $workOrderId, string $role, string $approvedUsername, string $approvedDisplayName): array
+    {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT no existe.']];
+        }
+
+        $role = strtoupper(trim($role)) === 'LEADER' ? 'LEADER' : 'SUPERVISOR';
+        $approvedUsername = trim($approvedUsername);
+        $approvedDisplayName = trim($approvedDisplayName);
+        if ($approvedUsername === '') {
+            return ['ok' => false, 'errors' => ['approval_username' => 'Usuario aprobador inválido.']];
+        }
+
+        $this->insertEvent('WORK_ORDER_SEALING_SETUP_APPROVED', [
+            'work_order_id' => $workOrderId,
+            'role' => $role,
+            'approved_username' => $approvedUsername,
+            'approved_display_name' => $approvedDisplayName !== '' ? $approvedDisplayName : $approvedUsername,
+            'detail' => 'La selladora quedó configurada para producción.',
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function approveWorkOrderPackagingSetup(int $workOrderId, string $role, string $approvedUsername, string $approvedDisplayName): array
+    {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT no existe.']];
+        }
+
+        $role = strtoupper(trim($role)) === 'LEADER' ? 'LEADER' : 'SUPERVISOR';
+        $approvedUsername = trim($approvedUsername);
+        $approvedDisplayName = trim($approvedDisplayName);
+        if ($approvedUsername === '') {
+            return ['ok' => false, 'errors' => ['approval_username' => 'Usuario aprobador inválido.']];
+        }
+
+        $this->insertEvent('WORK_ORDER_PACKAGING_SETUP_APPROVED', [
+            'work_order_id' => $workOrderId,
+            'role' => $role,
+            'approved_username' => $approvedUsername,
+            'approved_display_name' => $approvedDisplayName !== '' ? $approvedDisplayName : $approvedUsername,
+            'detail' => 'El embalaje quedó configurado para producción.',
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function getLastWorkOrderSetupApproval(int $workOrderId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, created_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.role")) AS role,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.approved_username")) AS approved_username,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.approved_display_name")) AS approved_display_name
+             FROM events
+             WHERE type = "WORK_ORDER_SETUP_APPROVED"
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function getLastWorkOrderSealingSetupApproval(int $workOrderId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, created_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.role")) AS role,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.approved_username")) AS approved_username,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.approved_display_name")) AS approved_display_name
+             FROM events
+             WHERE type = "WORK_ORDER_SEALING_SETUP_APPROVED"
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function getLastWorkOrderPackagingSetupApproval(int $workOrderId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, created_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.role")) AS role,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.approved_username")) AS approved_username,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.approved_display_name")) AS approved_display_name
+             FROM events
+             WHERE type = "WORK_ORDER_PACKAGING_SETUP_APPROVED"
                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
              ORDER BY id DESC
              LIMIT 1'
@@ -3646,10 +4928,60 @@ SQL;
                     JSON_UNQUOTE(JSON_EXTRACT(payload, "$.final_roll_weight_kg")) AS final_roll_weight_kg,
                     JSON_UNQUOTE(JSON_EXTRACT(payload, "$.output_roll_weight_kg")) AS output_roll_weight_kg,
                     JSON_UNQUOTE(JSON_EXTRACT(payload, "$.final_chemical_weight_kg")) AS final_chemical_weight_kg,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.production_meters")) AS production_meters,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.comments")) AS comments,
                     JSON_UNQUOTE(JSON_EXTRACT(payload, "$.box_qty")) AS box_qty,
                     JSON_UNQUOTE(JSON_EXTRACT(payload, "$.waste_kg")) AS waste_kg
              FROM events
              WHERE type = "WORK_ORDER_FINISHED"
+               AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        $row = $stmt->fetch();
+        return $row === false ? null : $row;
+    }
+
+    public function approveWorkOrderFinish(int $workOrderId, string $role, string $approvedUsername, string $approvedDisplayName): array
+    {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrderId <= 0 || $workOrder === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT no existe.']];
+        }
+
+        $lastFinish = $this->getLastWorkOrderFinish($workOrderId);
+        if ($lastFinish === null) {
+            return ['ok' => false, 'errors' => ['work_order_id' => 'La OT aun no registra cierre de flexografia.']];
+        }
+
+        $role = strtoupper(trim($role)) === 'LEADER' ? 'LEADER' : 'SUPERVISOR';
+        $approvedUsername = trim($approvedUsername);
+        $approvedDisplayName = trim($approvedDisplayName);
+        if ($approvedUsername === '') {
+            return ['ok' => false, 'errors' => ['approval_username' => 'Usuario aprobador invalido.']];
+        }
+
+        $this->insertEvent('WORK_ORDER_FINISH_APPROVED', [
+            'work_order_id' => $workOrderId,
+            'role' => $role,
+            'approved_username' => $approvedUsername,
+            'approved_display_name' => $approvedDisplayName !== '' ? $approvedDisplayName : $approvedUsername,
+            'detail' => 'El cierre de flexografia fue validado por supervisor.',
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function getLastWorkOrderFinishApproval(int $workOrderId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, created_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.role")) AS role,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.approved_username")) AS approved_username,
+                    JSON_UNQUOTE(JSON_EXTRACT(payload, "$.approved_display_name")) AS approved_display_name
+             FROM events
+             WHERE type = "WORK_ORDER_FINISH_APPROVED"
                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) = :wo
              ORDER BY id DESC
              LIMIT 1'
@@ -4025,10 +5357,8 @@ SQL;
     public function deliverMaterialRequest(int $requestId, ?int $rollId, string $operatorName): array
     {
         $operatorName = trim($operatorName);
-        $stmt = $this->pdo->prepare('SELECT * FROM work_order_material_requests WHERE id = :id LIMIT 1');
-        $stmt->execute([':id' => $requestId]);
-        $request = $stmt->fetch();
-        if ($request === false) {
+        $request = $this->getMaterialRequest($requestId);
+        if ($request === null) {
             return ['ok' => false, 'errors' => ['request_id' => 'Solicitud no existe.']];
         }
         if (!in_array((string)$request['status'], ['ACCEPTED', 'PARTIAL'], true)) {
@@ -4092,6 +5422,353 @@ SQL;
             'requested_unit' => (string)($request['requested_unit'] ?? 'Unid.'),
             'operator_name' => $operatorName,
         ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function attachRequestedRollToWorkOrder(int $requestId, int $rollId, float $processWeightKg, string $operatorName): array
+    {
+        $errors = [];
+        $operatorName = trim($operatorName);
+        $request = $this->getMaterialRequest($requestId);
+        $roll = $this->getRoll($rollId);
+        $productionWarehouseId = $this->findWarehouseIdByCode(3000);
+
+        if ($request === null) {
+            $errors['request_id'] = 'Solicitud no existe.';
+        } elseif ((string)($request['request_type'] ?? 'ROLL') !== 'ROLL') {
+            $errors['request_type'] = 'La solicitud no corresponde a una bobina.';
+        } elseif (!in_array((string)($request['status'] ?? ''), ['ACCEPTED', 'PARTIAL', 'DELIVERED'], true)) {
+            $errors['request_status'] = (string)($request['status'] ?? '') === 'PENDING'
+                ? 'La solicitud debe ser tomada por bodega antes de ingresar la bobina.'
+                : 'La solicitud ya fue atendida.';
+        } elseif (!in_array((string)($request['work_order_status'] ?? ''), ['OPEN', 'ACTIVE'], true)) {
+            $errors['work_order_id'] = 'La OT no está disponible para ingresar bobinas.';
+        }
+        if ($roll === null) {
+            $errors['roll_id'] = 'Bobina no existe.';
+        }
+        if ($processWeightKg <= 0) {
+            $errors['process_weight_kg'] = 'Peso de entrada debe ser mayor a 0.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+        if ($productionWarehouseId === null) {
+            $errors['warehouse_id'] = 'No existe la bodega 3000 de producción.';
+        }
+
+        $workOrderId = (int)($request['work_order_id'] ?? 0);
+        if ($workOrderId > 0 && $this->getCurrentRollInWorkOrder($workOrderId) !== null) {
+            $errors['roll_active'] = 'Ya existe una bobina activa en esta OT. Debes registrar la salida antes de ingresar otra.';
+        }
+        if ($request !== null && $roll !== null && ($request['requested_group_key'] ?? '') !== '' && $this->materialGroupKeyFromRoll($roll) !== (string)$request['requested_group_key']) {
+            $errors['roll_id'] = 'La bobina seleccionada no coincide con el tipo solicitado.';
+        }
+        $requestAlreadyDeliveredRollId = (int)($request['delivered_roll_id'] ?? 0);
+        $isAlreadyDeliveredForRequest = $request !== null
+            && $roll !== null
+            && $requestAlreadyDeliveredRollId > 0
+            && $requestAlreadyDeliveredRollId === (int)($roll['id'] ?? 0);
+        if ($roll !== null) {
+            $rollStatus = strtoupper(trim((string)($roll['status'] ?? '')));
+            $rollCurrentWorkOrderId = (int)($roll['current_work_order_id'] ?? 0);
+            $isAttachableDeliveredRoll = $isAlreadyDeliveredForRequest
+                && $rollStatus === 'IN_PROCESS'
+                && $rollCurrentWorkOrderId === $workOrderId;
+            if (!in_array($rollStatus, ['RECEIVED'], true) && !$isAttachableDeliveredRoll) {
+                $errors['roll_status'] = 'Solo se pueden ingresar bobinas disponibles.';
+            } elseif ($rollCurrentWorkOrderId > 0 && $rollCurrentWorkOrderId !== $workOrderId) {
+                $errors['roll_work_order'] = 'La bobina ya está asignada a otra OT.';
+            } elseif ($rollCurrentWorkOrderId === $workOrderId && !$isAlreadyDeliveredForRequest) {
+                $errors['roll_work_order'] = 'La bobina ya está asignada a esta OT.';
+            }
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $fromWarehouseId = (int)($roll['warehouse_id'] ?? 0);
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare('UPDATE rolls SET warehouse_id = :warehouse_id, current_work_order_id = :wo, status = :status WHERE id = :id');
+            $stmt->execute([
+                ':warehouse_id' => $productionWarehouseId,
+                ':wo' => $workOrderId,
+                ':status' => 'IN_PROCESS',
+                ':id' => $rollId,
+            ]);
+
+            if ($fromWarehouseId > 0 && $fromWarehouseId !== $productionWarehouseId) {
+                $stmt = $this->pdo->prepare(
+                    'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                     VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+                );
+                $stmt->execute([
+                    ':entity_type' => 'ROLL',
+                    ':entity_id' => $rollId,
+                    ':movement_type' => 'TRANSFER',
+                    ':from_warehouse_id' => $fromWarehouseId,
+                    ':to_warehouse_id' => $productionWarehouseId,
+                    ':payload' => json_encode([
+                        'operator_name' => $operatorName,
+                        'work_order_id' => $workOrderId,
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+
+                $this->insertEvent('ROLL_TRANSFERRED', [
+                    'roll_id' => $rollId,
+                    'from_warehouse_id' => $fromWarehouseId,
+                    'to_warehouse_id' => $productionWarehouseId,
+                    'operator_name' => $operatorName,
+                    'work_order_id' => $workOrderId,
+                ]);
+            }
+
+            if (!$isAlreadyDeliveredForRequest) {
+                $requestedQty = (float)($request['requested_qty'] ?? 0);
+                $deliveredQty = (float)($request['delivered_qty'] ?? 0) + 1.0;
+                $nextStatus = $deliveredQty >= $requestedQty ? 'DELIVERED' : 'PARTIAL';
+                $stmt = $this->pdo->prepare(
+                    'UPDATE work_order_material_requests
+                     SET status = :status,
+                         delivered_roll_id = :roll_id,
+                         delivered_qty = :delivered_qty,
+                         delivered_by = :delivered_by,
+                         delivered_at = CURRENT_TIMESTAMP
+                     WHERE id = :id'
+                );
+                $stmt->execute([
+                    ':status' => $nextStatus,
+                    ':roll_id' => $rollId,
+                    ':delivered_qty' => number_format($deliveredQty, 3, '.', ''),
+                    ':delivered_by' => $operatorName,
+                    ':id' => $requestId,
+                ]);
+
+                $this->insertEvent('MATERIAL_DELIVERED', [
+                    'work_order_id' => $workOrderId,
+                    'request_id' => $requestId,
+                    'request_type' => 'ROLL',
+                    'roll_id' => $rollId,
+                    'roll_code' => (string)$roll['roll_code'],
+                    'delivered_qty' => 1,
+                    'requested_unit' => (string)($request['requested_unit'] ?? 'Unid.'),
+                    'operator_name' => $operatorName,
+                ]);
+            }
+
+            $this->insertEvent('WORK_ORDER_ROLL_ATTACHED', [
+                'work_order_id' => $workOrderId,
+                'roll_id' => $rollId,
+                'process_weight_kg' => round($processWeightKg, 3),
+                'waste_kg' => 0,
+                'operator_name' => $operatorName,
+            ]);
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function releaseCurrentRollFromWorkOrder(int $workOrderId, float $finalWeightKg, float $wasteKg, string $operatorName, array $wasteDetails = []): array
+    {
+        $errors = [];
+        $operatorName = trim($operatorName);
+        $workOrder = $this->getWorkOrder($workOrderId);
+        $currentRoll = $this->getCurrentRollInWorkOrder($workOrderId);
+        $normalizedWasteDetails = [];
+        foreach ($wasteDetails as $wasteKey => $wasteDetail) {
+            if (!is_array($wasteDetail)) {
+                continue;
+            }
+            $weightKg = (float)($wasteDetail['weight_kg'] ?? 0);
+            $label = trim((string)($wasteDetail['label'] ?? ''));
+            $comment = trim((string)($wasteDetail['comment'] ?? ''));
+            if ($weightKg < 0) {
+                $errors['waste_detail_' . (string)$wasteKey] = 'Los kilos de merma no pueden ser negativos.';
+                continue;
+            }
+            $normalizedWasteDetails[] = [
+                'key' => (string)$wasteKey,
+                'label' => $label !== '' ? $label : (string)$wasteKey,
+                'comment' => $comment,
+                'weight_kg' => round($weightKg, 3),
+            ];
+        }
+        if ($normalizedWasteDetails !== []) {
+            $wasteKg = 0.0;
+            foreach ($normalizedWasteDetails as $wasteDetail) {
+                $wasteKg += (float)($wasteDetail['weight_kg'] ?? 0);
+            }
+            $wasteKg = round($wasteKg, 3);
+        }
+
+        if ($workOrder === null) {
+            $errors['work_order_id'] = 'OT no existe.';
+        } elseif (in_array((string)$workOrder['status'], ['CLOSED', 'CUTTING'], true)) {
+            $errors['work_order_id'] = 'La OT está cerrada.';
+        }
+        if ($currentRoll === null) {
+            $errors['current_roll'] = 'No hay una bobina activa para registrar salida.';
+        }
+        if ($finalWeightKg < 0) {
+            $errors['final_weight_kg'] = 'Peso de salida no puede ser negativo.';
+        }
+        if ($wasteKg < 0) {
+            $errors['waste_kg'] = 'Merma no puede ser negativa.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare('UPDATE rolls SET weight_kg = :weight_kg, current_work_order_id = NULL, status = :status WHERE id = :id');
+            $stmt->execute([
+                ':weight_kg' => round($finalWeightKg, 3),
+                ':status' => $finalWeightKg > 0 ? 'RECEIVED' : 'CONSUMED',
+                ':id' => (int)$currentRoll['id'],
+            ]);
+
+            $this->insertEvent('WORK_ORDER_ROLL_RELEASED', [
+                'work_order_id' => $workOrderId,
+                'roll_id' => (int)$currentRoll['id'],
+                'final_weight_kg' => round($finalWeightKg, 3),
+                'waste_kg' => round($wasteKg, 3),
+                'waste_details' => $normalizedWasteDetails,
+                'reason' => 'MANUAL_RELEASE',
+                'operator_name' => $operatorName,
+            ]);
+            foreach ($normalizedWasteDetails as $wasteDetail) {
+                $detailWeightKg = (float)($wasteDetail['weight_kg'] ?? 0);
+                if ($detailWeightKg <= 0) {
+                    continue;
+                }
+                $wasteResult = $this->createProductionWaste(
+                    $workOrderId,
+                    (int)$currentRoll['id'],
+                    'PRODUCTION',
+                    trim((string)($wasteDetail['comment'] ?? '')) !== ''
+                        ? (string)$wasteDetail['comment']
+                        : (string)($wasteDetail['label'] ?? 'Merma producción'),
+                    $detailWeightKg,
+                    $operatorName
+                );
+                if (($wasteResult['ok'] ?? false) !== true) {
+                    throw new RuntimeException('No se pudo registrar el detalle de merma de salida.');
+                }
+            }
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function removeCurrentRequestedRollFromWorkOrder(int $workOrderId, int $requestId, string $operatorName): array
+    {
+        $errors = [];
+        $operatorName = trim($operatorName);
+        $workOrder = $this->getWorkOrder($workOrderId);
+        $request = $this->getMaterialRequest($requestId);
+        $currentRoll = $this->getCurrentRollInWorkOrder($workOrderId);
+
+        if ($workOrder === null) {
+            $errors['work_order_id'] = 'OT no existe.';
+        } elseif (in_array((string)$workOrder['status'], ['CLOSED', 'CUTTING'], true)) {
+            $errors['work_order_id'] = 'La OT está cerrada.';
+        }
+        if ($request === null) {
+            $errors['request_id'] = 'Solicitud no existe.';
+        } elseif ((int)($request['work_order_id'] ?? 0) !== $workOrderId) {
+            $errors['request_id'] = 'La solicitud no corresponde a esta OT.';
+        } elseif ((string)($request['request_type'] ?? 'ROLL') !== 'ROLL') {
+            $errors['request_type'] = 'La solicitud no corresponde a una bobina.';
+        }
+        if ($currentRoll === null) {
+            $errors['current_roll'] = 'No hay una bobina activa para eliminar.';
+        }
+        if ($request !== null && $currentRoll !== null && (int)($request['delivered_roll_id'] ?? 0) !== (int)($currentRoll['id'] ?? 0)) {
+            $errors['request_roll'] = 'La solicitud no coincide con la bobina activa.';
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $nextDeliveredQty = max(0.0, (float)($request['delivered_qty'] ?? 0) - 1.0);
+        $nextStatus = $nextDeliveredQty <= 0 ? 'ACCEPTED' : 'PARTIAL';
+
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare(
+                'UPDATE rolls
+                 SET current_work_order_id = NULL,
+                     status = :status
+                 WHERE id = :id'
+            );
+            $stmt->execute([
+                ':status' => 'RECEIVED',
+                ':id' => (int)$currentRoll['id'],
+            ]);
+
+            $stmt = $this->pdo->prepare(
+                'UPDATE work_order_material_requests
+                 SET status = :status,
+                     delivered_roll_id = CASE WHEN delivered_roll_id = :roll_id THEN NULL ELSE delivered_roll_id END,
+                     delivered_qty = :delivered_qty,
+                     delivered_by = :delivered_by,
+                     delivered_at = CURRENT_TIMESTAMP
+                 WHERE id = :id'
+            );
+            $stmt->execute([
+                ':status' => $nextStatus,
+                ':roll_id' => (int)$currentRoll['id'],
+                ':delivered_qty' => number_format($nextDeliveredQty, 3, '.', ''),
+                ':delivered_by' => $operatorName,
+                ':id' => $requestId,
+            ]);
+
+            $this->insertEvent('WORK_ORDER_ROLL_RELEASED', [
+                'work_order_id' => $workOrderId,
+                'roll_id' => (int)$currentRoll['id'],
+                'final_weight_kg' => round((float)($currentRoll['weight_kg'] ?? 0), 3),
+                'waste_kg' => 0,
+                'reason' => 'ENTRY_REMOVED',
+                'operator_name' => $operatorName,
+            ]);
+
+            $this->insertEvent('MATERIAL_DELIVERY_REVERTED', [
+                'work_order_id' => $workOrderId,
+                'request_id' => $requestId,
+                'request_type' => 'ROLL',
+                'roll_id' => (int)$currentRoll['id'],
+                'roll_code' => (string)($currentRoll['roll_code'] ?? ''),
+                'delivered_qty' => 1,
+                'requested_unit' => (string)($request['requested_unit'] ?? 'Unid.'),
+                'operator_name' => $operatorName,
+                'reason' => 'ENTRY_REMOVED',
+            ]);
+
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
 
         return ['ok' => true, 'errors' => []];
     }
@@ -4454,13 +6131,30 @@ SQL;
         float $wasteKg,
         int $boxQty,
         float $outputRollWeightKg,
-        string $operatorName
+        string $operatorName,
+        float $productionMeters = 0,
+        string $comments = ''
     ): array
     {
         $errors = [];
         $operatorName = trim($operatorName);
+        $comments = trim($comments);
         $workOrder = $this->getWorkOrder($workOrderId);
         $currentRoll = $this->getCurrentRollInWorkOrder($workOrderId);
+        $sourceRoll = $currentRoll;
+        if ($sourceRoll === null) {
+            foreach ($this->listWorkOrderRollHistory($workOrderId) as $historyRow) {
+                $historyRollId = (int)($historyRow['roll_id'] ?? 0);
+                if ($historyRollId <= 0) {
+                    continue;
+                }
+                $historyRoll = $this->getRoll($historyRollId);
+                if ($historyRoll !== null) {
+                    $sourceRoll = $historyRoll;
+                    break;
+                }
+            }
+        }
 
         if ($workOrder === null) {
             $errors['work_order_id'] = 'OT no existe.';
@@ -4468,8 +6162,8 @@ SQL;
         if ($workOrder !== null && in_array((string)$workOrder['status'], ['CUTTING', 'CLOSED'], true)) {
             $errors['work_order_id'] = 'La producción ya fue cerrada para esta OT.';
         }
-        if ($currentRoll === null) {
-            $errors['current_roll'] = 'No hay bobina activa para finalizar la OT.';
+        if ($sourceRoll === null) {
+            $errors['roll_id'] = 'No hay bobinas registradas para cerrar la producción.';
         }
         if ($finalRollWeightKg < 0) {
             $errors['final_roll_weight_kg'] = 'Peso final de la bobina no puede ser negativo.';
@@ -4480,11 +6174,14 @@ SQL;
         if ($wasteKg < 0) {
             $errors['waste_kg'] = 'Merma no puede ser negativa.';
         }
-        if ($boxQty <= 0) {
-            $errors['box_qty'] = 'Cantidad de cajas debe ser mayor a 0.';
+        if ($boxQty < 0) {
+            $errors['box_qty'] = 'Cantidad de cajas no puede ser negativa.';
         }
         if ($outputRollWeightKg <= 0) {
             $errors['output_roll_weight_kg'] = 'Peso de la nueva bobina debe ser mayor a 0.';
+        }
+        if ($productionMeters < 0) {
+            $errors['production_meters'] = 'Los metros producidos no pueden ser negativos.';
         }
         if ($operatorName === '') {
             $errors['operator_name'] = 'Operador es obligatorio.';
@@ -4495,25 +6192,27 @@ SQL;
 
         $this->pdo->beginTransaction();
         try {
-            $stmt = $this->pdo->prepare('UPDATE rolls SET weight_kg = :weight_kg, current_work_order_id = NULL, status = :status WHERE id = :id');
-            $stmt->execute([
-                ':weight_kg' => round($finalRollWeightKg, 3),
-                ':status' => $finalRollWeightKg > 0 ? 'RECEIVED' : 'CONSUMED',
-                ':id' => (int)$currentRoll['id'],
-            ]);
+            if ($currentRoll !== null) {
+                $stmt = $this->pdo->prepare('UPDATE rolls SET weight_kg = :weight_kg, current_work_order_id = NULL, status = :status WHERE id = :id');
+                $stmt->execute([
+                    ':weight_kg' => round($finalRollWeightKg, 3),
+                    ':status' => $finalRollWeightKg > 0 ? 'RECEIVED' : 'CONSUMED',
+                    ':id' => (int)$currentRoll['id'],
+                ]);
 
-            $this->insertEvent('WORK_ORDER_ROLL_RELEASED', [
-                'work_order_id' => $workOrderId,
-                'roll_id' => (int)$currentRoll['id'],
-                'final_weight_kg' => round($finalRollWeightKg, 3),
-                'waste_kg' => round($wasteKg, 3),
-                'reason' => 'FINISH',
-                'operator_name' => $operatorName,
-            ]);
+                $this->insertEvent('WORK_ORDER_ROLL_RELEASED', [
+                    'work_order_id' => $workOrderId,
+                    'roll_id' => (int)$currentRoll['id'],
+                    'final_weight_kg' => round($finalRollWeightKg, 3),
+                    'waste_kg' => round($wasteKg, 3),
+                    'reason' => 'FINISH',
+                    'operator_name' => $operatorName,
+                ]);
+            }
 
             $outputRollId = $this->createOutputRollFromWorkOrder(
                 $workOrder,
-                $currentRoll,
+                $sourceRoll,
                 $outputRollWeightKg,
                 $operatorName
             );
@@ -4530,9 +6229,11 @@ SQL;
 
             $this->insertEvent('WORK_ORDER_FINISHED', [
                 'work_order_id' => $workOrderId,
-                'roll_id' => (int)$currentRoll['id'],
+                'roll_id' => (int)($sourceRoll['id'] ?? 0),
                 'final_roll_weight_kg' => round($finalRollWeightKg, 3),
                 'final_chemical_weight_kg' => round($finalChemicalWeightKg, 3),
+                'production_meters' => round($productionMeters, 3),
+                'comments' => $comments,
                 'box_qty' => $boxQty,
                 'output_roll_id' => $outputRollId,
                 'output_roll_weight_kg' => round($outputRollWeightKg, 3),
@@ -4544,7 +6245,7 @@ SQL;
             return [
                 'ok' => true,
                 'errors' => [],
-                'roll_id' => (int)$currentRoll['id'],
+                'roll_id' => (int)($sourceRoll['id'] ?? 0),
                 'output_roll_id' => $outputRollId,
             ];
         } catch (Throwable $e) {
@@ -4594,6 +6295,9 @@ SQL;
             $errors['source_roll_id'] = 'Bobina de corte no existe.';
         } elseif ((string)($sourceRoll['process_stage'] ?? 'RAW') !== 'PRINTED') {
             $errors['source_roll_id'] = 'La bobina debe provenir de producción para pasar a corte.';
+        }
+        if ($workOrderId !== null && $workOrderId > 0 && $this->getLastWorkOrderFinishApproval($workOrderId) === null) {
+            $errors['finish_approval'] = 'Debes validar el cierre de flexografia con supervisor antes de pasar a la siguiente maquina.';
         }
         if ($unitsTotal <= 0) {
             $errors['units_total'] = 'Unidades totales debe ser mayor a 0.';
@@ -5791,6 +7495,51 @@ SQL;
         return $row === false ? null : $row;
     }
 
+    public function listProductionPersonnelNames(): array
+    {
+        $names = [];
+
+        try {
+            $stmt = $this->pdo->query(
+                'SELECT DISTINCT display_name
+                 FROM auth_users
+                 WHERE is_active = 1
+                   AND (can_operator = 1 OR can_production = 1)
+                   AND TRIM(COALESCE(display_name, "")) <> ""
+                 ORDER BY display_name ASC'
+            );
+            foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $value) {
+                $name = trim((string)$value);
+                if ($name !== '') {
+                    $names[$name] = true;
+                }
+            }
+        } catch (Throwable) {
+            // Si auth_users aún no existe, seguimos con nombres históricos.
+        }
+
+        $stmt = $this->pdo->query(
+            'SELECT DISTINCT operator_name AS person_name
+             FROM production_shift_sessions
+             WHERE TRIM(COALESCE(operator_name, "")) <> ""
+             UNION
+             SELECT DISTINCT helper_name AS person_name
+             FROM production_shift_sessions
+             WHERE TRIM(COALESCE(helper_name, "")) <> ""
+             ORDER BY person_name ASC'
+        );
+        foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $value) {
+            $name = trim((string)$value);
+            if ($name !== '') {
+                $names[$name] = true;
+            }
+        }
+
+        $result = array_values(array_keys($names));
+        natcasesort($result);
+        return array_values($result);
+    }
+
     public function getActiveShiftSessionByOperator(string $operatorName): ?array
     {
         $operatorName = trim($operatorName);
@@ -5954,6 +7703,44 @@ SQL;
             'machine_name' => (string)($session['machine_name'] ?? ''),
             'operator_name' => (string)($session['operator_name'] ?? ''),
             'work_order_id' => (int)($session['work_order_id'] ?? 0) > 0 ? (int)$session['work_order_id'] : null,
+            'comments' => $comments !== '' ? $comments : null,
+        ]);
+
+        return ['ok' => true, 'errors' => []];
+    }
+
+    public function updateShiftSessionHeader(int $sessionId, ?string $helperName = null, ?string $comments = null): array
+    {
+        $session = $this->getShiftSession($sessionId);
+        if ($session === null) {
+            return ['ok' => false, 'errors' => ['session_id' => 'El turno no existe.']];
+        }
+        if ((string)($session['status'] ?? '') !== 'ACTIVE') {
+            return ['ok' => false, 'errors' => ['session_id' => 'Solo se puede editar un turno activo.']];
+        }
+
+        $helperName = trim((string)$helperName);
+        $comments = trim((string)$comments);
+
+        $stmt = $this->pdo->prepare(
+            'UPDATE production_shift_sessions
+             SET helper_name = :helper_name,
+                 comments = :comments
+             WHERE id = :id'
+        );
+        $stmt->execute([
+            ':id' => $sessionId,
+            ':helper_name' => $helperName !== '' ? $helperName : null,
+            ':comments' => $comments !== '' ? $comments : null,
+        ]);
+
+        $this->insertEvent('SHIFT_SESSION_HEADER_UPDATED', [
+            'shift_session_id' => $sessionId,
+            'machine_id' => (int)($session['machine_id'] ?? 0),
+            'machine_name' => (string)($session['machine_name'] ?? ''),
+            'work_order_id' => (int)($session['work_order_id'] ?? 0) > 0 ? (int)$session['work_order_id'] : null,
+            'operator_name' => (string)($session['operator_name'] ?? ''),
+            'helper_name' => $helperName !== '' ? $helperName : null,
             'comments' => $comments !== '' ? $comments : null,
         ]);
 
