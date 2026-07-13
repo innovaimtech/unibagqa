@@ -2149,7 +2149,8 @@ function renderWorkOrderSetupScreen(
     }
     $setupCommentLabel = $setupCommentParts !== [] ? h(implode(' | ', $setupCommentParts)) : '-';
     $setupReadyForProduction = $setupEndedAt !== ''
-        || (isset($_GET['setup_approved']) && $_GET['setup_approved'] === '1');
+        || (isset($_GET['setup_approved']) && $_GET['setup_approved'] === '1')
+        || $productionStartedAt !== '';
     $productionActionButton = $productionStartedAt !== ''
         ? '<span class="legacy-setup-action production" style="opacity:.75;cursor:default">Producción iniciada</span>'
         : ($setupReadyForProduction
@@ -2371,7 +2372,11 @@ function renderWorkOrderSetupScreen(
             . '<div class="finish-label">Comentarios</div>'
             . '<div class="finish-comments-wrap"><textarea name="finish_comments" rows="3">' . h($finishCommentsState) . '</textarea></div>'
             . '</div>'
-            . '<div class="finish-merma-block">';
+            . '<div class="finish-actions">'
+            . '<div class="finish-actions-left"><a class="btn secondary finish-grey-btn" href="/work-orders/' . (int)$ot['id'] . '/setup">Volver</a><button class="btn secondary finish-red-btn" type="reset">Eliminar</button></div>'
+            . '<div class="finish-actions-right"><button class="btn secondary finish-grey-btn" type="button" id="finish-production-refresh">Actualizar</button><button class="btn finish-yellow-btn" type="submit">Terminar producción</button></div>'
+            . '</div>'
+            . '<div class="finish-merma-block" style="margin-top:12px">';
         foreach ($wasteRows as $wasteRow) {
             $body .= '<div class="finish-form-row finish-merma-row">'
                 . '<div class="finish-merma-title">Merma</div>'
@@ -2383,10 +2388,6 @@ function renderWorkOrderSetupScreen(
                 . '</div>';
         }
         $body .= '</div>'
-            . '<div class="finish-actions">'
-            . '<div class="finish-actions-left"><a class="btn secondary finish-grey-btn" href="/work-orders/' . (int)$ot['id'] . '/setup">Volver</a><button class="btn secondary finish-red-btn" type="reset">Eliminar</button></div>'
-            . '<div class="finish-actions-right"><button class="btn secondary finish-grey-btn" type="button" id="finish-production-refresh">Actualizar</button><button class="btn finish-yellow-btn" type="submit">Terminar producción</button></div>'
-            . '</div>'
             . '</form></div>'
             . '<script>
                 (function () {
@@ -3780,6 +3781,16 @@ function renderWorkOrderPackagingSetupScreen(
     $setupApproval = $service instanceof ReceptionService ? $service->getLastWorkOrderPackagingSetupApproval((int)$ot['id']) : null;
     $lastPackagingFinish = $service instanceof ReceptionService ? $service->getLastWorkOrderPackagingFinish((int)$ot['id']) : null;
     $setupApproved = $setupApproval !== null;
+    $packagingFinishAfterSetup = false;
+    if ($lastPackagingFinish !== null) {
+        if ($setupApproval === null) {
+            $packagingFinishAfterSetup = true;
+        } else {
+            $finishTs = strtotime((string)($lastPackagingFinish['created_at'] ?? ''));
+            $setupTs = strtotime((string)($setupApproval['created_at'] ?? ''));
+            $packagingFinishAfterSetup = ($finishTs === false || $setupTs === false) ? true : ($finishTs >= $setupTs);
+        }
+    }
     $hasOpenProduction = false;
     foreach ($productionEvents as $productionEvent) {
         if (strtoupper((string)($productionEvent['status'] ?? '')) === 'OPEN') {
@@ -3787,7 +3798,7 @@ function renderWorkOrderPackagingSetupScreen(
             break;
         }
     }
-    $productionActionButton = $lastPackagingFinish !== null
+    $productionActionButton = $packagingFinishAfterSetup
         ? '<span class="legacy-setup-action production" style="opacity:.75;cursor:default">Producción terminada</span>'
         : ($hasOpenProduction
             ? '<span class="legacy-setup-action production" style="opacity:.75;cursor:default">Producción iniciada</span>'
@@ -3797,7 +3808,10 @@ function renderWorkOrderPackagingSetupScreen(
 
     $body = '<div class="legacy-screen-title">Alistamiento Embalaje</div>'
         . '<div class="legacy-breadcrumb">Ordenes de trabajo &gt; ' . h((string)$ot['ot_code']) . ' &gt; Embalaje &gt; Alistamiento</div>'
-        . '<div class="legacy-actionbar"><div class="row"><a class="btn secondary" href="/work-orders/' . (int)$ot['id'] . '/packaging">Volver</a></div></div>';
+        . '<div class="legacy-actionbar"><div class="row" style="display:flex;justify-content:space-between;align-items:center;gap:8px">'
+        . '<a class="btn secondary" href="/work-orders/' . (int)$ot['id'] . '/packaging">Volver</a>'
+        . '<a class="btn" href="/work-orders/' . (int)$ot['id'] . '/packaging/close">Cerrar OT</a>'
+        . '</div></div>';
 
     if ($flashMessage !== null && $flashMessage !== '') {
         $body .= '<div class="' . ($flashIsError ? 'err' : 'ok') . '" style="margin-bottom:12px">' . h($flashMessage) . '</div>';
@@ -3891,7 +3905,7 @@ function renderWorkOrderPackagingSetupScreen(
         }
         $body .= '<div class="ok" style="margin-top:12px">Alistamiento de Embalaje validado correctamente' . ($approvedBy !== '' ? ' por ' . h($approvedBy) : '') . '.</div>';
     }
-    if ($setupApproved && !$hasOpenProduction && $lastPackagingFinish === null) {
+    if ($setupApproved && !$hasOpenProduction && !$packagingFinishAfterSetup) {
         $body .= '<div class="legacy-inline-modal" id="progress-modal-production" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;padding:20px;overflow:auto">'
             . '<div style="max-width:720px;margin:20px auto;background:#f4f5f7;border:1px solid #d6d6d6;border-radius:8px;padding:16px 18px;box-shadow:0 20px 45px rgba(15,23,42,.22)">'
             . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Iniciar producción Embalaje</div><button type="button" class="btn secondary" data-progress-modal-close="production">Cerrar</button></div>'
@@ -4134,7 +4148,7 @@ function renderWorkOrderPackagingFinishScreen(
 
     $body = '<div class="legacy-screen-title">Terminar producción Embalaje</div>'
         . '<div class="legacy-breadcrumb">Ordenes de trabajo &gt; ' . h((string)$ot['ot_code']) . ' &gt; Embalaje &gt; Terminar producción</div>'
-        . '<div class="legacy-actionbar"><div class="row"><a class="btn secondary" href="/work-orders/' . (int)$ot['id'] . '/packaging/setup">Volver</a></div></div>';
+        . '<div class="legacy-actionbar"><div class="row"><a class="btn secondary" href="/work-orders/' . (int)$ot['id'] . '/packaging/setup">Volver</a><button class="btn" type="button" id="packaging-open-close-modal">Cerrar OT</button></div></div>';
 
     if ($flashMessage !== null && $flashMessage !== '') {
         $body .= '<div class="' . ($flashIsError ? 'err' : 'ok') . '" style="margin-bottom:12px">' . h($flashMessage) . '</div>';
@@ -4161,18 +4175,6 @@ function renderWorkOrderPackagingFinishScreen(
         . '<div class="finish-label">Comentarios</div>'
         . '<div class="finish-comments-wrap"><textarea name="packaging_finish_comments" rows="3">' . h($commentsState) . '</textarea></div>'
         . '</div>'
-        . '<div class="finish-merma-block">';
-    foreach ($wasteRows as $wasteRow) {
-        $body .= '<div class="finish-form-row finish-merma-row">'
-            . '<div class="finish-merma-title">' . h((string)$wasteRow['title']) . '</div>'
-            . '<div class="finish-merma-detail">' . h((string)$wasteRow['label']) . '</div>'
-            . '<div class="finish-merma-unit"><select disabled><option>Cantidad</option></select></div>'
-            . '<div class="finish-merma-weight"><input type="number" step="0.001" min="0" name="packaging_waste_weight[' . h((string)$wasteRow['key']) . ']" value="' . h((string)($wasteWeightState[$wasteRow['key']] ?? '')) . '"></div>'
-            . '<div class="finish-merma-comment-label">Comentarios</div>'
-            . '<div class="finish-merma-comment"><input type="text" name="packaging_waste_comment[' . h((string)$wasteRow['key']) . ']" value="' . h((string)($wasteCommentState[$wasteRow['key']] ?? '')) . '"></div>'
-            . '</div>';
-    }
-    $body .= '</div>'
         . '<div style="margin-top:12px"><table class="legacy-sheet-table" style="margin:0"><thead><tr><th style="text-align:left">Medidas / Cantidades embalaje</th><th style="text-align:left">Predefinido</th><th style="text-align:left">Ingreso</th><th style="text-align:left"></th></tr></thead><tbody>'
         . '<tr><td class="legacy-label-cell">Medida de caja</td><td class="legacy-value-cell"><input type="text" value="' . h((string)$display['box_measure_label']) . '" readonly style="width:100%"></td><td class="legacy-value-cell"><input id="packaging_measure" type="text" name="packaging_data[package_measure]" value="' . h($measureState) . '" style="width:100%"></td><td class="legacy-value-cell"></td></tr>'
         . '<tr><td class="legacy-label-cell">Cantidad de bolsas por caja</td><td class="legacy-value-cell"><input type="text" value="' . h((string)$display['units_per_box_label']) . '" readonly style="width:100%"></td><td class="legacy-value-cell"><input id="packaging_units_per_box" type="number" step="0.001" min="0" name="packaging_data[units_per_box]" value="' . h($unitsPerBoxState) . '" style="width:100%"></td><td class="legacy-value-cell">(calcula unidades producidas)</td></tr>'
@@ -4184,6 +4186,18 @@ function renderWorkOrderPackagingFinishScreen(
         . '<tr><td class="legacy-label-cell">Bolsas sobrantes</td><td class="legacy-value-cell"><input type="text" value="" readonly style="width:100%"></td><td class="legacy-value-cell"><input id="packaging_leftover_bags" type="number" step="0.001" min="0" name="packaging_data[leftover_bags]" value="' . h($leftoverBagsState) . '" style="width:100%"></td><td class="legacy-value-cell">(calcula unidades producidas)</td></tr>'
         . '<tr><td class="legacy-label-cell">Bolsas a Showroom</td><td class="legacy-value-cell"><input type="text" value="" readonly style="width:100%"></td><td class="legacy-value-cell"><input id="packaging_showroom_bags" type="number" step="0.001" min="0" name="packaging_data[showroom_bags]" value="' . h($showroomBagsState) . '" style="width:100%"></td><td class="legacy-value-cell">(calcula unidades producidas)</td></tr>'
         . '</tbody></table></div>'
+        . '<div class="finish-merma-block" style="margin-top:12px">';
+    foreach ($wasteRows as $wasteRow) {
+        $body .= '<div class="finish-form-row finish-merma-row">'
+            . '<div class="finish-merma-title">' . h((string)$wasteRow['title']) . '</div>'
+            . '<div class="finish-merma-detail">' . h((string)$wasteRow['label']) . '</div>'
+            . '<div class="finish-merma-unit"><select disabled><option>Cantidad</option></select></div>'
+            . '<div class="finish-merma-weight"><input type="number" step="0.001" min="0" name="packaging_waste_weight[' . h((string)$wasteRow['key']) . ']" value="' . h((string)($wasteWeightState[$wasteRow['key']] ?? '')) . '"></div>'
+            . '<div class="finish-merma-comment-label">Comentarios</div>'
+            . '<div class="finish-merma-comment"><input type="text" name="packaging_waste_comment[' . h((string)$wasteRow['key']) . ']" value="' . h((string)($wasteCommentState[$wasteRow['key']] ?? '')) . '"></div>'
+            . '</div>';
+    }
+    $body .= '</div>'
         . '<div class="legacy-inline-modal" id="packaging-close-modal" style="display:' . ($closeModalOpen ? 'block' : 'none') . ';position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;padding:18px;overflow:auto">'
         . '<div style="max-width:980px;margin:18px auto;background:#f2f2f2;border:1px solid #d6d6d6;border-radius:4px;padding:12px 14px;box-shadow:0 20px 45px rgba(15,23,42,.22)">'
         . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><div style="font-size:18px;font-weight:800">Terminar OT</div><button type="button" class="btn secondary" id="packaging-close-modal-close">Cerrar</button></div>'
@@ -4256,7 +4270,7 @@ function renderWorkOrderPackagingFinishScreen(
                     openCloseModalButton.type = "button";
                     openCloseModalButton.id = "packaging-open-close-modal";
                     openCloseModalButton.className = "btn secondary finish-grey-btn";
-                    openCloseModalButton.textContent = "Terminar OT";
+                    openCloseModalButton.textContent = "Cerrar OT";
                     if (refreshButton && refreshButton.nextSibling) {
                         actionsRight.insertBefore(openCloseModalButton, refreshButton.nextSibling);
                     } else {
@@ -4483,6 +4497,16 @@ function renderWorkOrderSealingSetupScreen(
     $setupApproval = $service instanceof ReceptionService ? $service->getLastWorkOrderSealingSetupApproval((int)$ot['id']) : null;
     $lastSealingFinish = $service instanceof ReceptionService ? $service->getLastWorkOrderSealingFinish((int)$ot['id']) : null;
     $setupApproved = $setupApproval !== null;
+    $sealingFinishAfterSetup = false;
+    if ($lastSealingFinish !== null) {
+        if ($setupApproval === null) {
+            $sealingFinishAfterSetup = true;
+        } else {
+            $finishTs = strtotime((string)($lastSealingFinish['created_at'] ?? ''));
+            $setupTs = strtotime((string)($setupApproval['created_at'] ?? ''));
+            $sealingFinishAfterSetup = ($finishTs === false || $setupTs === false) ? true : ($finishTs >= $setupTs);
+        }
+    }
     $hasOpenProduction = false;
     foreach ($productionEvents as $productionEvent) {
         if (strtoupper((string)($productionEvent['status'] ?? '')) === 'OPEN') {
@@ -4490,7 +4514,7 @@ function renderWorkOrderSealingSetupScreen(
             break;
         }
     }
-    $productionActionButton = $lastSealingFinish !== null
+    $productionActionButton = $sealingFinishAfterSetup
         ? '<span class="legacy-setup-action production" style="opacity:.75;cursor:default">Producción terminada</span>'
         : ($hasOpenProduction
             ? '<span class="legacy-setup-action production" style="opacity:.75;cursor:default">Producción iniciada</span>'
@@ -4587,7 +4611,7 @@ function renderWorkOrderSealingSetupScreen(
         $body .= '<tr><td colspan="7" class="legacy-value-cell">Todavía no hay eventos registrados para Selladora.</td></tr>';
     }
     $body .= '</tbody></table></div></div>';
-    if ($setupApproved && !$hasOpenProduction && $lastSealingFinish === null) {
+    if ($setupApproved && !$hasOpenProduction && !$sealingFinishAfterSetup) {
         $body .= '<div class="legacy-inline-modal" id="progress-modal-production" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;padding:20px;overflow:auto">'
             . '<div style="max-width:720px;margin:20px auto;background:#f4f5f7;border:1px solid #d6d6d6;border-radius:8px;padding:16px 18px;box-shadow:0 20px 45px rgba(15,23,42,.22)">'
             . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Iniciar producción Selladora</div><button type="button" class="btn secondary" data-progress-modal-close="production">Cerrar</button></div>'
@@ -4829,7 +4853,11 @@ function renderWorkOrderSealingFinishScreen(
         . '<div class="finish-label">Comentarios</div>'
         . '<div class="finish-comments-wrap"><textarea name="sealing_finish_comments" rows="3">' . h($commentsState) . '</textarea></div>'
         . '</div>'
-        . '<div class="finish-merma-block">';
+        . '<div class="finish-actions">'
+        . '<div class="finish-actions-left"><a class="btn secondary finish-grey-btn" href="/work-orders/' . (int)$ot['id'] . '/sealing/setup">Volver</a><button class="btn secondary finish-red-btn" type="reset">Eliminar</button></div>'
+        . '<div class="finish-actions-right"><button class="btn secondary finish-grey-btn" type="button" id="sealing-finish-refresh">Actualizar</button><button class="btn finish-yellow-btn" type="submit">Terminar producción</button></div>'
+        . '</div>'
+        . '<div class="finish-merma-block" style="margin-top:12px">';
     foreach ($wasteRows as $wasteRow) {
         $body .= '<div class="finish-form-row finish-merma-row">'
             . '<div class="finish-merma-title">' . h((string)$wasteRow['title']) . '</div>'
@@ -4841,10 +4869,6 @@ function renderWorkOrderSealingFinishScreen(
             . '</div>';
     }
     $body .= '</div>'
-        . '<div class="finish-actions">'
-        . '<div class="finish-actions-left"><a class="btn secondary finish-grey-btn" href="/work-orders/' . (int)$ot['id'] . '/sealing/setup">Volver</a><button class="btn secondary finish-red-btn" type="reset">Eliminar</button></div>'
-        . '<div class="finish-actions-right"><button class="btn secondary finish-grey-btn" type="button" id="sealing-finish-refresh">Actualizar</button><button class="btn finish-yellow-btn" type="submit">Terminar producción</button></div>'
-        . '</div>'
         . '</form></div>'
         . '<script>
             (function () {
@@ -5586,6 +5610,18 @@ function renderWorkOrderStartScreen(
     $finishApproval = $service instanceof ReceptionService ? $service->getLastWorkOrderFinishApproval((int)$ot['id']) : null;
     $finishApprovedAt = trim((string)($finishApproval['created_at'] ?? ''));
     $isFinishApproved = $finishApprovedAt !== '';
+    $sealingSetupApproval = $service instanceof ReceptionService ? $service->getLastWorkOrderSealingSetupApproval((int)$ot['id']) : null;
+    $sealingLastFinish = $service instanceof ReceptionService ? $service->getLastWorkOrderSealingFinish((int)$ot['id']) : null;
+    $sealingFinished = false;
+    if ($sealingLastFinish !== null) {
+        if ($sealingSetupApproval === null) {
+            $sealingFinished = true;
+        } else {
+            $finishTs = strtotime((string)($sealingLastFinish['created_at'] ?? ''));
+            $setupTs = strtotime((string)($sealingSetupApproval['created_at'] ?? ''));
+            $sealingFinished = ($finishTs === false || $setupTs === false) ? true : ($finishTs >= $setupTs);
+        }
+    }
     $sheetText = trim((string)($ot['erp_plan_desc'] ?? '') . ' ' . (string)($ot['sku_final'] ?? ''));
     $isStarted = $lastStart !== null;
     $isCutting = $status === 'CUTTING';
@@ -5599,7 +5635,7 @@ function renderWorkOrderStartScreen(
         );
     $screenTitle = match ($status) {
         'ACTIVE' => $showFinishData ? 'Terminar producción' : 'En curso',
-        'CUTTING' => $isFinishApproved ? 'Selladora' : 'En corte',
+        'CUTTING' => $isFinishApproved ? ($sealingFinished ? 'Embalaje' : 'Selladora') : 'En corte',
         'CLOSED' => 'Historico',
         default => 'Inicio OT',
     };
@@ -5612,7 +5648,9 @@ function renderWorkOrderStartScreen(
         $screenActionHtml .= '<a class="legacy-primary-btn" href="/work-orders/' . (int)$ot['id'] . '/finish-data">Terminar OT</a>';
     } elseif ($isCutting) {
         $screenActionHtml .= $isFinishApproved
-            ? '<a class="legacy-primary-btn" href="/work-orders/' . (int)$ot['id'] . '/sealing">Ir a Selladora</a>'
+            ? ($sealingFinished
+                ? '<a class="legacy-primary-btn" href="/work-orders/' . (int)$ot['id'] . '/packaging?sealing_finished=1">Iniciar alistamiento Embalaje</a>'
+                : '<a class="legacy-primary-btn" href="/work-orders/' . (int)$ot['id'] . '/sealing">Ir a Selladora</a>')
             : '<a class="legacy-primary-btn" href="/work-orders/' . (int)$ot['id'] . '/finish-approval">Validar cierre flexo</a>';
     }
     $body = '<div class="legacy-screen-title">' . h($screenTitle) . '</div>'
@@ -5621,6 +5659,17 @@ function renderWorkOrderStartScreen(
 
     if ($flashMessage !== null && $flashMessage !== '') {
         $body .= '<div class="' . ($flashIsError ? 'err' : 'ok') . '" style="margin-bottom:12px">' . h($flashMessage) . '</div>';
+    }
+
+    $expectedProcessStage = null;
+    if ($status === 'ACTIVE') {
+        $expectedProcessStage = 'PRODUCTION';
+    } elseif ($status === 'CUTTING') {
+        if (!$isFinishApproved) {
+            $expectedProcessStage = 'CUTTING';
+        } else {
+            $expectedProcessStage = $sealingFinished ? 'PACKAGING' : 'SEALING';
+        }
     }
 
     $sessionForDisplay = null;
@@ -5640,6 +5689,13 @@ function renderWorkOrderStartScreen(
         ];
     } elseif ($activeShiftSession !== null) {
         $sessionForDisplay = $activeShiftSession;
+    }
+
+    if ($sessionForDisplay !== null && $expectedProcessStage !== null) {
+        $sessionProcessStage = strtoupper(trim((string)($sessionForDisplay['process_stage'] ?? '')));
+        if ($sessionProcessStage !== '' && $sessionProcessStage !== $expectedProcessStage) {
+            $sessionForDisplay = null;
+        }
     }
 
     $operatorShiftMismatch = $activeShiftSession !== null
@@ -8445,6 +8501,51 @@ if (preg_match('#^/work-orders/(\d+)/start$#', $path, $m) === 1 && $method === '
         render('No encontrado', '<div class="card">No existe la OT.</div>');
         exit;
     }
+    if ((string)($ot['status'] ?? '') === 'CUTTING') {
+        $finishApproval = $service->getLastWorkOrderFinishApproval($workOrderId);
+        if ($finishApproval === null) {
+            header('Location: /work-orders/' . $workOrderId . '/finish-approval');
+            exit;
+        }
+
+        $lastSealingFinish = $service->getLastWorkOrderSealingFinish($workOrderId);
+        $packagingSetupApproval = $service->getLastWorkOrderPackagingSetupApproval($workOrderId);
+        $packagingSetupEvents = $service->listWorkOrderPackagingSetupEvents($workOrderId);
+        $packagingProductionEvents = $service->listWorkOrderPackagingProductionEvents($workOrderId);
+        if ($packagingSetupApproval !== null || !empty($packagingSetupEvents) || !empty($packagingProductionEvents)) {
+            header('Location: /work-orders/' . $workOrderId . '/packaging/setup?setup_started=1');
+            exit;
+        }
+
+        if ($lastSealingFinish !== null) {
+            header('Location: /work-orders/' . $workOrderId . '/packaging?sealing_finished=1');
+            exit;
+        }
+
+        $setupApproval = $service->getLastWorkOrderSealingSetupApproval($workOrderId);
+        $setupEvents = $service->listWorkOrderSealingSetupEvents($workOrderId);
+        $productionEvents = $service->listWorkOrderSealingProductionEvents($workOrderId);
+        if ($setupApproval !== null || !empty($setupEvents) || !empty($productionEvents)) {
+            header('Location: /work-orders/' . $workOrderId . '/sealing/setup');
+            exit;
+        }
+
+        header('Location: /work-orders/' . $workOrderId . '/sealing');
+        exit;
+    }
+
+    if (!in_array((string)($ot['status'] ?? ''), ['CUTTING', 'CLOSED'], true)) {
+        $setupApproval = $service->getLastWorkOrderSetupApproval($workOrderId);
+        $lastStart = $service->getLastWorkOrderStart($workOrderId);
+        if ($lastStart !== null) {
+            header('Location: /work-orders/' . $workOrderId . '/in-progress');
+            exit;
+        }
+        if ($setupApproval !== null) {
+            header('Location: /work-orders/' . $workOrderId . '/setup');
+            exit;
+        }
+    }
     $chemicals = $service->listChemicals();
     $currentRoll = $service->getCurrentRollInWorkOrder($workOrderId);
     $rollHistory = $service->listWorkOrderRollHistory($workOrderId);
@@ -8511,6 +8612,8 @@ if (preg_match('#^/work-orders/(\d+)/start$#', $path, $m) === 1 && $method === '
     } elseif (isset($_GET['cut_error']) && trim((string)$_GET['cut_error']) !== '') {
         $flashMessage = trim((string)$_GET['cut_error']);
         $flashIsError = true;
+    } elseif (isset($_GET['closed']) && $_GET['closed'] === '1') {
+        $flashMessage = 'La OT ya fue cerrada correctamente.';
     }
     renderWorkOrderStartScreen($ot, $chemicals, $currentRoll, $rollHistory, $chemicalInputs, $lastStart, $lastFinish, $currentOperatorName, $flashMessage, $flashIsError, [], $materialRequests, $wastes, $boxes, $pallets, $outputRoll, $availableMaterialRolls, $cutWarehouses, $activeShiftSession, $assignedCliches, $clicheUsageHistory);
     exit;
@@ -8524,14 +8627,19 @@ if (preg_match('#^/work-orders/(\d+)/finish-data$#', $path, $m) === 1 && $method
         render('No encontrado', '<div class="card">No existe la OT.</div>');
         exit;
     }
+    $lastFinish = $service->getLastWorkOrderFinish($workOrderId);
     $finishApproval = $service->getLastWorkOrderFinishApproval($workOrderId);
-    if ((string)($ot['status'] ?? '') === 'CUTTING' && $finishApproval !== null) {
-        header('Location: /work-orders/' . $workOrderId . '/sealing/finish-data');
+    $status = (string)($ot['status'] ?? '');
+    if (in_array($status, ['CUTTING', 'CLOSED'], true)) {
+        if ($lastFinish !== null && $finishApproval === null) {
+            header('Location: /work-orders/' . $workOrderId . '/finish-approval');
+        } else {
+            header('Location: /work-orders/' . $workOrderId . '/start');
+        }
         exit;
     }
     $currentRoll = $service->getCurrentRollInWorkOrder($workOrderId);
     $chemicalInputs = $service->listChemicalInputsByWorkOrder($workOrderId, 20);
-    $lastFinish = $service->getLastWorkOrderFinish($workOrderId);
     $boxes = $service->listBoxesByWorkOrder($workOrderId);
     $pallets = $service->listPalletsByWorkOrder($workOrderId);
     $assignedCliches = $service->listClichesAssignedToWorkOrder($workOrderId);
@@ -8635,6 +8743,29 @@ if (preg_match('#^/work-orders/(\d+)/sealing$#', $path, $m) === 1 && $method ===
         header('Location: /work-orders/' . $workOrderId . '/finish-approval');
         exit;
     }
+    // Check if setup is already approved or there are existing events
+    $setupApproval = $service->getLastWorkOrderSealingSetupApproval($workOrderId);
+    $setupEvents = $service->listWorkOrderSealingSetupEvents($workOrderId);
+    $productionEvents = $service->listWorkOrderSealingProductionEvents($workOrderId);
+    $lastSealingFinish = $service->getLastWorkOrderSealingFinish($workOrderId);
+    $sealingFinishAfterSetup = false;
+    if ($lastSealingFinish !== null) {
+        if ($setupApproval === null) {
+            $sealingFinishAfterSetup = true;
+        } else {
+            $finishTs = strtotime((string)($lastSealingFinish['created_at'] ?? ''));
+            $setupTs = strtotime((string)($setupApproval['created_at'] ?? ''));
+            $sealingFinishAfterSetup = ($finishTs === false || $setupTs === false) ? true : ($finishTs >= $setupTs);
+        }
+    }
+    if ($sealingFinishAfterSetup) {
+        header('Location: /work-orders/' . $workOrderId . '/packaging?sealing_finished=1');
+        exit;
+    }
+    if ($setupApproval !== null || !empty($setupEvents) || !empty($productionEvents)) {
+        header('Location: /work-orders/' . $workOrderId . '/sealing/setup');
+        exit;
+    }
     $outputRolls = $service->listOutputRollsByWorkOrder($workOrderId);
     $sealingMachines = array_values(array_filter(
         $service->listProductionMachinesWithSessions(),
@@ -8676,6 +8807,7 @@ if (preg_match('#^/work-orders/(\d+)/sealing/setup/start$#', $path, $m) === 1 &&
     }
 
     $comments = trim((string)($_POST['comments'] ?? ''));
+    $helperName = trim((string)($_POST['helper_name'] ?? ''));
     $outputRolls = $service->listOutputRollsByWorkOrder($workOrderId);
     $helperOptions = $service->listProductionPersonnelNames();
     $activeShiftSession = $service->getActiveShiftSessionByWorkOrder($workOrderId);
@@ -8753,6 +8885,22 @@ if (preg_match('#^/work-orders/(\d+)/sealing/setup$#', $path, $m) === 1 && $meth
         header('Location: /work-orders/' . $workOrderId . '/finish-approval');
         exit;
     }
+    $setupApproval = $service->getLastWorkOrderSealingSetupApproval($workOrderId);
+    $lastSealingFinish = $service->getLastWorkOrderSealingFinish($workOrderId);
+    $sealingFinishAfterSetup = false;
+    if ($lastSealingFinish !== null) {
+        if ($setupApproval === null) {
+            $sealingFinishAfterSetup = true;
+        } else {
+            $finishTs = strtotime((string)($lastSealingFinish['created_at'] ?? ''));
+            $setupTs = strtotime((string)($setupApproval['created_at'] ?? ''));
+            $sealingFinishAfterSetup = ($finishTs === false || $setupTs === false) ? true : ($finishTs >= $setupTs);
+        }
+    }
+    if ($sealingFinishAfterSetup) {
+        header('Location: /work-orders/' . $workOrderId . '/packaging?sealing_finished=1');
+        exit;
+    }
     $outputRolls = $service->listOutputRollsByWorkOrder($workOrderId);
     $helperOptions = $service->listProductionPersonnelNames();
     $activeShiftSession = $service->getActiveShiftSessionByWorkOrder($workOrderId);
@@ -8813,12 +8961,25 @@ if (preg_match('#^/work-orders/(\d+)/sealing/finish-data$#', $path, $m) === 1 &&
         header('Location: /work-orders/' . $workOrderId . '/finish-approval');
         exit;
     }
-    if ($service->getLastWorkOrderSealingSetupApproval($workOrderId) === null) {
-        header('Location: /work-orders/' . $workOrderId . '/sealing/setup');
-        exit;
-    }
-    if ($service->getOpenWorkOrderSealingProductionEvent($workOrderId) === null) {
-        header('Location: /work-orders/' . $workOrderId . '/sealing/setup?process_error=' . urlencode('Debes iniciar la producción de Selladora antes de terminarla.'));
+    $openProductionEvent = $service->getOpenWorkOrderSealingProductionEvent($workOrderId);
+    if ($openProductionEvent === null) {
+        $setupApproval = $service->getLastWorkOrderSealingSetupApproval($workOrderId);
+        $lastFinish = $service->getLastWorkOrderSealingFinish($workOrderId);
+        $finishAfterSetup = false;
+        if ($lastFinish !== null) {
+            if ($setupApproval === null) {
+                $finishAfterSetup = true;
+            } else {
+                $finishTs = strtotime((string)($lastFinish['created_at'] ?? ''));
+                $setupTs = strtotime((string)($setupApproval['created_at'] ?? ''));
+                $finishAfterSetup = ($finishTs === false || $setupTs === false) ? true : ($finishTs >= $setupTs);
+            }
+        }
+        if ($finishAfterSetup) {
+            header('Location: /work-orders/' . $workOrderId . '/packaging?sealing_finished=1');
+        } else {
+            header('Location: /work-orders/' . $workOrderId . '/sealing/setup?process_error=' . urlencode('Debes iniciar la producción de Selladora antes de terminarla.'));
+        }
         exit;
     }
     $outputRolls = $service->listOutputRollsByWorkOrder($workOrderId);
@@ -8885,6 +9046,18 @@ if (preg_match('#^/work-orders/(\d+)/packaging$#', $path, $m) === 1 && $method =
     if ($ot === null) {
         http_response_code(404);
         render('No encontrado', '<div class="card">No existe la OT.</div>');
+        exit;
+    }
+    if ((string)($ot['status'] ?? '') === 'CLOSED') {
+        header('Location: /work-orders/' . $workOrderId . '/start?closed=1');
+        exit;
+    }
+    // Check if setup is already approved or there are existing events
+    $setupApproval = $service->getLastWorkOrderPackagingSetupApproval($workOrderId);
+    $setupEvents = $service->listWorkOrderPackagingSetupEvents($workOrderId);
+    $productionEvents = $service->listWorkOrderPackagingProductionEvents($workOrderId);
+    if ($setupApproval !== null || !empty($setupEvents) || !empty($productionEvents)) {
+        header('Location: /work-orders/' . $workOrderId . '/packaging/setup?setup_started=1');
         exit;
     }
     $outputRolls = $service->listOutputRollsByWorkOrder($workOrderId);
@@ -8988,6 +9161,10 @@ if (preg_match('#^/work-orders/(\d+)/packaging/setup$#', $path, $m) === 1 && $me
         render('No encontrado', '<div class="card">No existe la OT.</div>');
         exit;
     }
+    if ((string)($ot['status'] ?? '') === 'CLOSED') {
+        header('Location: /work-orders/' . $workOrderId . '/start?closed=1');
+        exit;
+    }
     $outputRolls = $service->listOutputRollsByWorkOrder($workOrderId);
     $boxes = $service->listBoxesByWorkOrder($workOrderId);
     $pallets = $service->listPalletsByWorkOrder($workOrderId);
@@ -8999,7 +9176,7 @@ if (preg_match('#^/work-orders/(\d+)/packaging/setup$#', $path, $m) === 1 && $me
     $flashMessage = null;
     $flashIsError = false;
     if (isset($_GET['setup_started']) && $_GET['setup_started'] === '1') {
-        $flashMessage = 'Producción de Embalaje iniciada correctamente.';
+        $flashMessage = 'Alistamiento de Embalaje iniciado correctamente.';
     } elseif (isset($_GET['setup_approved']) && $_GET['setup_approved'] === '1') {
         $approvedBy = trim((string)($_GET['approved_by'] ?? ''));
         $flashMessage = $approvedBy !== ''
@@ -9018,6 +9195,40 @@ if (preg_match('#^/work-orders/(\d+)/packaging/setup$#', $path, $m) === 1 && $me
         $flashIsError = true;
     }
     renderWorkOrderPackagingSetupScreen($ot, $outputRolls, $activeShiftSession, $helperOptions, $boxes, $pallets, $flashMessage, $flashIsError);
+    exit;
+}
+
+if (preg_match('#^/work-orders/(\d+)/packaging/close$#', $path, $m) === 1 && $method === 'GET') {
+    $workOrderId = (int)$m[1];
+    $ot = $service->getWorkOrder($workOrderId);
+    if ($ot === null) {
+        http_response_code(404);
+        render('No encontrado', '<div class="card">No existe la OT.</div>');
+        exit;
+    }
+    if ((string)($ot['status'] ?? '') === 'CLOSED') {
+        header('Location: /work-orders/' . $workOrderId . '/start?closed=1');
+        exit;
+    }
+    $outputRolls = $service->listOutputRollsByWorkOrder($workOrderId);
+    $boxes = $service->listBoxesByWorkOrder($workOrderId);
+    $pallets = $service->listPalletsByWorkOrder($workOrderId);
+    $helperOptions = $service->listProductionPersonnelNames();
+    $activeShiftSession = $service->getActiveShiftSessionByWorkOrder($workOrderId);
+    if ($activeShiftSession === null) {
+        $activeShiftSession = $service->getActiveShiftSessionByOperator($currentOperatorName);
+    }
+    renderWorkOrderPackagingFinishScreen(
+        $ot,
+        $outputRolls,
+        $activeShiftSession,
+        $helperOptions,
+        $boxes,
+        $pallets,
+        null,
+        false,
+        ['close_modal_open' => '1']
+    );
     exit;
 }
 
@@ -9046,12 +9257,29 @@ if (preg_match('#^/work-orders/(\d+)/packaging/finish-data$#', $path, $m) === 1 
         render('No encontrado', '<div class="card">No existe la OT.</div>');
         exit;
     }
-    if ($service->getLastWorkOrderPackagingSetupApproval($workOrderId) === null) {
-        header('Location: /work-orders/' . $workOrderId . '/packaging/setup');
+    if ((string)($ot['status'] ?? '') === 'CLOSED') {
+        header('Location: /work-orders/' . $workOrderId . '/start?closed=1');
         exit;
     }
-    if ($service->getOpenWorkOrderPackagingProductionEvent($workOrderId) === null) {
-        header('Location: /work-orders/' . $workOrderId . '/packaging/setup?process_error=' . urlencode('Debes iniciar la producción de Embalaje antes de terminarla.'));
+    $openProductionEvent = $service->getOpenWorkOrderPackagingProductionEvent($workOrderId);
+    if ($openProductionEvent === null) {
+        $setupApproval = $service->getLastWorkOrderPackagingSetupApproval($workOrderId);
+        $lastFinish = $service->getLastWorkOrderPackagingFinish($workOrderId);
+        $finishAfterSetup = false;
+        if ($lastFinish !== null) {
+            if ($setupApproval === null) {
+                $finishAfterSetup = true;
+            } else {
+                $finishTs = strtotime((string)($lastFinish['created_at'] ?? ''));
+                $setupTs = strtotime((string)($setupApproval['created_at'] ?? ''));
+                $finishAfterSetup = ($finishTs === false || $setupTs === false) ? true : ($finishTs >= $setupTs);
+            }
+        }
+        if ($finishAfterSetup) {
+            header('Location: /work-orders/' . $workOrderId . '/packaging/setup?packaging_finished=1');
+        } else {
+            header('Location: /work-orders/' . $workOrderId . '/packaging/setup?process_error=' . urlencode('Debes iniciar la producción de Embalaje antes de terminarla.'));
+        }
         exit;
     }
     $outputRolls = $service->listOutputRollsByWorkOrder($workOrderId);
@@ -9126,6 +9354,10 @@ if (preg_match('#^/work-orders/(\d+)/packaging/finish-order$#', $path, $m) === 1
     if ($ot === null) {
         http_response_code(404);
         render('No encontrado', '<div class="card">No existe la OT.</div>');
+        exit;
+    }
+    if ((string)($ot['status'] ?? '') === 'CLOSED') {
+        header('Location: /work-orders/' . $workOrderId . '/start?closed=1');
         exit;
     }
 
@@ -9490,6 +9722,20 @@ if (preg_match('#^/work-orders/(\d+)/setup$#', $path, $m) === 1 && $method === '
         render('No encontrado', '<div class="card">No existe la OT.</div>');
         exit;
     }
+    $status = (string)($ot['status'] ?? '');
+    if ($status === 'CUTTING') {
+        $finishApproval = $service->getLastWorkOrderFinishApproval($workOrderId);
+        if ($service->getLastWorkOrderFinish($workOrderId) !== null && $finishApproval === null) {
+            header('Location: /work-orders/' . $workOrderId . '/finish-approval');
+        } else {
+            header('Location: /work-orders/' . $workOrderId . '/start');
+        }
+        exit;
+    }
+    if ($status === 'CLOSED') {
+        header('Location: /work-orders/' . $workOrderId . '/start?closed=1');
+        exit;
+    }
     $chemicalInputs = $service->listChemicalInputsByWorkOrder($workOrderId, 20);
     $currentRoll = $service->getCurrentRollInWorkOrder($workOrderId);
     $lastFinish = $service->getLastWorkOrderFinish($workOrderId);
@@ -9536,6 +9782,20 @@ if (preg_match('#^/work-orders/(\d+)/in-progress$#', $path, $m) === 1 && $method
     if ($ot === null) {
         http_response_code(404);
         render('No encontrado', '<div class="card">No existe la OT.</div>');
+        exit;
+    }
+    $status = (string)($ot['status'] ?? '');
+    if ($status === 'CUTTING') {
+        $finishApproval = $service->getLastWorkOrderFinishApproval($workOrderId);
+        if ($service->getLastWorkOrderFinish($workOrderId) !== null && $finishApproval === null) {
+            header('Location: /work-orders/' . $workOrderId . '/finish-approval');
+        } else {
+            header('Location: /work-orders/' . $workOrderId . '/start');
+        }
+        exit;
+    }
+    if ($status === 'CLOSED') {
+        header('Location: /work-orders/' . $workOrderId . '/start?closed=1');
         exit;
     }
     $chemicalInputs = $service->listChemicalInputsByWorkOrder($workOrderId, 20);

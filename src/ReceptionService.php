@@ -2860,6 +2860,73 @@ SQL;
                         $row['current_roll_code'] = (string)$outputRoll['roll_code'] . ' (' . (string)$outputRoll['weight_kg'] . ' Kg)';
                     }
                 }
+
+                $finishApproval = $this->getLastWorkOrderFinishApproval($workOrderId);
+                $sealingSetupApproval = $this->getLastWorkOrderSealingSetupApproval($workOrderId);
+                $sealingFinish = $this->getLastWorkOrderSealingFinish($workOrderId);
+                $packagingSetupApproval = $this->getLastWorkOrderPackagingSetupApproval($workOrderId);
+                $packagingFinish = $this->getLastWorkOrderPackagingFinish($workOrderId);
+                $openSealingProduction = $this->getOpenWorkOrderSealingProductionEvent($workOrderId);
+                $openPackagingProduction = $this->getOpenWorkOrderPackagingProductionEvent($workOrderId);
+
+                $finishApprovalTs = strtotime((string)($finishApproval['created_at'] ?? ''));
+                $sealingSetupTs = strtotime((string)($sealingSetupApproval['created_at'] ?? ''));
+                $sealingFinishTs = strtotime((string)($sealingFinish['created_at'] ?? ''));
+                $packagingSetupTs = strtotime((string)($packagingSetupApproval['created_at'] ?? ''));
+                $packagingFinishTs = strtotime((string)($packagingFinish['created_at'] ?? ''));
+                $openSealingStartedTs = strtotime((string)($openSealingProduction['started_at'] ?? ''));
+                $openPackagingStartedTs = strtotime((string)($openPackagingProduction['started_at'] ?? ''));
+
+                $flexoApproved = $finishApproval !== null;
+                $sealingSetupValid = $flexoApproved
+                    && $sealingSetupApproval !== null
+                    && ($finishApprovalTs === false || $sealingSetupTs === false || $sealingSetupTs >= $finishApprovalTs);
+
+                $sealingFinished = false;
+                if ($flexoApproved && $sealingFinish !== null) {
+                    if ($sealingSetupValid) {
+                        $sealingFinished = ($sealingFinishTs === false || $sealingSetupTs === false)
+                            ? true
+                            : ($sealingFinishTs >= $sealingSetupTs);
+                    } elseif ($finishApprovalTs === false || $sealingFinishTs === false) {
+                        $sealingFinished = true;
+                    } else {
+                        $sealingFinished = $sealingFinishTs >= $finishApprovalTs;
+                    }
+                }
+
+                $sealingStarted = $flexoApproved && (
+                    $sealingSetupValid
+                    || $sealingFinished
+                    || ($openSealingProduction !== null && ($finishApprovalTs === false || $openSealingStartedTs === false || $openSealingStartedTs >= $finishApprovalTs))
+                );
+
+                $packagingSetupValid = $sealingFinished
+                    && $packagingSetupApproval !== null
+                    && ($sealingFinishTs === false || $packagingSetupTs === false || $packagingSetupTs >= $sealingFinishTs);
+                $packagingFinished = $sealingFinished
+                    && $packagingFinish !== null
+                    && (
+                        $packagingSetupValid
+                            ? ($packagingFinishTs === false || $packagingSetupTs === false || $packagingFinishTs >= $packagingSetupTs)
+                            : ($sealingFinishTs === false || $packagingFinishTs === false || $packagingFinishTs >= $sealingFinishTs)
+                    );
+                $packagingStarted = $sealingFinished && (
+                    $packagingSetupValid
+                    || $packagingFinished
+                    || ($openPackagingProduction !== null && ($sealingFinishTs === false || $openPackagingStartedTs === false || $openPackagingStartedTs >= $sealingFinishTs))
+                );
+
+                if ($packagingStarted) {
+                    $row['status_label'] = 'Embalaje';
+                    $row['current_chemical_label'] = $packagingFinished ? 'Embalaje terminado' : 'En proceso de Embalaje';
+                } elseif ($sealingFinished) {
+                    $row['status_label'] = 'Embalaje';
+                    $row['current_chemical_label'] = 'Lista para Embalaje';
+                } elseif ($sealingStarted || $finishApproval !== null) {
+                    $row['status_label'] = 'Selladora';
+                    $row['current_chemical_label'] = $sealingSetupValid ? 'En proceso de Selladora' : 'Lista para Selladora';
+                }
             } elseif ((string)$row['status'] === 'CLOSED') {
                 $lastCut = $this->getLastCutCompletion($workOrderId);
                 $lastFinish = $this->getLastWorkOrderFinish($workOrderId);
@@ -4111,8 +4178,15 @@ SQL;
         if ($this->getOpenWorkOrderPackagingProductionEvent($workOrderId) !== null) {
             return ['ok' => false, 'errors' => ['event' => 'Ya existe una producción de Embalaje en curso para esta OT.']];
         }
-        if ($this->getLastWorkOrderPackagingFinish($workOrderId) !== null) {
-            return ['ok' => false, 'errors' => ['event' => 'La producción de Embalaje ya fue cerrada para esta OT.']];
+        $lastFinish = $this->getLastWorkOrderPackagingFinish($workOrderId);
+        if ($lastFinish !== null) {
+            $setupApproval = $this->getLastWorkOrderPackagingSetupApproval($workOrderId);
+            $finishTs = strtotime((string)($lastFinish['created_at'] ?? ''));
+            $setupTs = strtotime((string)($setupApproval['created_at'] ?? ''));
+            $finishAfterSetup = $setupApproval === null || $finishTs === false || $setupTs === false ? true : ($finishTs >= $setupTs);
+            if ($finishAfterSetup) {
+                return ['ok' => false, 'errors' => ['event' => 'La producción de Embalaje ya fue cerrada para esta OT.']];
+            }
         }
         if ($operatorName === '') {
             return ['ok' => false, 'errors' => ['operator_name' => 'Operador es obligatorio.']];
@@ -4546,8 +4620,15 @@ SQL;
         if ($this->getOpenWorkOrderSealingProductionEvent($workOrderId) !== null) {
             return ['ok' => false, 'errors' => ['event' => 'Ya existe una producción de Selladora en curso para esta OT.']];
         }
-        if ($this->getLastWorkOrderSealingFinish($workOrderId) !== null) {
-            return ['ok' => false, 'errors' => ['event' => 'La producción de Selladora ya fue cerrada para esta OT.']];
+        $lastFinish = $this->getLastWorkOrderSealingFinish($workOrderId);
+        if ($lastFinish !== null) {
+            $setupApproval = $this->getLastWorkOrderSealingSetupApproval($workOrderId);
+            $finishTs = strtotime((string)($lastFinish['created_at'] ?? ''));
+            $setupTs = strtotime((string)($setupApproval['created_at'] ?? ''));
+            $finishAfterSetup = $setupApproval === null || $finishTs === false || $setupTs === false ? true : ($finishTs >= $setupTs);
+            if ($finishAfterSetup) {
+                return ['ok' => false, 'errors' => ['event' => 'La producción de Selladora ya fue cerrada para esta OT.']];
+            }
         }
         if ($operatorName === '') {
             return ['ok' => false, 'errors' => ['operator_name' => 'Operador es obligatorio.']];
@@ -4988,7 +5069,28 @@ SQL;
         );
         $stmt->execute([':wo' => $workOrderId]);
         $row = $stmt->fetch();
-        return $row === false ? null : $row;
+        if ($row === false) {
+            return null;
+        }
+
+        $lastFinish = $this->getLastWorkOrderFinish($workOrderId);
+        if ($lastFinish === null) {
+            return null;
+        }
+
+        $approvalId = (int)($row['id'] ?? 0);
+        $finishId = (int)($lastFinish['id'] ?? 0);
+        if ($approvalId > 0 && $finishId > 0 && $approvalId < $finishId) {
+            return null;
+        }
+
+        $approvalTs = strtotime((string)($row['created_at'] ?? ''));
+        $finishTs = strtotime((string)($lastFinish['created_at'] ?? ''));
+        if ($approvalTs !== false && $finishTs !== false && $approvalTs < $finishTs) {
+            return null;
+        }
+
+        return $row;
     }
 
     public function getLastCutCompletion(int $workOrderId): ?array
