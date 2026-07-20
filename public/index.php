@@ -2795,6 +2795,20 @@ function renderWorkOrderRequestMaterialsScreen(
         $body .= '<div class="' . ($flashIsError ? 'err' : 'ok') . '" style="margin-bottom:12px">' . h($flashMessage) . '</div>';
     }
 
+    $requestFilter = strtoupper(trim((string)($formState['request_filter'] ?? ($_GET['request_filter'] ?? 'ROLL'))));
+    if (!in_array($requestFilter, ['ROLL', 'CHEMICAL', 'OTHER'], true)) {
+        $requestFilter = 'ROLL';
+    }
+    $requestFilterLabels = [
+        'ROLL' => 'Bobinas',
+        'CHEMICAL' => 'Tintas',
+        'OTHER' => 'Otros',
+    ];
+    $filteredMaterialRequests = array_values(array_filter(
+        $materialRequests,
+        static fn(array $request): bool => strtoupper(trim((string)($request['request_type'] ?? 'ROLL'))) === $requestFilter
+    ));
+
     $body .= '<div class="legacy-sheet-card" style="margin-bottom:12px"><table class="legacy-sheet-table"><thead><tr><th colspan="4">Informacion Cliente</th></tr></thead><tbody>';
     foreach ($legacyClientRows as $legacyRow) {
         $body .= '<tr><td class="legacy-label-cell">' . h((string)$legacyRow[0]) . '</td><td class="legacy-value-cell">' . $legacyRow[1] . '</td><td class="legacy-label-cell">' . h((string)$legacyRow[2]) . '</td><td class="legacy-value-cell">' . $legacyRow[3] . '</td></tr>';
@@ -2811,33 +2825,86 @@ function renderWorkOrderRequestMaterialsScreen(
     }
     $body .= '</tbody></table></div>';
 
+    $body .= '<div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:12px">';
+    foreach ($requestFilterLabels as $filterKey => $filterLabel) {
+        $buttonClass = $requestFilter === $filterKey ? 'btn' : 'btn secondary';
+        $body .= '<button type="button" class="' . $buttonClass . '" data-request-filter-tab="' . h($filterKey) . '" data-active-class="btn" data-inactive-class="btn secondary" style="min-width:120px;text-align:center">' . h($filterLabel) . '</button>';
+    }
+    $body .= '</div>';
+
     $body .= '<div class="legacy-sheet-card" style="margin-bottom:12px"><table class="legacy-sheet-table"><thead><tr><th colspan="4">Solicitudes a bodega</th></tr></thead><tbody>';
-    $body .= '<tr><td class="legacy-label-cell">Bobinas</td><td class="legacy-value-cell" colspan="3"><form method="post" action="/work-orders/' . (int)$ot['id'] . '/material-request"><input type="hidden" name="_csrf" value="' . h(csrfToken()) . '"><input type="hidden" name="request_type" value="ROLL"><input type="hidden" name="return_context" value="REQUEST_WINDOW"><table class="legacy-sheet-table" style="margin:0"><tbody><tr><td class="legacy-label-cell">Tipo de bobina</td><td class="legacy-value-cell" colspan="3"><select name="requested_group_key" required><option value="">Seleccionar material</option>';
+    $body .= '<tr data-request-filter-panel="ROLL"' . ($requestFilter === 'ROLL' ? '' : ' style="display:none"') . '><td class="legacy-label-cell">Bobinas</td><td class="legacy-value-cell" colspan="3"><form method="post" action="/work-orders/' . (int)$ot['id'] . '/material-request"><input type="hidden" name="_csrf" value="' . h(csrfToken()) . '"><input type="hidden" name="request_type" value="ROLL"><input type="hidden" name="request_filter" value="ROLL"><input type="hidden" name="return_context" value="REQUEST_WINDOW"><table class="legacy-sheet-table" style="margin:0"><tbody><tr><td class="legacy-label-cell">Tipo de bobina</td><td class="legacy-value-cell" colspan="3"><select name="requested_group_key" required><option value="">Seleccionar material</option>';
     foreach ($availableMaterialRolls as $availableRoll) {
         $selected = ((string)($formState['requested_group_key'] ?? '') === (string)$availableRoll['group_key']) ? ' selected' : '';
         $body .= '<option value="' . h((string)$availableRoll['group_key']) . '"' . $selected . '>' . h(materialRequestGroupLabel($availableRoll)) . '</option>';
     }
     $body .= '</select></td></tr><tr><td class="legacy-label-cell">Cantidad de bobinas</td><td class="legacy-value-cell"><input name="requested_qty" type="number" step="1" min="1" value="' . h((string)($formState['requested_qty'] ?? '1')) . '" required></td><td class="legacy-label-cell">Nota</td><td class="legacy-value-cell"><input name="request_notes" type="text" value="' . h((string)($formState['request_notes'] ?? '')) . '" placeholder="Observaciones para bodega"></td></tr><tr><td class="legacy-label-cell">Acción</td><td class="legacy-value-cell" colspan="3"><button class="btn" type="submit">Solicitar bobinas</button></td></tr></tbody></table></form></td></tr>';
-    $body .= '<tr><td class="legacy-label-cell">Tintas</td><td class="legacy-value-cell" colspan="3"><form method="post" action="/work-orders/' . (int)$ot['id'] . '/material-request"><input type="hidden" name="_csrf" value="' . h(csrfToken()) . '"><input type="hidden" name="request_type" value="CHEMICAL"><input type="hidden" name="return_context" value="REQUEST_WINDOW"><table class="legacy-sheet-table" style="margin:0"><tbody><tr><td class="legacy-label-cell">Tinta</td><td class="legacy-value-cell" colspan="3"><select name="chemical_id" required><option value="">Seleccionar tinta</option>';
+    $body .= '<tr data-request-filter-panel="CHEMICAL"' . ($requestFilter === 'CHEMICAL' ? '' : ' style="display:none"') . '><td class="legacy-label-cell">Tintas</td><td class="legacy-value-cell" colspan="3"><form method="post" action="/work-orders/' . (int)$ot['id'] . '/material-request"><input type="hidden" name="_csrf" value="' . h(csrfToken()) . '"><input type="hidden" name="request_type" value="CHEMICAL"><input type="hidden" name="request_filter" value="CHEMICAL"><input type="hidden" name="return_context" value="REQUEST_WINDOW"><table class="legacy-sheet-table" style="margin:0"><tbody><tr><td class="legacy-label-cell">Tinta</td><td class="legacy-value-cell" colspan="3"><select name="chemical_id" required><option value="">Seleccionar tinta</option>';
     foreach ($chemicals as $chemical) {
         $selected = ((string)($formState['chemical_request_id'] ?? '') === (string)$chemical['id']) ? ' selected' : '';
         $body .= '<option value="' . (int)$chemical['id'] . '"' . $selected . '>' . h((string)$chemical['code']) . ' - ' . h((string)$chemical['name']) . '</option>';
     }
     $body .= '</select></td></tr><tr><td class="legacy-label-cell">Cantidad</td><td class="legacy-value-cell"><input name="requested_qty" type="number" step="0.001" min="0.001" value="' . h((string)($formState['chemical_requested_qty'] ?? '1')) . '" required></td><td class="legacy-label-cell">Unidad</td><td class="legacy-value-cell"><select name="requested_unit"><option value="Kg">Kg</option><option value="Lt">Lt</option><option value="Unid.">Unid.</option></select></td></tr><tr><td class="legacy-label-cell">Nota</td><td class="legacy-value-cell" colspan="3"><input name="request_notes" type="text" value="' . h((string)($formState['chemical_request_notes'] ?? '')) . '" placeholder="Ej: para mezcla inicial o reposición"></td></tr><tr><td class="legacy-label-cell">Acción</td><td class="legacy-value-cell" colspan="3"><button class="btn" type="submit">Solicitar tinta</button></td></tr></tbody></table></form></td></tr>';
-    $body .= '<tr><td class="legacy-label-cell">Otros insumos</td><td class="legacy-value-cell" colspan="3"><form method="post" action="/work-orders/' . (int)$ot['id'] . '/material-request"><input type="hidden" name="_csrf" value="' . h(csrfToken()) . '"><input type="hidden" name="request_type" value="OTHER"><input type="hidden" name="return_context" value="REQUEST_WINDOW"><table class="legacy-sheet-table" style="margin:0"><tbody><tr><td class="legacy-label-cell">Material o insumo</td><td class="legacy-value-cell" colspan="3"><input name="requested_item" type="text" value="' . h((string)($formState['requested_item'] ?? '')) . '" placeholder="Ej: tinta azul, cajas, bolsas, aditivo" required></td></tr><tr><td class="legacy-label-cell">Cantidad</td><td class="legacy-value-cell"><input name="requested_qty" type="number" step="0.001" min="0.001" value="' . h((string)($formState['other_requested_qty'] ?? '1')) . '" required></td><td class="legacy-label-cell">Unidad</td><td class="legacy-value-cell"><input name="requested_unit" type="text" value="' . h((string)($formState['other_requested_unit'] ?? 'Unid.')) . '" placeholder="Ej: Unid., Kg, Lt"></td></tr><tr><td class="legacy-label-cell">Nota</td><td class="legacy-value-cell" colspan="3"><input name="request_notes" type="text" value="' . h((string)($formState['other_request_notes'] ?? '')) . '" placeholder="Observaciones para bodega"></td></tr><tr><td class="legacy-label-cell">Acción</td><td class="legacy-value-cell" colspan="3"><button class="btn" type="submit">Solicitar insumo</button></td></tr></tbody></table></form></td></tr>';
+    $body .= '<tr data-request-filter-panel="OTHER"' . ($requestFilter === 'OTHER' ? '' : ' style="display:none"') . '><td class="legacy-label-cell">Otros insumos</td><td class="legacy-value-cell" colspan="3"><form method="post" action="/work-orders/' . (int)$ot['id'] . '/material-request"><input type="hidden" name="_csrf" value="' . h(csrfToken()) . '"><input type="hidden" name="request_type" value="OTHER"><input type="hidden" name="request_filter" value="OTHER"><input type="hidden" name="return_context" value="REQUEST_WINDOW"><table class="legacy-sheet-table" style="margin:0"><tbody><tr><td class="legacy-label-cell">Material o insumo</td><td class="legacy-value-cell" colspan="3"><input name="requested_item" type="text" value="' . h((string)($formState['requested_item'] ?? '')) . '" placeholder="Ej: tinta azul, cajas, bolsas, aditivo" required></td></tr><tr><td class="legacy-label-cell">Cantidad</td><td class="legacy-value-cell"><input name="requested_qty" type="number" step="0.001" min="0.001" value="' . h((string)($formState['other_requested_qty'] ?? '1')) . '" required></td><td class="legacy-label-cell">Unidad</td><td class="legacy-value-cell"><input name="requested_unit" type="text" value="' . h((string)($formState['other_requested_unit'] ?? 'Unid.')) . '" placeholder="Ej: Unid., Kg, Lt"></td></tr><tr><td class="legacy-label-cell">Nota</td><td class="legacy-value-cell" colspan="3"><input name="request_notes" type="text" value="' . h((string)($formState['other_request_notes'] ?? '')) . '" placeholder="Observaciones para bodega"></td></tr><tr><td class="legacy-label-cell">Acción</td><td class="legacy-value-cell" colspan="3"><button class="btn" type="submit">Solicitar insumo</button></td></tr></tbody></table></form></td></tr>';
     $body .= '</tbody></table></div>';
 
     $body .= '<div class="legacy-sheet-card" style="margin-bottom:12px"><table class="legacy-sheet-table"><thead><tr><th colspan="4">Solicitudes de la OT</th></tr></thead><tbody>';
-    $body .= '<tr><td class="legacy-label-cell">Resumen</td><td class="legacy-value-cell" colspan="3">Solicitudes registradas para esta orden de trabajo.</td></tr>';
+    $body .= '<tr><td class="legacy-label-cell">Resumen</td><td class="legacy-value-cell" colspan="3">Solicitudes registradas para <span data-request-filter-summary-label>' . h(strtolower($requestFilterLabels[$requestFilter])) . '</span>.</td></tr>';
     $body .= '<tr><td class="legacy-label-cell">Solicitudes OT</td><td class="legacy-value-cell" colspan="3"><div class="table-wrap"><table class="table-compact"><thead><tr><th>Tipo</th><th>Material solicitado</th><th>Cant.</th><th>Entregadas</th><th>Estado</th><th>Última entrega</th></tr></thead><tbody>';
     foreach ($materialRequests as $request) {
         $deliveredRoll = trim((string)($request['delivered_roll_code'] ?? ''));
-        $body .= '<tr><td>' . h(materialRequestTypeLabel((string)($request['request_type'] ?? 'ROLL'))) . '</td><td>' . h((string)$request['requested_item']) . '</td><td>' . h(formatReceptionValue((float)($request['requested_qty'] ?? 0), (string)($request['requested_unit'] ?? 'Unid.'))) . '</td><td>' . h(formatReceptionValue((float)($request['delivered_qty'] ?? 0), (string)($request['requested_unit'] ?? 'Unid.'))) . '</td><td>' . h(materialRequestStatusLabel((string)$request['status'])) . '</td><td>' . h($deliveredRoll !== '' ? $deliveredRoll : (string)($request['delivered_by'] ?? '-')) . '</td></tr>';
+        $requestTypeValue = strtoupper(trim((string)($request['request_type'] ?? 'ROLL')));
+        $body .= '<tr data-request-filter-row="' . h($requestTypeValue) . '"' . ($requestTypeValue === $requestFilter ? '' : ' style="display:none"') . '><td>' . h(materialRequestTypeLabel((string)($request['request_type'] ?? 'ROLL'))) . '</td><td>' . h((string)$request['requested_item']) . '</td><td>' . h(formatReceptionValue((float)($request['requested_qty'] ?? 0), (string)($request['requested_unit'] ?? 'Unid.'))) . '</td><td>' . h(formatReceptionValue((float)($request['delivered_qty'] ?? 0), (string)($request['requested_unit'] ?? 'Unid.'))) . '</td><td>' . h(materialRequestStatusLabel((string)$request['status'])) . '</td><td>' . h($deliveredRoll !== '' ? $deliveredRoll : (string)($request['delivered_by'] ?? '-')) . '</td></tr>';
     }
-    if ($materialRequests === []) {
-        $body .= '<tr><td colspan="6" class="muted">Sin solicitudes todavía.</td></tr>';
-    }
+    $body .= '<tr data-request-filter-empty="' . h($requestFilter) . '"' . ($filteredMaterialRequests === [] ? '' : ' style="display:none"') . '><td colspan="6" class="muted">Sin solicitudes de <span data-request-filter-empty-label>' . h(strtolower($requestFilterLabels[$requestFilter])) . '</span> todavía.</td></tr>';
     $body .= '</tbody></table></div></td></tr></tbody></table></div>';
+    $requestFilterJson = json_encode($requestFilterLabels, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $body .= '<script>
+        (function () {
+            var labels = ' . ($requestFilterJson !== false ? $requestFilterJson : '{"ROLL":"Bobinas","CHEMICAL":"Tintas","OTHER":"Otros"}') . ';
+            var buttons = document.querySelectorAll("[data-request-filter-tab]");
+            var panels = document.querySelectorAll("[data-request-filter-panel]");
+            var rows = document.querySelectorAll("[data-request-filter-row]");
+            var summary = document.querySelector("[data-request-filter-summary-label]");
+            var emptyRow = document.querySelector("[data-request-filter-empty]");
+            var emptyLabel = document.querySelector("[data-request-filter-empty-label]");
+
+            function setFilter(filterKey) {
+                var visibleRows = 0;
+                buttons.forEach(function (button) {
+                    var activeClass = button.getAttribute("data-active-class") || "btn";
+                    var inactiveClass = button.getAttribute("data-inactive-class") || "btn secondary";
+                    button.className = button.getAttribute("data-request-filter-tab") === filterKey ? activeClass : inactiveClass;
+                });
+                panels.forEach(function (panel) {
+                    panel.style.display = panel.getAttribute("data-request-filter-panel") === filterKey ? "" : "none";
+                });
+                rows.forEach(function (row) {
+                    var matches = row.getAttribute("data-request-filter-row") === filterKey;
+                    row.style.display = matches ? "" : "none";
+                    if (matches) {
+                        visibleRows++;
+                    }
+                });
+                if (summary) {
+                    summary.textContent = (labels[filterKey] || "").toLowerCase();
+                }
+                if (emptyLabel) {
+                    emptyLabel.textContent = (labels[filterKey] || "").toLowerCase();
+                }
+                if (emptyRow) {
+                    emptyRow.style.display = visibleRows === 0 ? "" : "none";
+                    emptyRow.setAttribute("data-request-filter-empty", filterKey);
+                }
+            }
+
+            buttons.forEach(function (button) {
+                button.addEventListener("click", function () {
+                    setFilter(button.getAttribute("data-request-filter-tab"));
+                });
+            });
+        })();
+    </script>';
 
     render('Solicitar materiales', $body);
 }
@@ -5114,18 +5181,88 @@ function renderWorkOrderMaterialUsageScreen(
         $materialRequests,
         static fn(array $request): bool => strtoupper(trim((string)($request['request_type'] ?? 'ROLL'))) === 'ROLL'
     ));
-    $rollHistory = $service instanceof ReceptionService ? $service->listWorkOrderRollHistory((int)$ot['id']) : [];
-    $movementRows = [];
-    $activeRequestId = 0;
-    $attachedRequestIds = [];
-    if ($currentRoll !== null) {
-        foreach ($materialRequests as $materialRequest) {
-            if ((int)($materialRequest['delivered_roll_id'] ?? 0) === (int)($currentRoll['id'] ?? 0)) {
-                $activeRequestId = (int)($materialRequest['id'] ?? 0);
-                break;
+    $activeRolls = $service instanceof ReceptionService ? $service->listActiveRollsInWorkOrder((int)$ot['id']) : [];
+    $activeRollIds = [];
+    $activeRollsById = [];
+    foreach ($activeRolls as $activeRoll) {
+        $activeRollId = (int)($activeRoll['id'] ?? 0);
+        if ($activeRollId <= 0) {
+            continue;
+        }
+        $activeRollIds[$activeRollId] = true;
+        $activeRollsById[$activeRollId] = $activeRoll;
+    }
+    $deliveriesByRequest = [];
+    $deliveredRollRequestMap = [];
+    if ($service instanceof ReceptionService) {
+        foreach ($rollRequests as $rollRequest) {
+            $requestId = (int)($rollRequest['id'] ?? 0);
+            if ($requestId <= 0) {
+                continue;
             }
+            $deliveries = $service->listMaterialDeliveriesByRequest($requestId);
+            $deliveredRolls = [];
+            foreach ($deliveries as $delivery) {
+                $deliveredRollId = (int)($delivery['roll_id'] ?? 0);
+                if ($deliveredRollId <= 0 || isset($deliveredRolls[$deliveredRollId])) {
+                    continue;
+                }
+                $deliveredRoll = $service->getRoll($deliveredRollId);
+                if (!is_array($deliveredRoll)) {
+                    continue;
+                }
+                $deliveredRolls[$deliveredRollId] = $deliveredRoll;
+                $deliveredRollRequestMap[$deliveredRollId] = $requestId;
+            }
+            $deliveriesByRequest[$requestId] = array_values($deliveredRolls);
         }
     }
+    $rollHistory = $service instanceof ReceptionService ? $service->listWorkOrderRollHistory((int)$ot['id']) : [];
+    $activeAttachEventIds = [];
+    $openAttachEventIdByRoll = [];
+    foreach (array_reverse($rollHistory) as $historyRow) {
+        $eventType = strtoupper(trim((string)($historyRow['type'] ?? '')));
+        $historyEventId = (int)($historyRow['id'] ?? 0);
+        $historyRollId = (int)($historyRow['roll_id'] ?? 0);
+        if ($historyEventId <= 0 || $historyRollId <= 0) {
+            continue;
+        }
+        if ($eventType === 'WORK_ORDER_ROLL_ATTACHED') {
+            // Solo la ultima entrada vigente por bobina debe quedar operable en la grilla.
+            $openAttachEventIdByRoll[$historyRollId] = $historyEventId;
+            continue;
+        }
+        if ($eventType === 'WORK_ORDER_ROLL_RELEASED') {
+            unset($openAttachEventIdByRoll[$historyRollId]);
+        }
+    }
+    foreach ($openAttachEventIdByRoll as $openAttachEventId) {
+        $activeAttachEventIds[(int)$openAttachEventId] = true;
+    }
+    $activeRollRequestMap = [];
+    $activeRollRequestByRollId = [];
+    foreach ($rollHistory as $historyRow) {
+        $eventType = strtoupper(trim((string)($historyRow['type'] ?? '')));
+        $historyEventId = (int)($historyRow['id'] ?? 0);
+        if ($eventType !== 'WORK_ORDER_ROLL_ATTACHED' || !isset($activeAttachEventIds[$historyEventId])) {
+            continue;
+        }
+        $historyRollId = (int)($historyRow['roll_id'] ?? 0);
+        if ($historyRollId <= 0 || !isset($activeRollsById[$historyRollId])) {
+            continue;
+        }
+        $payload = isset($historyRow['payload_data']) && is_array($historyRow['payload_data']) ? $historyRow['payload_data'] : [];
+        $historyRequestId = (int)($payload['request_id'] ?? ($deliveredRollRequestMap[$historyRollId] ?? 0));
+        if ($historyRequestId <= 0) {
+            continue;
+        }
+        if (!isset($activeRollRequestMap[$historyRequestId])) {
+            $activeRollRequestMap[$historyRequestId] = [];
+        }
+        $activeRollRequestMap[$historyRequestId][$historyRollId] = $activeRollsById[$historyRollId];
+        $activeRollRequestByRollId[$historyRollId] = $historyRequestId;
+    }
+    $movementRows = [];
     foreach ($rollHistory as $historyRow) {
         $eventType = strtoupper(trim((string)($historyRow['type'] ?? '')));
         $payload = isset($historyRow['payload_data']) && is_array($historyRow['payload_data']) ? $historyRow['payload_data'] : [];
@@ -5135,20 +5272,13 @@ function renderWorkOrderMaterialUsageScreen(
             continue;
         }
         $historyRollId = (int)($historyRow['roll_id'] ?? 0);
-        $requestIdForRow = 0;
-        foreach ($materialRequests as $materialRequest) {
-            if ((int)($materialRequest['delivered_roll_id'] ?? 0) === $historyRollId) {
-                $requestIdForRow = (int)($materialRequest['id'] ?? 0);
-                break;
-            }
-        }
-        if ($isAttach && $requestIdForRow > 0) {
-            $attachedRequestIds[$requestIdForRow] = true;
-        }
+        $historyEventId = (int)($historyRow['id'] ?? 0);
+        $requestIdForRow = (int)($payload['request_id'] ?? ($deliveredRollRequestMap[$historyRollId] ?? 0));
         $quantityValue = $isAttach
             ? (float)($payload['process_weight_kg'] ?? 0)
             : (float)($payload['final_weight_kg'] ?? 0);
         $movementRows[] = [
+            'event_id' => $historyEventId,
             'transaction' => ($isAttach ? 'IA' : 'SA') . str_pad((string)((int)($historyRow['id'] ?? 0)), 7, '0', STR_PAD_LEFT),
             'date_time' => formatLabelDateTime((string)($historyRow['created_at'] ?? '')),
             'material' => trim((string)($historyRow['sku_description'] ?? '')) !== '' ? (string)$historyRow['sku_description'] : '-',
@@ -5157,18 +5287,9 @@ function renderWorkOrderMaterialUsageScreen(
             'type' => $isAttach ? 'Entrada' : 'Salida',
             'request_id' => $requestIdForRow,
             'roll_id' => $historyRollId,
-            'is_active' => $currentRoll !== null && $historyRollId === (int)($currentRoll['id'] ?? 0) && $isAttach,
+            'is_active' => $isAttach && isset($activeAttachEventIds[$historyEventId]),
         ];
     }
-    $rollRequests = array_values(array_filter(
-        $rollRequests,
-        static function (array $request) use ($attachedRequestIds): bool {
-            if (isset($attachedRequestIds[(int)($request['id'] ?? 0)])) {
-                return false;
-            }
-            return true;
-        }
-    ));
 
     $setupActionButtons = '<div class="legacy-setup-actions">'
         . '<a class="legacy-setup-action request" href="/work-orders/' . (int)$ot['id'] . '/request-materials" target="_blank" rel="noopener">Solicitar materiales</a>'
@@ -5210,16 +5331,48 @@ function renderWorkOrderMaterialUsageScreen(
         $body .= '<tr><td colspan="7" class="muted">Todavía no hay movimientos realizados en esta orden de trabajo.</td></tr>';
     } else {
         foreach ($movementRows as $movementRow) {
+            $rowEventId = (int)($movementRow['event_id'] ?? 0);
             $rowRequestId = (int)($movementRow['request_id'] ?? 0);
+            $rowRollId = (int)($movementRow['roll_id'] ?? 0);
             $isActiveMovement = (bool)($movementRow['is_active'] ?? false);
+            $rowReleaseModalId = 'material-row-release-' . $rowEventId;
+            $rowOpenReleaseOnclick = ' onclick="var modal=document.getElementById(\'' . $rowReleaseModalId . '\'); if(modal){modal.style.display=\'block\';} return false;"';
+            $rowCloseReleaseOnclick = ' onclick="var modal=document.getElementById(\'' . $rowReleaseModalId . '\'); if(modal){modal.style.display=\'none\';} return false;"';
+            $rowActiveRoll = $activeRollsById[$rowRollId] ?? null;
+            $rowReleaseWeight = is_array($rowActiveRoll) && isset($rowActiveRoll['weight_kg'])
+                ? rtrim(rtrim(number_format((float)$rowActiveRoll['weight_kg'], 2, '.', ''), '0'), '.')
+                : '';
             $rowOptions = $isActiveMovement
                 ? '<div style="display:flex;gap:6px;align-items:center">'
                     . '<form method="post" action="/work-orders/' . (int)$ot['id'] . '/materials/remove" onsubmit="return confirm(\'¿Eliminar esta entrada por error?\')" style="margin:0">'
                     . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
                     . '<input type="hidden" name="request_id" value="' . $rowRequestId . '">'
-                    . '<button class="btn" type="submit" style="background:#d94841;border-color:#d94841;padding:6px 14px"' . ($rowRequestId > 0 ? '' : ' disabled') . '>Eliminar</button>'
+                    . '<input type="hidden" name="roll_id" value="' . $rowRollId . '">'
+                    . '<button class="btn" type="submit" style="background:#d94841;border-color:#d94841;padding:6px 14px"' . ($rowRequestId > 0 && $rowRollId > 0 ? '' : ' disabled') . '>Eliminar</button>'
                     . '</form>'
-                    . '<button class="btn secondary" type="button" data-material-modal-open="active-release">Salida</button>'
+                    . '<button class="btn secondary" type="button"' . $rowOpenReleaseOnclick . ($rowRollId > 0 ? '' : ' disabled') . '>Salida</button>'
+                    . '<div class="legacy-inline-modal" id="' . $rowReleaseModalId . '" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;padding:20px;overflow:auto">'
+                    . '<div style="max-width:520px;margin:40px auto;background:#fff;border-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,.22);padding:18px">'
+                    . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Salida de bobina</div><button type="button" class="btn secondary"' . $rowCloseReleaseOnclick . '>Cerrar</button></div>'
+                    . '<div class="muted" style="margin-bottom:12px">Registra los kilos que salieron de la máquina y la merma generada.</div>'
+                    . '<form method="post" action="/work-orders/' . (int)$ot['id'] . '/materials/release" data-release-form>'
+                    . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
+                    . '<input type="hidden" name="request_id" value="' . $rowRequestId . '">'
+                    . '<label>Bobina activa</label>'
+                    . '<input type="hidden" name="roll_id" value="' . $rowRollId . '">'
+                    . '<input type="text" value="' . h((string)($movementRow['code'] ?? '-')) . '" readonly>'
+                    . '<label style="margin-top:10px">Kilos que salieron de la máquina</label>'
+                    . '<input name="final_weight_kg" type="number" step="0.001" min="0" value="' . h($rowReleaseWeight) . '" required placeholder="Ej: 8.600">'
+                    . '<input name="waste_kg" type="hidden" value="' . h($releaseWasteTotalState) . '" data-release-waste-total>'
+                    . '<div style="font-weight:700;margin-top:12px;margin-bottom:8px">Mermas de salida</div>'
+                    . '<div style="display:grid;grid-template-columns:120px minmax(0,1fr) 86px minmax(0,1fr);gap:8px;align-items:center;margin-bottom:8px"><div style="font-weight:700">Ajuste / Aprobación</div><div><input type="number" step="0.001" min="0" name="release_waste_detail_weight[approval]" value="" data-release-waste-input placeholder="Kg" style="width:100%;box-sizing:border-box"></div><div style="font-size:12px;color:#555">Comentario</div><div><input type="text" name="release_waste_detail_comment[approval]" value="" style="width:100%;box-sizing:border-box"></div></div>'
+                    . '<div style="display:grid;grid-template-columns:120px minmax(0,1fr) 86px minmax(0,1fr);gap:8px;align-items:center;margin-bottom:8px"><div style="font-weight:700">Impresión</div><div><input type="number" step="0.001" min="0" name="release_waste_detail_weight[printing]" value="" data-release-waste-input placeholder="Kg" style="width:100%;box-sizing:border-box"></div><div style="font-size:12px;color:#555">Comentario</div><div><input type="text" name="release_waste_detail_comment[printing]" value="" style="width:100%;box-sizing:border-box"></div></div>'
+                    . '<div style="display:grid;grid-template-columns:120px minmax(0,1fr) 86px minmax(0,1fr);gap:8px;align-items:center;margin-bottom:8px"><div style="font-weight:700">Merma Proceso</div><div><input type="number" step="0.001" min="0" name="release_waste_detail_weight[process]" value="" data-release-waste-input placeholder="Kg" style="width:100%;box-sizing:border-box"></div><div style="font-size:12px;color:#555">Comentario</div><div><input type="text" name="release_waste_detail_comment[process]" value="" style="width:100%;box-sizing:border-box"></div></div>'
+                    . '<div style="display:grid;grid-template-columns:120px minmax(0,1fr) 86px minmax(0,1fr);gap:8px;align-items:center;margin-bottom:8px"><div style="font-weight:700">Otros</div><div><input type="number" step="0.001" min="0" name="release_waste_detail_weight[other]" value="" data-release-waste-input placeholder="Kg" style="width:100%;box-sizing:border-box"></div><div style="font-size:12px;color:#555">Comentario</div><div><input type="text" name="release_waste_detail_comment[other]" value="" style="width:100%;box-sizing:border-box"></div></div>'
+                    . '<label style="margin-top:10px">Merma total</label>'
+                    . '<input type="text" value="' . h($releaseWasteTotalState) . ' Kg" readonly data-release-waste-display>'
+                    . '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn secondary" type="button"' . $rowCloseReleaseOnclick . '>Cancelar</button><button class="btn" type="submit">Guardar salida</button></div>'
+                    . '</form></div></div>'
                     . '</div>'
                 : '<div class="muted">Realizado</div>';
             $body .= '<tr>'
@@ -5238,6 +5391,8 @@ function renderWorkOrderMaterialUsageScreen(
         $releaseWeight = isset($currentRoll['weight_kg'])
             ? rtrim(rtrim(number_format((float)$currentRoll['weight_kg'], 2, '.', ''), '0'), '.')
             : '';
+        $currentRollId = (int)($currentRoll['id'] ?? 0);
+        $currentRollRequestId = (int)($activeRollRequestByRollId[$currentRollId] ?? 0);
         $releaseMaterialLabel = trim((string)($currentRoll['sku_description'] ?? '')) !== '' ? (string)$currentRoll['sku_description'] : '-';
         $releaseGsmValue = isset($currentRoll['grams']) && (string)($currentRoll['grams'] ?? '') !== ''
             ? rtrim(rtrim(number_format((float)$currentRoll['grams'], 2, '.', ''), '0'), '.')
@@ -5262,6 +5417,8 @@ function renderWorkOrderMaterialUsageScreen(
             . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Salida de bobina</div><button type="button" class="btn secondary" data-material-modal-close="active-release">Cerrar</button></div>'
             . '<form method="post" action="/work-orders/' . (int)$ot['id'] . '/materials/release" data-release-form>'
             . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
+            . '<input type="hidden" name="request_id" value="' . $currentRollRequestId . '">'
+            . '<input type="hidden" name="roll_id" value="' . $currentRollId . '">'
             . '<div style="background:#fff;border:1px solid #d4d4cf;border-radius:4px;overflow:hidden;margin-bottom:12px">'
             . '<div style="background:#18a8a3;color:#fff;font-weight:800;padding:8px 10px">Información del producto : Tela</div>'
             . '<div style="padding:10px"><table class="legacy-sheet-table" style="margin:0"><tbody>'
@@ -5313,33 +5470,52 @@ function renderWorkOrderMaterialUsageScreen(
             . '</div></div>'
             . '</form></div></div>';
     }
-    $currentRollGroupKey = $currentRoll !== null ? buildMaterialRequestGroupKeyFromRollData($currentRoll) : '';
     $body .= '<div class="legacy-sheet-card"><table class="legacy-sheet-table"><thead><tr><th colspan="9">Bobinas solicitadas</th></tr></thead><tbody>';
     $body .= '<tr><td class="legacy-label-cell">Resumen</td><td class="legacy-value-cell" colspan="8">Muestra las bobinas pendientes por ingresar a la máquina.</td></tr>';
     $body .= '<tr><td class="legacy-label-cell">Ingreso</td><td class="legacy-value-cell" colspan="8"><div class="table-wrap"><table class="table-compact"><thead><tr><th>Descripción</th><th>SKU</th><th>Código bobina</th><th>Ancho (cm)</th><th>Longitud (m)</th><th>GSM</th><th>Color</th><th>Kg</th><th>Entrada</th></tr></thead><tbody>';
 
     foreach ($rollRequests as $request) {
         $groupData = parseMaterialRequestGroupKey((string)($request['requested_group_key'] ?? ''));
-        $matchingRolls = [];
+        $requestId = (int)($request['id'] ?? 0);
+        $matchingRollsById = [];
+        foreach (($deliveriesByRequest[$requestId] ?? []) as $deliveredRequestRoll) {
+            $deliveredRequestRollId = (int)($deliveredRequestRoll['id'] ?? 0);
+            if ($deliveredRequestRollId <= 0 || isset($matchingRollsById[$deliveredRequestRollId])) {
+                continue;
+            }
+            $matchingRollsById[$deliveredRequestRollId] = $deliveredRequestRoll;
+        }
         $deliveredRollId = (int)($request['delivered_roll_id'] ?? 0);
-        if ($deliveredRollId > 0 && $service instanceof ReceptionService) {
+        if ($deliveredRollId > 0 && !isset($matchingRollsById[$deliveredRollId]) && $service instanceof ReceptionService) {
             $deliveredRoll = $service->getRoll($deliveredRollId);
             if (is_array($deliveredRoll)) {
-                $matchingRolls[] = $deliveredRoll;
+                $matchingRollsById[$deliveredRollId] = $deliveredRoll;
             }
         }
-        if ($matchingRolls === []) {
-            $matchingRolls = $availableRollsByGroup[(string)($request['requested_group_key'] ?? '')] ?? [];
+        foreach (($activeRollRequestMap[$requestId] ?? []) as $activeRequestRollId => $activeRequestRoll) {
+            if ($activeRequestRollId <= 0 || isset($matchingRollsById[$activeRequestRollId])) {
+                continue;
+            }
+            $matchingRollsById[$activeRequestRollId] = $activeRequestRoll;
         }
+        foreach (($availableRollsByGroup[(string)($request['requested_group_key'] ?? '')] ?? []) as $availableGroupRoll) {
+            $availableGroupRollId = (int)($availableGroupRoll['id'] ?? 0);
+            if ($availableGroupRollId <= 0 || isset($matchingRollsById[$availableGroupRollId])) {
+                continue;
+            }
+            $matchingRollsById[$availableGroupRollId] = $availableGroupRoll;
+        }
+        $matchingRolls = array_values($matchingRollsById);
+        $activeRequestRolls = array_values(array_filter(
+            $matchingRolls,
+            static fn(array $roll): bool => isset($activeRollIds[(int)($roll['id'] ?? 0)])
+        ));
         $referenceRoll = $matchingRolls[0] ?? null;
         $requestedQty = (float)($request['requested_qty'] ?? 0);
         $deliveredQty = (float)($request['delivered_qty'] ?? 0);
         $pendingQty = max(0.0, $requestedQty - $deliveredQty);
-        $requestId = (int)($request['id'] ?? 0);
         $requestGroupKey = (string)($request['requested_group_key'] ?? '');
-        $rowHasActiveRoll = $currentRoll !== null
-            && $currentRollGroupKey !== ''
-            && $currentRollGroupKey === $requestGroupKey;
+        $rowHasActiveRoll = $activeRequestRolls !== [];
         $widthCmLabel = ($groupData['width_mm'] !== '' && is_numeric($groupData['width_mm']))
             ? rtrim(rtrim(number_format(((float)$groupData['width_mm']) / 10, 2, '.', ''), '0'), '.')
             : '-';
@@ -5367,38 +5543,37 @@ function renderWorkOrderMaterialUsageScreen(
         if (!workOrderCanReceiveMaterials((string)($ot['status'] ?? ''))) {
             $entryHtml = '<div class="muted">La OT ya no admite ingresos.</div>';
         } else {
-            $canOpenAttachModal = in_array((string)($request['status'] ?? ''), ['ACCEPTED', 'PARTIAL', 'DELIVERED'], true)
+            $canOpenAttachModal = in_array((string)($request['status'] ?? ''), ['PENDING', 'ACCEPTED', 'PARTIAL', 'DELIVERED'], true)
                 && $matchingRolls !== [];
-            $canAttach = $canOpenAttachModal && $currentRoll === null;
+            $canAttach = $canOpenAttachModal;
             $canRelease = $rowHasActiveRoll;
             $attachDisabled = $canOpenAttachModal ? '' : ' disabled';
             $releaseDisabled = $canRelease ? '' : ' disabled';
             $attachButtonClass = $canOpenAttachModal ? 'btn' : 'btn secondary';
             $releaseButtonClass = $canRelease ? 'btn secondary' : 'btn secondary';
+            $openAttachOnclick = ' onclick="var modal=document.getElementById(\'material-modal-attach-' . $requestId . '\'); if(modal){modal.style.display=\'block\';} return false;"';
+            $openReleaseOnclick = ' onclick="var modal=document.getElementById(\'material-modal-release-' . $requestId . '\'); if(modal){modal.style.display=\'block\';} return false;"';
+            $closeAttachOnclick = ' onclick="var modal=document.getElementById(\'material-modal-attach-' . $requestId . '\'); if(modal){modal.style.display=\'none\';} return false;"';
+            $closeReleaseOnclick = ' onclick="var modal=document.getElementById(\'material-modal-release-' . $requestId . '\'); if(modal){modal.style.display=\'none\';} return false;"';
             $entryHtml = '<div style="display:flex;gap:8px;flex-wrap:wrap">'
-                . '<button class="' . $attachButtonClass . '" type="button" data-material-modal-open="attach-' . $requestId . '"' . $attachDisabled . '>Entrada</button>'
-                . '<button class="' . $releaseButtonClass . '" type="button" data-material-modal-open="release-' . $requestId . '"' . $releaseDisabled . '>Salida</button>'
+                . '<button class="' . $attachButtonClass . '" type="button" data-material-modal-open="attach-' . $requestId . '"' . $openAttachOnclick . $attachDisabled . '>Entrada</button>'
+                . '<button class="' . $releaseButtonClass . '" type="button" data-material-modal-open="release-' . $requestId . '"' . $openReleaseOnclick . $releaseDisabled . '>Salida</button>'
                 . '</div>';
             if ((string)($request['status'] ?? '') === 'PENDING') {
                 $entryHtml .= '<div class="muted" style="margin-top:6px">Pendiente de bodega.</div>';
-            } elseif ((string)($request['status'] ?? '') === 'DELIVERED' && trim((string)($request['delivered_roll_code'] ?? '')) !== '') {
-                $entryHtml .= '<div class="muted" style="margin-top:6px">Entregada por bodega: ' . h((string)$request['delivered_roll_code']) . '</div>';
-            } elseif ($rowHasActiveRoll && $currentRoll !== null) {
-                $entryHtml .= '<div class="muted" style="margin-top:6px">Activa: ' . h((string)($currentRoll['roll_code'] ?? '-')) . '</div>';
-            } elseif ($currentRoll !== null) {
-                $entryHtml .= '<div class="muted" style="margin-top:6px">Primero registra la salida de la bobina activa.</div>';
+            } elseif ((string)($request['status'] ?? '') === 'DELIVERED' && $matchingRolls !== []) {
+                $entryHtml .= '<div class="muted" style="margin-top:6px">Entregadas por bodega: ' . h(implode(', ', array_map(static fn(array $roll): string => (string)($roll['roll_code'] ?? '-'), $matchingRolls))) . '</div>';
+            } elseif ($rowHasActiveRoll) {
+                $entryHtml .= '<div class="muted" style="margin-top:6px">Activas: ' . h(implode(', ', array_map(static fn(array $roll): string => (string)($roll['roll_code'] ?? '-'), $activeRequestRolls))) . '</div>';
             }
 
             $attachFormDisabled = $canAttach ? '' : ' disabled';
             $entryHtml .= '<div class="legacy-inline-modal" id="material-modal-attach-' . $requestId . '" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;padding:20px;overflow:auto">'
                 . '<div style="max-width:780px;margin:10px auto;background:#f6f6f3;border-radius:10px;box-shadow:0 12px 30px rgba(15,23,42,.22);padding:14px">'
-                . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Entrada de bobina</div><button type="button" class="btn secondary" data-material-modal-close="attach-' . $requestId . '">Cerrar</button></div>'
+                . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Entrada de bobina</div><button type="button" class="btn secondary" data-material-modal-close="attach-' . $requestId . '"' . $closeAttachOnclick . '>Cerrar</button></div>'
                 . '<form method="post" action="/work-orders/' . (int)$ot['id'] . '/materials/attach">'
                 . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
                 . '<input type="hidden" name="request_id" value="' . $requestId . '">'
-                . ($currentRoll !== null
-                    ? '<div class="notice" style="margin-bottom:12px;background:#fff3cd;border:1px solid #f4d47c;color:#7a5b00;padding:10px;border-radius:4px">Primero debes registrar la salida de la bobina activa <strong>' . h((string)($currentRoll['roll_code'] ?? '-')) . '</strong> antes de guardar una nueva entrada.</div>'
-                    : '')
                 . '<div style="background:#fff;border:1px solid #d4d4cf;border-radius:4px;overflow:hidden;margin-bottom:12px">'
                 . '<div style="background:#18a8a3;color:#fff;font-weight:800;padding:8px 10px">Informacion del producto</div>'
                 . '<div style="padding:10px">'
@@ -5445,38 +5620,48 @@ function renderWorkOrderMaterialUsageScreen(
                 . '<input name="process_weight_kg" type="number" step="0.001" min="0.001" required placeholder="Ej: 118.200" style="max-width:180px"' . $attachFormDisabled . '>'
                 . '<span>kg</span>'
                 . '</div>'
-                . '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px"><button class="btn secondary" type="button" data-material-modal-close="attach-' . $requestId . '">Cancelar</button><button class="btn" type="submit"' . $attachFormDisabled . '>Guardar entrada</button></div>'
+                . '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px"><button class="btn secondary" type="button" data-material-modal-close="attach-' . $requestId . '"' . $closeAttachOnclick . '>Cancelar</button><button class="btn" type="submit"' . $attachFormDisabled . '>Guardar entrada</button></div>'
                 . '</div></div>'
                 . '</form></div></div>';
 
-            $releaseRollCode = $rowHasActiveRoll && $currentRoll !== null ? (string)($currentRoll['roll_code'] ?? '-') : '-';
-            $releaseWeight = $rowHasActiveRoll && $currentRoll !== null && isset($currentRoll['weight_kg'])
-                ? rtrim(rtrim(number_format((float)$currentRoll['weight_kg'], 2, '.', ''), '0'), '.')
+            $releaseRoll = $activeRequestRolls[0] ?? null;
+            $releaseRollCode = $releaseRoll !== null ? (string)($releaseRoll['roll_code'] ?? '-') : '-';
+            $releaseWeight = $releaseRoll !== null && isset($releaseRoll['weight_kg'])
+                ? rtrim(rtrim(number_format((float)$releaseRoll['weight_kg'], 2, '.', ''), '0'), '.')
                 : '';
             $entryHtml .= '<div class="legacy-inline-modal" id="material-modal-release-' . $requestId . '" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;padding:20px;overflow:auto">'
                 . '<div style="max-width:520px;margin:40px auto;background:#fff;border-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,.22);padding:18px">'
-                . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Salida de bobina</div><button type="button" class="btn secondary" data-material-modal-close="release-' . $requestId . '">Cerrar</button></div>'
+                . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Salida de bobina</div><button type="button" class="btn secondary" data-material-modal-close="release-' . $requestId . '"' . $closeReleaseOnclick . '>Cerrar</button></div>'
                 . '<div class="muted" style="margin-bottom:12px">Registra los kilos que salieron de la máquina y la merma generada.</div>'
                 . '<form method="post" action="/work-orders/' . (int)$ot['id'] . '/materials/release" data-release-form>'
                 . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
                 . '<input type="hidden" name="request_id" value="' . $requestId . '">'
-                . '<label>Bobina activa</label>'
-                . '<input type="text" value="' . h($releaseRollCode) . '" readonly>'
-                . '<label style="margin-top:10px">Kilos que salieron de la máquina</label>'
+                . '<label>Bobina activa</label>';
+            if (count($activeRequestRolls) > 1) {
+                $entryHtml .= '<select name="roll_id" required>';
+                foreach ($activeRequestRolls as $activeRequestRoll) {
+                    $entryHtml .= '<option value="' . (int)($activeRequestRoll['id'] ?? 0) . '">' . h((string)($activeRequestRoll['roll_code'] ?? '-')) . ' · ' . h(rtrim(rtrim(number_format((float)($activeRequestRoll['weight_kg'] ?? 0), 2, '.', ''), '0'), '.')) . ' Kg</option>';
+                }
+                $entryHtml .= '</select>';
+            } else {
+                $entryHtml .= '<input type="hidden" name="roll_id" value="' . (int)($releaseRoll['id'] ?? 0) . '">'
+                    . '<input type="text" value="' . h($releaseRollCode) . '" readonly>';
+            }
+            $entryHtml .= '<label style="margin-top:10px">Kilos que salieron de la máquina</label>'
                 . '<input name="final_weight_kg" type="number" step="0.001" min="0" value="' . h($releaseWeight) . '" required placeholder="Ej: 8.600">'
                 . '<input name="waste_kg" type="hidden" value="' . h($releaseWasteTotalState) . '" data-release-waste-total>'
                 . '<div style="font-weight:700;margin-top:12px;margin-bottom:8px">Mermas de salida</div>';
             foreach ($releaseWasteRows as $releaseWasteRow) {
-                $entryHtml .= '<div style="display:grid;grid-template-columns:128px minmax(140px,1fr) 90px minmax(140px,1fr);gap:8px;align-items:center;margin-bottom:8px">'
+                $entryHtml .= '<div style="display:grid;grid-template-columns:120px minmax(0,1fr) 86px minmax(0,1fr);gap:8px;align-items:center;margin-bottom:8px">'
                     . '<div style="font-weight:700">' . h((string)$releaseWasteRow['label']) . '</div>'
-                    . '<div><input type="number" step="0.001" min="0" name="release_waste_detail_weight[' . h((string)$releaseWasteRow['key']) . ']" value="' . h((string)($releaseWasteWeightState[$releaseWasteRow['key']] ?? '')) . '" data-release-waste-input placeholder="Kg" style="width:100%"></div>'
+                    . '<div><input type="number" step="0.001" min="0" name="release_waste_detail_weight[' . h((string)$releaseWasteRow['key']) . ']" value="' . h((string)($releaseWasteWeightState[$releaseWasteRow['key']] ?? '')) . '" data-release-waste-input placeholder="Kg" style="width:100%;box-sizing:border-box"></div>'
                     . '<div style="font-size:12px;color:#555">Comentario</div>'
-                    . '<div><input type="text" name="release_waste_detail_comment[' . h((string)$releaseWasteRow['key']) . ']" value="' . h((string)($releaseWasteCommentState[$releaseWasteRow['key']] ?? '')) . '" style="width:100%"></div>'
+                    . '<div><input type="text" name="release_waste_detail_comment[' . h((string)$releaseWasteRow['key']) . ']" value="' . h((string)($releaseWasteCommentState[$releaseWasteRow['key']] ?? '')) . '" style="width:100%;box-sizing:border-box"></div>'
                     . '</div>';
             }
             $entryHtml .= '<label style="margin-top:10px">Merma total</label>'
                 . '<input type="text" value="' . h($releaseWasteTotalState) . ' Kg" readonly data-release-waste-display>'
-                . '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn secondary" type="button" data-material-modal-close="release-' . $requestId . '">Cancelar</button><button class="btn" type="submit">Guardar salida</button></div>'
+                . '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn secondary" type="button" data-material-modal-close="release-' . $requestId . '"' . $closeReleaseOnclick . '>Cancelar</button><button class="btn" type="submit">Guardar salida</button></div>'
                 . '</form></div></div>';
         }
 
@@ -5927,21 +6112,14 @@ function renderWorkOrderStartScreen(
     }
     $body .= '</tbody></table></div>';
 
-    $body .= '<div class="legacy-sheet-card" style="margin-bottom:12px"><table class="legacy-sheet-table"><thead><tr><th colspan="4">Clisés OT</th></tr></thead><tbody>';
-    if ($assignedCliches !== []) {
-        foreach ($assignedCliches as $assignedCliche) {
-            $body .= '<tr>'
-                . '<td class="legacy-label-cell">Clisé</td>'
-                . '<td class="legacy-value-cell"><a href="/cliches/' . (int)$assignedCliche['id'] . '">' . h((string)$assignedCliche['code']) . '</a></td>'
-                . '<td class="legacy-label-cell">Ubicación</td>'
-                . '<td class="legacy-value-cell">' . h((string)($assignedCliche['location_detail'] ?? $assignedCliche['location_code'] ?? '-')) . '</td>'
-                . '</tr>';
-        }
-    } else {
-        $body .= '<tr><td class="legacy-label-cell">Clisés</td><td class="legacy-value-cell" colspan="3">Sin clisés asignados a esta OT.</td></tr>';
-    }
-    $body .= '<tr><td class="legacy-label-cell">Acción</td><td class="legacy-value-cell" colspan="3"><a class="btn secondary" href="/cliches?work_order_id=' . (int)$ot['id'] . '">Gestionar clisés</a></td></tr>';
-    $body .= '</tbody></table></div>';
+    $compactClicheLocationLabel = $primaryClicheLocationLabel !== ''
+        ? $primaryClicheLocationLabel
+        : 'Sin ubicación de cliché';
+    $body .= '<div style="margin:-2px 0 12px 0">'
+        . '<a class="btn secondary" href="/cliches?work_order_id=' . (int)$ot['id'] . '" style="padding:4px 10px;font-size:12px;line-height:1.2;min-height:auto;border-radius:8px">'
+        . 'Ubicación Cliché: ' . h($compactClicheLocationLabel)
+        . '</a>'
+        . '</div>';
 
     if ($clicheUsageHistory !== []) {
         $body .= '<div class="legacy-sheet-card" style="margin-bottom:12px"><table class="legacy-sheet-table"><thead><tr><th colspan="4">Historial de clisés en OT</th></tr></thead><tbody>';
@@ -10250,7 +10428,9 @@ if (preg_match('#^/work-orders/(\d+)/materials/release$#', $path, $m) === 1 && $
         (float)($_POST['final_weight_kg'] ?? 0),
         (float)($_POST['waste_kg'] ?? 0),
         $currentOperatorName,
-        $releaseWasteDetails
+        $releaseWasteDetails,
+        (int)($_POST['roll_id'] ?? 0),
+        (int)($_POST['request_id'] ?? 0)
     );
     if (($result['ok'] ?? false) === true) {
         header('Location: /work-orders/' . $workOrderId . '/materials?material_released=1');
@@ -10307,7 +10487,8 @@ if (preg_match('#^/work-orders/(\d+)/materials/remove$#', $path, $m) === 1 && $m
     $result = $service->removeCurrentRequestedRollFromWorkOrder(
         $workOrderId,
         (int)($_POST['request_id'] ?? 0),
-        $currentOperatorName
+        $currentOperatorName,
+        (int)($_POST['roll_id'] ?? 0)
     );
     if (($result['ok'] ?? false) === true) {
         header('Location: /work-orders/' . $workOrderId . '/materials?material_removed=1');
@@ -10509,6 +10690,10 @@ if (preg_match('#^/work-orders/(\d+)/material-request$#', $path, $m) === 1 && $m
     requireCsrf();
     $workOrderId = (int)$m[1];
     $returnContext = strtoupper(trim((string)($_POST['return_context'] ?? '')));
+    $requestFilter = strtoupper(trim((string)($_POST['request_filter'] ?? ($_POST['request_type'] ?? 'ROLL'))));
+    if (!in_array($requestFilter, ['ROLL', 'CHEMICAL', 'OTHER'], true)) {
+        $requestFilter = 'ROLL';
+    }
     $result = $service->createMaterialRequest(
         $workOrderId,
         (string)($_POST['request_type'] ?? 'ROLL'),
@@ -10522,7 +10707,7 @@ if (preg_match('#^/work-orders/(\d+)/material-request$#', $path, $m) === 1 && $m
     );
     if (($result['ok'] ?? false) === true) {
         $redirectPath = $returnContext === 'REQUEST_WINDOW'
-            ? '/work-orders/' . $workOrderId . '/request-materials?material_requested=1'
+            ? withQuery('/work-orders/' . $workOrderId . '/request-materials', ['material_requested' => '1', 'request_filter' => $requestFilter])
             : '/work-orders/' . $workOrderId . '/start?material_requested=1';
         header('Location: ' . $redirectPath);
         exit;
@@ -10535,6 +10720,7 @@ if (preg_match('#^/work-orders/(\d+)/material-request$#', $path, $m) === 1 && $m
     }
 
     $formState = $_POST;
+    $formState['request_filter'] = $requestFilter;
     if ((string)($_POST['request_type'] ?? '') === 'CHEMICAL') {
         $formState['chemical_request_id'] = (string)($_POST['chemical_id'] ?? '');
         $formState['chemical_requested_qty'] = (string)($_POST['requested_qty'] ?? '');

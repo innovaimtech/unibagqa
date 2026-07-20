@@ -174,15 +174,59 @@ function ensureErpOperatorContext(PDO $pdo): array
     $userStmt->execute([':login' => $login]);
     $userRow = $userStmt->fetch(PDO::FETCH_ASSOC);
 
+    $timestamp = time();
+
     if ($userRow === false) {
         $insertUser = $pdo->prepare(
-            'INSERT INTO `user` (user_login, user_status) VALUES (:login, 1)'
+            'INSERT INTO `user` (
+                user_firstname, user_lastname, user_login, user_pass, user_type, user_status,
+                user_crtusr, user_crtdat, user_updusr, user_upddat, user_visible, user_mailforward,
+                user_mail, user_street, user_telephone, user_cellphone, user_internet, user_annotations,
+                user_mail_signature_html, user_doc_signature, user_pic, user_countryid, user_regionid,
+                user_provinciaid, user_comunaid, user_sidepanel_active, user_sidepanel_login,
+                user_printer_name, user_printer_port, user_rut, user_code, conf_mailserver,
+                conf_mail_accountname, conf_mail_password
+             ) VALUES (
+                :first_name, :last_name, :login, :password, 2, 1,
+                1, :created_at, 1, :updated_at, 1, 0,
+                :mail, "", "", "", "", "",
+                "", "", "", 0, 0,
+                0, 0, 1, 1,
+                "", "", "", :user_code, "",
+                "", ""
+             )'
         );
-        $insertUser->execute([':login' => $login]);
+        $insertUser->execute([
+            ':first_name' => 'Operador',
+            ':last_name' => 'Demo',
+            ':login' => $login,
+            ':password' => '1234',
+            ':created_at' => $timestamp,
+            ':updated_at' => $timestamp,
+            ':mail' => 'operador.demo@local.test',
+            ':user_code' => 'OPERADOR-DEMO',
+        ]);
         $userId = (int)$pdo->lastInsertId();
     } else {
         $userId = (int)$userRow['id'];
-        $pdo->prepare('UPDATE `user` SET user_status = 1 WHERE id = :id')->execute([':id' => $userId]);
+        $pdo->prepare(
+            'UPDATE `user`
+             SET user_status = 1,
+                 user_firstname = COALESCE(NULLIF(user_firstname, \'\'), :first_name),
+                 user_lastname = COALESCE(NULLIF(user_lastname, \'\'), :last_name),
+                 user_mail = COALESCE(NULLIF(user_mail, \'\'), :mail),
+                 user_code = COALESCE(NULLIF(user_code, \'\'), :user_code),
+                 user_upddat = :updated_at,
+                 user_updusr = 1
+             WHERE id = :id'
+        )->execute([
+            ':id' => $userId,
+            ':first_name' => 'Operador',
+            ':last_name' => 'Demo',
+            ':mail' => 'operador.demo@local.test',
+            ':user_code' => 'OPERADOR-DEMO',
+            ':updated_at' => $timestamp,
+        ]);
     }
 
     $workerStmt = $pdo->prepare('SELECT id FROM workers WHERE wrk_uid = :user_id LIMIT 1');
@@ -194,11 +238,37 @@ function ensureErpOperatorContext(PDO $pdo): array
             'INSERT INTO workers (wrk_uid, wrk_firstname, wrk_lastname, wrk_status, wrk_turno_state)
              VALUES (:user_id, :first_name, :last_name, 1, 0)'
         );
-        $insertWorker->execute([
+        $fallbackWorkerData = [
             ':user_id' => $userId,
             ':first_name' => 'Operador',
             ':last_name' => 'Demo',
-        ]);
+        ];
+        try {
+            $insertWorker->execute($fallbackWorkerData);
+        } catch (Throwable $e) {
+            $insertWorker = $pdo->prepare(
+                'INSERT INTO workers (
+                    wrk_uid, wrk_firstname, wrk_lastname, wrk_status, wrk_turno_state,
+                    wrk_crtdat, wrk_crtusr, wrk_rut, wrk_folio, wrk_email, wrk_telefono1,
+                    wrk_telefono2, wrk_telefono3, wrk_turno_turnoid, wrk_cargoid, wrk_costo_hh,
+                    wrk_titulo, wrk_birthday, wrk_street, wrk_foto, wrk_turno_startdate, wrk_axx_pass
+                 ) VALUES (
+                    :user_id, :first_name, :last_name, 1, 0,
+                    :created_at, 1, :rut, :folio, :mail, "", "",
+                    "", 0, 0, 0.00,
+                    "", "", "", "", 0, ""
+                 )'
+            );
+            $insertWorker->execute([
+                ':user_id' => $userId,
+                ':first_name' => 'Operador',
+                ':last_name' => 'Demo',
+                ':created_at' => $timestamp,
+                ':rut' => '11.111.111-1',
+                ':folio' => 'OPERADOR-DEMO',
+                ':mail' => 'operador.demo@local.test',
+            ]);
+        }
         $workerId = (int)$pdo->lastInsertId();
     } else {
         $workerId = (int)$workerRow['id'];

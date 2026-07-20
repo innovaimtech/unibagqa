@@ -3776,6 +3776,22 @@ SQL;
         return $currentRollId !== null ? $this->getRoll($currentRollId) : null;
     }
 
+    public function listActiveRollsInWorkOrder(int $workOrderId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT r.*, w.code AS warehouse_code, w.name AS warehouse_name,
+                    s.code AS sku_code, s.description AS sku_description
+             FROM rolls r
+             JOIN warehouses w ON w.id = r.warehouse_id
+             JOIN skus s ON s.id = r.sku_id
+             WHERE r.current_work_order_id = :wo
+               AND r.status = "IN_PROCESS"
+             ORDER BY r.id DESC'
+        );
+        $stmt->execute([':wo' => $workOrderId]);
+        return $stmt->fetchAll();
+    }
+
     public function listWorkOrderRollHistory(int $workOrderId): array
     {
         $stmt = $this->pdo->prepare(
@@ -5206,33 +5222,68 @@ SQL;
 
     public function listMaterialDeliveriesByRequest(int $requestId): array
     {
+        if ($requestId <= 0) {
+            return [];
+        }
+
         $stmt = $this->pdo->prepare(
-            'SELECT e.created_at, e.payload
+            'SELECT e.id, e.type, e.created_at, e.payload
              FROM events e
-             WHERE e.type = "MATERIAL_DELIVERED"
+             WHERE e.type IN ("MATERIAL_DELIVERED", "MATERIAL_DELIVERY_REVERTED")
                AND CAST(JSON_UNQUOTE(JSON_EXTRACT(e.payload, "$.request_id")) AS UNSIGNED) = :request_id
-             ORDER BY e.id DESC'
+             ORDER BY e.id ASC'
         );
         $stmt->execute([':request_id' => $requestId]);
         $rows = $stmt->fetchAll();
-        $deliveries = [];
+        $deliveryStacks = [];
         foreach ($rows as $row) {
             $payload = json_decode((string)($row['payload'] ?? '{}'), true);
             if (!is_array($payload)) {
                 $payload = [];
             }
-            $deliveries[] = [
-                'created_at' => (string)($row['created_at'] ?? ''),
-                'roll_id' => (int)($payload['roll_id'] ?? 0),
-                'roll_code' => (string)($payload['roll_code'] ?? ''),
-                'operator_name' => (string)($payload['operator_name'] ?? ''),
-                'request_type' => (string)($payload['request_type'] ?? 'ROLL'),
-                'delivered_qty' => (float)($payload['delivered_qty'] ?? 0),
-                'requested_unit' => (string)($payload['requested_unit'] ?? 'Unid.'),
-                'delivered_item' => (string)($payload['delivered_item'] ?? ''),
-                'delivery_note' => (string)($payload['delivery_note'] ?? ''),
-            ];
+            $rollId = (int)($payload['roll_id'] ?? 0);
+            if ($rollId <= 0) {
+                continue;
+            }
+            $eventType = strtoupper(trim((string)($row['type'] ?? '')));
+            if ($eventType === 'MATERIAL_DELIVERED') {
+                if (!isset($deliveryStacks[$rollId])) {
+                    $deliveryStacks[$rollId] = [];
+                }
+                $deliveryStacks[$rollId][] = [
+                    'created_at' => (string)($row['created_at'] ?? ''),
+                    'roll_id' => $rollId,
+                    'roll_code' => (string)($payload['roll_code'] ?? ''),
+                    'operator_name' => (string)($payload['operator_name'] ?? ''),
+                    'request_type' => (string)($payload['request_type'] ?? 'ROLL'),
+                    'delivered_qty' => (float)($payload['delivered_qty'] ?? 0),
+                    'requested_unit' => (string)($payload['requested_unit'] ?? 'Unid.'),
+                    'delivered_item' => (string)($payload['delivered_item'] ?? ''),
+                    'delivery_note' => (string)($payload['delivery_note'] ?? ''),
+                ];
+                continue;
+            }
+
+            if (isset($deliveryStacks[$rollId]) && $deliveryStacks[$rollId] !== []) {
+                array_pop($deliveryStacks[$rollId]);
+                if ($deliveryStacks[$rollId] === []) {
+                    unset($deliveryStacks[$rollId]);
+                }
+            }
         }
+
+        $deliveries = [];
+        foreach ($deliveryStacks as $stack) {
+            foreach ($stack as $delivery) {
+                $deliveries[] = $delivery;
+            }
+        }
+
+        usort(
+            $deliveries,
+            static fn(array $a, array $b): int => strcmp((string)($b['created_at'] ?? ''), (string)($a['created_at'] ?? ''))
+        );
+
         return $deliveries;
     }
 
@@ -5241,6 +5292,9 @@ SQL;
         $rolls = $this->listAvailableRollsForMaterialDelivery();
         $groups = [];
         foreach ($rolls as $roll) {
+            if (!$this->isRequestableRollMaterial($roll)) {
+                continue;
+            }
             $groupKey = $this->materialGroupKeyFromRoll($roll);
             if (!isset($groups[$groupKey])) {
                 $groups[$groupKey] = [
@@ -5540,11 +5594,9 @@ SQL;
             $errors['request_id'] = 'Solicitud no existe.';
         } elseif ((string)($request['request_type'] ?? 'ROLL') !== 'ROLL') {
             $errors['request_type'] = 'La solicitud no corresponde a una bobina.';
-        } elseif (!in_array((string)($request['status'] ?? ''), ['ACCEPTED', 'PARTIAL', 'DELIVERED'], true)) {
-            $errors['request_status'] = (string)($request['status'] ?? '') === 'PENDING'
-                ? 'La solicitud debe ser tomada por bodega antes de ingresar la bobina.'
-                : 'La solicitud ya fue atendida.';
-        } elseif (!in_array((string)($request['work_order_status'] ?? ''), ['OPEN', 'ACTIVE'], true)) {
+        } elseif (!in_array((string)($request['status'] ?? ''), ['PENDING', 'ACCEPTED', 'PARTIAL', 'DELIVERED'], true)) {
+            $errors['request_status'] = 'La solicitud ya fue atendida.';
+        } elseif (!in_array((string)($request['work_order_status'] ?? ''), ['OPEN', 'ACTIVE', 'CUTTING'], true)) {
             $errors['work_order_id'] = 'La OT no está disponible para ingresar bobinas.';
         }
         if ($roll === null) {
@@ -5561,12 +5613,12 @@ SQL;
         }
 
         $workOrderId = (int)($request['work_order_id'] ?? 0);
-        if ($workOrderId > 0 && $this->getCurrentRollInWorkOrder($workOrderId) !== null) {
-            $errors['roll_active'] = 'Ya existe una bobina activa en esta OT. Debes registrar la salida antes de ingresar otra.';
-        }
         if ($request !== null && $roll !== null && ($request['requested_group_key'] ?? '') !== '' && $this->materialGroupKeyFromRoll($roll) !== (string)$request['requested_group_key']) {
             $errors['roll_id'] = 'La bobina seleccionada no coincide con el tipo solicitado.';
         }
+        $isDeliveredForRequest = $request !== null && $roll !== null
+            ? $this->isRollDeliveredForMaterialRequest($requestId, (int)($roll['id'] ?? 0))
+            : false;
         $requestAlreadyDeliveredRollId = (int)($request['delivered_roll_id'] ?? 0);
         $isAlreadyDeliveredForRequest = $request !== null
             && $roll !== null
@@ -5575,14 +5627,14 @@ SQL;
         if ($roll !== null) {
             $rollStatus = strtoupper(trim((string)($roll['status'] ?? '')));
             $rollCurrentWorkOrderId = (int)($roll['current_work_order_id'] ?? 0);
-            $isAttachableDeliveredRoll = $isAlreadyDeliveredForRequest
+            $isAttachableDeliveredRoll = ($isAlreadyDeliveredForRequest || $isDeliveredForRequest)
                 && $rollStatus === 'IN_PROCESS'
                 && $rollCurrentWorkOrderId === $workOrderId;
             if (!in_array($rollStatus, ['RECEIVED'], true) && !$isAttachableDeliveredRoll) {
                 $errors['roll_status'] = 'Solo se pueden ingresar bobinas disponibles.';
             } elseif ($rollCurrentWorkOrderId > 0 && $rollCurrentWorkOrderId !== $workOrderId) {
                 $errors['roll_work_order'] = 'La bobina ya está asignada a otra OT.';
-            } elseif ($rollCurrentWorkOrderId === $workOrderId && !$isAlreadyDeliveredForRequest) {
+            } elseif ($rollCurrentWorkOrderId === $workOrderId && !$isAlreadyDeliveredForRequest && !$isDeliveredForRequest) {
                 $errors['roll_work_order'] = 'La bobina ya está asignada a esta OT.';
             }
         }
@@ -5628,7 +5680,7 @@ SQL;
                 ]);
             }
 
-            if (!$isAlreadyDeliveredForRequest) {
+            if (!$isAlreadyDeliveredForRequest && !$isDeliveredForRequest) {
                 $requestedQty = (float)($request['requested_qty'] ?? 0);
                 $deliveredQty = (float)($request['delivered_qty'] ?? 0) + 1.0;
                 $nextStatus = $deliveredQty >= $requestedQty ? 'DELIVERED' : 'PARTIAL';
@@ -5663,6 +5715,7 @@ SQL;
 
             $this->insertEvent('WORK_ORDER_ROLL_ATTACHED', [
                 'work_order_id' => $workOrderId,
+                'request_id' => $requestId,
                 'roll_id' => $rollId,
                 'process_weight_kg' => round($processWeightKg, 3),
                 'waste_kg' => 0,
@@ -5678,12 +5731,12 @@ SQL;
         return ['ok' => true, 'errors' => []];
     }
 
-    public function releaseCurrentRollFromWorkOrder(int $workOrderId, float $finalWeightKg, float $wasteKg, string $operatorName, array $wasteDetails = []): array
+    public function releaseCurrentRollFromWorkOrder(int $workOrderId, float $finalWeightKg, float $wasteKg, string $operatorName, array $wasteDetails = [], int $rollId = 0, int $requestId = 0): array
     {
         $errors = [];
         $operatorName = trim($operatorName);
         $workOrder = $this->getWorkOrder($workOrderId);
-        $currentRoll = $this->getCurrentRollInWorkOrder($workOrderId);
+        $currentRoll = $rollId > 0 ? $this->getRoll($rollId) : $this->getCurrentRollInWorkOrder($workOrderId);
         $normalizedWasteDetails = [];
         foreach ($wasteDetails as $wasteKey => $wasteDetail) {
             if (!is_array($wasteDetail)) {
@@ -5713,8 +5766,11 @@ SQL;
 
         if ($workOrder === null) {
             $errors['work_order_id'] = 'OT no existe.';
-        } elseif (in_array((string)$workOrder['status'], ['CLOSED', 'CUTTING'], true)) {
+        } elseif ((string)$workOrder['status'] === 'CLOSED') {
             $errors['work_order_id'] = 'La OT está cerrada.';
+        }
+        if ($currentRoll !== null && (int)($currentRoll['current_work_order_id'] ?? 0) !== $workOrderId) {
+            $errors['current_roll'] = 'La bobina seleccionada no está activa en esta OT.';
         }
         if ($currentRoll === null) {
             $errors['current_roll'] = 'No hay una bobina activa para registrar salida.';
@@ -5743,6 +5799,7 @@ SQL;
 
             $this->insertEvent('WORK_ORDER_ROLL_RELEASED', [
                 'work_order_id' => $workOrderId,
+                'request_id' => $requestId > 0 ? $requestId : null,
                 'roll_id' => (int)$currentRoll['id'],
                 'final_weight_kg' => round($finalWeightKg, 3),
                 'waste_kg' => round($wasteKg, 3),
@@ -5779,17 +5836,17 @@ SQL;
         return ['ok' => true, 'errors' => []];
     }
 
-    public function removeCurrentRequestedRollFromWorkOrder(int $workOrderId, int $requestId, string $operatorName): array
+    public function removeCurrentRequestedRollFromWorkOrder(int $workOrderId, int $requestId, string $operatorName, int $rollId = 0): array
     {
         $errors = [];
         $operatorName = trim($operatorName);
         $workOrder = $this->getWorkOrder($workOrderId);
         $request = $this->getMaterialRequest($requestId);
-        $currentRoll = $this->getCurrentRollInWorkOrder($workOrderId);
+        $currentRoll = $rollId > 0 ? $this->getRoll($rollId) : $this->getCurrentRollInWorkOrder($workOrderId);
 
         if ($workOrder === null) {
             $errors['work_order_id'] = 'OT no existe.';
-        } elseif (in_array((string)$workOrder['status'], ['CLOSED', 'CUTTING'], true)) {
+        } elseif ((string)$workOrder['status'] === 'CLOSED') {
             $errors['work_order_id'] = 'La OT está cerrada.';
         }
         if ($request === null) {
@@ -5801,9 +5858,11 @@ SQL;
         }
         if ($currentRoll === null) {
             $errors['current_roll'] = 'No hay una bobina activa para eliminar.';
+        } elseif ((int)($currentRoll['current_work_order_id'] ?? 0) !== $workOrderId || strtoupper(trim((string)($currentRoll['status'] ?? ''))) !== 'IN_PROCESS') {
+            $errors['current_roll'] = 'La bobina seleccionada ya no está activa en esta OT.';
         }
-        if ($request !== null && $currentRoll !== null && (int)($request['delivered_roll_id'] ?? 0) !== (int)($currentRoll['id'] ?? 0)) {
-            $errors['request_roll'] = 'La solicitud no coincide con la bobina activa.';
+        if ($request !== null && $currentRoll !== null && !$this->isRollDeliveredForMaterialRequest($requestId, (int)($currentRoll['id'] ?? 0))) {
+            $errors['request_roll'] = 'La solicitud no coincide con la bobina seleccionada.';
         }
         if ($operatorName === '') {
             $errors['operator_name'] = 'Operador es obligatorio.';
@@ -5813,7 +5872,18 @@ SQL;
         }
 
         $nextDeliveredQty = max(0.0, (float)($request['delivered_qty'] ?? 0) - 1.0);
-        $nextStatus = $nextDeliveredQty <= 0 ? 'ACCEPTED' : 'PARTIAL';
+        $requestedQty = (float)($request['requested_qty'] ?? 0);
+        $nextStatus = $nextDeliveredQty <= 0
+            ? 'ACCEPTED'
+            : ($requestedQty > 0 && $nextDeliveredQty >= $requestedQty ? 'DELIVERED' : 'PARTIAL');
+        $remainingDeliveredRollId = 0;
+        foreach ($this->listMaterialDeliveriesByRequest($requestId) as $delivery) {
+            $deliveryRollId = (int)($delivery['roll_id'] ?? 0);
+            if ($deliveryRollId > 0 && $deliveryRollId !== (int)($currentRoll['id'] ?? 0)) {
+                $remainingDeliveredRollId = $deliveryRollId;
+                break;
+            }
+        }
 
         $this->pdo->beginTransaction();
         try {
@@ -5831,7 +5901,7 @@ SQL;
             $stmt = $this->pdo->prepare(
                 'UPDATE work_order_material_requests
                  SET status = :status,
-                     delivered_roll_id = CASE WHEN delivered_roll_id = :roll_id THEN NULL ELSE delivered_roll_id END,
+                     delivered_roll_id = :delivered_roll_id,
                      delivered_qty = :delivered_qty,
                      delivered_by = :delivered_by,
                      delivered_at = CURRENT_TIMESTAMP
@@ -5839,7 +5909,7 @@ SQL;
             );
             $stmt->execute([
                 ':status' => $nextStatus,
-                ':roll_id' => (int)$currentRoll['id'],
+                ':delivered_roll_id' => $remainingDeliveredRollId > 0 ? $remainingDeliveredRollId : null,
                 ':delivered_qty' => number_format($nextDeliveredQty, 3, '.', ''),
                 ':delivered_by' => $operatorName,
                 ':id' => $requestId,
@@ -5847,6 +5917,7 @@ SQL;
 
             $this->insertEvent('WORK_ORDER_ROLL_RELEASED', [
                 'work_order_id' => $workOrderId,
+                'request_id' => $requestId,
                 'roll_id' => (int)$currentRoll['id'],
                 'final_weight_kg' => round((float)($currentRoll['weight_kg'] ?? 0), 3),
                 'waste_kg' => 0,
@@ -5888,6 +5959,26 @@ SQL;
         ]);
     }
 
+    private function isRollDeliveredForMaterialRequest(int $requestId, int $rollId): bool
+    {
+        if ($requestId <= 0 || $rollId <= 0) {
+            return false;
+        }
+        foreach ($this->listMaterialDeliveriesByRequest($requestId) as $delivery) {
+            if ((int)($delivery['roll_id'] ?? 0) === $rollId) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isRequestableRollMaterial(array $roll): bool
+    {
+        $warehouseCode = (int)($roll['warehouse_code'] ?? 0);
+        return in_array($warehouseCode, [100, 200], true);
+    }
+
     private function materialGroupLabel(array $group): string
     {
         $parts = [];
@@ -5920,6 +6011,9 @@ SQL;
     private function findFirstAvailableRollIdByMaterialGroup(string $groupKey): int
     {
         foreach ($this->listAvailableRollsForMaterialDelivery() as $roll) {
+            if (!$this->isRequestableRollMaterial($roll)) {
+                continue;
+            }
             if ($this->materialGroupKeyFromRoll($roll) === $groupKey) {
                 return (int)$roll['id'];
             }
@@ -6391,6 +6485,7 @@ SQL;
         $customerOrderRef = trim((string)$customerOrderRef);
         $operatorName = trim($operatorName);
         $sourceRoll = $this->getRoll($sourceRollId);
+        $workOrderId = $sourceRoll !== null ? (int)($sourceRoll['source_work_order_id'] ?? 0) : 0;
         $errors = [];
 
         if ($sourceRoll === null) {
@@ -6398,7 +6493,7 @@ SQL;
         } elseif ((string)($sourceRoll['process_stage'] ?? 'RAW') !== 'PRINTED') {
             $errors['source_roll_id'] = 'La bobina debe provenir de producción para pasar a corte.';
         }
-        if ($workOrderId !== null && $workOrderId > 0 && $this->getLastWorkOrderFinishApproval($workOrderId) === null) {
+        if ($workOrderId > 0 && $this->getLastWorkOrderFinishApproval($workOrderId) === null) {
             $errors['finish_approval'] = 'Debes validar el cierre de flexografia con supervisor antes de pasar a la siguiente maquina.';
         }
         if ($unitsTotal <= 0) {
