@@ -7,7 +7,7 @@ require_once __DIR__ . '/RollReceptionService.php';
 
 final class ReceptionService
 {
-    private const RECEPTION_SCHEMA_VERSION = 'reception_v8';
+    private const RECEPTION_SCHEMA_VERSION = 'reception_v10';
     private const PRODUCTION_WAREHOUSE_SYNC_VERSION = 'production_warehouse_sync_v1';
     private static bool $schemaEnsured = false;
     private bool $erpWarehousesSynced = false;
@@ -46,6 +46,9 @@ final class ReceptionService
             }
             self::$schemaEnsured = true;
         }
+        $this->ensureProductionMachineCatalog();
+        $this->ensureWasteSchema();
+        $this->ensureBonusSchema();
     }
 
     private function ensureReceptionSchema(): void
@@ -133,6 +136,16 @@ final class ReceptionService
         if (!$this->columnExists('work_order_material_requests', 'accepted_at')) {
             $this->pdo->exec("ALTER TABLE work_order_material_requests ADD COLUMN accepted_at TIMESTAMP NULL DEFAULT NULL AFTER accepted_by");
         }
+        if (!$this->columnExists('work_order_material_requests', 'requested_meters')) {
+            $this->pdo->exec("ALTER TABLE work_order_material_requests ADD COLUMN requested_meters DECIMAL(12,3) NULL AFTER requested_qty");
+        }
+        if (!$this->columnExists('work_order_material_requests', 'estimated_roll_qty')) {
+            $this->pdo->exec("ALTER TABLE work_order_material_requests ADD COLUMN estimated_roll_qty DECIMAL(12,3) NULL AFTER requested_meters");
+        }
+
+        if ($this->tableExists('app_settings') && $this->getAppSetting('roll_request_meter_buffer_percent') === null) {
+            $this->setAppSetting('roll_request_meter_buffer_percent', '5');
+        }
 
         $this->pdo->exec(
             "CREATE TABLE IF NOT EXISTS production_wastes (
@@ -150,6 +163,23 @@ final class ReceptionService
                 CONSTRAINT fk_production_wastes_wo FOREIGN KEY (work_order_id) REFERENCES work_orders(id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS warehouse_capacities (
+                warehouse_id INT UNSIGNED NOT NULL,
+                capacity_units_total DECIMAL(14,3) NOT NULL DEFAULT 0.000,
+                capacity_pallets INT UNSIGNED NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (warehouse_id),
+                CONSTRAINT fk_warehouse_capacities_wh FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        if (!$this->columnExists('warehouse_capacities', 'capacity_units_total')) {
+            $this->pdo->exec("ALTER TABLE warehouse_capacities ADD COLUMN capacity_units_total DECIMAL(14,3) NOT NULL DEFAULT 0.000 AFTER warehouse_id");
+        }
+        if (!$this->columnExists('warehouse_capacities', 'capacity_pallets')) {
+            $this->pdo->exec("ALTER TABLE warehouse_capacities ADD COLUMN capacity_pallets INT UNSIGNED NOT NULL DEFAULT 0 AFTER capacity_units_total");
+        }
 
         $this->pdo->exec(
             "CREATE TABLE IF NOT EXISTS pallets (
@@ -384,6 +414,8 @@ final class ReceptionService
                 erp_machine_type_id BIGINT NULL,
                 erp_planta_id BIGINT NULL,
                 erp_target_qty DECIMAL(12,3) NULL,
+                erp_required_meters DECIMAL(12,3) NULL,
+                erp_required_meters_source VARCHAR(120) NULL,
                 erp_header_status VARCHAR(40) NULL,
                 erp_agenda_status VARCHAR(40) NULL,
                 erp_agenda_active TINYINT(1) NOT NULL DEFAULT 0,
@@ -397,6 +429,12 @@ final class ReceptionService
                 CONSTRAINT fk_erp_work_order_sync_wo FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
+        if (!$this->columnExists('erp_work_order_sync', 'erp_required_meters')) {
+            $this->pdo->exec("ALTER TABLE erp_work_order_sync ADD COLUMN erp_required_meters DECIMAL(12,3) NULL AFTER erp_target_qty");
+        }
+        if (!$this->columnExists('erp_work_order_sync', 'erp_required_meters_source')) {
+            $this->pdo->exec("ALTER TABLE erp_work_order_sync ADD COLUMN erp_required_meters_source VARCHAR(120) NULL AFTER erp_required_meters");
+        }
 
         $this->pdo->exec(
             "CREATE TABLE IF NOT EXISTS production_machine_types (
@@ -517,8 +555,160 @@ final class ReceptionService
                 (900, 'Bodega 900 - Tintas'),
                 (1000, 'Bodega 1000 - Retail')"
         );
+    }
 
-        $this->ensureProductionMachineCatalog();
+    private function ensureWasteSchema(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS waste_inventory_entries (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                shift_session_id BIGINT UNSIGNED NULL,
+                material_code VARCHAR(20) NOT NULL,
+                weight_kg DECIMAL(10,3) NOT NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                supplier_operator_name VARCHAR(120) NULL,
+                supplier_machine_code VARCHAR(60) NULL,
+                supplier_machine_name VARCHAR(160) NULL,
+                comments VARCHAR(255) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_waste_inventory_shift (shift_session_id),
+                KEY idx_waste_inventory_material (material_code),
+                KEY idx_waste_inventory_supplier (supplier_operator_name),
+                KEY idx_waste_inventory_supplier_machine (supplier_machine_code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+        if (!$this->columnExists('waste_inventory_entries', 'supplier_operator_name')) {
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD COLUMN supplier_operator_name VARCHAR(120) NULL AFTER operator_name");
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD INDEX idx_waste_inventory_supplier (supplier_operator_name)");
+        }
+        if (!$this->columnExists('waste_inventory_entries', 'supplier_machine_code')) {
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD COLUMN supplier_machine_code VARCHAR(60) NULL AFTER supplier_operator_name");
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD INDEX idx_waste_inventory_supplier_machine (supplier_machine_code)");
+        }
+        if (!$this->columnExists('waste_inventory_entries', 'supplier_machine_name')) {
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD COLUMN supplier_machine_name VARCHAR(160) NULL AFTER supplier_machine_code");
+        }
+        if (!$this->columnExists('waste_inventory_entries', 'withdrawn_at')) {
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD COLUMN withdrawn_at TIMESTAMP NULL AFTER created_at");
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD COLUMN withdrawn_by_operator VARCHAR(120) NULL AFTER withdrawn_at");
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD COLUMN withdrawal_operation_id BIGINT UNSIGNED NULL AFTER withdrawn_by_operator");
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD INDEX idx_waste_inventory_withdrawn (withdrawn_at)");
+            $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD INDEX idx_waste_inventory_withdrawal_op (withdrawal_operation_id)");
+        }
+        if (!$this->columnExists('waste_operations', 'material_code')) {
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN material_code VARCHAR(20) NULL AFTER operation_code");
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN weight_kg DECIMAL(10,3) NULL AFTER material_code");
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN supplier_operator_name VARCHAR(120) NULL AFTER operator_name");
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN supplier_machine_code VARCHAR(60) NULL AFTER supplier_operator_name");
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN supplier_machine_name VARCHAR(160) NULL AFTER supplier_machine_code");
+        }
+        if (!$this->columnExists('waste_operations', 'solicitante')) {
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN solicitante VARCHAR(120) NULL AFTER supplier_machine_name");
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN area VARCHAR(100) NULL AFTER solicitante");
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN motivo VARCHAR(160) NULL AFTER area");
+        }
+        if (!$this->columnExists('waste_operations', 'entry_kg')) {
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN entry_kg DECIMAL(10,3) NULL AFTER motivo");
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN exit_kg DECIMAL(10,3) NULL AFTER entry_kg");
+            $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN pallet_count INT UNSIGNED NULL AFTER exit_kg");
+        }
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS waste_operations (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                shift_session_id BIGINT UNSIGNED NULL,
+                operation_code VARCHAR(30) NOT NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                comments VARCHAR(255) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_waste_ops_shift (shift_session_id),
+                KEY idx_waste_ops_code (operation_code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+    }
+
+    private function ensureBonusSchema(): void
+    {
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS bonus_brackets (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                bonus_code VARCHAR(40) NOT NULL,
+                range_from INT UNSIGNED NOT NULL,
+                range_to INT UNSIGNED NULL,
+                amount_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_bonus_code (bonus_code),
+                KEY idx_bonus_range (bonus_code, range_from, range_to)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS bonus_unit_rates (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                bonus_code VARCHAR(40) NOT NULL,
+                category_code VARCHAR(60) NOT NULL,
+                tier_code VARCHAR(20) NOT NULL,
+                rate_clp DECIMAL(12,4) NOT NULL DEFAULT 0.0000,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uniq_bonus_unit (bonus_code, category_code, tier_code),
+                KEY idx_bonus_unit_bonus (bonus_code),
+                KEY idx_bonus_unit_category (bonus_code, category_code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS bonus_operator_factors (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                bonus_code VARCHAR(40) NOT NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                factor DECIMAL(4,2) NOT NULL DEFAULT 1.00,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uniq_bonus_operator_factor (bonus_code, operator_name),
+                KEY idx_bonus_operator_factor_bonus (bonus_code),
+                KEY idx_bonus_operator_factor_operator (operator_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS bonus_helper_roster (
+                operator_name VARCHAR(120) NOT NULL,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (operator_name),
+                KEY idx_bonus_helper_active (is_active)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS bonus_helper_monthly (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                month_key CHAR(7) NOT NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                proactividad_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                eficiencia_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                multitarea_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                matrix_proactividad_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                matrix_eficiencia_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                matrix_multitarea_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                fixed_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                additional_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+                observations VARCHAR(255) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                UNIQUE KEY uniq_bonus_helper_month (month_key, operator_name),
+                KEY idx_bonus_helper_month (month_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
     }
 
     private function syncLegacyProductionRollWarehouses(): void
@@ -607,6 +797,7 @@ final class ReceptionService
             ['code' => 'SERIGRAFIA', 'name' => 'IMPRESORA SERIGRAFIA', 'production_area' => 'PRINTING', 'erp_machine_type_id' => 2, 'display_order' => 30],
             ['code' => 'REBOBINADO', 'name' => 'REBOBINADORA', 'production_area' => 'REWINDING', 'erp_machine_type_id' => 3, 'display_order' => 40],
             ['code' => 'SELLADO', 'name' => 'SELLADORAS', 'production_area' => 'SEALING', 'erp_machine_type_id' => 4, 'display_order' => 50],
+            ['code' => 'GESTION_RESIDUOS', 'name' => 'gestion residuo', 'production_area' => 'RESIDUOS', 'erp_machine_type_id' => null, 'display_order' => 60],
         ];
 
         $typeStmt = $this->pdo->prepare(
@@ -653,6 +844,7 @@ final class ReceptionService
             ['type' => 'SELLADO', 'code' => 'SELLA-04', 'name' => 'SELLADORA IV.', 'erp_machine_id' => 134, 'sort_order' => 52],
             ['type' => 'SELLADO', 'code' => 'SELLA-05', 'name' => 'SELLADORA V.', 'erp_machine_id' => 135, 'sort_order' => 53],
             ['type' => 'SELLADO', 'code' => 'SELLA-06', 'name' => 'SELLADORA VI.', 'erp_machine_id' => 136, 'sort_order' => 54],
+            ['type' => 'GESTION_RESIDUOS', 'code' => 'GESTION-01', 'name' => 'gestion 1', 'erp_machine_id' => null, 'sort_order' => 60],
         ];
 
         $machineStmt = $this->pdo->prepare(
@@ -693,6 +885,17 @@ final class ReceptionService
         $stmt->execute([
             ':table_name' => $table,
             ':column_name' => $column,
+        ]);
+        return (int)$stmt->fetchColumn() > 0;
+    }
+
+    private function tableExists(string $table): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name'
+        );
+        $stmt->execute([
+            ':table_name' => $table,
         ]);
         return (int)$stmt->fetchColumn() > 0;
     }
@@ -950,6 +1153,8 @@ SQL;
                         erp_machine_type_id,
                         erp_planta_id,
                         erp_target_qty,
+                        erp_required_meters,
+                        erp_required_meters_source,
                         erp_header_status,
                         erp_agenda_status,
                         erp_agenda_active,
@@ -974,6 +1179,8 @@ SQL;
                         :erp_machine_type_id,
                         :erp_planta_id,
                         :erp_target_qty,
+                        :erp_required_meters,
+                        :erp_required_meters_source,
                         :erp_header_status,
                         :erp_agenda_status,
                         :erp_agenda_active,
@@ -997,6 +1204,8 @@ SQL;
                         erp_machine_type_id = VALUES(erp_machine_type_id),
                         erp_planta_id = VALUES(erp_planta_id),
                         erp_target_qty = VALUES(erp_target_qty),
+                        erp_required_meters = VALUES(erp_required_meters),
+                        erp_required_meters_source = VALUES(erp_required_meters_source),
                         erp_header_status = VALUES(erp_header_status),
                         erp_agenda_status = VALUES(erp_agenda_status),
                         erp_agenda_active = VALUES(erp_agenda_active),
@@ -1026,6 +1235,8 @@ SQL;
                         ? (int)$row['ag_plantaid']
                         : (isset($row['prd_plantaid']) ? (int)$row['prd_plantaid'] : null),
                     ':erp_target_qty' => isset($row['ag_amount']) ? (float)$row['ag_amount'] : null,
+                    ':erp_required_meters' => null,
+                    ':erp_required_meters_source' => null,
                     ':erp_header_status' => trim((string)($row['prd_status'] ?? '')) !== '' ? trim((string)$row['prd_status']) : null,
                     ':erp_agenda_status' => trim((string)($row['ag_status'] ?? '')) !== '' ? trim((string)$row['ag_status']) : null,
                     ':erp_agenda_active' => (int)($row['ag_active'] ?? 0),
@@ -1166,6 +1377,7 @@ SQL;
             'PACKAGING', 'EMBALAJE' => 'PACKAGING',
             'SEALING', 'SELLADO', 'SELLADORA', 'SELLADORAS' => 'SEALING',
             'CUT', 'CORTE', 'CUTTING' => 'CUTTING',
+            'RESIDUOS', 'WASTE', 'GESTION_RESIDUOS', 'GESTION RESIDUOS', 'RESIDUO' => 'RESIDUOS',
             default => 'PRODUCTION',
         };
     }
@@ -1185,7 +1397,7 @@ SQL;
         return $row === false ? null : $row;
     }
 
-    private function getActiveShiftSessionByMachine(int $machineId): ?array
+    public function getActiveShiftSessionByMachine(int $machineId): ?array
     {
         $stmt = $this->pdo->prepare(
             'SELECT pss.*, pm.name AS machine_name, pm.code AS machine_code, pmt.name AS machine_type_name
@@ -2775,7 +2987,8 @@ SQL;
                     sync.erp_prod_header_id, sync.erp_agenda_id, sync.erp_prod_number, sync.erp_req_id,
                     sync.erp_plan_desc, sync.erp_plan_date, sync.erp_plan_timestamp,
                     sync.erp_machine_id, sync.erp_machine_label, sync.erp_machine_type_id,
-                    sync.erp_worker_name, sync.erp_target_qty, sync.erp_header_status, sync.erp_agenda_status
+                    sync.erp_worker_name, sync.erp_target_qty, sync.erp_required_meters,
+                    sync.erp_required_meters_source, sync.erp_header_status, sync.erp_agenda_status
              FROM work_orders wo
              LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
              WHERE wo.status IN (' . implode(',', $placeholderNames) . ')
@@ -2951,7 +3164,8 @@ SQL;
                     sync.erp_user_id, sync.erp_user_login, sync.erp_prod_number, sync.erp_req_id,
                     sync.erp_plan_desc, sync.erp_plan_date, sync.erp_plan_timestamp,
                     sync.erp_machine_id, sync.erp_machine_label, sync.erp_machine_type_id,
-                    sync.erp_planta_id, sync.erp_target_qty, sync.erp_header_status,
+                    sync.erp_planta_id, sync.erp_target_qty, sync.erp_required_meters,
+                    sync.erp_required_meters_source, sync.erp_header_status,
                     sync.erp_agenda_status, sync.erp_agenda_active, sync.erp_worker_status
              FROM work_orders wo
              LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
@@ -3447,6 +3661,65 @@ SQL;
             ':key' => $key,
             ':value' => $value,
         ]);
+    }
+
+    public function getRollRequestLinearPlanningConfig(): array
+    {
+        $bufferPercent = $this->tableExists('app_settings')
+            ? (float)($this->getAppSetting('roll_request_meter_buffer_percent', '5') ?? '5')
+            : 5.0;
+        if ($bufferPercent < 0) {
+            $bufferPercent = 0;
+        }
+
+        return [
+            'buffer_percent' => round($bufferPercent, 3),
+        ];
+    }
+
+    public function getRollRequestPlanningForWorkOrder(int $workOrderId): array
+    {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        $config = $this->getRollRequestLinearPlanningConfig();
+        if ($workOrder === null) {
+            return [
+                'work_order_id' => $workOrderId,
+                'required_meters' => 0.0,
+                'suggested_roll_qty' => 0,
+                'suggested_group_key' => '',
+                'suggested_group_label' => '',
+                'hint' => [],
+                'config' => $config,
+            ];
+        }
+
+        $hint = $this->parseWorkOrderRollHint($workOrder);
+        $bestGroup = null;
+        $bestScore = null;
+        foreach ($this->listAvailableRollsForMaterialRequest() as $group) {
+            $score = $this->scoreMaterialGroupForWorkOrder($group, $hint);
+            if ($bestGroup === null || $score > $bestScore) {
+                $bestGroup = $group;
+                $bestScore = $score;
+            }
+        }
+
+        $requiredMeters = round((float)($hint['required_meters'] ?? 0), 3);
+        $suggestedRollQty = 0;
+        if (is_array($bestGroup)) {
+            $suggestedRollQty = $this->estimateRollQuantityByMeters($requiredMeters, (float)($bestGroup['meters'] ?? 0), $config);
+        }
+
+        return [
+            'work_order_id' => $workOrderId,
+            'required_meters' => $requiredMeters,
+            'suggested_roll_qty' => $suggestedRollQty,
+            'suggested_group_key' => is_array($bestGroup) ? (string)($bestGroup['group_key'] ?? '') : '',
+            'suggested_group_label' => is_array($bestGroup) ? $this->materialGroupLabel($bestGroup) : '',
+            'suggested_group' => $bestGroup,
+            'hint' => $hint,
+            'config' => $config,
+        ];
     }
 
     public function listChemicals(): array
@@ -5343,6 +5616,7 @@ SQL;
         ?int $chemicalId,
         string $requestedItemText,
         float $requestedQty,
+        float $requestedMeters,
         string $requestedUnit,
         string $notes,
         string $operatorName
@@ -5354,6 +5628,7 @@ SQL;
         $requestedUnit = trim($requestedUnit);
         $notes = trim($notes);
         $operatorName = trim($operatorName);
+        $requestedMeters = round($requestedMeters, 3);
         $errors = [];
         $group = null;
         $chemical = null;
@@ -5364,7 +5639,7 @@ SQL;
         if (!in_array($requestType, ['ROLL', 'CHEMICAL', 'OTHER'], true)) {
             $errors['request_type'] = 'Tipo de solicitud inválido.';
         }
-        if ($requestedQty <= 0) {
+        if ($requestType !== 'ROLL' && $requestedQty <= 0) {
             $errors['requested_qty'] = 'Cantidad solicitada debe ser mayor a 0.';
         }
         if ($operatorName === '') {
@@ -5375,8 +5650,23 @@ SQL;
             $group = $this->findMaterialGroupByKey($requestedGroupKey);
             if ($requestedGroupKey === '' || $group === null) {
                 $errors['requested_group_key'] = 'Debes seleccionar un tipo de bobina disponible.';
-            } elseif ($requestedQty > (float)($group['available_qty'] ?? 0)) {
-                $errors['requested_qty'] = 'La cantidad solicitada supera las bobinas disponibles en bodega.';
+            } else {
+                if ($requestedMeters < 0) {
+                    $errors['requested_meters'] = 'Los metros lineales no pueden ser negativos.';
+                }
+                $estimatedQty = $this->estimateRollQuantityByMeters(
+                    $requestedMeters,
+                    (float)($group['meters'] ?? 0),
+                    $this->getRollRequestLinearPlanningConfig()
+                );
+                if ($requestedMeters > 0 && $estimatedQty > 0) {
+                    $requestedQty = (float)$estimatedQty;
+                }
+                if ($requestedQty <= 0) {
+                    $errors['requested_qty'] = 'Debes indicar metros lineales o una cantidad válida de bobinas.';
+                } elseif ($requestedQty > (float)($group['available_qty'] ?? 0)) {
+                    $errors['requested_qty'] = 'La cantidad solicitada supera las bobinas disponibles en bodega.';
+                }
             }
             $requestedUnit = 'Unid.';
         } elseif ($requestType === 'CHEMICAL') {
@@ -5413,14 +5703,16 @@ SQL;
         };
 
         $stmt = $this->pdo->prepare(
-            'INSERT INTO work_order_material_requests (work_order_id, request_type, requested_item, requested_qty, requested_unit, delivered_qty, request_notes, status, requested_by, requested_roll_id, requested_group_key, chemical_id)
-             VALUES (:wo, :request_type, :item, :qty, :requested_unit, :delivered_qty, :notes, :status, :requested_by, NULL, :requested_group_key, :chemical_id)'
+            'INSERT INTO work_order_material_requests (work_order_id, request_type, requested_item, requested_qty, requested_meters, estimated_roll_qty, requested_unit, delivered_qty, request_notes, status, requested_by, requested_roll_id, requested_group_key, chemical_id)
+             VALUES (:wo, :request_type, :item, :qty, :requested_meters, :estimated_roll_qty, :requested_unit, :delivered_qty, :notes, :status, :requested_by, NULL, :requested_group_key, :chemical_id)'
         );
         $stmt->execute([
             ':wo' => $workOrderId,
             ':request_type' => $requestType,
             ':item' => $requestedItem,
             ':qty' => number_format($requestedQty, 3, '.', ''),
+            ':requested_meters' => $requestType === 'ROLL' && $requestedMeters > 0 ? number_format($requestedMeters, 3, '.', '') : null,
+            ':estimated_roll_qty' => $requestType === 'ROLL' && $requestedQty > 0 ? number_format($requestedQty, 3, '.', '') : null,
             ':requested_unit' => $requestedUnit,
             ':delivered_qty' => number_format(0, 3, '.', ''),
             ':notes' => $notes !== '' ? $notes : null,
@@ -5438,6 +5730,7 @@ SQL;
             'requested_group_key' => $requestedGroupKey,
             'requested_item' => $requestedItem,
             'requested_qty' => round($requestedQty, 3),
+            'requested_meters' => $requestType === 'ROLL' ? $requestedMeters : 0,
             'requested_unit' => $requestedUnit,
             'request_notes' => $notes,
             'operator_name' => $operatorName,
@@ -5731,12 +6024,13 @@ SQL;
         return ['ok' => true, 'errors' => []];
     }
 
-    public function releaseCurrentRollFromWorkOrder(int $workOrderId, float $finalWeightKg, float $wasteKg, string $operatorName, array $wasteDetails = [], int $rollId = 0, int $requestId = 0): array
+    public function releaseCurrentRollFromWorkOrder(int $workOrderId, float $finalWeightKg, float $wasteKg, string $operatorName, array $wasteDetails = [], int $rollId = 0, int $requestId = 0, ?float $finalMeters = null): array
     {
         $errors = [];
         $operatorName = trim($operatorName);
         $workOrder = $this->getWorkOrder($workOrderId);
         $currentRoll = $rollId > 0 ? $this->getRoll($rollId) : $this->getCurrentRollInWorkOrder($workOrderId);
+        $finalMeters = $finalMeters !== null ? round($finalMeters, 3) : null;
         $normalizedWasteDetails = [];
         foreach ($wasteDetails as $wasteKey => $wasteDetail) {
             if (!is_array($wasteDetail)) {
@@ -5781,6 +6075,12 @@ SQL;
         if ($wasteKg < 0) {
             $errors['waste_kg'] = 'Merma no puede ser negativa.';
         }
+        $currentMeters = $currentRoll !== null ? (float)($currentRoll['meters'] ?? 0) : 0.0;
+        if ($finalMeters !== null && $finalMeters < 0) {
+            $errors['final_meters'] = 'Los metros finales no pueden ser negativos.';
+        } elseif ($finalMeters !== null && $currentMeters > 0 && $finalMeters > $currentMeters) {
+            $errors['final_meters'] = 'Los metros finales no pueden superar los metros actuales de la bobina.';
+        }
         if ($operatorName === '') {
             $errors['operator_name'] = 'Operador es obligatorio.';
         }
@@ -5790,9 +6090,10 @@ SQL;
 
         $this->pdo->beginTransaction();
         try {
-            $stmt = $this->pdo->prepare('UPDATE rolls SET weight_kg = :weight_kg, current_work_order_id = NULL, status = :status WHERE id = :id');
+            $stmt = $this->pdo->prepare('UPDATE rolls SET weight_kg = :weight_kg, meters = :meters, current_work_order_id = NULL, status = :status WHERE id = :id');
             $stmt->execute([
                 ':weight_kg' => round($finalWeightKg, 3),
+                ':meters' => $finalMeters !== null ? number_format($finalMeters, 3, '.', '') : ($currentRoll['meters'] ?? null),
                 ':status' => $finalWeightKg > 0 ? 'RECEIVED' : 'CONSUMED',
                 ':id' => (int)$currentRoll['id'],
             ]);
@@ -5802,6 +6103,9 @@ SQL;
                 'request_id' => $requestId > 0 ? $requestId : null,
                 'roll_id' => (int)$currentRoll['id'],
                 'final_weight_kg' => round($finalWeightKg, 3),
+                'initial_meters' => $currentMeters > 0 ? round($currentMeters, 3) : null,
+                'final_meters' => $finalMeters,
+                'used_meters' => $finalMeters !== null && $currentMeters > 0 ? round(max(0, $currentMeters - $finalMeters), 3) : null,
                 'waste_kg' => round($wasteKg, 3),
                 'waste_details' => $normalizedWasteDetails,
                 'reason' => 'MANUAL_RELEASE',
@@ -5946,6 +6250,110 @@ SQL;
         return ['ok' => true, 'errors' => []];
     }
 
+    private function parseWorkOrderRollHint(array $workOrder): array
+    {
+        $sheetText = trim((string)($workOrder['erp_plan_desc'] ?? '') . ' ' . (string)($workOrder['sku_final'] ?? ''));
+        $widthMm = 0.0;
+        $heightMm = 0.0;
+        $gussetMm = 0.0;
+        if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dimensionMatch) === 1) {
+            $widthMm = round(((float)str_replace(',', '.', (string)$dimensionMatch[1])) * 10, 3);
+            $heightMm = round(((float)str_replace(',', '.', (string)$dimensionMatch[2])) * 10, 3);
+            $gussetMm = trim((string)($dimensionMatch[3] ?? '')) !== ''
+                ? round(((float)str_replace(',', '.', (string)$dimensionMatch[3])) * 10, 3)
+                : 0.0;
+        }
+
+        $requiredMeters = round((float)($workOrder['erp_required_meters'] ?? 0), 3);
+        if ($requiredMeters < 0) {
+            $requiredMeters = 0.0;
+        }
+        $requiredMetersSource = trim((string)($workOrder['erp_required_meters_source'] ?? ''));
+        if ($requiredMeters > 0 && $requiredMetersSource === '') {
+            $requiredMetersSource = 'ERP';
+        }
+
+        $material = '';
+        foreach (['PLA', 'BOPP', 'PEBD', 'PEAD', 'PP', 'PE'] as $materialKeyword) {
+            if (stripos($sheetText, $materialKeyword) !== false) {
+                $material = $materialKeyword;
+                break;
+            }
+        }
+
+        $color = '';
+        foreach (['NATURAL', 'BLANCO', 'BEIGE', 'AZUL', 'ROJO', 'VERDE', 'NEGRO', 'TRANSPARENTE', 'AMARILLO', 'ROSADO'] as $colorKeyword) {
+            if (stripos($sheetText, $colorKeyword) !== false) {
+                $color = $colorKeyword;
+                break;
+            }
+        }
+
+        return [
+            'sheet_text' => $sheetText,
+            'width_mm' => $widthMm,
+            'height_mm' => $heightMm,
+            'gusset_mm' => $gussetMm,
+            'required_meters' => $requiredMeters,
+            'required_meters_source' => $requiredMetersSource,
+            'material' => $material,
+            'color' => $color,
+        ];
+    }
+
+    private function scoreMaterialGroupForWorkOrder(array $group, array $hint): int
+    {
+        $score = 0;
+        $groupDescription = strtoupper(trim((string)($group['sku_description'] ?? '')));
+        $groupColor = strtoupper(trim((string)($group['color'] ?? '')));
+        $groupWidth = (float)($group['width_mm'] ?? 0);
+
+        if ($groupWidth > 0 && (float)($hint['width_mm'] ?? 0) > 0) {
+            $difference = abs($groupWidth - (float)$hint['width_mm']);
+            if ($difference <= 10) {
+                $score += 60;
+            } elseif ($difference <= 30) {
+                $score += 45;
+            } elseif ($difference <= 60) {
+                $score += 25;
+            }
+        }
+
+        $material = strtoupper(trim((string)($hint['material'] ?? '')));
+        if ($material !== '' && str_contains($groupDescription, $material)) {
+            $score += 30;
+        }
+
+        $color = strtoupper(trim((string)($hint['color'] ?? '')));
+        if ($color !== '') {
+            if ($groupColor === $color) {
+                $score += 15;
+            } elseif ($groupColor === '' && $color === 'NATURAL') {
+                $score += 10;
+            }
+        }
+
+        if ((float)($group['available_qty'] ?? 0) > 0) {
+            $score += 5;
+        }
+
+        if ((float)($group['meters'] ?? 0) > 0) {
+            $score += 3;
+        }
+
+        return $score;
+    }
+
+    private function estimateRollQuantityByMeters(float $requiredMeters, float $rollMeters, array $config): int
+    {
+        if ($requiredMeters <= 0 || $rollMeters <= 0) {
+            return 0;
+        }
+
+        $bufferFactor = 1 + (((float)($config['buffer_percent'] ?? 0)) / 100);
+        return max(1, (int)ceil(($requiredMeters * $bufferFactor) / $rollMeters));
+    }
+
     private function materialGroupKeyFromRoll(array $roll): string
     {
         return implode('|', [
@@ -6044,7 +6452,7 @@ SQL;
         if ($workOrderId <= 0 || $this->getWorkOrder($workOrderId) === null) {
             $errors['work_order_id'] = 'OT no existe.';
         }
-        if (!in_array($stage, ['PRODUCTION', 'CUT'], true)) {
+        if (!in_array($stage, ['PRODUCTION', 'CUT', 'SEALING'], true)) {
             $errors['waste_stage'] = 'Etapa de merma inválida.';
         }
         if ($reason === '') {
@@ -6085,6 +6493,40 @@ SQL;
         ]);
 
         return ['ok' => true, 'errors' => [], 'waste_id' => $wasteId];
+    }
+
+    public function isWorkOrderInSealingStage(int $workOrderId): bool
+    {
+        $workOrder = $this->getWorkOrder($workOrderId);
+        if ($workOrder === null) {
+            return false;
+        }
+        if (strtoupper(trim((string)($workOrder['status'] ?? ''))) === 'CLOSED') {
+            return false;
+        }
+
+        $finishApproval = $this->getLastWorkOrderFinishApproval($workOrderId);
+        if ($finishApproval === null) {
+            return false;
+        }
+
+        $sealingFinish = $this->getLastWorkOrderSealingFinish($workOrderId);
+        if ($sealingFinish === null) {
+            return true;
+        }
+
+        $sealingSetup = $this->getLastWorkOrderSealingSetupApproval($workOrderId);
+        if ($sealingSetup === null) {
+            return false;
+        }
+
+        $finishTs = strtotime((string)($sealingFinish['created_at'] ?? ''));
+        $setupTs = strtotime((string)($sealingSetup['created_at'] ?? ''));
+        if ($finishTs === false || $setupTs === false) {
+            return false;
+        }
+
+        return $finishTs < $setupTs;
     }
 
     private function listWorkOrderRollEvents(int $workOrderId): array
@@ -7521,6 +7963,258 @@ SQL;
         ];
     }
 
+    public function getProductionDashboardKpis(string $startAt, string $endAt): array
+    {
+        $stmt = $this->pdo->prepare('SELECT COALESCE(SUM(units_qty), 0) AS produced_units FROM boxes WHERE created_at BETWEEN :start AND :end');
+        $stmt->execute([':start' => $startAt, ':end' => $endAt]);
+        $producedUnits = (float)($stmt->fetchColumn() ?: 0);
+
+        $stmt = $this->pdo->prepare(
+            'SELECT COALESCE(SUM(units_qty), 0) AS dispatched_units
+             FROM boxes
+             WHERE destination_mode = "CUSTOMER_ORDER"
+               AND created_at BETWEEN :start AND :end'
+        );
+        $stmt->execute([':start' => $startAt, ':end' => $endAt]);
+        $dispatchedUnits = (float)($stmt->fetchColumn() ?: 0);
+
+        $stmt = $this->pdo->prepare(
+            'SELECT COALESCE(SUM(COALESCE(wo.target_qty, 0)), 0) AS pending_units
+             FROM work_orders wo
+             LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
+             WHERE wo.status IN ("OPEN","ACTIVE","CUTTING")
+               AND COALESCE(
+                   CASE WHEN sync.erp_plan_timestamp IS NOT NULL THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
+                   wo.created_at
+               ) BETWEEN :start AND :end'
+        );
+        $stmt->execute([':start' => $startAt, ':end' => $endAt]);
+        $pendingUnits = (float)($stmt->fetchColumn() ?: 0);
+
+        $stmt = $this->pdo->prepare(
+            'SELECT r.id, r.roll_code, r.meters, r.weight_kg, r.created_at,
+                    wo.id AS work_order_id, wo.ot_code, wo.target_qty,
+                    COALESCE(roll_totals.total_rolls, 0) AS total_rolls
+             FROM rolls r
+             LEFT JOIN work_orders wo ON wo.id = r.source_work_order_id
+             LEFT JOIN (
+                SELECT source_work_order_id, COUNT(*) AS total_rolls
+                FROM rolls
+                WHERE source_work_order_id IS NOT NULL
+                GROUP BY source_work_order_id
+             ) roll_totals ON roll_totals.source_work_order_id = r.source_work_order_id
+             WHERE r.process_stage = "PRINTED"
+               AND r.status <> "CONSUMED"
+             ORDER BY r.id DESC
+             LIMIT 40'
+        );
+        $stmt->execute();
+        $semiRows = $stmt->fetchAll();
+        foreach ($semiRows as &$row) {
+            $targetQty = (float)($row['target_qty'] ?? 0);
+            $totalRolls = (int)($row['total_rolls'] ?? 0);
+            $row['estimated_units'] = $targetQty > 0 && $totalRolls > 0 ? round($targetQty / $totalRolls, 3) : null;
+        }
+        unset($row);
+
+        $stmt = $this->pdo->prepare('SELECT COALESCE(SUM(weight_kg), 0) AS waste_kg FROM production_wastes WHERE created_at BETWEEN :start AND :end');
+        $stmt->execute([':start' => $startAt, ':end' => $endAt]);
+        $wasteKg = (float)($stmt->fetchColumn() ?: 0);
+
+        $stmt = $this->pdo->prepare(
+            'SELECT COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.process_weight_kg")) AS DECIMAL(12,3))), 0) AS processed_kg
+             FROM events
+             WHERE type = "WORK_ORDER_ROLL_ATTACHED"
+               AND created_at BETWEEN :start AND :end'
+        );
+        $stmt->execute([':start' => $startAt, ':end' => $endAt]);
+        $processedKg = (float)($stmt->fetchColumn() ?: 0);
+
+        $stmt = $this->pdo->prepare(
+            'SELECT wo.id,
+                    wo.ot_code,
+                    wo.sku_final,
+                    wo.status,
+                    wo.created_at,
+                    COALESCE(wo.target_qty, 0) AS target_qty,
+                    COALESCE(
+                        CASE WHEN sync.erp_plan_timestamp IS NOT NULL THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
+                        wo.created_at
+                    ) AS planned_at,
+                    COALESCE(box_stats.produced_units, 0) AS produced_units,
+                    COALESCE(box_stats.dispatched_units, 0) AS dispatched_units,
+                    COALESCE(box_stats.boxes_count, 0) AS boxes_count,
+                    box_stats.last_box_at,
+                    COALESCE(waste_stats.waste_kg, 0) AS waste_kg,
+                    COALESCE(waste_stats.waste_records, 0) AS waste_records,
+                    COALESCE(process_stats.processed_kg, 0) AS processed_kg,
+                    COALESCE(process_stats.attached_events, 0) AS attached_events,
+                    COALESCE(semi_stats.semi_rolls_count, 0) AS semi_rolls_count,
+                    COALESCE(semi_stats.semi_weight_kg, 0) AS semi_weight_kg,
+                    COALESCE(semi_stats.semi_meters, 0) AS semi_meters
+             FROM work_orders wo
+             LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
+             LEFT JOIN (
+                SELECT work_order_id,
+                       COALESCE(SUM(units_qty), 0) AS produced_units,
+                       COALESCE(SUM(CASE WHEN destination_mode = "CUSTOMER_ORDER" THEN units_qty ELSE 0 END), 0) AS dispatched_units,
+                       COUNT(*) AS boxes_count,
+                       MAX(created_at) AS last_box_at
+                FROM boxes
+                WHERE created_at BETWEEN :box_start AND :box_end
+                GROUP BY work_order_id
+             ) box_stats ON box_stats.work_order_id = wo.id
+             LEFT JOIN (
+                SELECT work_order_id,
+                       COALESCE(SUM(weight_kg), 0) AS waste_kg,
+                       COUNT(*) AS waste_records
+                FROM production_wastes
+                WHERE created_at BETWEEN :waste_start AND :waste_end
+                GROUP BY work_order_id
+             ) waste_stats ON waste_stats.work_order_id = wo.id
+             LEFT JOIN (
+                SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED) AS work_order_id,
+                       COALESCE(SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.process_weight_kg")) AS DECIMAL(12,3))), 0) AS processed_kg,
+                       COUNT(*) AS attached_events
+                FROM events
+                WHERE type = "WORK_ORDER_ROLL_ATTACHED"
+                  AND created_at BETWEEN :process_start AND :process_end
+                GROUP BY CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, "$.work_order_id")) AS UNSIGNED)
+             ) process_stats ON process_stats.work_order_id = wo.id
+             LEFT JOIN (
+                SELECT source_work_order_id AS work_order_id,
+                       COUNT(*) AS semi_rolls_count,
+                       COALESCE(SUM(weight_kg), 0) AS semi_weight_kg,
+                       COALESCE(SUM(meters), 0) AS semi_meters
+                FROM rolls
+                WHERE process_stage = "PRINTED"
+                  AND status <> "CONSUMED"
+                  AND source_work_order_id IS NOT NULL
+                GROUP BY source_work_order_id
+             ) semi_stats ON semi_stats.work_order_id = wo.id
+             WHERE (
+                COALESCE(
+                    CASE WHEN sync.erp_plan_timestamp IS NOT NULL THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
+                    wo.created_at
+                ) BETWEEN :plan_start AND :plan_end
+                OR box_stats.work_order_id IS NOT NULL
+                OR waste_stats.work_order_id IS NOT NULL
+                OR process_stats.work_order_id IS NOT NULL
+                OR semi_stats.work_order_id IS NOT NULL
+             )
+             ORDER BY
+                CASE wo.status
+                    WHEN "ACTIVE" THEN 0
+                    WHEN "OPEN" THEN 1
+                    WHEN "CUTTING" THEN 2
+                    WHEN "CLOSED" THEN 3
+                    ELSE 4
+                END,
+                COALESCE(box_stats.produced_units, 0) DESC,
+                wo.id DESC
+             LIMIT 80'
+        );
+        $stmt->execute([
+            ':box_start' => $startAt,
+            ':box_end' => $endAt,
+            ':waste_start' => $startAt,
+            ':waste_end' => $endAt,
+            ':process_start' => $startAt,
+            ':process_end' => $endAt,
+            ':plan_start' => $startAt,
+            ':plan_end' => $endAt,
+        ]);
+        $workOrderRows = $stmt->fetchAll();
+        foreach ($workOrderRows as &$workOrderRow) {
+            $targetQty = (float)($workOrderRow['target_qty'] ?? 0);
+            $producedQty = (float)($workOrderRow['produced_units'] ?? 0);
+            $processedQty = (float)($workOrderRow['processed_kg'] ?? 0);
+            $wasteQty = (float)($workOrderRow['waste_kg'] ?? 0);
+            $pendingQty = max(0.0, $targetQty - $producedQty);
+            $progressPercent = $targetQty > 0 ? round(min(100, ($producedQty / $targetQty) * 100), 2) : 0.0;
+            $dispatchCoveragePercent = $producedQty > 0 ? round(min(100, (((float)($workOrderRow['dispatched_units'] ?? 0)) / $producedQty) * 100), 2) : 0.0;
+            $wastePercentByOt = $processedQty > 0 ? round(($wasteQty / $processedQty) * 100, 2) : 0.0;
+            $status = (string)($workOrderRow['status'] ?? '');
+            if ($status === 'CLOSED' || ($targetQty > 0 && $pendingQty <= 0 && $producedQty > 0)) {
+                $dashboardStatus = 'Terminada';
+            } elseif ($producedQty > 0 || $processedQty > 0 || $wasteQty > 0) {
+                $dashboardStatus = 'Con avance';
+            } elseif ($status === 'ACTIVE') {
+                $dashboardStatus = 'En produccion';
+            } elseif ($status === 'CUTTING') {
+                $dashboardStatus = 'En corte';
+            } else {
+                $dashboardStatus = 'Pendiente';
+            }
+
+            $workOrderRow['pending_units'] = round($pendingQty, 3);
+            $workOrderRow['progress_percent'] = $progressPercent;
+            $workOrderRow['dispatch_coverage_percent'] = $dispatchCoveragePercent;
+            $workOrderRow['waste_percent'] = $wastePercentByOt;
+            $workOrderRow['dashboard_status'] = $dashboardStatus;
+        }
+        unset($workOrderRow);
+
+        $wastePercent = $processedKg > 0 ? round(($wasteKg / $processedKg) * 100, 2) : 0.0;
+
+        return [
+            'produced_units' => round($producedUnits, 3),
+            'pending_units' => round($pendingUnits, 3),
+            'dispatched_units' => round($dispatchedUnits, 3),
+            'work_orders' => $workOrderRows,
+            'semi_rolls' => [
+                'count' => count($semiRows),
+                'rows' => $semiRows,
+            ],
+            'warehouses' => $this->stockSummaryWithCapacities(),
+            'waste' => [
+                'waste_kg' => round($wasteKg, 3),
+                'processed_kg' => round($processedKg, 3),
+                'percent' => $wastePercent,
+            ],
+        ];
+    }
+
+    public function stockSummaryWithCapacities(): array
+    {
+        $capacities = [];
+        $stmt = $this->pdo->prepare('SELECT warehouse_id, capacity_units_total, capacity_pallets FROM warehouse_capacities');
+        $stmt->execute();
+        foreach ($stmt->fetchAll() as $row) {
+            $capacities[(int)$row['warehouse_id']] = [
+                'capacity_units_total' => (float)($row['capacity_units_total'] ?? 0),
+                'capacity_pallets' => (int)($row['capacity_pallets'] ?? 0),
+            ];
+        }
+
+        $rows = $this->stockSummary();
+        foreach ($rows as &$row) {
+            $warehouseId = (int)($row['warehouse_id'] ?? 0);
+            $cap = $capacities[$warehouseId] ?? ['capacity_units_total' => 0.0, 'capacity_pallets' => 0];
+            $row['capacity_units_total'] = (float)$cap['capacity_units_total'];
+            $row['capacity_pallets'] = (int)$cap['capacity_pallets'];
+            $row['occupancy_percent'] = null;
+            $palletsCount = (int)($row['pallets_count'] ?? 0);
+            $stockUnits = (float)($row['stock_units_total'] ?? 0);
+            $capPallets = (int)$row['capacity_pallets'];
+            $capUnits = (float)$row['capacity_units_total'];
+            if ($capPallets > 0) {
+                if ($palletsCount > 0) {
+                    $row['occupancy_percent'] = round(($palletsCount / $capPallets) * 100, 2);
+                } elseif ($capUnits > 0 && $stockUnits > 0) {
+                    $row['occupancy_percent'] = round(($stockUnits / $capUnits) * 100, 2);
+                } else {
+                    $row['occupancy_percent'] = 0.0;
+                }
+            } elseif ($capUnits > 0) {
+                $row['occupancy_percent'] = round(($stockUnits / $capUnits) * 100, 2);
+            }
+        }
+        unset($row);
+
+        return $rows;
+    }
+
     public function listErpDashboardAlerts(int $limit = 6): array
     {
         $summary = $this->getErpDashboardSummary();
@@ -7637,6 +8331,260 @@ SQL;
         $stmt = $this->pdo->prepare('SELECT id, code, name FROM warehouses ORDER BY code ASC');
         $stmt->execute();
         return $stmt->fetchAll();
+    }
+
+    public function listWarehousesForCut(): array
+    {
+        $all = $this->listWarehouses();
+        $allowedCodes = [700, 1000];
+        return array_values(array_filter(
+            $all,
+            static fn(array $warehouse): bool => in_array((int)($warehouse['code'] ?? 0), $allowedCodes, true)
+        ));
+    }
+
+    public function getWarehouseById(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT w.id, w.code, w.name,
+                    COALESCE(wc.capacity_units_total, 0) AS capacity_units_total,
+                    COALESCE(wc.capacity_pallets, 0) AS capacity_pallets
+             FROM warehouses w
+             LEFT JOIN warehouse_capacities wc ON wc.warehouse_id = w.id
+             WHERE w.id = :id
+             LIMIT 1'
+        );
+        $stmt->execute([':id' => $id]);
+        $row = $stmt->fetch();
+        if ($row === false) {
+            return null;
+        }
+        return [
+            'id' => (int)$row['id'],
+            'code' => (int)$row['code'],
+            'name' => (string)$row['name'],
+            'capacity_units_total' => (float)($row['capacity_units_total'] ?? 0),
+            'capacity_pallets' => (int)($row['capacity_pallets'] ?? 0),
+        ];
+    }
+
+    public function listWarehousesWithCapacities(): array
+    {
+        $summaryRows = $this->stockSummaryWithCapacities();
+        $summaryByWarehouseId = [];
+        foreach ($summaryRows as $row) {
+            $warehouseId = (int)($row['warehouse_id'] ?? 0);
+            if ($warehouseId > 0) {
+                $summaryByWarehouseId[$warehouseId] = $row;
+            }
+        }
+
+        $stmt = $this->pdo->prepare(
+            'SELECT w.id, w.code, w.name,
+                    COALESCE(wc.capacity_units_total, 0) AS capacity_units_total,
+                    COALESCE(wc.capacity_pallets, 0) AS capacity_pallets
+             FROM warehouses w
+             LEFT JOIN warehouse_capacities wc ON wc.warehouse_id = w.id
+             ORDER BY w.code ASC'
+        );
+        $stmt->execute();
+        $warehouses = $stmt->fetchAll();
+
+        $result = [];
+        foreach ($warehouses as $w) {
+            $id = (int)($w['id'] ?? 0);
+            $summary = $summaryByWarehouseId[$id] ?? null;
+            if ($summary !== null) {
+                $result[] = [
+                    'id' => $id,
+                    'code' => (int)($summary['warehouse_code'] ?? $w['code'] ?? 0),
+                    'name' => (string)($summary['warehouse_name'] ?? $w['name'] ?? ''),
+                    'capacity_units_total' => (float)($summary['capacity_units_total'] ?? $w['capacity_units_total'] ?? 0),
+                    'capacity_pallets' => (int)($summary['capacity_pallets'] ?? $w['capacity_pallets'] ?? 0),
+                    'rolls_count' => (int)($summary['rolls_count'] ?? 0),
+                    'boxes_count' => (int)($summary['boxes_count'] ?? 0),
+                    'pallets_count' => (int)($summary['pallets_count'] ?? 0),
+                    'stock_units_total' => (float)($summary['stock_units_total'] ?? 0),
+                    'occupancy_percent' => isset($summary['occupancy_percent'])
+                        ? (is_numeric($summary['occupancy_percent']) ? round((float)$summary['occupancy_percent'], 2) : null)
+                        : null,
+                ];
+            } else {
+                $capacityPallets = (int)($w['capacity_pallets'] ?? 0);
+                $capacityUnits = (float)($w['capacity_units_total'] ?? 0);
+                $occupancy = null;
+                if ($capacityPallets > 0) {
+                    $occupancy = 0.0;
+                } elseif ($capacityUnits > 0) {
+                    $occupancy = 0.0;
+                }
+                $result[] = [
+                    'id' => $id,
+                    'code' => (int)($w['code'] ?? 0),
+                    'name' => (string)($w['name'] ?? ''),
+                    'capacity_units_total' => $capacityUnits,
+                    'capacity_pallets' => $capacityPallets,
+                    'rolls_count' => 0,
+                    'boxes_count' => 0,
+                    'pallets_count' => 0,
+                    'stock_units_total' => 0.0,
+                    'occupancy_percent' => $occupancy === null ? null : round((float)$occupancy, 2),
+                ];
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function createWarehouse(int $code, string $name, float $capacityUnitsTotal, int $capacityPallets): array
+    {
+        $errors = [];
+        $code = max(0, $code);
+        $name = trim($name);
+        $capacityUnitsTotal = (int)round(max(0.0, $capacityUnitsTotal));
+        $capacityPallets = max(0, $capacityPallets);
+
+        if ($code <= 0) {
+            $errors[] = 'El código de bodega debe ser mayor a 0.';
+        }
+        if ($name === '') {
+            $errors[] = 'El nombre de la bodega es obligatorio.';
+        }
+
+        $check = $this->pdo->prepare('SELECT id FROM warehouses WHERE code = :code LIMIT 1');
+        $check->execute([':code' => $code]);
+        if ($check->fetch() !== false) {
+            $errors[] = 'Ya existe una bodega con el código ' . $code . '.';
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $insert = $this->pdo->prepare('INSERT INTO warehouses (code, name) VALUES (:code, :name)');
+            $insert->execute([':code' => $code, ':name' => $name]);
+            $id = (int)$this->pdo->lastInsertId();
+
+            $cap = $this->pdo->prepare(
+                'INSERT INTO warehouse_capacities (warehouse_id, capacity_units_total, capacity_pallets)
+                 VALUES (:id, :units, :pallets)
+                 ON DUPLICATE KEY UPDATE capacity_units_total = VALUES(capacity_units_total), capacity_pallets = VALUES(capacity_pallets)'
+            );
+            $cap->execute([
+                ':id' => $id,
+                ':units' => $capacityUnitsTotal,
+                ':pallets' => $capacityPallets,
+            ]);
+
+            $this->pdo->commit();
+            return ['ok' => true, 'id' => $id];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'errors' => ['No se pudo crear la bodega: ' . $e->getMessage()]];
+        }
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[]}
+     */
+    public function updateWarehouse(int $id, int $code, string $name, float $capacityUnitsTotal, int $capacityPallets): array
+    {
+        $errors = [];
+        $code = max(0, $code);
+        $name = trim($name);
+        $capacityUnitsTotal = (int)round(max(0.0, $capacityUnitsTotal));
+        $capacityPallets = max(0, $capacityPallets);
+
+        $current = $this->pdo->prepare('SELECT id, code FROM warehouses WHERE id = :id LIMIT 1');
+        $current->execute([':id' => $id]);
+        $currentRow = $current->fetch();
+        if ($currentRow === false) {
+            return ['ok' => false, 'errors' => ['La bodega seleccionada no existe.']];
+        }
+
+        if ($code <= 0) {
+            $errors[] = 'El código de bodega debe ser mayor a 0.';
+        }
+        if ($name === '') {
+            $errors[] = 'El nombre de la bodega es obligatorio.';
+        }
+
+        if ($code !== (int)$currentRow['code']) {
+            $check = $this->pdo->prepare('SELECT id FROM warehouses WHERE code = :code AND id <> :id LIMIT 1');
+            $check->execute([':code' => $code, ':id' => $id]);
+            if ($check->fetch() !== false) {
+                $errors[] = 'Ya existe otra bodega con el código ' . $code . '.';
+            }
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $update = $this->pdo->prepare('UPDATE warehouses SET code = :code, name = :name WHERE id = :id');
+            $update->execute([':code' => $code, ':name' => $name, ':id' => $id]);
+
+            $cap = $this->pdo->prepare(
+                'INSERT INTO warehouse_capacities (warehouse_id, capacity_units_total, capacity_pallets)
+                 VALUES (:id, :units, :pallets)
+                 ON DUPLICATE KEY UPDATE capacity_units_total = VALUES(capacity_units_total), capacity_pallets = VALUES(capacity_pallets)'
+            );
+            $cap->execute([
+                ':id' => $id,
+                ':units' => $capacityUnitsTotal,
+                ':pallets' => $capacityPallets,
+            ]);
+
+            $this->pdo->commit();
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'errors' => ['No se pudo actualizar la bodega: ' . $e->getMessage()]];
+        }
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[]}
+     */
+    public function deleteWarehouse(int $id): array
+    {
+        $rollsStmt = $this->pdo->prepare('SELECT COUNT(*) AS c FROM rolls WHERE warehouse_id = :id');
+        $rollsStmt->execute([':id' => $id]);
+        $rollsCount = (int)($rollsStmt->fetch()['c'] ?? 0);
+
+        $palletsStmt = $this->pdo->prepare('SELECT COUNT(*) AS c FROM pallets WHERE warehouse_id = :id');
+        $palletsStmt->execute([':id' => $id]);
+        $palletsCount = (int)($palletsStmt->fetch()['c'] ?? 0);
+
+        $boxesStmt = $this->pdo->prepare('SELECT COUNT(*) AS c FROM boxes WHERE warehouse_id = :id');
+        $boxesStmt->execute([':id' => $id]);
+        $boxesCount = (int)($boxesStmt->fetch()['c'] ?? 0);
+
+        if ($rollsCount > 0 || $palletsCount > 0 || $boxesCount > 0) {
+            $parts = [];
+            if ($rollsCount > 0) $parts[] = $rollsCount . ' bobina(s)';
+            if ($palletsCount > 0) $parts[] = $palletsCount . ' pallet(s)';
+            if ($boxesCount > 0) $parts[] = $boxesCount . ' caja(s)';
+            return [
+                'ok' => false,
+                'errors' => ['No se puede eliminar la bodega: tiene ' . implode(', ', $parts) . ' asociadas.'],
+            ];
+        }
+
+        try {
+            $delete = $this->pdo->prepare('DELETE FROM warehouses WHERE id = :id');
+            $delete->execute([':id' => $id]);
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'errors' => ['No se pudo eliminar la bodega: ' . $e->getMessage()]];
+        }
     }
 
     public function listProductionMachinesWithSessions(): array
@@ -8130,6 +9078,28 @@ SQL;
              WHERE w.code = :code
                AND COALESCE(p.status, "") = "STORED"
              ORDER BY p.id DESC
+             LIMIT :limit'
+        );
+        $stmt->bindValue(':code', $warehouseCode, PDO::PARAM_INT);
+        $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    public function listBoxesByWarehouseCode(int $warehouseCode, int $limit = 100): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT b.id, b.box_code, b.final_sku, b.units_qty, b.destination_mode, b.customer_order_ref, b.status, b.created_at,
+                    b.operator_name, w.code AS warehouse_code, w.name AS warehouse_name,
+                    r.roll_code AS source_roll_code, p.pallet_code, wo.ot_code
+             FROM boxes b
+             JOIN warehouses w ON w.id = b.warehouse_id
+             LEFT JOIN rolls r ON r.id = b.source_roll_id
+             LEFT JOIN pallets p ON p.id = b.pallet_id
+             LEFT JOIN work_orders wo ON wo.id = b.work_order_id
+             WHERE w.code = :code
+               AND (b.pallet_id IS NULL OR COALESCE(p.status, "") = "STORED")
+             ORDER BY b.id DESC
              LIMIT :limit'
         );
         $stmt->bindValue(':code', $warehouseCode, PDO::PARAM_INT);
@@ -8658,5 +9628,1916 @@ SQL;
         $date = gmdate('Ymd');
         $rand = bin2hex(random_bytes(3));
         return 'PL-' . $date . '-' . strtoupper($rand);
+    }
+
+    public function listWasteInventoryTotals(): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT UPPER(TRIM(material_code)) AS material_code,
+                    COALESCE(SUM(weight_kg), 0) AS total_kg
+             FROM waste_inventory_entries
+             GROUP BY UPPER(TRIM(material_code))'
+        );
+        $stmt->execute();
+        $rows = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $rows[(string)$row['material_code']] = (float)($row['total_kg'] ?? 0);
+        }
+        $defaults = [
+            'PP' => 0.0,
+            'PLA' => 0.0,
+            'FILM' => 0.0,
+        ];
+        foreach ($defaults as $code => $zero) {
+            if (!isset($rows[$code])) {
+                $rows[$code] = $zero;
+            }
+        }
+        return $rows;
+    }
+
+    public function listWastePendingInventoryTotals(): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT UPPER(TRIM(material_code)) AS material_code,
+                    COALESCE(SUM(weight_kg), 0) AS total_kg
+             FROM waste_inventory_entries
+             WHERE withdrawn_at IS NULL
+             GROUP BY UPPER(TRIM(material_code))'
+        );
+        $stmt->execute();
+        $rows = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $rows[(string)$row['material_code']] = (float)($row['total_kg'] ?? 0);
+        }
+        $defaults = [
+            'PP' => 0.0,
+            'PLA' => 0.0,
+            'FILM' => 0.0,
+        ];
+        foreach ($defaults as $code => $zero) {
+            if (!isset($rows[$code])) {
+                $rows[$code] = $zero;
+            }
+        }
+        return $rows;
+    }
+
+    public function listPendingWasteWithdrawalsOfDay(): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, shift_session_id, material_code, weight_kg, operator_name, supplier_operator_name, supplier_machine_code, supplier_machine_name, created_at
+             FROM waste_inventory_entries
+             WHERE withdrawn_at IS NULL
+               AND DATE(created_at) = CURDATE()
+             ORDER BY created_at ASC, id ASC'
+        );
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function recordWasteInventoryEntry(
+        string $materialCode,
+        float $weightKg,
+        string $operatorName,
+        ?int $shiftSessionId = null,
+        ?string $comments = null,
+        ?string $supplierOperatorName = null,
+        ?string $supplierMachineCode = null,
+        ?string $supplierMachineName = null
+    ): array {
+        $materialCode = strtoupper(trim($materialCode));
+        $weightKg = round(max(0.0, $weightKg), 3);
+        $operatorName = trim($operatorName);
+        $supplierOperatorName = trim((string)$supplierOperatorName);
+        if ($supplierOperatorName === '') {
+            $supplierOperatorName = null;
+        }
+        $supplierMachineCode = trim((string)$supplierMachineCode);
+        if ($supplierMachineCode === '') {
+            $supplierMachineCode = null;
+        }
+        $supplierMachineName = trim((string)$supplierMachineName);
+        if ($supplierMachineName === '') {
+            $supplierMachineName = null;
+        }
+        $comments = trim((string)$comments);
+
+        $errors = [];
+        if (!in_array($materialCode, ['PP', 'PLA', 'FILM'], true)) {
+            $errors[] = 'Material inválido. Usa PP, PLA o FILM.';
+        }
+        if ($weightKg <= 0) {
+            $errors[] = 'Debes indicar un peso en kg mayor a 0.';
+        }
+        if ($operatorName === '') {
+            $errors[] = 'El operador es obligatorio.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO waste_inventory_entries (shift_session_id, material_code, weight_kg, operator_name, supplier_operator_name, supplier_machine_code, supplier_machine_name, comments)
+             VALUES (:shift_session_id, :material_code, :weight_kg, :operator_name, :supplier_operator_name, :supplier_machine_code, :supplier_machine_name, :comments)'
+        );
+        $stmt->execute([
+            ':shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            ':material_code' => $materialCode,
+            ':weight_kg' => $weightKg,
+            ':operator_name' => $operatorName,
+            ':supplier_operator_name' => $supplierOperatorName,
+            ':supplier_machine_code' => $supplierMachineCode,
+            ':supplier_machine_name' => $supplierMachineName,
+            ':comments' => $comments !== '' ? $comments : null,
+        ]);
+        $id = (int)$this->pdo->lastInsertId();
+
+        $this->insertEvent('WASTE_INVENTORY_ENTRY_CREATED', [
+            'waste_inventory_entry_id' => $id,
+            'shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            'material_code' => $materialCode,
+            'weight_kg' => $weightKg,
+            'operator_name' => $operatorName,
+            'supplier_operator_name' => $supplierOperatorName,
+            'supplier_machine_code' => $supplierMachineCode,
+            'supplier_machine_name' => $supplierMachineName,
+            'comments' => $comments !== '' ? $comments : null,
+        ]);
+
+        return ['ok' => true, 'id' => $id, 'errors' => []];
+    }
+
+    public function listWasteInventoryRecentEntries(int $limit = 25): array
+    {
+        $limit = max(1, $limit);
+        $stmt = $this->pdo->prepare(
+            'SELECT id, shift_session_id, material_code, weight_kg, operator_name, supplier_operator_name, supplier_machine_code, supplier_machine_name, comments, created_at
+             FROM waste_inventory_entries
+             ORDER BY id DESC
+             LIMIT ' . $limit
+        );
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    public function listWasteInventoryBySupplierTotals(): array
+    {
+        $rows = $this->pdo->query(
+            'SELECT
+                TRIM(COALESCE(supplier_operator_name, "")) AS supplier_operator_name,
+                UPPER(TRIM(material_code)) AS material_code,
+                COALESCE(SUM(weight_kg), 0) AS total_kg
+             FROM waste_inventory_entries
+             GROUP BY TRIM(COALESCE(supplier_operator_name, "")), UPPER(TRIM(material_code))
+             ORDER BY supplier_operator_name ASC, material_code ASC'
+        )->fetchAll();
+
+        $suppliers = [];
+        foreach ($rows as $row) {
+            $supplier = trim((string)($row['supplier_operator_name'] ?? ''));
+            if ($supplier === '') {
+                $supplier = 'Sin asignar';
+            }
+            if (!isset($suppliers[$supplier])) {
+                $suppliers[$supplier] = [
+                    'supplier_operator_name' => $supplier,
+                    'totals' => ['PP' => 0.0, 'PLA' => 0.0, 'FILM' => 0.0],
+                    'total_kg' => 0.0,
+                ];
+            }
+            $material = strtoupper(trim((string)($row['material_code'] ?? '')));
+            $kg = (float)($row['total_kg'] ?? 0.0);
+            if (in_array($material, ['PP', 'PLA', 'FILM'], true)) {
+                $suppliers[$supplier]['totals'][$material] = round(($suppliers[$supplier]['totals'][$material] ?? 0.0) + $kg, 3);
+            }
+            $suppliers[$supplier]['total_kg'] = round(($suppliers[$supplier]['total_kg'] ?? 0.0) + $kg, 3);
+        }
+        return array_values($suppliers);
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function recordWasteOperation(
+        string $operationCode,
+        string $operatorName,
+        ?int $shiftSessionId = null,
+        ?string $comments = null
+    ): array {
+        $operationCode = strtoupper(trim($operationCode));
+        $operatorName = trim($operatorName);
+        $comments = trim((string)$comments);
+
+        $allowed = [
+            'MOLINO',
+            'COMPACTADORA',
+            'RETIRO',
+            'CRECION_MERMA',
+            'CREACION_MERMA',
+            'RESPEL',
+            'PAUSA_MOLINO',
+            'MANTENCION_MOLINO',
+            'PAUSA_MOLINO_INICIO',
+            'PAUSA_MOLINO_FIN',
+            'MANTENCION_MOLINO_INICIO',
+            'MANTENCION_MOLINO_FIN',
+            'PAUSA_COMPACTADORA',
+            'MANTENCION_COMPACTADORA',
+            'PAUSA_COMPACTADORA_INICIO',
+            'PAUSA_COMPACTADORA_FIN',
+            'MANTENCION_COMPACTADORA_INICIO',
+            'MANTENCION_COMPACTADORA_FIN',
+        ];
+        $aliases = [
+            'MOLINO' => 'MOLINO',
+            'COMPACTADORA' => 'COMPACTADORA',
+            'RETIRO' => 'RETIRO',
+            'CRECION_MERMA' => 'CREACION_MERMA',
+            'CREACION MERMA' => 'CREACION_MERMA',
+            'CREACION_MERMA' => 'CREACION_MERMA',
+            'RESPEL' => 'RESPEL',
+            'PAUSA_MOLINO' => 'PAUSA_MOLINO',
+            'MANTENCION_MOLINO' => 'MANTENCION_MOLINO',
+            'PAUSA_MOLINO_INICIO' => 'PAUSA_MOLINO_INICIO',
+            'PAUSA_MOLINO_FIN' => 'PAUSA_MOLINO_FIN',
+            'MANTENCION_MOLINO_INICIO' => 'MANTENCION_MOLINO_INICIO',
+            'MANTENCION_MOLINO_FIN' => 'MANTENCION_MOLINO_FIN',
+            'PAUSA_COMPACTADORA' => 'PAUSA_COMPACTADORA',
+            'MANTENCION_COMPACTADORA' => 'MANTENCION_COMPACTADORA',
+            'PAUSA_COMPACTADORA_INICIO' => 'PAUSA_COMPACTADORA_INICIO',
+            'PAUSA_COMPACTADORA_FIN' => 'PAUSA_COMPACTADORA_FIN',
+            'MANTENCION_COMPACTADORA_INICIO' => 'MANTENCION_COMPACTADORA_INICIO',
+            'MANTENCION_COMPACTADORA_FIN' => 'MANTENCION_COMPACTADORA_FIN',
+        ];
+        $normalized = $aliases[$operationCode] ?? null;
+        $errors = [];
+        if ($normalized === null || !in_array($normalized, $allowed, true)) {
+            $errors[] = 'Operación inválida de gestión de residuos.';
+        }
+        if ($operatorName === '') {
+            $errors[] = 'El operador es obligatorio.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO waste_operations (shift_session_id, operation_code, operator_name, comments)
+             VALUES (:shift_session_id, :operation_code, :operator_name, :comments)'
+        );
+        $stmt->execute([
+            ':shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            ':operation_code' => $normalized,
+            ':operator_name' => $operatorName,
+            ':comments' => $comments !== '' ? $comments : null,
+        ]);
+        $id = (int)$this->pdo->lastInsertId();
+
+        $this->insertEvent('WASTE_OPERATION_CREATED', [
+            'waste_operation_id' => $id,
+            'shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            'operation_code' => $normalized,
+            'operator_name' => $operatorName,
+            'comments' => $comments !== '' ? $comments : null,
+        ]);
+
+        return ['ok' => true, 'id' => $id, 'errors' => []];
+    }
+
+    public function listRecentWasteOperations(int $limit = 10): array
+    {
+        $limit = max(1, $limit);
+        $stmt = $this->pdo->prepare(
+            'SELECT id, operation_code, material_code, weight_kg, operator_name, supplier_operator_name, supplier_machine_code, supplier_machine_name, comments, created_at, shift_session_id
+             FROM waste_operations
+             ORDER BY id DESC
+             LIMIT ' . $limit
+        );
+        $stmt->execute();
+        return $stmt->fetchAll();
+    }
+
+    public function markWasteEntriesWithdrawn(array $entryIds, int $withdrawalOperationId, string $operatorName): int
+    {
+        if ($entryIds === []) {
+            return 0;
+        }
+        $ids = array_values(array_map('intval', $entryIds));
+        $idPlaceholders = [];
+        foreach (array_keys($ids) as $i) {
+            $idPlaceholders[] = ':id' . $i;
+        }
+        $placeholders = implode(',', $idPlaceholders);
+        $stmt = $this->pdo->prepare(
+            'UPDATE waste_inventory_entries
+             SET withdrawn_at = CURRENT_TIMESTAMP,
+                 withdrawn_by_operator = :op,
+                 withdrawal_operation_id = :opId
+             WHERE id IN (' . $placeholders . ') AND withdrawn_at IS NULL'
+        );
+        $stmt->bindValue(':op', trim($operatorName));
+        $stmt->bindValue(':opId', $withdrawalOperationId, \PDO::PARAM_INT);
+        foreach ($ids as $i => $id) {
+            $stmt->bindValue(':id' . $i, $id, \PDO::PARAM_INT);
+        }
+        $stmt->execute();
+        return (int)$stmt->rowCount();
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int, affected?:int}
+     */
+    public function recordWasteWithdrawalOperation(
+        array $entryIds,
+        string $operatorName,
+        ?int $shiftSessionId = null,
+        ?string $materialCode = null,
+        ?float $weightKg = null,
+        ?string $supplierOperatorName = null,
+        ?string $supplierMachineCode = null,
+        ?string $supplierMachineName = null,
+        ?string $comments = null
+    ): array {
+        $operatorName = trim($operatorName);
+        $errors = [];
+        if ($operatorName === '') {
+            $errors[] = 'El operador es obligatorio para el retiro.';
+        }
+        if ($entryIds === []) {
+            $errors[] = 'No hay sacos seleccionados para retirar.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+        $ids = array_values(array_unique(array_map('intval', $entryIds)));
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $this->pdo->prepare(
+            'SELECT id, material_code, weight_kg, supplier_operator_name, supplier_machine_code, supplier_machine_name
+             FROM waste_inventory_entries
+             WHERE id IN (' . $placeholders . ') AND withdrawn_at IS NULL
+             ORDER BY id ASC'
+        );
+        foreach ($ids as $i => $id) {
+            $stmt->bindValue($i + 1, $id, \PDO::PARAM_INT);
+        }
+        $stmt->execute();
+        $entries = $stmt->fetchAll();
+        if ($entries === []) {
+            return ['ok' => false, 'errors' => ['Los sacos seleccionados ya fueron retirados o no existen.']];
+        }
+
+        $mat = $materialCode !== null ? strtoupper(trim((string)$materialCode)) : null;
+        $w = $weightKg !== null ? (float)$weightKg : null;
+        $supOp = $supplierOperatorName !== null ? trim((string)$supplierOperatorName) : null;
+        $supCode = $supplierMachineCode !== null ? trim((string)$supplierMachineCode) : null;
+        $supName = $supplierMachineName !== null ? trim((string)$supplierMachineName) : null;
+        if ($mat === null && count($entries) === 1) {
+            $mat = strtoupper(trim((string)($entries[0]['material_code'] ?? '')));
+        }
+        if ($w === null && count($entries) === 1) {
+            $w = (float)($entries[0]['weight_kg'] ?? 0);
+        }
+        if ($w === null) {
+            $sum = 0.0;
+            foreach ($entries as $e) {
+                $sum += (float)($e['weight_kg'] ?? 0);
+            }
+            $w = round($sum, 3);
+        }
+        if ($supOp === null && count($entries) === 1) {
+            $supOp = trim((string)($entries[0]['supplier_operator_name'] ?? ''));
+        }
+        if ($supCode === null && count($entries) === 1) {
+            $supCode = trim((string)($entries[0]['supplier_machine_code'] ?? ''));
+        }
+        if ($supName === null && count($entries) === 1) {
+            $supName = trim((string)($entries[0]['supplier_machine_name'] ?? ''));
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $opStmt = $this->pdo->prepare(
+                'INSERT INTO waste_operations (shift_session_id, operation_code, material_code, weight_kg, operator_name, supplier_operator_name, supplier_machine_code, supplier_machine_name, comments)
+                 VALUES (:shift_session_id, :operation_code, :material_code, :weight_kg, :operator_name, :supplier_operator_name, :supplier_machine_code, :supplier_machine_name, :comments)'
+            );
+            $opStmt->execute([
+                ':shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+                ':operation_code' => 'RETIRO',
+                ':material_code' => ($mat !== null && $mat !== '') ? $mat : null,
+                ':weight_kg' => $w,
+                ':operator_name' => $operatorName,
+                ':supplier_operator_name' => ($supOp !== null && $supOp !== '') ? $supOp : null,
+                ':supplier_machine_code' => ($supCode !== null && $supCode !== '') ? $supCode : null,
+                ':supplier_machine_name' => ($supName !== null && $supName !== '') ? $supName : null,
+                ':comments' => $comments !== null && trim((string)$comments) !== '' ? trim((string)$comments) : null,
+            ]);
+            $opId = (int)$this->pdo->lastInsertId();
+
+            $affected = $this->markWasteEntriesWithdrawn($ids, $opId, $operatorName);
+
+            $this->insertEvent('WASTE_WITHDRAWAL_CREATED', [
+                'waste_operation_id' => $opId,
+                'entry_ids' => $ids,
+                'material_code' => $mat,
+                'weight_kg' => $w,
+                'operator_name' => $operatorName,
+                'supplier_operator_name' => $supOp,
+            ]);
+
+            $this->pdo->commit();
+            return ['ok' => true, 'id' => $opId, 'affected' => $affected, 'errors' => []];
+        } catch (Throwable $e) {
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return ['ok' => false, 'errors' => ['No se pudo registrar el retiro: ' . $e->getMessage()]];
+        }
+    }
+
+    public function listWasteCreationMaterialOptions(): array
+    {
+        return [
+            ['code' => 'PP', 'label' => 'PP'],
+            ['code' => 'PLA', 'label' => 'PLA'],
+            ['code' => 'FILM', 'label' => 'FILM'],
+            ['code' => 'PAPEL', 'label' => 'PAPEL'],
+            ['code' => 'CARTON', 'label' => 'CARTÓN'],
+            ['code' => 'BOLSA', 'label' => 'BOLSA'],
+            ['code' => 'OTRO', 'label' => 'OTRO'],
+        ];
+    }
+
+    public function listWasteCreationAreaOptions(): array
+    {
+        return [
+            ['code' => 'IMPRESION', 'label' => 'Impresión'],
+            ['code' => 'SELLADO', 'label' => 'Sellado'],
+            ['code' => 'REBOBINADO', 'label' => 'Rebobinado'],
+            ['code' => 'EMBALAJE', 'label' => 'Embalaje'],
+            ['code' => 'SERIGRAFIA', 'label' => 'Serigrafía'],
+            ['code' => 'PULPO', 'label' => 'Pulpo'],
+            ['code' => 'BODEGA', 'label' => 'Bodega'],
+            ['code' => 'CALIDAD', 'label' => 'Calidad'],
+            ['code' => 'MANTENCION', 'label' => 'Mantención'],
+            ['code' => 'OTRO', 'label' => 'Otro'],
+        ];
+    }
+
+    public function listWasteCreationMotivoOptions(): array
+    {
+        return [
+            ['code' => 'CAMBIO_ORDEN', 'label' => 'Cambio de orden'],
+            ['code' => 'ERROR_IMPRESION', 'label' => 'Error de impresión'],
+            ['code' => 'ERROR_SELLADO', 'label' => 'Error de sellado'],
+            ['code' => 'MATERIAL_DEFECTUOSO', 'label' => 'Material defectuoso'],
+            ['code' => 'AJUSTE_APROBACION', 'label' => 'Ajuste / Aprobación'],
+            ['code' => 'SCRAP_PRODUCCION', 'label' => 'Scrap de producción'],
+            ['code' => 'MUESTRAS', 'label' => 'Muestras'],
+            ['code' => 'OBSOLETO', 'label' => 'Obsoleto / Vencido'],
+            ['code' => 'DEVOLUCION', 'label' => 'Devolución cliente'],
+            ['code' => 'LIMPIEZA', 'label' => 'Limpieza'],
+            ['code' => 'REPARACION', 'label' => 'Reparación'],
+            ['code' => 'OTRO', 'label' => 'Otro motivo'],
+        ];
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function recordWasteCreationOperation(
+        string $materialCode,
+        float $weightKg,
+        string $solicitante,
+        string $area,
+        string $motivo,
+        string $operatorName,
+        ?int $shiftSessionId = null
+    ): array {
+        $errors = [];
+        $materialCode = strtoupper(trim($materialCode));
+        $weightKg = (float)$weightKg;
+        $solicitante = trim($solicitante);
+        $area = trim($area);
+        $motivo = trim($motivo);
+        $operatorName = trim($operatorName);
+
+        $validMaterials = [];
+        foreach ($this->listWasteCreationMaterialOptions() as $m) {
+            $validMaterials[] = $m['code'];
+        }
+        $validAreas = [];
+        foreach ($this->listWasteCreationAreaOptions() as $a) {
+            $validAreas[] = $a['code'];
+        }
+        $validMotivos = [];
+        foreach ($this->listWasteCreationMotivoOptions() as $m) {
+            $validMotivos[] = $m['code'];
+        }
+
+        if ($materialCode === '' || !in_array($materialCode, $validMaterials, true)) {
+            $errors[] = 'Materialidad inválida.';
+        }
+        if ($weightKg <= 0) {
+            $errors[] = 'El peso debe ser mayor a 0.';
+        }
+        if ($solicitante === '') {
+            $errors[] = 'El solicitante es obligatorio.';
+        }
+        if ($area === '' || !in_array($area, $validAreas, true)) {
+            $errors[] = 'Área inválida.';
+        }
+        if ($motivo === '' || !in_array($motivo, $validMotivos, true)) {
+            $errors[] = 'Motivo inválido.';
+        }
+        if ($operatorName === '') {
+            $errors[] = 'El operador es obligatorio.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $stmt = $this->pdo->prepare('
+            INSERT INTO waste_operations
+                (shift_session_id, operation_code, material_code, weight_kg, operator_name,
+                 solicitante, area, motivo, created_at)
+            VALUES
+                (:shift_session_id, "CREACION_MERMA", :material_code, :weight_kg, :operator_name,
+                 :solicitante, :area, :motivo, CURRENT_TIMESTAMP)
+        ');
+        $stmt->execute([
+            ':shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            ':material_code' => $materialCode,
+            ':weight_kg' => $weightKg,
+            ':operator_name' => $operatorName,
+            ':solicitante' => $solicitante,
+            ':area' => $area,
+            ':motivo' => $motivo,
+        ]);
+        $id = (int)$this->pdo->lastInsertId();
+
+        $this->insertEvent('WASTE_CREATION_RECORDED', [
+            'waste_operation_id' => $id,
+            'shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            'material_code' => $materialCode,
+            'weight_kg' => $weightKg,
+            'solicitante' => $solicitante,
+            'area' => $area,
+            'motivo' => $motivo,
+            'operator_name' => $operatorName,
+        ]);
+
+        return ['ok' => true, 'id' => $id, 'errors' => []];
+    }
+
+    /**
+     * @return array{id:int,material_code:string,entry_kg:string,operator_name:string,shift_session_id:int|null}|null
+     */
+    public function getActiveMolinoOperation(string $operatorName, ?int $shiftSessionId = null): ?array
+    {
+        $sql = 'SELECT id, material_code, entry_kg, operator_name, shift_session_id
+                FROM waste_operations
+                WHERE operation_code = "MOLINO" AND exit_kg IS NULL AND entry_kg IS NOT NULL ';
+        $params = [];
+        if ($shiftSessionId > 0) {
+            $sql .= ' AND shift_session_id = :shift_session_id';
+            $params[':shift_session_id'] = $shiftSessionId;
+        } else {
+            $sql .= ' AND operator_name = :operator_name AND DATE(created_at) = CURDATE()';
+            $params[':operator_name'] = trim($operatorName);
+        }
+        $sql .= ' ORDER BY id DESC LIMIT 1';
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $row = $stmt->fetch();
+        return $row !== false ? $row : null;
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function recordMolinoEntry(string $materialCode, float $entryKg, string $operatorName, ?int $shiftSessionId = null): array
+    {
+        $errors = [];
+        $materialCode = strtoupper(trim($materialCode));
+        $entryKg = (float)$entryKg;
+        $operatorName = trim($operatorName);
+
+        if ($materialCode !== 'PLA') {
+            $errors[] = 'El molino solo procesa materialidad PLA.';
+        }
+        if ($entryKg <= 0) {
+            $errors[] = 'El peso de ingreso debe ser mayor a 0.';
+        }
+        $stockPla = (float)($this->listWastePendingInventoryTotals()['PLA'] ?? 0.0);
+        if ($entryKg > $stockPla + 0.0001) {
+            $errors[] = 'El peso de ingreso supera el stock PLA disponible en bodega transitoria (' . number_format($stockPla, 3, '.', '') . ' kg).';
+        }
+        if ($operatorName === '') {
+            $errors[] = 'El operador es obligatorio.';
+        }
+        if ($this->getActiveMolinoOperation($operatorName, $shiftSessionId) !== null) {
+            $errors[] = 'Ya existe una operación de molino abierta; debe finalizarla antes de iniciar una nueva.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $stmt = $this->pdo->prepare('
+            INSERT INTO waste_operations
+                (shift_session_id, operation_code, material_code, entry_kg, operator_name, created_at)
+            VALUES
+                (:shift_session_id, "MOLINO", :material_code, :entry_kg, :operator_name, CURRENT_TIMESTAMP)
+        ');
+        $stmt->execute([
+            ':shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            ':material_code' => $materialCode,
+            ':entry_kg' => $entryKg,
+            ':operator_name' => $operatorName,
+        ]);
+        $id = (int)$this->pdo->lastInsertId();
+
+        $this->insertEvent('WASTE_MOLINO_ENTRY_RECORDED', [
+            'waste_operation_id' => $id,
+            'shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            'material_code' => $materialCode,
+            'entry_kg' => $entryKg,
+            'operator_name' => $operatorName,
+        ]);
+
+        return ['ok' => true, 'id' => $id, 'errors' => []];
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function finalizeMolinoOperation(int $opId, float $exitKg, int $palletCount, string $operatorName): array
+    {
+        $errors = [];
+        $opId = (int)$opId;
+        $exitKg = (float)$exitKg;
+        $palletCount = (int)$palletCount;
+        $operatorName = trim($operatorName);
+
+        if ($opId <= 0) {
+            $errors[] = 'Operación de molino inválida.';
+        }
+        if ($exitKg <= 0) {
+            $errors[] = 'El peso de salida debe ser mayor a 0.';
+        }
+        if ($palletCount < 0) {
+            $errors[] = 'La cantidad de palet no puede ser negativa.';
+        }
+        if ($operatorName === '') {
+            $errors[] = 'El operador es obligatorio.';
+        }
+        $row = null;
+        if ($opId > 0) {
+            $stmt = $this->pdo->prepare('SELECT id, operation_code, material_code, entry_kg, exit_kg, operator_name FROM waste_operations WHERE id = :id');
+            $stmt->execute([':id' => $opId]);
+            $row = $stmt->fetch();
+            if ($row === false) {
+                $errors[] = 'No se encontró la operación de molino.';
+            } elseif (($row['operation_code'] ?? '') !== 'MOLINO') {
+                $errors[] = 'La operación seleccionada no corresponde a molino.';
+            } elseif (($row['exit_kg'] ?? null) !== null) {
+                $errors[] = 'Esta operación de molino ya fue finalizada.';
+            }
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $stmt = $this->pdo->prepare('
+            UPDATE waste_operations
+            SET exit_kg = :exit_kg, pallet_count = :pallet_count
+            WHERE id = :id
+        ');
+        $stmt->execute([
+            ':exit_kg' => $exitKg,
+            ':pallet_count' => $palletCount > 0 ? $palletCount : null,
+            ':id' => $opId,
+        ]);
+
+        $this->insertEvent('WASTE_MOLINO_FINALIZED', [
+            'waste_operation_id' => $opId,
+            'material_code' => (string)($row['material_code'] ?? ''),
+            'entry_kg' => (float)($row['entry_kg'] ?? 0.0),
+            'exit_kg' => $exitKg,
+            'pallet_count' => $palletCount,
+            'operator_name' => $operatorName,
+        ]);
+
+        return ['ok' => true, 'id' => $opId, 'errors' => []];
+    }
+
+    /**
+     * Devuelve filas para la tabla de registro producción Molino, estilo legacy-setup-event-table.
+     *
+     * @return list<array{event:string,start_at:string,end_at:string,duration_label:string,quantity_label:string,comments:string,option_badge_type:string,option_label:string,option_href?:string,option_form_action?:string,option_form_params?:array<string,mixed>}>
+     */
+    public function listMolinoProductionEvents(string $operatorName, ?int $shiftSessionId = null): array
+    {
+        $operatorName = trim($operatorName);
+        if ($operatorName === '' && !($shiftSessionId > 0)) {
+            return [];
+        }
+
+        $params = [];
+        $where = ' WHERE operation_code = "MOLINO" AND exit_kg IS NULL AND entry_kg IS NOT NULL ';
+        if ($shiftSessionId > 0) {
+            $where .= ' AND shift_session_id = :shift_session_id';
+            $params[':shift_session_id'] = $shiftSessionId;
+        } else {
+            $where .= ' AND operator_name = :operator_name AND DATE(created_at) = CURDATE()';
+            $params[':operator_name'] = $operatorName;
+        }
+
+        $stmt = $this->pdo->prepare('
+            SELECT id, material_code, entry_kg, operator_name, created_at
+            FROM waste_operations
+            ' . $where . '
+            ORDER BY id DESC
+            LIMIT 1
+        ');
+        $stmt->execute($params);
+        $molinoOp = $stmt->fetch();
+        if ($molinoOp === false) {
+            return [];
+        }
+
+        $startAt = (string)($molinoOp['created_at'] ?? '');
+        $entryVal = (float)($molinoOp['entry_kg'] ?? 0.0);
+        $operatorLabel = trim((string)($molinoOp['operator_name'] ?? $operatorName));
+
+        $rows = [];
+        $rows[] = [
+            'event' => 'Ingreso',
+            'start_at' => $startAt !== '' ? $startAt : '-',
+            'end_at' => '-',
+            'duration_label' => '0h 0m',
+            'quantity_label' => number_format($entryVal, 3, '.', '') . ' kg',
+            'comments' => 'Ingreso Molino registrado · Operador: ' . ($operatorLabel !== '' ? $operatorLabel : $operatorName),
+            'option_badge_type' => 'configured',
+            'option_label' => 'Registrado',
+        ];
+
+        $rows[] = [
+            'event' => 'Producción',
+            'start_at' => $startAt !== '' ? $startAt : '-',
+            'end_at' => '-',
+            'duration_label' => '-',
+            'quantity_label' => 'Entrada ' . number_format($entryVal, 3, '.', '') . ' kg',
+            'comments' => 'Operador: ' . ($operatorLabel !== '' ? $operatorLabel : $operatorName) . ' · Producción en curso.',
+            'option_badge_type' => 'finish-production',
+            'option_label' => 'Terminar producción',
+            'option_trigger' => 'molino-finalize',
+        ];
+
+        $eventsParams = [
+            ':started_at' => $startAt,
+        ];
+        $eventsWhere = ' WHERE created_at >= :started_at AND operation_code IN ("PAUSA_MOLINO_INICIO","PAUSA_MOLINO_FIN","MANTENCION_MOLINO_INICIO","MANTENCION_MOLINO_FIN","PAUSA_MOLINO","MANTENCION_MOLINO") ';
+        if ($shiftSessionId > 0) {
+            $eventsWhere .= ' AND shift_session_id = :shift_session_id';
+            $eventsParams[':shift_session_id'] = $shiftSessionId;
+        } else {
+            $eventsWhere .= ' AND operator_name = :operator_name AND DATE(created_at) = CURDATE()';
+            $eventsParams[':operator_name'] = $operatorName;
+        }
+        $evtStmt = $this->pdo->prepare('SELECT operation_code, operator_name, created_at, comments FROM waste_operations' . $eventsWhere . ' ORDER BY id ASC');
+        $evtStmt->execute($eventsParams);
+        $events = $evtStmt->fetchAll();
+        $pauseStack = [];
+        $maintenanceStack = [];
+
+        foreach ($events as $ev) {
+            $code = strtoupper(trim((string)($ev['operation_code'] ?? '')));
+            $evtAt = (string)($ev['created_at'] ?? '');
+            $comments = trim((string)($ev['comments'] ?? ''));
+            $opLabel = trim((string)($ev['operator_name'] ?? $operatorName));
+
+            if ($code === 'PAUSA_MOLINO_INICIO' || $code === 'PAUSA_MOLINO') {
+                $pauseStack[] = [
+                    'start_at' => $evtAt,
+                    'comments' => $comments !== '' ? $comments : ('Operador: ' . ($opLabel !== '' ? $opLabel : $operatorName)),
+                ];
+                continue;
+            }
+            if ($code === 'MANTENCION_MOLINO_INICIO' || $code === 'MANTENCION_MOLINO') {
+                $maintenanceStack[] = [
+                    'start_at' => $evtAt,
+                    'comments' => $comments !== '' ? $comments : ('Operador: ' . ($opLabel !== '' ? $opLabel : $operatorName)),
+                ];
+                continue;
+            }
+
+            if ($code === 'PAUSA_MOLINO_FIN') {
+                $startRow = array_pop($pauseStack);
+                if ($startRow !== null) {
+                    $rows[] = [
+                        'event' => 'Pausa',
+                        'start_at' => $startRow['start_at'] !== '' ? $startRow['start_at'] : '-',
+                        'end_at' => $evtAt !== '' ? $evtAt : '-',
+                        'duration_label' => $this->formatSimpleElapsedLabel($startRow['start_at'], $evtAt),
+                        'quantity_label' => '-',
+                        'comments' => (string)$startRow['comments'],
+                        'option_badge_type' => 'configured',
+                        'option_label' => 'Terminado',
+                    ];
+                }
+                continue;
+            }
+            if ($code === 'MANTENCION_MOLINO_FIN') {
+                $startRow = array_pop($maintenanceStack);
+                if ($startRow !== null) {
+                    $rows[] = [
+                        'event' => 'Mantención',
+                        'start_at' => $startRow['start_at'] !== '' ? $startRow['start_at'] : '-',
+                        'end_at' => $evtAt !== '' ? $evtAt : '-',
+                        'duration_label' => $this->formatSimpleElapsedLabel($startRow['start_at'], $evtAt),
+                        'quantity_label' => '-',
+                        'comments' => (string)$startRow['comments'],
+                        'option_badge_type' => 'configured',
+                        'option_label' => 'Terminado',
+                    ];
+                }
+                continue;
+            }
+        }
+
+        foreach ($pauseStack as $openPause) {
+            $rows[] = [
+                'event' => 'Pausa',
+                'start_at' => (string)($openPause['start_at'] ?? '-'),
+                'end_at' => '-',
+                'duration_label' => $this->formatSimpleElapsedLabel((string)($openPause['start_at'] ?? ''), null),
+                'quantity_label' => '-',
+                'comments' => (string)($openPause['comments'] ?? '-'),
+                'option_badge_type' => 'finish-event',
+                'option_label' => 'Terminar',
+                'option_form_action' => '/waste/operations',
+                'option_form_params' => ['operation_code' => 'PAUSA_MOLINO_FIN', 'comments' => ''],
+            ];
+        }
+        foreach ($maintenanceStack as $openMaint) {
+            $rows[] = [
+                'event' => 'Mantención',
+                'start_at' => (string)($openMaint['start_at'] ?? '-'),
+                'end_at' => '-',
+                'duration_label' => $this->formatSimpleElapsedLabel((string)($openMaint['start_at'] ?? ''), null),
+                'quantity_label' => '-',
+                'comments' => (string)($openMaint['comments'] ?? '-'),
+                'option_badge_type' => 'finish-event',
+                'option_label' => 'Terminar',
+                'option_form_action' => '/waste/operations',
+                'option_form_params' => ['operation_code' => 'MANTENCION_MOLINO_FIN', 'comments' => ''],
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @return array{id:int,material_code:string,entry_kg:string,operator_name:string,shift_session_id:int|null}|null
+     */
+    public function getActiveCompactadoraOperation(string $operatorName, ?int $shiftSessionId = null): ?array
+    {
+        $sql = 'SELECT id, material_code, entry_kg, operator_name, shift_session_id
+                FROM waste_operations
+                WHERE operation_code = "COMPACTADORA" AND exit_kg IS NULL AND entry_kg IS NOT NULL ';
+        $params = [];
+        if ($shiftSessionId > 0) {
+            $sql .= ' AND shift_session_id = :shift_session_id';
+            $params[':shift_session_id'] = $shiftSessionId;
+        } else {
+            $sql .= ' AND operator_name = :operator_name AND DATE(created_at) = CURDATE()';
+            $params[':operator_name'] = trim($operatorName);
+        }
+        $sql .= ' ORDER BY id DESC LIMIT 1';
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $row = $stmt->fetch();
+        return $row !== false ? $row : null;
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function recordCompactadoraEntry(string $materialCode, float $entryKg, string $operatorName, ?int $shiftSessionId = null): array
+    {
+        $errors = [];
+        $materialCode = strtoupper(trim($materialCode));
+        $entryKg = (float)$entryKg;
+        $operatorName = trim($operatorName);
+
+        if ($materialCode === '') {
+            $errors[] = 'La materialidad es obligatoria.';
+        }
+        if ($entryKg <= 0) {
+            $errors[] = 'El peso de ingreso debe ser mayor a 0.';
+        }
+        $stock = (float)($this->listWastePendingInventoryTotals()[$materialCode] ?? 0.0);
+        if ($materialCode !== '' && $entryKg > $stock + 0.0001) {
+            $errors[] = 'El peso de ingreso supera el stock disponible (' . number_format($stock, 3, '.', '') . ' kg).';
+        }
+        if ($operatorName === '') {
+            $errors[] = 'El operador es obligatorio.';
+        }
+        if ($this->getActiveCompactadoraOperation($operatorName, $shiftSessionId) !== null) {
+            $errors[] = 'Ya existe una compactadora en proceso; debe finalizarla antes de iniciar una nueva.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $stmt = $this->pdo->prepare('
+            INSERT INTO waste_operations
+                (shift_session_id, operation_code, material_code, entry_kg, operator_name, created_at)
+            VALUES
+                (:shift_session_id, "COMPACTADORA", :material_code, :entry_kg, :operator_name, CURRENT_TIMESTAMP)
+        ');
+        $stmt->execute([
+            ':shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            ':material_code' => $materialCode,
+            ':entry_kg' => $entryKg,
+            ':operator_name' => $operatorName,
+        ]);
+        $id = (int)$this->pdo->lastInsertId();
+
+        $this->insertEvent('WASTE_COMPACTADORA_ENTRY_RECORDED', [
+            'waste_operation_id' => $id,
+            'shift_session_id' => $shiftSessionId > 0 ? $shiftSessionId : null,
+            'material_code' => $materialCode,
+            'entry_kg' => $entryKg,
+            'operator_name' => $operatorName,
+        ]);
+
+        return ['ok' => true, 'id' => $id, 'errors' => []];
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function finalizeCompactadoraOperation(int $opId, float $exitKg, string $operatorName): array
+    {
+        $errors = [];
+        $opId = (int)$opId;
+        $exitKg = (float)$exitKg;
+        $operatorName = trim($operatorName);
+
+        if ($opId <= 0) {
+            $errors[] = 'Operación de compactadora inválida.';
+        }
+        if ($exitKg <= 0) {
+            $errors[] = 'El peso de salida debe ser mayor a 0.';
+        }
+        if ($operatorName === '') {
+            $errors[] = 'El operador es obligatorio.';
+        }
+        $row = null;
+        if ($opId > 0) {
+            $stmt = $this->pdo->prepare('SELECT id, operation_code, material_code, entry_kg, exit_kg, operator_name FROM waste_operations WHERE id = :id');
+            $stmt->execute([':id' => $opId]);
+            $row = $stmt->fetch();
+            if ($row === false) {
+                $errors[] = 'No se encontró la operación de compactadora.';
+            } elseif (($row['operation_code'] ?? '') !== 'COMPACTADORA') {
+                $errors[] = 'La operación seleccionada no corresponde a compactadora.';
+            } elseif (($row['exit_kg'] ?? null) !== null) {
+                $errors[] = 'Esta operación de compactadora ya fue finalizada.';
+            }
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $stmt = $this->pdo->prepare('
+            UPDATE waste_operations
+            SET exit_kg = :exit_kg, pallet_count = NULL
+            WHERE id = :id
+        ');
+        $stmt->execute([
+            ':exit_kg' => $exitKg,
+            ':id' => $opId,
+        ]);
+
+        $this->insertEvent('WASTE_COMPACTADORA_FINALIZED', [
+            'waste_operation_id' => $opId,
+            'material_code' => (string)($row['material_code'] ?? ''),
+            'entry_kg' => (float)($row['entry_kg'] ?? 0.0),
+            'exit_kg' => $exitKg,
+            'operator_name' => $operatorName,
+        ]);
+
+        return ['ok' => true, 'id' => $opId, 'errors' => []];
+    }
+
+    /**
+     * @return list<array{event:string,start_at:string,end_at:string,duration_label:string,quantity_label:string,comments:string,option_badge_type:string,option_label:string,option_href?:string,option_form_action?:string,option_form_params?:array<string,mixed>}>
+     */
+    public function listCompactadoraProductionEvents(string $operatorName, ?int $shiftSessionId = null): array
+    {
+        $operatorName = trim($operatorName);
+        if ($operatorName === '' && !($shiftSessionId > 0)) {
+            return [];
+        }
+
+        $params = [];
+        $where = ' WHERE operation_code = "COMPACTADORA" AND exit_kg IS NULL AND entry_kg IS NOT NULL ';
+        if ($shiftSessionId > 0) {
+            $where .= ' AND shift_session_id = :shift_session_id';
+            $params[':shift_session_id'] = $shiftSessionId;
+        } else {
+            $where .= ' AND operator_name = :operator_name AND DATE(created_at) = CURDATE()';
+            $params[':operator_name'] = $operatorName;
+        }
+
+        $stmt = $this->pdo->prepare('
+            SELECT id, material_code, entry_kg, operator_name, created_at
+            FROM waste_operations
+            ' . $where . '
+            ORDER BY id DESC
+            LIMIT 1
+        ');
+        $stmt->execute($params);
+        $op = $stmt->fetch();
+        if ($op === false) {
+            return [];
+        }
+
+        $startAt = (string)($op['created_at'] ?? '');
+        $entryVal = (float)($op['entry_kg'] ?? 0.0);
+        $materialCode = strtoupper(trim((string)($op['material_code'] ?? '')));
+        $operatorLabel = trim((string)($op['operator_name'] ?? $operatorName));
+
+        $rows = [];
+        $rows[] = [
+            'event' => 'Ingreso',
+            'start_at' => $startAt !== '' ? $startAt : '-',
+            'end_at' => '-',
+            'duration_label' => '0h 0m',
+            'quantity_label' => $materialCode !== '' ? ($materialCode . ' · ' . number_format($entryVal, 3, '.', '') . ' kg') : (number_format($entryVal, 3, '.', '') . ' kg'),
+            'comments' => 'Ingreso Compactadora registrado · Operador: ' . ($operatorLabel !== '' ? $operatorLabel : $operatorName),
+            'option_badge_type' => 'configured',
+            'option_label' => 'Registrado',
+        ];
+
+        $rows[] = [
+            'event' => 'Producción',
+            'start_at' => $startAt !== '' ? $startAt : '-',
+            'end_at' => '-',
+            'duration_label' => '-',
+            'quantity_label' => ($materialCode !== '' ? ($materialCode . ' · ') : '') . 'Entrada ' . number_format($entryVal, 3, '.', '') . ' kg',
+            'comments' => 'Operador: ' . ($operatorLabel !== '' ? $operatorLabel : $operatorName) . ' · Producción en curso.',
+            'option_badge_type' => 'finish-production',
+            'option_label' => 'Terminar producción',
+            'option_trigger' => 'compactadora-finalize',
+        ];
+
+        $eventsParams = [
+            ':started_at' => $startAt,
+        ];
+        $eventsWhere = ' WHERE created_at >= :started_at AND operation_code IN ("PAUSA_COMPACTADORA_INICIO","PAUSA_COMPACTADORA_FIN","MANTENCION_COMPACTADORA_INICIO","MANTENCION_COMPACTADORA_FIN","PAUSA_COMPACTADORA","MANTENCION_COMPACTADORA") ';
+        if ($shiftSessionId > 0) {
+            $eventsWhere .= ' AND shift_session_id = :shift_session_id';
+            $eventsParams[':shift_session_id'] = $shiftSessionId;
+        } else {
+            $eventsWhere .= ' AND operator_name = :operator_name AND DATE(created_at) = CURDATE()';
+            $eventsParams[':operator_name'] = $operatorName;
+        }
+        $evtStmt = $this->pdo->prepare('SELECT operation_code, operator_name, created_at, comments FROM waste_operations' . $eventsWhere . ' ORDER BY id ASC');
+        $evtStmt->execute($eventsParams);
+        $events = $evtStmt->fetchAll();
+
+        $pauseStack = [];
+        $maintenanceStack = [];
+        foreach ($events as $ev) {
+            $code = strtoupper(trim((string)($ev['operation_code'] ?? '')));
+            $evtAt = (string)($ev['created_at'] ?? '');
+            $comments = trim((string)($ev['comments'] ?? ''));
+            $opLabel = trim((string)($ev['operator_name'] ?? $operatorName));
+
+            if ($code === 'PAUSA_COMPACTADORA_INICIO' || $code === 'PAUSA_COMPACTADORA') {
+                $pauseStack[] = [
+                    'start_at' => $evtAt,
+                    'comments' => $comments !== '' ? $comments : ('Operador: ' . ($opLabel !== '' ? $opLabel : $operatorName)),
+                ];
+                continue;
+            }
+            if ($code === 'MANTENCION_COMPACTADORA_INICIO' || $code === 'MANTENCION_COMPACTADORA') {
+                $maintenanceStack[] = [
+                    'start_at' => $evtAt,
+                    'comments' => $comments !== '' ? $comments : ('Operador: ' . ($opLabel !== '' ? $opLabel : $operatorName)),
+                ];
+                continue;
+            }
+            if ($code === 'PAUSA_COMPACTADORA_FIN') {
+                $startRow = array_pop($pauseStack);
+                if ($startRow !== null) {
+                    $rows[] = [
+                        'event' => 'Pausa',
+                        'start_at' => $startRow['start_at'] !== '' ? $startRow['start_at'] : '-',
+                        'end_at' => $evtAt !== '' ? $evtAt : '-',
+                        'duration_label' => $this->formatSimpleElapsedLabel($startRow['start_at'], $evtAt),
+                        'quantity_label' => '-',
+                        'comments' => (string)$startRow['comments'],
+                        'option_badge_type' => 'configured',
+                        'option_label' => 'Terminado',
+                    ];
+                }
+                continue;
+            }
+            if ($code === 'MANTENCION_COMPACTADORA_FIN') {
+                $startRow = array_pop($maintenanceStack);
+                if ($startRow !== null) {
+                    $rows[] = [
+                        'event' => 'Mantención',
+                        'start_at' => $startRow['start_at'] !== '' ? $startRow['start_at'] : '-',
+                        'end_at' => $evtAt !== '' ? $evtAt : '-',
+                        'duration_label' => $this->formatSimpleElapsedLabel($startRow['start_at'], $evtAt),
+                        'quantity_label' => '-',
+                        'comments' => (string)$startRow['comments'],
+                        'option_badge_type' => 'configured',
+                        'option_label' => 'Terminado',
+                    ];
+                }
+                continue;
+            }
+        }
+
+        foreach ($pauseStack as $openPause) {
+            $rows[] = [
+                'event' => 'Pausa',
+                'start_at' => (string)($openPause['start_at'] ?? '-'),
+                'end_at' => '-',
+                'duration_label' => $this->formatSimpleElapsedLabel((string)($openPause['start_at'] ?? ''), null),
+                'quantity_label' => '-',
+                'comments' => (string)($openPause['comments'] ?? '-'),
+                'option_badge_type' => 'finish-event',
+                'option_label' => 'Terminar',
+                'option_form_action' => '/waste/operations',
+                'option_form_params' => ['operation_code' => 'PAUSA_COMPACTADORA_FIN', 'comments' => ''],
+            ];
+        }
+        foreach ($maintenanceStack as $openMaint) {
+            $rows[] = [
+                'event' => 'Mantención',
+                'start_at' => (string)($openMaint['start_at'] ?? '-'),
+                'end_at' => '-',
+                'duration_label' => $this->formatSimpleElapsedLabel((string)($openMaint['start_at'] ?? ''), null),
+                'quantity_label' => '-',
+                'comments' => (string)($openMaint['comments'] ?? '-'),
+                'option_badge_type' => 'finish-event',
+                'option_label' => 'Terminar',
+                'option_form_action' => '/waste/operations',
+                'option_form_params' => ['operation_code' => 'MANTENCION_COMPACTADORA_FIN', 'comments' => ''],
+            ];
+        }
+
+        return $rows;
+    }
+
+    private function formatSimpleElapsedLabel(?string $startedAt, ?string $endedAt = null): string
+    {
+        $startedAt = trim((string)$startedAt);
+        $endedAt = $endedAt !== null ? trim((string)$endedAt) : '';
+        $startedTs = $startedAt !== '' ? strtotime($startedAt) : false;
+        if ($startedTs === false) {
+            return '0h 0m';
+        }
+        $endedTs = $endedAt !== '' ? strtotime($endedAt) : time();
+        if ($endedTs === false || $endedTs < $startedTs) {
+            $endedTs = $startedTs;
+        }
+        $diffSeconds = max(0, $endedTs - $startedTs);
+        $hours = intdiv($diffSeconds, 3600);
+        $minutes = intdiv($diffSeconds % 3600, 60);
+        return $hours . 'h ' . $minutes . 'm';
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function listBonusCodes(): array
+    {
+        return [
+            'bonoflexo',
+            'bonoseri',
+            'bonocys',
+            'bonopulp',
+            'bonoayudante',
+        ];
+    }
+
+    public function listActiveBonusHelpers(): array
+    {
+        $stmt = $this->pdo->query(
+            'SELECT operator_name
+             FROM bonus_helper_roster
+             WHERE is_active = 1
+             ORDER BY operator_name ASC'
+        );
+        $rows = $stmt->fetchAll();
+        if ($rows === false || $rows === []) {
+            return [];
+        }
+        $out = [];
+        foreach ($rows as $r) {
+            $name = trim((string)($r['operator_name'] ?? ''));
+            if ($name !== '') {
+                $out[] = $name;
+            }
+        }
+        return $out;
+    }
+
+    public function saveActiveBonusHelpers(array $operatorNames): array
+    {
+        $names = [];
+        foreach ($operatorNames as $n) {
+            $n = trim((string)$n);
+            if ($n === '' || mb_strlen($n) > 120) {
+                continue;
+            }
+            $names[] = $n;
+        }
+        $names = array_values(array_unique($names));
+
+        $this->pdo->beginTransaction();
+        try {
+            $this->pdo->exec('UPDATE bonus_helper_roster SET is_active = 0');
+            if ($names !== []) {
+                $upsert = $this->pdo->prepare(
+                    'INSERT INTO bonus_helper_roster (operator_name, is_active)
+                     VALUES (:operator_name, 1)
+                     ON DUPLICATE KEY UPDATE is_active = 1'
+                );
+                foreach ($names as $name) {
+                    $upsert->execute([':operator_name' => $name]);
+                }
+            }
+            $this->pdo->commit();
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'errors' => ['No se pudo guardar ayudantes.']];
+        }
+    }
+
+    public function listBonusHelperMonthlyRows(string $monthKey): array
+    {
+        $monthKey = trim($monthKey);
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            return [];
+        }
+        $helpers = $this->listActiveBonusHelpers();
+        if ($helpers === []) {
+            return [];
+        }
+
+        $in = [];
+        $params = [':month_key' => $monthKey];
+        foreach ($helpers as $i => $name) {
+            $k = ':op' . $i;
+            $in[] = $k;
+            $params[$k] = $name;
+        }
+        $sql = 'SELECT operator_name, proactividad_score, eficiencia_score, multitarea_score,
+                       matrix_proactividad_clp, matrix_eficiencia_clp, matrix_multitarea_clp,
+                       fixed_clp, additional_clp, observations
+                FROM bonus_helper_monthly
+                WHERE month_key = :month_key AND operator_name IN (' . implode(',', $in) . ')
+                ORDER BY operator_name ASC';
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+        $map = [];
+        foreach ($rows as $r) {
+            $name = trim((string)($r['operator_name'] ?? ''));
+            if ($name !== '') {
+                $map[$name] = $r;
+            }
+        }
+
+        $out = [];
+        foreach ($helpers as $name) {
+            $r = $map[$name] ?? null;
+            $out[] = [
+                'operator_name' => $name,
+                'proactividad_score' => (int)($r['proactividad_score'] ?? 0),
+                'eficiencia_score' => (int)($r['eficiencia_score'] ?? 0),
+                'multitarea_score' => (int)($r['multitarea_score'] ?? 0),
+                'matrix_proactividad_clp' => (float)($r['matrix_proactividad_clp'] ?? 0.0),
+                'matrix_eficiencia_clp' => (float)($r['matrix_eficiencia_clp'] ?? 0.0),
+                'matrix_multitarea_clp' => (float)($r['matrix_multitarea_clp'] ?? 0.0),
+                'fixed_clp' => (float)($r['fixed_clp'] ?? 0.0),
+                'additional_clp' => (float)($r['additional_clp'] ?? 0.0),
+                'observations' => (string)($r['observations'] ?? ''),
+            ];
+        }
+        return $out;
+    }
+
+    public function saveBonusHelperMonthlyRows(string $monthKey, array $rows): array
+    {
+        $monthKey = trim($monthKey);
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            return ['ok' => false, 'errors' => ['Mes inválido.']];
+        }
+        $helpers = $this->listActiveBonusHelpers();
+        if ($helpers === []) {
+            return ['ok' => false, 'errors' => ['No hay ayudantes seleccionados.']];
+        }
+        $helperSet = array_fill_keys($helpers, true);
+
+        $this->pdo->beginTransaction();
+        try {
+            $upsert = $this->pdo->prepare(
+                'INSERT INTO bonus_helper_monthly (
+                    month_key, operator_name,
+                    proactividad_score, eficiencia_score, multitarea_score,
+                    matrix_proactividad_clp, matrix_eficiencia_clp, matrix_multitarea_clp,
+                    fixed_clp, additional_clp, observations
+                 ) VALUES (
+                    :month_key, :operator_name,
+                    :proactividad_score, :eficiencia_score, :multitarea_score,
+                    :matrix_proactividad_clp, :matrix_eficiencia_clp, :matrix_multitarea_clp,
+                    :fixed_clp, :additional_clp, :observations
+                 )
+                 ON DUPLICATE KEY UPDATE
+                    proactividad_score = VALUES(proactividad_score),
+                    eficiencia_score = VALUES(eficiencia_score),
+                    multitarea_score = VALUES(multitarea_score),
+                    matrix_proactividad_clp = VALUES(matrix_proactividad_clp),
+                    matrix_eficiencia_clp = VALUES(matrix_eficiencia_clp),
+                    matrix_multitarea_clp = VALUES(matrix_multitarea_clp),
+                    fixed_clp = VALUES(fixed_clp),
+                    additional_clp = VALUES(additional_clp),
+                    observations = VALUES(observations)'
+            );
+
+            foreach ($rows as $r) {
+                $name = trim((string)($r['operator_name'] ?? ''));
+                if ($name === '' || !isset($helperSet[$name])) {
+                    continue;
+                }
+                $p = max(0, min(10, (int)($r['proactividad_score'] ?? 0)));
+                $e = max(0, min(10, (int)($r['eficiencia_score'] ?? 0)));
+                $m = max(0, min(10, (int)($r['multitarea_score'] ?? 0)));
+                $mp = max(0.0, (float)($r['matrix_proactividad_clp'] ?? 0.0));
+                $me = max(0.0, (float)($r['matrix_eficiencia_clp'] ?? 0.0));
+                $mm = max(0.0, (float)($r['matrix_multitarea_clp'] ?? 0.0));
+                $fixed = max(0.0, (float)($r['fixed_clp'] ?? 0.0));
+                $add = max(0.0, (float)($r['additional_clp'] ?? 0.0));
+                $obs = trim((string)($r['observations'] ?? ''));
+                if (mb_strlen($obs) > 255) {
+                    $obs = mb_substr($obs, 0, 255);
+                }
+
+                $upsert->execute([
+                    ':month_key' => $monthKey,
+                    ':operator_name' => $name,
+                    ':proactividad_score' => $p,
+                    ':eficiencia_score' => $e,
+                    ':multitarea_score' => $m,
+                    ':matrix_proactividad_clp' => $mp,
+                    ':matrix_eficiencia_clp' => $me,
+                    ':matrix_multitarea_clp' => $mm,
+                    ':fixed_clp' => $fixed,
+                    ':additional_clp' => $add,
+                    ':observations' => $obs !== '' ? $obs : null,
+                ]);
+            }
+
+            $this->pdo->commit();
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'errors' => ['No se pudo guardar bonificación.']];
+        }
+    }
+
+    public function getBonusPeriodByMonthFinal(string $monthKey): array
+    {
+        $monthKey = trim($monthKey);
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            $monthKey = date('Y-m');
+        }
+
+        $tz = new DateTimeZone(date_default_timezone_get());
+        $monthStart = new DateTimeImmutable($monthKey . '-01 00:00:00', $tz);
+        $previousMonth = $monthStart->modify('-1 month');
+        $periodStart = $previousMonth->setDate((int)$previousMonth->format('Y'), (int)$previousMonth->format('m'), 26)->setTime(0, 0, 0);
+        $periodEnd = $monthStart->setDate((int)$monthStart->format('Y'), (int)$monthStart->format('m'), 25)->setTime(23, 59, 59);
+
+        return [
+            'month_key' => $monthKey,
+            'start_date' => $periodStart->format('Y-m-d'),
+            'end_date' => $periodEnd->format('Y-m-d'),
+            'start_ts' => $periodStart->getTimestamp(),
+            'end_ts' => $periodEnd->getTimestamp(),
+        ];
+    }
+
+    public function listErpFlexoProductionForBonusPeriod(string $monthKey, ?string $operatorName = null): array
+    {
+        $period = $this->getBonusPeriodByMonthFinal($monthKey);
+        $startTs = (int)($period['start_ts'] ?? 0);
+        $endTs = (int)($period['end_ts'] ?? 0);
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return ['ok' => false, 'errors' => ['Período inválido.'], 'period' => $period, 'rows' => []];
+        }
+
+        $operatorName = $operatorName !== null ? trim($operatorName) : '';
+
+        $sql = <<<SQL
+SELECT
+    pa.ag_equipo_id AS printer_no,
+    ph.prd_reqid AS cost_center,
+    ph.prd_number AS work_order_number,
+    DATE(FROM_UNIXTIME(e.evt_crtdat)) AS event_date,
+    ph.prd_desc AS erp_desc,
+    TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))) AS operator_name,
+    MAX(pa.ag_amount) AS requested_units,
+    SUM(e.evt_amount) AS produced_units,
+    SUM(e.evt_amount_metros_lineales) AS produced_linear_meters,
+    SUM(e.evt_amount_metros_maquina) AS produced_machine_meters
+FROM prod_worker_ot_events e
+INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+INNER JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+INNER JOIN workers w ON w.id = pwi.win_wrkid
+WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+  AND pa.ag_equipotype_id = 1
+  AND e.evt_type = 'PRODUCTION'
+  AND (:operator_name = '' OR TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))) = :operator_name_exact)
+GROUP BY pa.ag_equipo_id, ph.prd_reqid, ph.prd_number, DATE(FROM_UNIXTIME(e.evt_crtdat)), operator_name, ph.prd_desc
+ORDER BY event_date ASC, printer_no ASC, cost_center ASC, work_order_number ASC
+SQL;
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute([
+                ':start_ts' => $startTs,
+                ':end_ts' => $endTs,
+                ':operator_name' => $operatorName,
+                ':operator_name_exact' => $operatorName,
+            ]);
+            $rawRows = $stmt->fetchAll();
+        } catch (PDOException $e) {
+            $sqlState = (string)($e->errorInfo[0] ?? $e->getCode() ?? '');
+            $message = $e->getMessage();
+            if ($sqlState === '42S02' || str_contains($message, 'Base table or view not found')) {
+                return ['ok' => false, 'errors' => ['No se encuentran las tablas de producción del ERP (prod_*).'], 'period' => $period, 'rows' => []];
+            }
+            if ($sqlState !== '') {
+                return ['ok' => false, 'errors' => ['No se pudo consultar producción ERP (SQLSTATE ' . $sqlState . ').'], 'period' => $period, 'rows' => []];
+            }
+            return ['ok' => false, 'errors' => ['No se pudo consultar producción ERP.'], 'period' => $period, 'rows' => []];
+        }
+
+        $rows = [];
+        foreach ($rawRows as $r) {
+            $desc = trim((string)($r['erp_desc'] ?? ''));
+            $rows[] = [
+                'printer_no' => (string)($r['printer_no'] ?? ''),
+                'cost_center' => (string)($r['cost_center'] ?? ''),
+                'work_order_number' => (string)($r['work_order_number'] ?? ''),
+                'event_date' => (string)($r['event_date'] ?? ''),
+                'client_label' => $this->parseClientLabelFromErpDesc($desc),
+                'product_type' => $this->parseProductTypeFromErpDesc($desc),
+                'measure_cm' => $this->parseMeasureCmFromErpDesc($desc),
+                'helper_label' => '',
+                'bonification_label' => '',
+                'operator_name' => trim((string)($r['operator_name'] ?? '')),
+                'requested_units' => (float)($r['requested_units'] ?? 0),
+                'produced_units' => (float)($r['produced_units'] ?? 0),
+                'produced_linear_meters' => (float)($r['produced_linear_meters'] ?? 0),
+                'produced_machine_meters' => (float)($r['produced_machine_meters'] ?? 0),
+                'erp_desc' => $desc,
+            ];
+        }
+
+        return ['ok' => true, 'errors' => [], 'period' => $period, 'rows' => $rows];
+    }
+
+    private function parseClientLabelFromErpDesc(string $desc): string
+    {
+        $desc = trim($desc);
+        if ($desc === '') {
+            return '';
+        }
+        $pos = mb_strpos($desc, '(');
+        if ($pos !== false && $pos > 0) {
+            return trim(mb_substr($desc, 0, $pos));
+        }
+        return $desc;
+    }
+
+    private function parseProductTypeFromErpDesc(string $desc): string
+    {
+        $desc = strtoupper($desc);
+        if (preg_match('/\b(BOU|PRO|TRO|IND)\b/', $desc, $m) === 1) {
+            return (string)$m[1];
+        }
+        return '';
+    }
+
+    private function parseMeasureCmFromErpDesc(string $desc): string
+    {
+        if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $desc, $m) !== 1) {
+            return '';
+        }
+        $a = rtrim(rtrim(str_replace(',', '.', (string)$m[1]), '0'), '.');
+        $b = rtrim(rtrim(str_replace(',', '.', (string)$m[2]), '0'), '.');
+        $c = trim((string)($m[3] ?? ''));
+        if ($c !== '') {
+            $c = rtrim(rtrim(str_replace(',', '.', $c), '0'), '.');
+            return strtoupper($a . 'X' . $b . 'X' . $c);
+        }
+        return strtoupper($a . 'X' . $b);
+    }
+
+    /**
+     * @return list<array{id:int,bonus_code:string,range_from:int,range_to:int|null,amount_clp:string}>
+     */
+    public function listBonusBrackets(string $bonusCode): array
+    {
+        $bonusCode = strtolower(trim($bonusCode));
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            return [];
+        }
+        $stmt = $this->pdo->prepare(
+            'SELECT id, bonus_code, range_from, range_to, amount_clp
+             FROM bonus_brackets
+             WHERE bonus_code = :bonus_code
+             ORDER BY range_from ASC, range_to ASC, id ASC'
+        );
+        $stmt->execute([':bonus_code' => $bonusCode]);
+        $rows = $stmt->fetchAll();
+        return $rows !== false ? $rows : [];
+    }
+
+    /**
+     * @return array<string,float>
+     */
+    public function listBonusOperatorFactors(string $bonusCode): array
+    {
+        $bonusCode = strtolower(trim($bonusCode));
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            return [];
+        }
+        $stmt = $this->pdo->prepare(
+            'SELECT operator_name, factor
+             FROM bonus_operator_factors
+             WHERE bonus_code = :bonus_code
+             ORDER BY operator_name ASC'
+        );
+        $stmt->execute([':bonus_code' => $bonusCode]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $out = [];
+        foreach ($rows !== false ? $rows : [] as $row) {
+            $name = trim((string)($row['operator_name'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $out[$name] = (float)($row['factor'] ?? 1.0);
+        }
+        return $out;
+    }
+
+    /**
+     * @param array<string,float|int|string> $factorsByOperator
+     * @return array{ok:bool, errors?:string[]}
+     */
+    public function replaceBonusOperatorFactors(string $bonusCode, array $factorsByOperator): array
+    {
+        $errors = [];
+        $bonusCode = strtolower(trim($bonusCode));
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            $errors[] = 'Bono inválido.';
+        }
+
+        $normalized = [];
+        foreach ($factorsByOperator as $operatorName => $factorRaw) {
+            $operatorName = trim((string)$operatorName);
+            if ($operatorName === '') {
+                continue;
+            }
+            if (mb_strlen($operatorName) > 120) {
+                $errors[] = 'Operador inválido.';
+                break;
+            }
+            $factor = (float)$factorRaw;
+            $allowed = [1.0, 0.9, 0.8];
+            $ok = false;
+            foreach ($allowed as $a) {
+                if (abs($factor - $a) < 0.0001) {
+                    $factor = $a;
+                    $ok = true;
+                    break;
+                }
+            }
+            if (!$ok) {
+                $errors[] = 'Factor inválido para ' . $operatorName . '.';
+                break;
+            }
+            if (abs($factor - 1.0) < 0.0001) {
+                continue;
+            }
+            $normalized[$operatorName] = $factor;
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $del = $this->pdo->prepare('DELETE FROM bonus_operator_factors WHERE bonus_code = :bonus_code');
+            $del->execute([':bonus_code' => $bonusCode]);
+
+            if ($normalized !== []) {
+                $ins = $this->pdo->prepare(
+                    'INSERT INTO bonus_operator_factors (bonus_code, operator_name, factor)
+                     VALUES (:bonus_code, :operator_name, :factor)'
+                );
+                foreach ($normalized as $operatorName => $factor) {
+                    $ins->execute([
+                        ':bonus_code' => $bonusCode,
+                        ':operator_name' => $operatorName,
+                        ':factor' => $factor,
+                    ]);
+                }
+            }
+
+            $this->pdo->commit();
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'errors' => ['No se pudo guardar la configuración.']];
+        }
+    }
+
+    public function resolveBonusBracketAmount(array $brackets, float $units): float
+    {
+        $u = (int)round($units);
+        foreach ($brackets as $b) {
+            if (!is_array($b)) {
+                continue;
+            }
+            $from = (int)($b['range_from'] ?? 0);
+            $to = ($b['range_to'] ?? null) !== null ? (int)$b['range_to'] : null;
+            if ($u < $from) {
+                break;
+            }
+            if ($to !== null && $u > $to) {
+                continue;
+            }
+            return (float)($b['amount_clp'] ?? 0);
+        }
+        return 0.0;
+    }
+
+    /**
+     * @return array{ok:bool, errors?:string[], id?:int}
+     */
+    public function saveBonusBracket(string $bonusCode, ?int $id, int $rangeFrom, ?int $rangeTo, float $amountClp): array
+    {
+        $errors = [];
+        $bonusCode = strtolower(trim($bonusCode));
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            $errors[] = 'Bono inválido.';
+        }
+        if ($rangeFrom < 0) {
+            $errors[] = 'Desde (unidades) debe ser mayor o igual a 0.';
+        }
+        if ($rangeTo !== null && $rangeTo < $rangeFrom) {
+            $errors[] = 'Hasta (unidades) debe ser mayor o igual a Desde.';
+        }
+        if ($amountClp < 0) {
+            $errors[] = 'El monto no puede ser negativo.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $id = $id !== null ? (int)$id : null;
+        if ($id !== null && $id > 0) {
+            $stmt = $this->pdo->prepare(
+                'UPDATE bonus_brackets
+                 SET range_from = :range_from,
+                     range_to = :range_to,
+                     amount_clp = :amount_clp
+                 WHERE id = :id AND bonus_code = :bonus_code'
+            );
+            $stmt->execute([
+                ':range_from' => $rangeFrom,
+                ':range_to' => $rangeTo,
+                ':amount_clp' => $amountClp,
+                ':id' => $id,
+                ':bonus_code' => $bonusCode,
+            ]);
+            return ['ok' => true, 'id' => $id, 'errors' => []];
+        }
+
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO bonus_brackets (bonus_code, range_from, range_to, amount_clp)
+             VALUES (:bonus_code, :range_from, :range_to, :amount_clp)'
+        );
+        $stmt->execute([
+            ':bonus_code' => $bonusCode,
+            ':range_from' => $rangeFrom,
+            ':range_to' => $rangeTo,
+            ':amount_clp' => $amountClp,
+        ]);
+        $newId = (int)$this->pdo->lastInsertId();
+        return ['ok' => true, 'id' => $newId, 'errors' => []];
+    }
+
+    public function deleteBonusBracket(string $bonusCode, int $id): array
+    {
+        $errors = [];
+        $bonusCode = strtolower(trim($bonusCode));
+        $id = (int)$id;
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            $errors[] = 'Bono inválido.';
+        }
+        if ($id <= 0) {
+            $errors[] = 'Registro inválido.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+        $stmt = $this->pdo->prepare('DELETE FROM bonus_brackets WHERE id = :id AND bonus_code = :bonus_code');
+        $stmt->execute([':id' => $id, ':bonus_code' => $bonusCode]);
+        return ['ok' => true];
+    }
+
+    /**
+     * @param list<array{range_from:int,range_to:int|null,amount_clp:float}> $brackets
+     * @return array{ok:bool, errors?:string[]}
+     */
+    public function replaceBonusBrackets(string $bonusCode, array $brackets): array
+    {
+        $errors = [];
+        $bonusCode = strtolower(trim($bonusCode));
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            $errors[] = 'Bono inválido.';
+        }
+        foreach ($brackets as $idx => $b) {
+            $from = (int)($b['range_from'] ?? -1);
+            $to = ($b['range_to'] ?? null) !== null ? (int)$b['range_to'] : null;
+            $amount = (float)($b['amount_clp'] ?? -1);
+            if ($from < 0) {
+                $errors[] = 'Tramo inválido (Desde) en fila ' . ($idx + 1) . '.';
+                break;
+            }
+            if ($to !== null && $to < $from) {
+                $errors[] = 'Tramo inválido (Hasta) en fila ' . ($idx + 1) . '.';
+                break;
+            }
+            if ($amount < 0) {
+                $errors[] = 'Monto inválido en fila ' . ($idx + 1) . '.';
+                break;
+            }
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $del = $this->pdo->prepare('DELETE FROM bonus_brackets WHERE bonus_code = :bonus_code');
+            $del->execute([':bonus_code' => $bonusCode]);
+
+            $ins = $this->pdo->prepare(
+                'INSERT INTO bonus_brackets (bonus_code, range_from, range_to, amount_clp)
+                 VALUES (:bonus_code, :range_from, :range_to, :amount_clp)'
+            );
+            foreach ($brackets as $b) {
+                $ins->execute([
+                    ':bonus_code' => $bonusCode,
+                    ':range_from' => (int)$b['range_from'],
+                    ':range_to' => ($b['range_to'] ?? null) !== null ? (int)$b['range_to'] : null,
+                    ':amount_clp' => (float)$b['amount_clp'],
+                ]);
+            }
+
+            $this->pdo->commit();
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'errors' => ['No se pudo guardar la configuración.']];
+        }
+    }
+
+    /**
+     * @return array<string, array<string, float>>
+     */
+    public function getBonusUnitRates(string $bonusCode): array
+    {
+        $bonusCode = strtolower(trim($bonusCode));
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            return [];
+        }
+        $stmt = $this->pdo->prepare(
+            'SELECT category_code, tier_code, rate_clp
+             FROM bonus_unit_rates
+             WHERE bonus_code = :bonus_code
+             ORDER BY category_code ASC, tier_code ASC'
+        );
+        $stmt->execute([':bonus_code' => $bonusCode]);
+        $rows = $stmt->fetchAll();
+        if ($rows === false || $rows === []) {
+            return [];
+        }
+        $out = [];
+        foreach ($rows as $r) {
+            $cat = strtolower(trim((string)($r['category_code'] ?? '')));
+            $tier = strtoupper(trim((string)($r['tier_code'] ?? '')));
+            if ($cat === '' || $tier === '') {
+                continue;
+            }
+            if (!isset($out[$cat])) {
+                $out[$cat] = [];
+            }
+            $out[$cat][$tier] = (float)($r['rate_clp'] ?? 0.0);
+        }
+        return $out;
+    }
+
+    /**
+     * @param array<string, array<string, float>> $rates
+     * @return array{ok:bool, errors?:string[]}
+     */
+    public function replaceBonusUnitRates(string $bonusCode, array $rates): array
+    {
+        $errors = [];
+        $bonusCode = strtolower(trim($bonusCode));
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            $errors[] = 'Bono inválido.';
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $allowedTiers = ['LT_3000', 'GTE_3000', 'BASE', 'AMOUNT'];
+        foreach ($rates as $category => $tiers) {
+            $category = strtolower(trim((string)$category));
+            if ($category === '') {
+                $errors[] = 'Categoría inválida.';
+                break;
+            }
+            foreach ($tiers as $tierCode => $rate) {
+                $tierCode = strtoupper(trim((string)$tierCode));
+                if (!in_array($tierCode, $allowedTiers, true)) {
+                    $errors[] = 'Tier inválido.';
+                    break 2;
+                }
+                $rate = (float)$rate;
+                if ($rate < 0) {
+                    $errors[] = 'La tarifa no puede ser negativa.';
+                    break 2;
+                }
+            }
+        }
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $del = $this->pdo->prepare('DELETE FROM bonus_unit_rates WHERE bonus_code = :bonus_code');
+            $del->execute([':bonus_code' => $bonusCode]);
+
+            $ins = $this->pdo->prepare(
+                'INSERT INTO bonus_unit_rates (bonus_code, category_code, tier_code, rate_clp)
+                 VALUES (:bonus_code, :category_code, :tier_code, :rate_clp)'
+            );
+            foreach ($rates as $category => $tiers) {
+                $category = strtolower(trim((string)$category));
+                foreach ($tiers as $tierCode => $rate) {
+                    $tierCode = strtoupper(trim((string)$tierCode));
+                    $ins->execute([
+                        ':bonus_code' => $bonusCode,
+                        ':category_code' => $category,
+                        ':tier_code' => $tierCode,
+                        ':rate_clp' => (float)$rate,
+                    ]);
+                }
+            }
+
+            $this->pdo->commit();
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'errors' => ['No se pudo guardar la configuración.']];
+        }
     }
 }

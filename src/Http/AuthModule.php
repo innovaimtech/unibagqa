@@ -84,6 +84,7 @@ function unibagHandleLoginPost(): void
     $_SESSION['perm_area_erp'] = $areaPermissions['ERP'] ? 1 : 0;
     $_SESSION['perm_area_reception'] = $areaPermissions['RECEPTION'] ? 1 : 0;
     $_SESSION['perm_area_production'] = $areaPermissions['PRODUCTION'] ? 1 : 0;
+    $_SESSION['perm_area_scale'] = $areaPermissions['SCALE'] ? 1 : 0;
     $_SESSION['erp_area'] = $erpArea;
     $_SESSION['erp_area_label'] = erpAreaDefinitions()[$erpArea]['label'] ?? 'ERP';
 
