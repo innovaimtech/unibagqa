@@ -32,16 +32,31 @@ if [ -d "database/migrations" ]; then
     done
 fi
 
-# 4. Asegurar permisos de carpetas de escritura
+# 4. Asegurar dependencias de Python para generador de reportes PPTX
+if [ -f "requirements.txt" ]; then
+    echo "🐍 Verificando dependencias de Python..."
+    if [ ! -d "venv" ] && command -v python3 >/dev/null 2>&1; then
+        python3 -m venv venv 2>/dev/null || true
+    fi
+    if [ -d "venv" ]; then
+        ./venv/bin/pip install --quiet --upgrade pip 2>/dev/null || true
+        ./venv/bin/pip install --quiet -r requirements.txt 2>/dev/null || true
+    elif command -v pip3 >/dev/null 2>&1; then
+        pip3 install --quiet -r requirements.txt 2>/dev/null || true
+    fi
+fi
+
+# 5. Asegurar permisos de carpetas de escritura
 echo "🔒 Ajustando permisos de carpetas de almacenamiento..."
 mkdir -p storage/sessions storage/logs data
-chown -R www-data:www-data storage data 2>/dev/null || true
+chown -R www-data:www-data storage data venv 2>/dev/null || true
 chmod -R 775 storage data 2>/dev/null || true
 
-# 5. Deshabilitar módulos de debug si estuvieran activos (uopz, xdebug)
+# 6. Deshabilitar módulos de debug si estuvieran activos (uopz, xdebug)
 phpdismod uopz xdebug 2>/dev/null || true
 
-# 6. Reiniciar servicios PHP-FPM y Nginx
+# 7. Reiniciar servicios PHP-FPM y Nginx
+
 echo "🔄 Reiniciando servicios web..."
 systemctl restart php8.1-fpm 2>/dev/null || systemctl restart php*-fpm 2>/dev/null || true
 systemctl restart nginx 2>/dev/null || true

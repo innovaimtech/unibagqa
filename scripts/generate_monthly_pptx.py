@@ -14,19 +14,28 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 def get_fonts():
-    try:
-        f_reg = ImageFont.truetype('C:/Windows/Fonts/arial.ttf', 13)
-        f_bold = ImageFont.truetype('C:/Windows/Fonts/arialbd.ttf', 13)
-        f_head = ImageFont.truetype('C:/Windows/Fonts/arialbd.ttf', 14)
-        f_sm = ImageFont.truetype('C:/Windows/Fonts/arial.ttf', 11)
-        f_sm_bold = ImageFont.truetype('C:/Windows/Fonts/arialbd.ttf', 11)
-    except Exception:
-        f_reg = ImageFont.load_default()
-        f_bold = f_reg
-        f_head = f_reg
-        f_sm = f_reg
-        f_sm_bold = f_reg
-    return f_reg, f_bold, f_head, f_sm, f_sm_bold
+    candidate_pairs = [
+        ('C:/Windows/Fonts/arial.ttf', 'C:/Windows/Fonts/arialbd.ttf'),
+        ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'),
+        ('/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf'),
+        ('/usr/share/fonts/truetype/msttcorefonts/arial.ttf', '/usr/share/fonts/truetype/msttcorefonts/arialbd.ttf'),
+        ('/usr/share/fonts/truetype/freefont/FreeSans.ttf', '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf'),
+    ]
+    for reg_path, bold_path in candidate_pairs:
+        try:
+            if os.path.exists(reg_path) and os.path.exists(bold_path):
+                f_reg = ImageFont.truetype(reg_path, 13)
+                f_bold = ImageFont.truetype(bold_path, 13)
+                f_head = ImageFont.truetype(bold_path, 14)
+                f_sm = ImageFont.truetype(reg_path, 11)
+                f_sm_bold = ImageFont.truetype(bold_path, 11)
+                return f_reg, f_bold, f_head, f_sm, f_sm_bold
+        except Exception:
+            continue
+
+    f_reg = ImageFont.load_default()
+    return f_reg, f_reg, f_reg, f_reg, f_reg
+
 
 def draw_kpi_table(col_month, rows, green_rows=None, red_cells=None, width=982, row_height=28):
     if green_rows is None:

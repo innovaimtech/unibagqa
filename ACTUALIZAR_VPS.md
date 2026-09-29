@@ -88,6 +88,21 @@ tail -f /var/log/php8.1-fpm.log
 ```
 *(Para salir de la vista de logs presiona `Ctrl + C`)*.
 
+### 5. Error al descargar presentación PPTX: `ModuleNotFoundError: No module named 'matplotlib'`
+
+Ocurre si la VPS aún no tiene instaladas las librerías de Python requeridas para generar los gráficos y tablas de la presentación.
+**Solución (opción rápida y recomendada con entorno virtual):**
+```bash
+cd /var/www/innovaimtech/unibagqa
+sudo apt update && sudo apt install -y python3-pip python3-venv
+python3 -m venv venv
+./venv/bin/pip install --upgrade pip
+./venv/bin/pip install -r requirements.txt
+chown -R www-data:www-data venv
+```
+*(O de manera directa en el sistema sin venv: `sudo apt update && sudo apt install -y python3-pip python3-matplotlib python3-numpy python3-pil && sudo pip3 install python-pptx`)*
+
+
 ---
 
 ## 📋 Resumen de Servicios del Servidor

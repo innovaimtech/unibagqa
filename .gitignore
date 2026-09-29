@@ -50,8 +50,16 @@ data/*.pptx
 !data/KP´S OPERACIONES AGOSTO 2026.pptx
 data/*.sqlite
 
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+!requirements.txt
+
 # Sistema operativo / editor
 .DS_Store
 Thumbs.db
 desktop.ini
+
 
