@@ -2820,7 +2820,14 @@ function render(string $title, string $body): void
 
     $activeModule = 'dashboard';
     if ($displayArea === 'ERP' || $displayArea === 'RECEPTION') {
-        if ($currentPath === '/' || $currentPath === '/reports/production-dashboard' || $currentPath === '/reports/graphics') {
+        if (
+            $currentPath === '/'
+            || $currentPath === '/reports/production-dashboard'
+            || $currentPath === '/reports/graphics'
+            || $currentPath === '/reports/resumen-diario'
+            || $currentPath === '/dashboard/resumen'
+            || $currentPath === '/reports/daily-summary'
+        ) {
             $activeModule = 'dashboard';
         } elseif (
             str_starts_with($currentPath, '/reception')
@@ -2891,9 +2898,11 @@ function render(string $title, string $body): void
     echo '<div class="submenu">';
     if ($activeModule === 'dashboard') {
         $isPanel = $currentPath === '/' || $currentPath === '/reports/production-dashboard';
+        $isDailySummary = $currentPath === '/reports/resumen-diario' || $currentPath === '/dashboard/resumen' || $currentPath === '/reports/daily-summary';
         $isGraphics = $currentPath === '/reports/graphics';
         $isLunch = str_starts_with($currentPath, '/reports/colaciones') || str_starts_with($currentPath, '/reports/lunch-breaks');
         echo '<a class="subitem' . ($isPanel ? ' active' : '') . '" href="/"><span>Panel Producción & Mermas</span></a>';
+        echo '<a class="subitem' . ($isDailySummary ? ' active' : '') . '" href="/reports/resumen-diario"><span>📋 Resumen Diario</span></a>';
         echo '<a class="subitem' . ($isGraphics ? ' active' : '') . '" href="/reports/graphics"><span>Gráficos</span></a>';
         echo '<a class="subitem' . ($isLunch ? ' active' : '') . '" href="/reports/colaciones"><span>🍱 Control Colaciones</span></a>';
     } elseif ($activeModule === 'reception') {

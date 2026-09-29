@@ -19952,6 +19952,311 @@ SQL;
             'skipped_already_had' => $skippedAlreadyHad,
         ];
     }
+
+    /**
+     * Resumen completo de planta para un día específico (por defecto, ayer).
+     * Incluye: producción total, mermas por proceso y máquina, eventos y paradas operativas,
+     * mermas críticas (>5%), y control de asistencia/colaciones.
+     *
+     * @param string $date Fecha YYYY-MM-DD
+     * @return array<string, mixed>
+     */
+    public function getDailyPlantSummary(string $date = ''): array
+    {
+        $date = trim($date);
+        if ($date === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+            $date = date('Y-m-d', strtotime('-1 day'));
+        }
+
+        $prevDate = date('Y-m-d', strtotime("$date -1 day"));
+        $nextDate = date('Y-m-d', strtotime("$date +1 day"));
+        $isYesterday = ($date === date('Y-m-d', strtotime('-1 day')));
+        $isToday = ($date === date('Y-m-d'));
+
+        $dias = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+        $meses = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+        $ts = strtotime($date);
+        $dayOfWeek = $dias[(int)date('w', $ts)];
+        $dayNum = date('d', $ts);
+        $monthName = $meses[(int)date('n', $ts)];
+        $yearNum = date('Y', $ts);
+        $formattedDate = "$dayOfWeek, $dayNum de $monthName de $yearNum";
+
+        $startTs = strtotime("$date 00:00:00");
+        $endTs = strtotime("$date 23:59:59");
+
+        // 1. Consultar OTs de producción del día
+        $prodRows = [];
+        try {
+            $sqlProd = "
+                SELECT 
+                    t1.id AS ot_id,
+                    t1.wok_status,
+                    t1.wok_crtdat,
+                    t1.wok_enddat,
+                    t4.prd_number AS ot_number,
+                    t2.ag_reqid AS cc_number,
+                    COALESCE(t12.cust_name, 'Cliente no asignado') AS customer_name,
+                    COALESCE(t11.item_title, 'Sin descripción') AS product_name,
+                    COALESCE(t7.equipo_name, 'Sin Máquina') AS machine_name,
+                    t7.id AS machine_id,
+                    t7.equipo_type_id,
+                    CASE 
+                        WHEN t7.equipo_type_id = 7 THEN 'Flexografía'
+                        WHEN t7.equipo_type_id = 8 THEN 'Corte y Sellado'
+                        WHEN t7.equipo_type_id = 11 AND t7.id != 36 THEN 'Serigrafía'
+                        WHEN t7.equipo_type_id = 22 OR t7.id = 36 THEN 'Pulpo Serigráfico'
+                        WHEN t7.equipo_type_id = 15 THEN 'Embalaje'
+                        WHEN t7.equipo_type_id = 12 THEN 'Rebobinado'
+                        ELSE 'Otros'
+                    END AS process_name,
+                    CASE 
+                        WHEN t7.equipo_type_id = 7 THEN 'flexo'
+                        WHEN t7.equipo_type_id = 8 THEN 'sellado'
+                        WHEN t7.equipo_type_id = 11 AND t7.id != 36 THEN 'seri'
+                        WHEN t7.equipo_type_id = 22 OR t7.id = 36 THEN 'pulpo'
+                        WHEN t7.equipo_type_id = 15 THEN 'embalaje'
+                        WHEN t7.equipo_type_id = 12 THEN 'rebo'
+                        ELSE 'otros'
+                    END AS process_code,
+                    TRIM(CONCAT(COALESCE(w.wrk_firstname,''), ' ', COALESCE(w.wrk_lastname,''))) AS operator_name,
+                    COALESCE(pe.produced_units, 0) AS produced_units,
+                    COALESCE(dw.waste_units, 0) AS waste_units,
+                    COALESCE(dw.waste_kg, 0) AS waste_kg,
+                    COALESCE(pe.produced_meters, 0) AS produced_meters,
+                    CASE 
+                        WHEN t1.wok_enddat > t1.wok_crtdat THEN ROUND((t1.wok_enddat - t1.wok_crtdat)/3600, 2)
+                        ELSE 0 
+                    END AS duration_hours
+                FROM prod_worker_ot t1
+                INNER JOIN prod_agenda t2 ON t1.wok_ag_id = t2.id
+                INNER JOIN prod_worker_init t3 ON t1.wok_init_id = t3.id
+                INNER JOIN prod_header t4 ON t2.ag_prdid = t4.id
+                LEFT JOIN equipo t7 ON t3.win_equipoid = t7.id
+                LEFT JOIN workers w ON t3.win_wrkid = w.id
+                LEFT JOIN orders t9 ON t2.ag_reqid = t9.id
+                LEFT JOIN orders_items t10 ON t9.id = t10.req_id
+                LEFT JOIN item t11 ON t10.item_id = t11.id
+                LEFT JOIN customer t12 ON t9.req_cust_id = t12.id
+                LEFT JOIN (
+                    SELECT evt_prod_worker_otid,
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') OR evt_status > 0 THEN evt_amount ELSE 0 END) AS produced_units,
+                           SUM(COALESCE(evt_amount_metros_lineales, 0)) AS produced_meters
+                    FROM prod_worker_ot_events
+                    GROUP BY evt_prod_worker_otid
+                ) pe ON pe.evt_prod_worker_otid = t1.id
+                LEFT JOIN (
+                    SELECT e.evt_prod_worker_otid AS wok_id,
+                           SUM(CASE WHEN LOWER(d.evt_type) = 'merma' THEN d.evt_amount ELSE 0 END) AS waste_units,
+                           SUM(CASE WHEN LOWER(d.evt_type) = 'merma' THEN d.evt_kgstounits ELSE 0 END) AS waste_kg
+                    FROM prod_worker_ot_defectunits d
+                    INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                    WHERE d.evt_status > 0
+                    GROUP BY e.evt_prod_worker_otid
+                ) dw ON dw.wok_id = t1.id
+                WHERE t1.wok_status > 0 AND t1.wok_crtdat BETWEEN :s AND :e
+                ORDER BY process_name ASC, t7.equipo_name ASC, t1.id ASC
+            ";
+            $stmt = $this->erpPdo->prepare($sqlProd);
+            $stmt->execute([':s' => $startTs, ':e' => $endTs]);
+            $prodRows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {}
+
+        // 2. Consultar eventos, paradas, montajes y pausas
+        $stopsRows = [];
+        try {
+            $sqlStops = "
+                SELECT 
+                    e.id,
+                    e.evt_type,
+                    e.evt_pause_id,
+                    COALESCE(ppt.pause_name, CASE WHEN e.evt_type = 'apertura' THEN 'Cambio de Formato / Montaje' ELSE 'Parada Operativa' END) AS stop_reason,
+                    e.evt_crtdat,
+                    e.evt_enddat,
+                    CASE WHEN e.evt_enddat > e.evt_crtdat THEN ROUND((e.evt_enddat - e.evt_crtdat)/60) ELSE 0 END AS duration_minutes,
+                    e.evt_comments,
+                    eq.equipo_name AS machine_name,
+                    TRIM(CONCAT(COALESCE(w.wrk_firstname,''), ' ', COALESCE(w.wrk_lastname,''))) AS operator_name,
+                    h.prd_number AS ot_number
+                FROM prod_worker_ot_events e
+                LEFT JOIN prod_worker_ot ot ON e.evt_prod_worker_otid = ot.id
+                LEFT JOIN prod_agenda ag ON ot.wok_ag_id = ag.id
+                LEFT JOIN prod_header h ON ag.ag_prdid = h.id
+                LEFT JOIN prod_worker_init wi ON ot.wok_init_id = wi.id
+                LEFT JOIN workers w ON wi.win_wrkid = w.id
+                LEFT JOIN equipo eq ON ag.ag_equipo_id = eq.id
+                LEFT JOIN prod_pause_types ppt ON e.evt_pause_id = ppt.id
+                WHERE e.evt_crtdat BETWEEN :s AND :e
+                  AND (e.evt_type IN ('pause', 'apertura') OR e.evt_pause_id > 0)
+                ORDER BY e.evt_crtdat ASC
+            ";
+            $stmtStops = $this->erpPdo->prepare($sqlStops);
+            $stmtStops->execute([':s' => $startTs, ':e' => $endTs]);
+            $stopsRows = $stmtStops->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {}
+
+        // 3. Consultar asistencia y control de colaciones
+        $lunchReport = $this->getOperatorLunchReport($date);
+
+        // 4. Procesar y estructurar datos
+        $totalGoodUnits = 0.0;
+        $totalWasteUnits = 0.0;
+        $totalWasteKg = 0.0;
+        $totalMeters = 0.0;
+        $totalProdHours = 0.0;
+
+        $byProcess = [
+            'Corte y Sellado' => ['title' => 'Corte y Sellado', 'icon' => '✂️', 'code' => 'sellado', 'produced' => 0.0, 'waste' => 0.0, 'waste_kg' => 0.0, 'ots_count' => 0],
+            'Flexografía' => ['title' => 'Flexografía', 'icon' => '🎨', 'code' => 'flexo', 'produced' => 0.0, 'waste' => 0.0, 'waste_kg' => 0.0, 'ots_count' => 0],
+            'Serigrafía' => ['title' => 'Serigrafía', 'icon' => '🖌️', 'code' => 'seri', 'produced' => 0.0, 'waste' => 0.0, 'waste_kg' => 0.0, 'ots_count' => 0],
+            'Pulpo Serigráfico' => ['title' => 'Pulpo Serigráfico', 'icon' => '🐙', 'code' => 'pulpo', 'produced' => 0.0, 'waste' => 0.0, 'waste_kg' => 0.0, 'ots_count' => 0],
+            'Embalaje' => ['title' => 'Embalaje', 'icon' => '📦', 'code' => 'embalaje', 'produced' => 0.0, 'waste' => 0.0, 'waste_kg' => 0.0, 'ots_count' => 0],
+            'Rebobinado' => ['title' => 'Rebobinado', 'icon' => '🔄', 'code' => 'rebo', 'produced' => 0.0, 'waste' => 0.0, 'waste_kg' => 0.0, 'ots_count' => 0],
+        ];
+
+        $byMachine = [];
+        $criticalWasteOrders = [];
+        $activeMachines = [];
+        $activeOperators = [];
+
+        foreach ($prodRows as &$r) {
+            $g = (float)$r['produced_units'];
+            $w = (float)$r['waste_units'];
+            $wKg = (float)$r['waste_kg'];
+            $m = (float)$r['produced_meters'];
+            $hrs = (float)$r['duration_hours'];
+            $tot = $g + $w;
+            $wRate = $tot > 0 ? round(($w / $tot) * 100, 2) : 0.0;
+            $r['waste_rate'] = $wRate;
+
+            $totalGoodUnits += $g;
+            $totalWasteUnits += $w;
+            $totalWasteKg += $wKg;
+            $totalMeters += $m;
+            $totalProdHours += $hrs;
+
+            $mName = trim((string)$r['machine_name']) ?: 'Sin Máquina';
+            $pName = trim((string)$r['process_name']) ?: 'Otros';
+            $opName = trim((string)$r['operator_name']);
+
+            $activeMachines[$mName] = true;
+            if ($opName !== '') {
+                $activeOperators[$opName] = true;
+            }
+
+            // Agrupación por Proceso
+            if (!isset($byProcess[$pName])) {
+                $byProcess[$pName] = ['title' => $pName, 'icon' => '⚙️', 'code' => $r['process_code'], 'produced' => 0.0, 'waste' => 0.0, 'waste_kg' => 0.0, 'ots_count' => 0];
+            }
+            $byProcess[$pName]['produced'] += $g;
+            $byProcess[$pName]['waste'] += $w;
+            $byProcess[$pName]['waste_kg'] += $wKg;
+            $byProcess[$pName]['ots_count']++;
+
+            // Agrupación por Máquina
+            if (!isset($byMachine[$mName])) {
+                $byMachine[$mName] = [
+                    'machine_name' => $mName,
+                    'process_name' => $pName,
+                    'process_code' => $r['process_code'],
+                    'ots_count' => 0,
+                    'produced_units' => 0.0,
+                    'waste_units' => 0.0,
+                    'waste_kg' => 0.0,
+                    'duration_hours' => 0.0,
+                    'operators' => [],
+                    'orders' => [],
+                ];
+            }
+            $byMachine[$mName]['ots_count']++;
+            $byMachine[$mName]['produced_units'] += $g;
+            $byMachine[$mName]['waste_units'] += $w;
+            $byMachine[$mName]['waste_kg'] += $wKg;
+            $byMachine[$mName]['duration_hours'] += $hrs;
+            if ($opName !== '' && !in_array($opName, $byMachine[$mName]['operators'], true)) {
+                $byMachine[$mName]['operators'][] = $opName;
+            }
+            $byMachine[$mName]['orders'][] = $r;
+
+            // Merma Crítica (>5%)
+            if ($wRate >= 5.0 && $w > 0) {
+                $criticalWasteOrders[] = $r;
+            }
+        }
+        unset($r);
+
+        // Calcular porcentaje global de merma
+        $totOverall = $totalGoodUnits + $totalWasteUnits;
+        $overallWastePercent = $totOverall > 0 ? round(($totalWasteUnits / $totOverall) * 100, 2) : 0.0;
+
+        // Calcular métricas de eventos / paradas
+        $totalStopsMinutes = 0;
+        $totalSetupsMinutes = 0;
+        $stopsByCategory = [];
+
+        foreach ($stopsRows as &$st) {
+            $mins = (int)$st['duration_minutes'];
+            $st['start_time'] = !empty($st['evt_crtdat']) ? date('H:i', (int)$st['evt_crtdat']) : '';
+            $st['end_time'] = !empty($st['evt_enddat']) ? date('H:i', (int)$st['evt_enddat']) : '';
+
+            if ($st['evt_type'] === 'apertura') {
+                $totalSetupsMinutes += $mins;
+            } else {
+                $totalStopsMinutes += $mins;
+            }
+
+            $reason = trim((string)$st['stop_reason']);
+            if (!isset($stopsByCategory[$reason])) {
+                $stopsByCategory[$reason] = ['count' => 0, 'minutes' => 0];
+            }
+            $stopsByCategory[$reason]['count']++;
+            $stopsByCategory[$reason]['minutes'] += $mins;
+        }
+        unset($st);
+
+        uasort($stopsByCategory, static fn($a, $b) => $b['minutes'] <=> $a['minutes']);
+
+        // Calcular cumplimiento de colaciones
+        $lunchTotalOps = (int)($lunchReport['total_operators'] ?? 0);
+        $lunchMissingOps = (int)($lunchReport['missing_count'] ?? 0);
+        $lunchCompletedOps = max(0, $lunchTotalOps - $lunchMissingOps);
+        $lunchComplianceRate = $lunchTotalOps > 0 ? round(($lunchCompletedOps / $lunchTotalOps) * 100, 1) : 100.0;
+
+        return [
+            'date' => $date,
+            'formatted_date' => $formattedDate,
+            'is_yesterday' => $isYesterday,
+            'is_today' => $isToday,
+            'prev_date' => $prevDate,
+            'next_date' => $nextDate,
+            'kpis' => [
+                'total_produced_units' => $totalGoodUnits,
+                'total_waste_units' => $totalWasteUnits,
+                'total_waste_kg' => $totalWasteKg,
+                'waste_percent' => $overallWastePercent,
+                'total_meters' => $totalMeters,
+                'total_prod_hours' => round($totalProdHours, 1),
+                'total_stops_hours' => round($totalStopsMinutes / 60, 1),
+                'total_stops_minutes' => $totalStopsMinutes,
+                'total_setups_hours' => round($totalSetupsMinutes / 60, 1),
+                'total_setups_minutes' => $totalSetupsMinutes,
+                'active_machines_count' => count($activeMachines),
+                'active_operators_count' => max(count($activeOperators), $lunchTotalOps),
+                'total_ots_count' => count($prodRows),
+                'critical_waste_count' => count($criticalWasteOrders),
+                'lunch_compliance_rate' => $lunchComplianceRate,
+                'lunch_missing_count' => $lunchMissingOps,
+            ],
+            'by_process' => array_values(array_filter($byProcess, static fn($p) => $p['produced'] > 0 || $p['waste'] > 0 || $p['ots_count'] > 0)),
+            'by_machine' => array_values($byMachine),
+            'work_orders' => $prodRows,
+            'stops_rows' => $stopsRows,
+            'stops_by_category' => $stopsByCategory,
+            'critical_waste_orders' => $criticalWasteOrders,
+            'attendance' => $lunchReport,
+        ];
+    }
 }
+
 
 

@@ -7542,7 +7542,646 @@ function unibagOutputOperatorWasteExcel(ReceptionService $service): void
     echo '</tbody></table></body></html>';
 
     $html = ob_get_clean();
-    SimpleXlsx::streamHtml($filename, $html, 'Merma por Operador');
+}
+
+// =============================================================================
+// RESUMEN DIARIO DE PLANTA (DÍA ANTERIOR) · VISTA EJECUTIVA Y DE CONTROL
+// =============================================================================
+
+function unibagRenderDailySummaryPage(ReceptionService $service): void
+{
+    $perms = sessionAreaPermissions();
+    if (!userCanAccessArea('ERP', $perms) && !userCanAccessArea('PRODUCTION', $perms)) {
+        redirectResponse(firstAllowedAreaHome($perms));
+    }
+
+    $date = trim((string)($_GET['date'] ?? ''));
+    if ($date === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        $date = date('Y-m-d', strtotime('-1 day'));
+    }
+
+    $summary = $service->getDailyPlantSummary($date);
+    $kpis = $summary['kpis'];
+    $yesterdayDate = date('Y-m-d', strtotime('-1 day'));
+    $todayDate = date('Y-m-d');
+    $excelUrl = '/reports/resumen-diario/excel?date=' . urlencode($date);
+    $activeTab = trim((string)($_GET['tab'] ?? 'production'));
+    if (!in_array($activeTab, ['production', 'stops', 'critical', 'attendance'], true)) {
+        $activeTab = 'production';
+    }
+
+    $fmtInt = static fn(float|int $n): string => number_format((float)$n, 0, ',', '.');
+    $fmtDec = static fn(float|int $n, int $d = 2): string => number_format((float)$n, $d, ',', '.');
+
+    // Estado del badge de merma
+    $wastePercent = (float)$kpis['waste_percent'];
+    $wasteTheme = $wastePercent > 5.0 ? 'red' : ($wastePercent > 3.0 ? 'amber' : 'emerald');
+
+    $body = '<style>
+        main { max-width: 1540px !important; width: 100% !important; margin: 0 auto !important; padding: 18px 24px !important; box-sizing: border-box !important; }
+        .daily-shell { display: flex; flex-direction: column; gap: 20px; width: 100%; box-sizing: border-box; }
+        
+        .daily-head-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 20px 24px; box-shadow: 0 4px 16px rgba(15,23,42,.04); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+        .daily-head-left { display: flex; flex-direction: column; gap: 4px; }
+        .daily-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .daily-head-title { font-size: 22px; font-weight: 800; color: #0f172a; letter-spacing: -.02em; display: flex; align-items: center; gap: 8px; }
+        .daily-date-badge { font-size: 12px; font-weight: 800; padding: 4px 10px; border-radius: 999px; text-transform: uppercase; letter-spacing: .04em; }
+        .daily-date-badge.yesterday { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+        .daily-date-badge.today { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+        .daily-date-badge.other { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
+        .daily-head-sub { font-size: 13.5px; color: #64748b; font-weight: 500; }
+
+        .daily-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .daily-date-input-wrap { display: flex; align-items: center; gap: 6px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; padding: 4px 10px; height: 38px; box-sizing: border-box; }
+        .daily-date-input-wrap input[type="date"] { border: none; background: transparent; font-weight: 700; font-size: 13px; color: #0f172a; outline: none; padding: 0; width: 130px; }
+        .btn-date-quick { height: 38px; padding: 0 12px; border-radius: 8px; font-size: 12.5px; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: 1px solid #cbd5e1; background: #fff; color: #475569; transition: all .15s ease; }
+        .btn-date-quick:hover { background: #f1f5f9; color: #0f172a; border-color: #94a3b8; }
+        .btn-date-quick.active { background: #00A9A6; color: #fff; border-color: #00A9A6; box-shadow: 0 2px 6px rgba(0,169,166,.3); }
+        .btn-export-excel { height: 38px; padding: 0 14px; border-radius: 8px; font-size: 12.5px; font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: #059669; color: #fff; border: none; box-shadow: 0 2px 6px rgba(5,150,105,.25); transition: all .15s ease; }
+        .btn-export-excel:hover { background: #047857; color: #fff; transform: translateY(-1px); }
+
+        .daily-kpi-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; width: 100%; box-sizing: border-box; }
+        .kpi-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px 16px; box-shadow: 0 4px 14px rgba(15,23,42,.03); display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; min-height: 125px; box-sizing: border-box; }
+        .kpi-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3.5px; }
+        .kpi-card.teal::before { background: linear-gradient(90deg, #00A9A6, #2dd4bf); }
+        .kpi-card.emerald::before { background: linear-gradient(90deg, #10b981, #34d399); }
+        .kpi-card.amber::before { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+        .kpi-card.red::before { background: linear-gradient(90deg, #ef4444, #f87171); }
+        .kpi-card.blue::before { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+        .kpi-card.indigo::before { background: linear-gradient(90deg, #6366f1, #818cf8); }
+        .kpi-card.slate::before { background: linear-gradient(90deg, #64748b, #94a3b8); }
+
+        .kpi-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+        .kpi-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #64748b; }
+        .kpi-icon { font-size: 18px; line-height: 1; }
+        .kpi-val { font-size: 26px; font-weight: 800; color: #0f172a; letter-spacing: -.02em; margin: 4px 0 2px; }
+        .kpi-sub { font-size: 11.5px; color: #64748b; font-weight: 500; }
+
+        .process-distribution-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; width: 100%; box-sizing: border-box; }
+        .process-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(15,23,42,.02); display: flex; flex-direction: column; justify-content: space-between; gap: 8px; }
+        .process-card-top { display: flex; align-items: center; justify-content: space-between; }
+        .process-card-title { font-size: 13.5px; font-weight: 800; color: #1e293b; display: flex; align-items: center; gap: 6px; }
+        .process-card-count { font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; background: #f1f5f9; color: #475569; }
+        .process-card-metric { display: flex; align-items: baseline; justify-content: space-between; }
+        .process-card-num { font-size: 20px; font-weight: 800; color: #0f172a; }
+        .process-card-waste { font-size: 12px; font-weight: 700; color: #b91c1c; }
+
+        .daily-tabs-nav { display: flex; gap: 8px; border-bottom: 2px solid #e2e8f0; padding-bottom: 2px; margin-top: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        .daily-tab-link { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; font-size: 13.5px; font-weight: 700; text-decoration: none; border-radius: 8px 8px 0 0; color: #64748b; transition: all .15s ease; white-space: nowrap; }
+        .daily-tab-link:hover { color: #0f172a; background: #f1f5f9; }
+        .daily-tab-link.active { color: #00A9A6; border-bottom: 3px solid #00A9A6; background: #f0fdfa; margin-bottom: -2px; }
+        .daily-tab-pill { font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 999px; background: #e2e8f0; color: #334155; }
+        .daily-tab-link.active .daily-tab-pill { background: #00A9A6; color: #fff; }
+
+        .daily-content-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 20px 24px; box-shadow: 0 4px 16px rgba(15,23,42,.03); width: 100%; box-sizing: border-box; }
+        .table-responsive { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; border: 1px solid #e2e8f0; }
+        .table-daily { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+        .table-daily th { background: #f8fafc; color: #475569; font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; padding: 10px 12px; border-bottom: 2px solid #e2e8f0; text-align: left; white-space: nowrap; }
+        .table-daily td { padding: 9px 12px; border-bottom: 1px solid #f1f5f9; color: #1e293b; vertical-align: middle; }
+        .table-daily tbody tr:hover { background: #f8fafc; }
+        .table-daily tbody tr:last-child td { border-bottom: none; }
+        .table-daily tfoot th, .table-daily tfoot td { background: #f1f5f9; font-weight: 800; border-top: 2px solid #cbd5e1; padding: 10px 12px; }
+
+        .badge-process { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; font-weight: 700; font-size: 11.5px; }
+        .badge-process.sellado { background: #eff6ff; color: #1d4ed8; }
+        .badge-process.flexo { background: #f0fdfa; color: #0f766e; }
+        .badge-process.seri { background: #fdf4ff; color: #a21caf; }
+        .badge-process.pulpo { background: #fff7ed; color: #c2410c; }
+        .badge-process.embalaje { background: #f8fafc; color: #334155; border: 1px solid #cbd5e1; }
+        .badge-process.rebo { background: #faf5ff; color: #7e22ce; }
+
+        .badge-rate { display: inline-block; padding: 3px 8px; border-radius: 999px; font-weight: 800; font-size: 11px; }
+        .badge-rate.good { background: #ecfdf5; color: #047857; }
+        .badge-rate.warn { background: #fffbeb; color: #b45309; }
+        .badge-rate.bad { background: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; }
+
+        .search-box-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+        .search-input-wrap { display: flex; align-items: center; gap: 8px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 6px 12px; width: min(340px, 100%); }
+        .search-input-wrap input { border: none; background: transparent; font-size: 13px; color: #0f172a; outline: none; width: 100%; }
+
+        .alert-summary-banner { background: #fffbeb; border: 1px solid #fde68a; border-left: 5px solid #d97706; border-radius: 12px; padding: 14px 18px; margin-bottom: 18px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .alert-summary-title { font-size: 14px; font-weight: 800; color: #92400e; display: flex; align-items: center; gap: 8px; }
+
+        @media (max-width: 1200px) {
+            .daily-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        }
+        @media (max-width: 768px) {
+            .daily-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .daily-head-card { flex-direction: column; align-items: stretch; }
+            .daily-controls { flex-direction: column; align-items: stretch; }
+            .daily-controls > * { width: 100%; }
+        }
+    </style>';
+
+    $body .= '<div class="daily-shell">';
+
+    // HEADER Y SELECTOR DE FECHAS
+    $dateBadgeLabel = $summary['is_yesterday'] ? 'Día Anterior (Ayer)' : ($summary['is_today'] ? 'Jornada en Curso (Hoy)' : 'Fecha Seleccionada');
+    $dateBadgeCls = $summary['is_yesterday'] ? 'yesterday' : ($summary['is_today'] ? 'today' : 'other');
+
+    $body .= '<div class="daily-head-card">';
+    $body .= '<div class="daily-head-left">';
+    $body .= '<div class="daily-title-row">';
+    $body .= '<div class="daily-head-title"><span>📋</span> Resumen Operativo de Planta</div>';
+    $body .= '<span class="daily-date-badge ' . $dateBadgeCls . '">' . h($dateBadgeLabel) . '</span>';
+    $body .= '</div>';
+    $body .= '<div class="daily-head-sub">' . h($summary['formatted_date']) . ' · Control consolidado de producción, incidencias, paradas y dotación.</div>';
+    $body .= '</div>';
+
+    $body .= '<div class="daily-controls">';
+    $body .= '<form method="get" action="/reports/resumen-diario" style="margin:0; display:flex; gap:6px; flex-wrap:wrap; align-items:center;">';
+    $body .= '<input type="hidden" name="tab" value="' . h($activeTab) . '">';
+    $body .= '<a class="btn-date-quick" href="/reports/resumen-diario?date=' . urlencode($summary['prev_date']) . '&tab=' . urlencode($activeTab) . '" title="Ir al día anterior">← Anterior</a>';
+    $body .= '<div class="daily-date-input-wrap">';
+    $body .= '<span style="font-size:14px;">📅</span>';
+    $body .= '<input type="date" name="date" value="' . h($date) . '" onchange="this.form.submit()">';
+    $body .= '</div>';
+    $body .= '<a class="btn-date-quick' . ($date === $yesterdayDate ? ' active' : '') . '" href="/reports/resumen-diario?date=' . urlencode($yesterdayDate) . '&tab=' . urlencode($activeTab) . '">Ayer</a>';
+    $body .= '<a class="btn-date-quick' . ($date === $todayDate ? ' active' : '') . '" href="/reports/resumen-diario?date=' . urlencode($todayDate) . '&tab=' . urlencode($activeTab) . '">Hoy</a>';
+    $body .= '<a class="btn-date-quick" href="/reports/resumen-diario?date=' . urlencode($summary['next_date']) . '&tab=' . urlencode($activeTab) . '" title="Ir al día siguiente">Siguiente →</a>';
+    $body .= '</form>';
+    $body .= '<a class="btn-export-excel" href="' . h($excelUrl) . '"><span>📥</span> Exportar Excel</a>';
+    $body .= '</div>';
+    $body .= '</div>';
+
+    // GRID DE 6 KPIS PRINCIPALES
+    $body .= '<div class="daily-kpi-grid">';
+    
+    // KPI 1: Producción Total
+    $body .= '<div class="kpi-card teal">';
+    $body .= '<div class="kpi-top"><span class="kpi-tag">Producción Total</span><span class="kpi-icon">📦</span></div>';
+    $body .= '<div class="kpi-val">' . $fmtInt($kpis['total_produced_units']) . '</div>';
+    $body .= '<div class="kpi-sub">' . $kpis['active_machines_count'] . ' máquinas operaron</div>';
+    $body .= '</div>';
+
+    // KPI 2: Merma Total y %
+    $body .= '<div class="kpi-card ' . $wasteTheme . '">';
+    $body .= '<div class="kpi-top"><span class="kpi-tag">Merma de Planta</span><span class="kpi-icon">⚠️</span></div>';
+    $body .= '<div class="kpi-val">' . $fmtDec($kpis['waste_percent']) . '%</div>';
+    $body .= '<div class="kpi-sub">' . $fmtInt($kpis['total_waste_units']) . ' unid (' . $fmtDec($kpis['total_waste_kg'], 1) . ' kg)</div>';
+    $body .= '</div>';
+
+    // KPI 3: Máquinas Activas
+    $body .= '<div class="kpi-card blue">';
+    $body .= '<div class="kpi-top"><span class="kpi-tag">Máquinas Activas</span><span class="kpi-icon">🏭</span></div>';
+    $body .= '<div class="kpi-val">' . $kpis['active_machines_count'] . '</div>';
+    $body .= '<div class="kpi-sub">' . $kpis['total_ots_count'] . ' OTs procesadas</div>';
+    $body .= '</div>';
+
+    // KPI 4: Dotación en Turno
+    $body .= '<div class="kpi-card indigo">';
+    $body .= '<div class="kpi-top"><span class="kpi-tag">Dotación Planta</span><span class="kpi-icon">👷</span></div>';
+    $body .= '<div class="kpi-val">' . $kpis['active_operators_count'] . '</div>';
+    $body .= '<div class="kpi-sub">Colaciones: ' . $kpis['lunch_compliance_rate'] . '% cumplimiento</div>';
+    $body .= '</div>';
+
+    // KPI 5: Horas Efectivas de Producción
+    $body .= '<div class="kpi-card emerald">';
+    $body .= '<div class="kpi-top"><span class="kpi-tag">Horas Operación</span><span class="kpi-icon">⏱️</span></div>';
+    $body .= '<div class="kpi-val">' . $fmtDec($kpis['total_prod_hours'], 1) . ' <span style="font-size:15px; font-weight:600;">hrs</span></div>';
+    $body .= '<div class="kpi-sub">Tiempo de máquina productivo</div>';
+    $body .= '</div>';
+
+    // KPI 6: Paradas y Cambios de Formato
+    $body .= '<div class="kpi-card slate">';
+    $body .= '<div class="kpi-top"><span class="kpi-tag">Paradas & Cambios</span><span class="kpi-icon">🛑</span></div>';
+    $body .= '<div class="kpi-val">' . $fmtDec($kpis['total_stops_hours'] + $kpis['total_setups_hours'], 1) . ' <span style="font-size:15px; font-weight:600;">hrs</span></div>';
+    $body .= '<div class="kpi-sub">' . count($summary['stops_rows']) . ' eventos registrados</div>';
+    $body .= '</div>';
+
+    $body .= '</div>';
+
+    // DISTRIBUCIÓN POR LÍNEAS OPERATIVAS (MINI CARDS)
+    if (!empty($summary['by_process'])) {
+        $body .= '<div class="process-distribution-grid">';
+        foreach ($summary['by_process'] as $p) {
+            $pTot = $p['produced'] + $p['waste'];
+            $pRate = $pTot > 0 ? round(($p['waste'] / $pTot) * 100, 2) : 0.0;
+            $body .= '<div class="process-card">';
+            $body .= '<div class="process-card-top">';
+            $body .= '<div class="process-card-title"><span>' . h($p['icon']) . '</span> ' . h($p['title']) . '</div>';
+            $body .= '<span class="process-card-count">' . $p['ots_count'] . ' OT' . ($p['ots_count'] !== 1 ? 's' : '') . '</span>';
+            $body .= '</div>';
+            $body .= '<div class="process-card-metric">';
+            $body .= '<div class="process-card-num">' . $fmtInt($p['produced']) . ' <span style="font-size:11.5px; font-weight:600; color:#64748b;">unid</span></div>';
+            $body .= '<div class="process-card-waste">' . ($p['waste'] > 0 ? ('Merma: ' . $fmtDec($pRate) . '%') : '<span style="color:#059669">0% Merma</span>') . '</div>';
+            $body .= '</div>';
+            $body .= '</div>';
+        }
+        $body .= '</div>';
+    }
+
+    // PESTAÑAS DE NAVEGACIÓN
+    $tabUrl = static fn(string $t): string => '/reports/resumen-diario?date=' . urlencode($date) . '&tab=' . urlencode($t);
+    $otsCount = count($summary['work_orders']);
+    $stopsCount = count($summary['stops_rows']);
+    $critCount = count($summary['critical_waste_orders']);
+    $attCount = $kpis['active_operators_count'];
+
+    $body .= '<div class="daily-tabs-nav">';
+    $body .= '<a class="daily-tab-link' . ($activeTab === 'production' ? ' active' : '') . '" href="' . h($tabUrl('production')) . '"><span>🏭</span> Producción por Máquina y OT <span class="daily-tab-pill">' . $otsCount . '</span></a>';
+    $body .= '<a class="daily-tab-link' . ($activeTab === 'stops' ? ' active' : '') . '" href="' . h($tabUrl('stops')) . '"><span>🛑</span> Paradas, Novedades y Montajes <span class="daily-tab-pill">' . $stopsCount . '</span></a>';
+    $body .= '<a class="daily-tab-link' . ($activeTab === 'critical' ? ' active' : '') . '" href="' . h($tabUrl('critical')) . '"><span>⚠️</span> Mermas Críticas (>5%) <span class="daily-tab-pill">' . $critCount . '</span></a>';
+    $body .= '<a class="daily-tab-link' . ($activeTab === 'attendance' ? ' active' : '') . '" href="' . h($tabUrl('attendance')) . '"><span>👥</span> Dotación y Colaciones <span class="daily-tab-pill">' . $attCount . '</span></a>';
+    $body .= '</div>';
+
+    // CONTENIDO DE LA PESTAÑA SELECCIONADA
+    $body .= '<div class="daily-content-card">';
+
+    // -------------------------------------------------------------------------
+    // TAB 1: PRODUCCIÓN POR MÁQUINA Y OT
+    // -------------------------------------------------------------------------
+    if ($activeTab === 'production') {
+        $body .= '<div class="search-box-row">';
+        $body .= '<div style="font-size:16px; font-weight:800; color:#0f172a;">Detalle de Órdenes de Trabajo Ejecutadas en la Jornada</div>';
+        $body .= '<div class="search-input-wrap">';
+        $body .= '<span>🔍</span>';
+        $body .= '<input type="text" id="filter-production-table" placeholder="Buscar por OT, Cliente, Máquina u Operario..." onkeyup="filterDailyTable()">';
+        $body .= '</div>';
+        $body .= '</div>';
+
+        if (empty($summary['work_orders'])) {
+            $body .= '<div style="text-align:center; padding:48px 16px; color:#64748b; font-weight:600;">No se registraron órdenes de trabajo ni producción efectiva para el día ' . h($date) . '.</div>';
+        } else {
+            $body .= '<div class="table-responsive">';
+            $body .= '<table class="table-daily" id="daily-production-table">';
+            $body .= '<thead><tr>';
+            $body .= '<th>Proceso</th>';
+            $body .= '<th>Máquina</th>';
+            $body .= '<th class="text-center">N° OT</th>';
+            $body .= '<th class="text-center">CC</th>';
+            $body .= '<th>Cliente</th>';
+            $body .= '<th>Producto / Diseño</th>';
+            $body .= '<th>Operador</th>';
+            $body .= '<th style="text-align:right;">U. Buenas</th>';
+            $body .= '<th style="text-align:right;">U. Merma</th>';
+            $body .= '<th style="text-align:right;">Kg Merma</th>';
+            $body .= '<th class="text-center">% Merma</th>';
+            $body .= '<th class="text-center">Duración</th>';
+            $body .= '<th class="text-center">Estado</th>';
+            $body .= '</tr></thead><tbody>';
+
+            foreach ($summary['work_orders'] as $row) {
+                $pCode = $row['process_code'];
+                $wRate = (float)$row['waste_rate'];
+                $rateCls = $wRate > 5.0 ? 'bad' : ($wRate > 3.0 ? 'warn' : 'good');
+                $statusBadge = (int)$row['wok_status'] === 2 ? '<span style="color:#059669; font-weight:700;">Finalizada</span>' : '<span style="color:#2563eb; font-weight:700;">En curso</span>';
+
+                $body .= '<tr>';
+                $body .= '<td><span class="badge-process ' . h($pCode) . '">' . h($row['process_name']) . '</span></td>';
+                $body .= '<td style="font-weight:700; color:#0f172a;">' . h($row['machine_name']) . '</td>';
+                $body .= '<td class="text-center" style="font-family:monospace; font-weight:800; color:#0f172a;">' . h($row['ot_number']) . '</td>';
+                $body .= '<td class="text-center" style="font-family:monospace; color:#475569;">' . h((string)$row['cc_number']) . '</td>';
+                $body .= '<td style="font-weight:600; color:#1e293b; max-width:200px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' . h($row['customer_name']) . '">' . h($row['customer_name']) . '</td>';
+                $body .= '<td style="color:#475569; max-width:240px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="' . h($row['product_name']) . '">' . h($row['product_name']) . '</td>';
+                $body .= '<td style="font-weight:600; color:#334155;">' . h($row['operator_name']) . '</td>';
+                $body .= '<td style="text-align:right; font-weight:800; color:#0f172a;">' . $fmtInt((float)$row['produced_units']) . '</td>';
+                $body .= '<td style="text-align:right; font-weight:700; color:#b91c1c;">' . $fmtInt((float)$row['waste_units']) . '</td>';
+                $body .= '<td style="text-align:right; font-weight:600;">' . $fmtDec((float)$row['waste_kg'], 2) . ' kg</td>';
+                $body .= '<td class="text-center"><span class="badge-rate ' . $rateCls . '">' . $fmtDec($wRate) . '%</span></td>';
+                $body .= '<td class="text-center" style="font-weight:600; color:#64748b;">' . $fmtDec((float)$row['duration_hours'], 1) . ' hrs</td>';
+                $body .= '<td class="text-center">' . $statusBadge . '</td>';
+                $body .= '</tr>';
+            }
+
+            $body .= '</tbody><tfoot><tr>';
+            $body .= '<th colspan="7" style="text-align:right;">TOTALES GENERALES DE LA JORNADA:</th>';
+            $body .= '<th style="text-align:right; font-size:13.5px; color:#0f172a;">' . $fmtInt($kpis['total_produced_units']) . '</th>';
+            $body .= '<th style="text-align:right; font-size:13.5px; color:#b91c1c;">' . $fmtInt($kpis['total_waste_units']) . '</th>';
+            $body .= '<th style="text-align:right; font-size:13.5px;">' . $fmtDec($kpis['total_waste_kg'], 2) . ' kg</th>';
+            $body .= '<th class="text-center"><span class="badge-rate ' . ($wastePercent > 5 ? 'bad' : ($wastePercent > 3 ? 'warn' : 'good')) . '">' . $fmtDec($wastePercent) . '%</span></th>';
+            $body .= '<th class="text-center">' . $fmtDec($kpis['total_prod_hours'], 1) . ' hrs</th>';
+            $body .= '<th></th>';
+            $body .= '</tr></tfoot>';
+            $body .= '</table></div>';
+
+            $body .= '<script>
+                function filterDailyTable() {
+                    var input = document.getElementById("filter-production-table");
+                    var filter = input.value.toLowerCase();
+                    var rows = document.querySelectorAll("#daily-production-table tbody tr");
+                    rows.forEach(function(r) {
+                        var text = r.textContent.toLowerCase();
+                        r.style.display = text.indexOf(filter) > -1 ? "" : "none";
+                    });
+                }
+            </script>';
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // TAB 2: PARADAS, NOVEDADES Y MONTAJES
+    // -------------------------------------------------------------------------
+    elseif ($activeTab === 'stops') {
+        $body .= '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">';
+        $body .= '<div>';
+        $body .= '<div style="font-size:16px; font-weight:800; color:#0f172a;">Registro Cronológico de Detenciones, Ajustes e Incidentes</div>';
+        $body .= '<div style="font-size:13px; color:#64748b; margin-top:2px;">Detalle de todas las interrupciones operativas, fallas, montajes y pausas de máquina reportadas.</div>';
+        $body .= '</div>';
+        $body .= '</div>';
+
+        // Pills de motivos
+        if (!empty($summary['stops_by_category'])) {
+            $body .= '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px;">';
+            foreach ($summary['stops_by_category'] as $reason => $stat) {
+                $body .= '<div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:8px; padding:6px 12px; font-size:12px;">';
+                $body .= '<strong>' . h($reason) . ':</strong> ' . $stat['count'] . ' eventos · ' . $stat['minutes'] . ' min (' . round($stat['minutes']/60, 1) . ' hrs)';
+                $body .= '</div>';
+            }
+            $body .= '</div>';
+        }
+
+        if (empty($summary['stops_rows'])) {
+            $body .= '<div style="text-align:center; padding:48px 16px; color:#059669; font-weight:700;">✅ Jornada Continua: No se reportaron paradas, fallas ni detenciones operativas en el sistema para este día.</div>';
+        } else {
+            $body .= '<div class="table-responsive">';
+            $body .= '<table class="table-daily">';
+            $body .= '<thead><tr>';
+            $body .= '<th class="text-center">Hora Inicio</th>';
+            $body .= '<th class="text-center">Hora Fin</th>';
+            $body .= '<th class="text-center">Duración</th>';
+            $body .= '<th>Máquina</th>';
+            $body .= '<th>Operador</th>';
+            $body .= '<th>Motivo / Tipo de Evento</th>';
+            $body .= '<th class="text-center">OT Asociada</th>';
+            $body .= '<th>Observaciones / Comentarios Reportados</th>';
+            $body .= '</tr></thead><tbody>';
+
+            foreach ($summary['stops_rows'] as $st) {
+                $isColacion = stripos((string)$st['stop_reason'], 'colaci') !== false;
+                $isApertura = $st['evt_type'] === 'apertura';
+                $badgeStyle = $isColacion ? 'background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;' : ($isApertura ? 'background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe;' : 'background:#fff1f2; color:#be123c; border:1px solid #fecdd3;');
+
+                $body .= '<tr>';
+                $body .= '<td class="text-center" style="font-family:monospace; font-weight:700; color:#0f172a;">' . h($st['start_time']) . '</td>';
+                $body .= '<td class="text-center" style="font-family:monospace; color:#64748b;">' . h($st['end_time'] ?: 'En curso') . '</td>';
+                $body .= '<td class="text-center" style="font-weight:800; color:#0f172a;">' . (int)$st['duration_minutes'] . ' min</td>';
+                $body .= '<td style="font-weight:700; color:#0f172a;">' . h((string)$st['machine_name']) . '</td>';
+                $body .= '<td style="font-weight:600; color:#334155;">' . h((string)$st['operator_name']) . '</td>';
+                $body .= '<td><span style="display:inline-block; padding:3px 9px; border-radius:6px; font-weight:700; font-size:11.5px; ' . $badgeStyle . '">' . h((string)$st['stop_reason']) . '</span></td>';
+                $body .= '<td class="text-center" style="font-family:monospace; font-weight:700;">' . h((string)$st['ot_number'] ?: '—') . '</td>';
+                $body .= '<td style="color:#475569; font-size:12px;">' . h((string)$st['evt_comments'] ?: 'Sin observaciones') . '</td>';
+                $body .= '</tr>';
+            }
+
+            $body .= '</tbody></table></div>';
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // TAB 3: MERMAS CRÍTICAS (>5%)
+    // -------------------------------------------------------------------------
+    elseif ($activeTab === 'critical') {
+        if (empty($summary['critical_waste_orders'])) {
+            $body .= '<div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:12px; padding:24px; text-align:center;">';
+            $body .= '<div style="font-size:32px; margin-bottom:8px;">🌟</div>';
+            $body .= '<div style="font-size:17px; font-weight:800; color:#15803d;">¡Excelente Control de Calidad!</div>';
+            $body .= '<div style="font-size:13.5px; color:#166534; margin-top:4px;">Ninguna orden de trabajo superó el umbral crítico de merma del 5.0% durante la jornada del ' . h($date) . '.</div>';
+            $body .= '</div>';
+        } else {
+            $body .= '<div class="alert-summary-banner">';
+            $body .= '<div class="alert-summary-title">';
+            $body .= '<span style="font-size:20px;">⚠️</span>';
+            $body .= '<span>Alerta de Calidad: Se detectaron ' . count($summary['critical_waste_orders']) . ' órdenes con merma superior al umbral crítico del 5.0%</span>';
+            $body .= '</div>';
+            $body .= '<div style="font-size:12.5px; color:#78350f;">Se recomienda auditoría técnica y revisión con los operadores responsables.</div>';
+            $body .= '</div>';
+
+            $body .= '<div class="table-responsive">';
+            $body .= '<table class="table-daily">';
+            $body .= '<thead><tr>';
+            $body .= '<th>Proceso</th>';
+            $body .= '<th>Máquina</th>';
+            $body .= '<th class="text-center">N° OT</th>';
+            $body .= '<th class="text-center">CC</th>';
+            $body .= '<th>Cliente</th>';
+            $body .= '<th>Producto</th>';
+            $body .= '<th>Operador</th>';
+            $body .= '<th style="text-align:right;">U. Buenas</th>';
+            $body .= '<th style="text-align:right;">U. Merma</th>';
+            $body .= '<th style="text-align:right;">Kg Merma</th>';
+            $body .= '<th class="text-center">% Merma</th>';
+            $body .= '</tr></thead><tbody>';
+
+            foreach ($summary['critical_waste_orders'] as $co) {
+                $wRate = (float)$co['waste_rate'];
+                $body .= '<tr>';
+                $body .= '<td><span class="badge-process ' . h($co['process_code']) . '">' . h($co['process_name']) . '</span></td>';
+                $body .= '<td style="font-weight:700;">' . h($co['machine_name']) . '</td>';
+                $body .= '<td class="text-center" style="font-family:monospace; font-weight:800; color:#0f172a;">' . h($co['ot_number']) . '</td>';
+                $body .= '<td class="text-center" style="font-family:monospace;">' . h((string)$co['cc_number']) . '</td>';
+                $body .= '<td style="font-weight:700; color:#1e293b;">' . h($co['customer_name']) . '</td>';
+                $body .= '<td style="color:#475569;">' . h($co['product_name']) . '</td>';
+                $body .= '<td style="font-weight:600;">' . h($co['operator_name']) . '</td>';
+                $body .= '<td style="text-align:right;">' . $fmtInt((float)$co['produced_units']) . '</td>';
+                $body .= '<td style="text-align:right; font-weight:800; color:#dc2626;">' . $fmtInt((float)$co['waste_units']) . '</td>';
+                $body .= '<td style="text-align:right; font-weight:600;">' . $fmtDec((float)$co['waste_kg'], 2) . ' kg</td>';
+                $body .= '<td class="text-center"><span class="badge-rate bad">' . $fmtDec($wRate) . '%</span></td>';
+                $body .= '</tr>';
+            }
+
+            $body .= '</tbody></table></div>';
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // TAB 4: DOTACIÓN, ASISTENCIA Y COLACIONES
+    // -------------------------------------------------------------------------
+    elseif ($activeTab === 'attendance') {
+        $att = $summary['attendance'];
+        $body .= '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">';
+        $body .= '<div>';
+        $body .= '<div style="font-size:16px; font-weight:800; color:#0f172a;">Dotación de Operarios y Cumplimiento de Colaciones</div>';
+        $body .= '<div style="font-size:13px; color:#64748b; margin-top:2px;">Control de asistencia en planta, turnos iniciados y horarios de almuerzo registrados.</div>';
+        $body .= '</div>';
+        $body .= '<div>';
+        $body .= '<a class="btn secondary" href="/reports/colaciones?date=' . urlencode($date) . '" style="background:#00A9A6; color:#fff; border:none; font-weight:700; font-size:12.5px; padding:7px 14px; border-radius:8px; text-decoration:none;">Gestionar Colaciones en Módulo →</a>';
+        $body .= '</div>';
+        $body .= '</div>';
+
+        if (empty($att['operators'])) {
+            $body .= '<div style="text-align:center; padding:48px 16px; color:#64748b; font-weight:600;">No se registraron turnos ni asignaciones de operarios para este día.</div>';
+        } else {
+            $body .= '<div class="table-responsive">';
+            $body .= '<table class="table-daily">';
+            $body .= '<thead><tr>';
+            $body .= '<th>Operador</th>';
+            $body .= '<th>Máquina Asignada</th>';
+            $body .= '<th class="text-center">Inicio Turno</th>';
+            $body .= '<th class="text-center">Fin Turno</th>';
+            $body .= '<th class="text-center">Turno Almuerzo</th>';
+            $body .= '<th class="text-center">Horario Colación</th>';
+            $body .= '<th class="text-center">Duración</th>';
+            $body .= '<th class="text-center">Estado Colación</th>';
+            $body .= '</tr></thead><tbody>';
+
+            foreach ($att['operators'] as $op) {
+                $hasLunch = !empty($op['has_lunch']) && !empty($op['lunch_start']);
+                $lunchRange = $hasLunch ? ($op['lunch_start'] . ' a ' . ($op['lunch_end'] ?: 'En curso')) : 'Sin registro';
+                $lunchStateBadge = $hasLunch 
+                    ? '<span style="display:inline-block; padding:3px 9px; border-radius:999px; font-weight:800; font-size:11px; background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;">✓ REGISTRADA</span>'
+                    : '<span style="display:inline-block; padding:3px 9px; border-radius:999px; font-weight:800; font-size:11px; background:#fef2f2; color:#b91c1c; border:1px solid #fca5a5;">⚠️ PENDIENTE</span>';
+
+                $body .= '<tr>';
+                $body .= '<td style="font-weight:700; color:#0f172a;">' . h($op['operator_name']) . '</td>';
+                $body .= '<td style="font-weight:600; color:#475569;">' . h($op['machine_name']) . '</td>';
+                $body .= '<td class="text-center" style="font-family:monospace; font-weight:700;">' . h($op['shift_start']) . '</td>';
+                $body .= '<td class="text-center" style="font-family:monospace; color:#64748b;">' . h($op['shift_end']) . '</td>';
+                $body .= '<td class="text-center" style="font-size:12px; font-weight:600; color:#0f766e;">' . h($op['shift_lunch_window'] ?? '12:00 a 13:15') . '</td>';
+                $body .= '<td class="text-center" style="font-family:monospace; font-weight:700; color:#0f172a;">' . h($lunchRange) . '</td>';
+                $body .= '<td class="text-center" style="font-weight:700;">' . ((int)($op['duration_minutes'] ?? 0) > 0 ? ((int)$op['duration_minutes'] . ' min') : '—') . '</td>';
+                $body .= '<td class="text-center">' . $lunchStateBadge . '</td>';
+                $body .= '</tr>';
+            }
+
+            $body .= '</tbody></table></div>';
+        }
+    }
+
+    $body .= '</div>'; // End daily-content-card
+    $body .= '</div>'; // End daily-shell
+
+    render('Resumen Diario de Planta · ' . $summary['formatted_date'], $body);
+}
+
+function unibagOutputDailySummaryExcel(ReceptionService $service): void
+{
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
+    $date = trim((string)($_GET['date'] ?? ''));
+    if ($date === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        $date = date('Y-m-d', strtotime('-1 day'));
+    }
+
+    $summary = $service->getDailyPlantSummary($date);
+    $kpis = $summary['kpis'];
+    $filename = 'Resumen_Planta_' . str_replace('-', '', $date);
+
+    $fmtInt = static fn(float|int $n): string => number_format((float)$n, 0, ',', '.');
+    $fmtDec = static fn(float|int $n, int $d = 2): string => number_format((float)$n, $d, ',', '.');
+
+    ob_start();
+    echo '<!DOCTYPE html><html><head><meta charset="utf-8">';
+    echo '<style>
+        body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #111; }
+        h1 { font-size: 16pt; color: #008A87; margin-bottom: 4px; }
+        h2 { font-size: 13pt; color: #1e293b; margin-top: 18px; margin-bottom: 6px; }
+        table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+        th { background-color: #008A87; color: #ffffff; font-weight: bold; border: 1px solid #cbd5e1; padding: 6px 10px; text-align: left; }
+        td { border: 1px solid #e2e8f0; padding: 5px 8px; font-size: 10pt; }
+        .text-center { text-align: center; }
+        .text-right { text-align: right; }
+        .font-bold { font-weight: bold; }
+        .bg-gray { background-color: #f8fafc; }
+        .bg-total { background-color: #e2e8f0; font-weight: bold; }
+    </style></head><body>';
+
+    echo '<h1>UNIBAG · INFORME RESUMEN OPERATIVO DE PLANTA</h1>';
+    echo '<p style="color:#64748b; font-weight:bold;">Fecha de Operación: ' . h($summary['formatted_date']) . ' (' . h($date) . ')</p>';
+
+    // KPIs Ejecutivos
+    echo '<h2>1. INDICADORES CLAVE DE RENDIMIENTO (KPIS)</h2>';
+    echo '<table>';
+    echo '<tr><th>Indicador</th><th>Valor</th><th>Detalle</th></tr>';
+    echo '<tr><td class="font-bold">Total Unidades Producidas (Buenas)</td><td class="font-bold text-right">' . $fmtInt($kpis['total_produced_units']) . '</td><td>Total fabricado en planta</td></tr>';
+    echo '<tr><td class="font-bold">Total Merma Generada</td><td class="font-bold text-right" style="color:#b91c1c;">' . $fmtInt($kpis['total_waste_units']) . ' unid (' . $fmtDec($kpis['total_waste_kg'], 2) . ' kg)</td><td>Merma total del día</td></tr>';
+    echo '<tr><td class="font-bold">% Merma Global</td><td class="font-bold text-right">' . $fmtDec($kpis['waste_percent']) . '%</td><td>Sobre total producido + merma</td></tr>';
+    echo '<tr><td class="font-bold">Máquinas Operativas</td><td class="text-right">' . $kpis['active_machines_count'] . '</td><td>Equipos con OTs procesadas</td></tr>';
+    echo '<tr><td class="font-bold">Dotación de Operarios en Turno</td><td class="text-right">' . $kpis['active_operators_count'] . '</td><td>Personal activo en jornada</td></tr>';
+    echo '<tr><td class="font-bold">Horas de Producción Efectiva</td><td class="text-right">' . $fmtDec($kpis['total_prod_hours'], 1) . ' hrs</td><td>Horas máquina productivas</td></tr>';
+    echo '<tr><td class="font-bold">Horas de Paradas y Detenciones</td><td class="text-right">' . $fmtDec($kpis['total_stops_hours'], 1) . ' hrs</td><td>Paradas operativas</td></tr>';
+    echo '<tr><td class="font-bold">Horas de Montaje y Cambios de Formato</td><td class="text-right">' . $fmtDec($kpis['total_setups_hours'], 1) . ' hrs</td><td>Aperturas y preparación</td></tr>';
+    echo '<tr><td class="font-bold">Cumplimiento Control de Colaciones</td><td class="text-right">' . $kpis['lunch_compliance_rate'] . '%</td><td>' . $kpis['lunch_missing_count'] . ' faltas / sin registro</td></tr>';
+    echo '</table>';
+
+    // Producción Detallada por OT
+    echo '<h2>2. DETALLE DE PRODUCCIÓN POR MÁQUINA Y ORDEN DE TRABAJO (OT)</h2>';
+    echo '<table>';
+    echo '<thead><tr>';
+    echo '<th>Proceso</th><th>Máquina</th><th>N° OT</th><th>CC</th><th>Cliente</th><th>Producto / Diseño</th><th>Operador</th><th class="text-right">U. Buenas</th><th class="text-right">U. Merma</th><th class="text-right">Kg Merma</th><th class="text-center">% Merma</th><th class="text-center">Horas</th><th class="text-center">Estado</th>';
+    echo '</tr></thead><tbody>';
+
+    if (empty($summary['work_orders'])) {
+        echo '<tr><td colspan="13" class="text-center">Sin producción registrada para este día.</td></tr>';
+    } else {
+        foreach ($summary['work_orders'] as $row) {
+            echo '<tr>';
+            echo '<td>' . h($row['process_name']) . '</td>';
+            echo '<td class="font-bold">' . h($row['machine_name']) . '</td>';
+            echo '<td class="text-center font-bold">' . h($row['ot_number']) . '</td>';
+            echo '<td class="text-center">' . h((string)$row['cc_number']) . '</td>';
+            echo '<td>' . h($row['customer_name']) . '</td>';
+            echo '<td>' . h($row['product_name']) . '</td>';
+            echo '<td>' . h($row['operator_name']) . '</td>';
+            echo '<td class="text-right font-bold">' . $fmtInt((float)$row['produced_units']) . '</td>';
+            echo '<td class="text-right" style="color:#b91c1c;">' . $fmtInt((float)$row['waste_units']) . '</td>';
+            echo '<td class="text-right">' . $fmtDec((float)$row['waste_kg'], 2) . ' kg</td>';
+            echo '<td class="text-center">' . $fmtDec((float)$row['waste_rate']) . '%</td>';
+            echo '<td class="text-center">' . $fmtDec((float)$row['duration_hours'], 1) . '</td>';
+            echo '<td class="text-center">' . ((int)$row['wok_status'] === 2 ? 'Finalizada' : 'En curso') . '</td>';
+            echo '</tr>';
+        }
+        echo '<tr class="bg-total"><td colspan="7" class="text-right">TOTALES:</td><td class="text-right">' . $fmtInt($kpis['total_produced_units']) . '</td><td class="text-right">' . $fmtInt($kpis['total_waste_units']) . '</td><td class="text-right">' . $fmtDec($kpis['total_waste_kg'], 2) . ' kg</td><td class="text-center">' . $fmtDec($kpis['waste_percent']) . '%</td><td class="text-center">' . $fmtDec($kpis['total_prod_hours'], 1) . ' hrs</td><td></td></tr>';
+    }
+    echo '</tbody></table>';
+
+    // Detenciones e Incidentes
+    echo '<h2>3. DETENCIONES, NOVEDADES Y CAMBIOS DE FORMATO</h2>';
+    echo '<table>';
+    echo '<thead><tr>';
+    echo '<th>Hora Inicio</th><th>Hora Fin</th><th class="text-center">Duración (min)</th><th>Máquina</th><th>Operador</th><th>Tipo / Motivo</th><th>OT Asociada</th><th>Observaciones / Comentarios</th>';
+    echo '</tr></thead><tbody>';
+
+    if (empty($summary['stops_rows'])) {
+        echo '<tr><td colspan="8" class="text-center">No se reportaron detenciones operativas en este día.</td></tr>';
+    } else {
+        foreach ($summary['stops_rows'] as $st) {
+            echo '<tr>';
+            echo '<td class="text-center">' . h($st['start_time']) . '</td>';
+            echo '<td class="text-center">' . h($st['end_time'] ?: 'En curso') . '</td>';
+            echo '<td class="text-center font-bold">' . (int)$st['duration_minutes'] . '</td>';
+            echo '<td class="font-bold">' . h((string)$st['machine_name']) . '</td>';
+            echo '<td>' . h((string)$st['operator_name']) . '</td>';
+            echo '<td>' . h((string)$st['stop_reason']) . '</td>';
+            echo '<td class="text-center">' . h((string)$st['ot_number'] ?: '—') . '</td>';
+            echo '<td>' . h((string)$st['evt_comments'] ?: 'Sin observaciones') . '</td>';
+            echo '</tr>';
+        }
+    }
+    echo '</tbody></table>';
+
+    // Asistencia y Colaciones
+    echo '<h2>4. ASISTENCIA Y CONTROL DE COLACIONES</h2>';
+    echo '<table>';
+    echo '<thead><tr>';
+    echo '<th>Operador</th><th>Máquina Asignada</th><th class="text-center">Inicio Turno</th><th class="text-center">Fin Turno</th><th class="text-center">Horario Colación</th><th class="text-center">Duración</th><th class="text-center">Estado Colación</th>';
+    echo '</tr></thead><tbody>';
+
+    if (empty($summary['attendance']['operators'])) {
+        echo '<tr><td colspan="7" class="text-center">Sin asistencia registrada para este día.</td></tr>';
+    } else {
+        foreach ($summary['attendance']['operators'] as $op) {
+            $hasLunch = !empty($op['has_lunch']) && !empty($op['lunch_start']);
+            $lunchRange = $hasLunch ? ($op['lunch_start'] . ' a ' . ($op['lunch_end'] ?: 'En curso')) : 'Sin registro';
+            echo '<tr>';
+            echo '<td class="font-bold">' . h($op['operator_name']) . '</td>';
+            echo '<td>' . h($op['machine_name']) . '</td>';
+            echo '<td class="text-center">' . h($op['shift_start']) . '</td>';
+            echo '<td class="text-center">' . h($op['shift_end']) . '</td>';
+            echo '<td class="text-center font-bold">' . h($lunchRange) . '</td>';
+            echo '<td class="text-center">' . ((int)($op['duration_minutes'] ?? 0) > 0 ? ((int)$op['duration_minutes'] . ' min') : '—') . '</td>';
+            echo '<td class="text-center">' . ($hasLunch ? 'REGISTRADA' : 'PENDIENTE') . '</td>';
+            echo '</tr>';
+        }
+    }
+    echo '</tbody></table>';
+
+    echo '</body></html>';
+
+    $html = ob_get_clean();
+    SimpleXlsx::streamHtml($filename, $html, 'Resumen Diario Planta');
 }
 
 /**
@@ -7579,6 +8218,16 @@ function handleErpReportRoutes(string $path, string $method, ReceptionService $s
 {
     if ($path === '/' && $method === 'GET') {
         unibagRenderErpDashboardPage($service);
+        return true;
+    }
+
+    if (($path === '/reports/resumen-diario' || $path === '/dashboard/resumen' || $path === '/reports/daily-summary') && $method === 'GET') {
+        unibagRenderDailySummaryPage($service);
+        return true;
+    }
+
+    if (($path === '/reports/resumen-diario/excel' || $path === '/dashboard/resumen/excel' || $path === '/reports/daily-summary/excel') && $method === 'GET') {
+        unibagOutputDailySummaryExcel($service);
         return true;
     }
 
