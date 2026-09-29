@@ -266,7 +266,7 @@ function renderDatabaseConnectionError(Throwable $e): void
         <div class="err" style="margin-bottom:10px"><div style="font-weight:700;margin-bottom:6px">Detalle</div><div>' . h($e->getMessage()) . '</div></div>
         <div style="font-weight:700;margin-bottom:6px">Checklist</div>
         <ul style="margin:0;padding-left:18px">
-          <li>Configurar <b>ERP_DB_*</b> para <b>unibagqa</b></li>
+          <li>Configurar <b>ERP_DB_*</b> para <b>unibag_unibag</b></li>
           <li>Configurar <b>TRZ_DB_*</b> para <b>unibag_trazabilidad</b></li>
           <li>Ejecutar el esquema de trazabilidad en la base <b>TRZ_DB_NAME</b></li>
         </ul>

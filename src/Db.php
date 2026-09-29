@@ -106,7 +106,7 @@ final class Db
         return self::connect('erp', [
             'host' => self::clean(Env::get('ERP_DB_HOST', '127.0.0.1'), '127.0.0.1'),
             'port' => self::clean(Env::get('ERP_DB_PORT', '3306'), '3306'),
-            'name' => self::clean(Env::get('ERP_DB_NAME', 'unibagqa'), 'unibagqa'),
+            'name' => self::clean(Env::get('ERP_DB_NAME', 'unibag_unibag'), 'unibag_unibag'),
             'user' => self::clean(Env::get('ERP_DB_USER', 'root'), 'root'),
             'pass' => self::clean(Env::get('ERP_DB_PASS', ''), ''),
             'charset' => self::clean(Env::get('ERP_DB_CHARSET', 'utf8mb4'), 'utf8mb4'),
