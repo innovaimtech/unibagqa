@@ -40,7 +40,6 @@ CREATE TABLE IF NOT EXISTS purchase_order_lines (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 ALTER TABLE rolls
-  ADD COLUMN received_qty DECIMAL(12,3) NOT NULL DEFAULT 1.000 AFTER weight_kg,
   ADD COLUMN purchase_order_id BIGINT UNSIGNED NULL,
   ADD COLUMN purchase_order_line_id BIGINT UNSIGNED NULL,
   ADD COLUMN supplier_id INT UNSIGNED NULL,
