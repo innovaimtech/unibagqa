@@ -43,6 +43,7 @@ GUIA_*.md
 *.md
 !README.md
 !INICIO_RAPIDO.md
+!ACTUALIZAR_VPS.md
 
 # Archivos de datos generados
 data/*.pptx
