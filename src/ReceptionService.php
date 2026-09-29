@@ -91,6 +91,9 @@ final class ReceptionService
     /** @var array<string, array<string, bool>> */
     private array $erpColumnExistsCache = [];
 
+    /** @var array<string, bool> */
+    private array $erpTableExistsCache = [];
+
     private InventoryCountService $inventoryCountService;
     private RollReceptionService $rollReceptionService;
 
@@ -126,11 +129,20 @@ final class ReceptionService
                 $this->syncLegacyProductionRollWarehouses();
                 $this->setAppSetting('production_warehouse_sync_version', self::PRODUCTION_WAREHOUSE_SYNC_VERSION);
             }
+            if ($this->getAppSetting('production_machine_catalog_version', '') !== '1.0.0') {
+                $this->ensureProductionMachineCatalog();
+                $this->setAppSetting('production_machine_catalog_version', '1.0.0');
+            }
+            if ($this->getAppSetting('waste_schema_version', '') !== '1.0.0') {
+                $this->ensureWasteSchema();
+                $this->setAppSetting('waste_schema_version', '1.0.0');
+            }
+            if ($this->getAppSetting('bonus_schema_version', '') !== '1.0.0') {
+                $this->ensureBonusSchema();
+                $this->setAppSetting('bonus_schema_version', '1.0.0');
+            }
             self::$schemaEnsured = true;
         }
-        $this->ensureProductionMachineCatalog();
-        $this->ensureWasteSchema();
-        $this->ensureBonusSchema();
     }
 
     /**
@@ -11874,6 +11886,9 @@ SQL;
 
     private function erpTableExists(string $table): bool
     {
+        if (isset($this->erpTableExistsCache[$table])) {
+            return $this->erpTableExistsCache[$table];
+        }
         try {
             $stmt = $this->erpPdo->prepare(
                 'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name'
@@ -11881,8 +11896,11 @@ SQL;
             $stmt->execute([
                 ':table_name' => $table,
             ]);
-            return (int)$stmt->fetchColumn() > 0;
+            $exists = (int)$stmt->fetchColumn() > 0;
+            $this->erpTableExistsCache[$table] = $exists;
+            return $exists;
         } catch (Throwable) {
+            $this->erpTableExistsCache[$table] = false;
             return false;
         }
     }
