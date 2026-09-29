@@ -1,0 +1,436 @@
+<?
+//----------------------------------------------------------------------------------
+// Author:        1BIT LTDA
+// Copyright:     2020 by 1BIT LTDA. All Rights Reserved.
+// Any unauthorized redistribution, reselling, modifying or reproduction of part
+// or all of the contents in any form is strictly prohibited.
+//----------------------------------------------------------------------------------
+
+if($_REQUEST["subexec"] == "save")
+{
+   foreach(array_keys($_REQUEST) AS $reqkey)
+   {
+      if(strpos($reqkey, "fab_item_id_") !== false && strpos($reqkey, "fab_item_id_") == 0)
+      {
+         if((int)$_REQUEST[$reqkey])
+         {
+            $idxarr              = explode("_", $reqkey);
+            $fab_type            = $idxarr[3];
+            $posidx              = $idxarr[4];
+            $fab_item_id         = (int)$_REQUEST[$reqkey];
+            $fab_desc            = trim(addslashes($_REQUEST["fab_desc_{$fab_type}_{$posidx}"]));
+            $fab_med_width       = (int)trim($_REQUEST["fab_med_width_{$fab_type}_{$posidx}"]);
+            $fab_med_height      = (int)trim($_REQUEST["fab_med_height_{$fab_type}_{$posidx}"]);
+            $fab_med_fuelle      = (int)trim($_REQUEST["fab_med_fuelle_{$fab_type}_{$posidx}"]);
+            $fab_min_amt         = getPrice(trim($_REQUEST["fab_min_amt_{$fab_type}_{$posidx}"]));
+            $fab_corte_machine   = (int)trim($_REQUEST["fab_corte_machine_{$fab_type}_{$posidx}"]);
+            $fab_roll_width      = (int)trim($_REQUEST["fab_roll_width_{$fab_type}_{$posidx}"]);
+            $fab_fabric_gr       = (int)trim($_REQUEST["fab_fabric_gr_{$fab_type}_{$posidx}"]);
+            $fab_manilla_length  = (int)trim($_REQUEST["fab_manilla_length_{$fab_type}_{$posidx}"]);
+            $fab_print_width     = (int)trim($_REQUEST["fab_print_width_{$fab_type}_{$posidx}"]);
+            $fab_print_height    = (int)trim($_REQUEST["fab_print_height_{$fab_type}_{$posidx}"]);
+            $fab_noprint_discount = (int)trim($_REQUEST["fab_noprint_discount_{$fab_type}_{$posidx}"]);
+            $fab_active          = (int)$_REQUEST["fab_active_{$fab_type}_{$posidx}"];
+            $fab_inc_id          = (int)$_REQUEST["fab_inc_id_{$fab_type}_{$posidx}"];
+            $existingid          = (int)$_REQUEST["existingid_{$fab_type}_{$posidx}"];
+
+            $prc_headerid = $existingid;
+            if((int)$existingid)
+            {
+               $sql = " update price_lists_fab_items
+                        set
+                        fab_item_id          = {$fab_item_id},   
+                        fab_type             = '{$fab_type}',
+                        fab_desc             = '{$fab_desc}',
+                        fab_med_width        = {$fab_med_width},
+                        fab_med_height       = {$fab_med_height},
+                        fab_med_fuelle       = {$fab_med_fuelle},
+                        fab_min_amt          = {$fab_min_amt},
+                        fab_corte_machine    = {$fab_corte_machine},
+                        fab_roll_width       = {$fab_roll_width},
+                        fab_fabric_gr        = {$fab_fabric_gr},
+                        fab_manilla_length   = {$fab_manilla_length},
+                        fab_print_width      = {$fab_print_width},
+                        fab_print_height     = {$fab_print_height},
+                        fab_noprint_discount = {$fab_noprint_discount},
+                        fab_active           = {$fab_active},
+                        fab_inc_id           = {$fab_inc_id}
+                        where
+                        id = {$existingid}";
+               $res = $CON->no_result($sql);
+
+               $sql = " delete from price_lists_fab_items_prices
+                        where
+                        pl_id = {$_REQUEST["id"]} and
+                        prc_headerid = {$existingid}";
+               $CON->no_result($sql);
+            }
+            else
+            {
+            
+               $sql = " insert into price_lists_fab_items
+                        (pl_id, fab_item_id, fab_type, fab_desc, fab_med_width, fab_med_height, fab_med_fuelle,
+                         fab_min_amt, fab_corte_machine, fab_roll_width, fab_fabric_gr, fab_manilla_length,
+                         fab_print_width, fab_print_height, fab_noprint_discount, fab_active, fab_inc_id)
+                        VALUES
+                        ({$_REQUEST["id"]}, {$fab_item_id}, '{$fab_type}', '{$fab_desc}', {$fab_med_width},
+                         {$fab_med_height}, {$fab_med_fuelle}, {$fab_min_amt}, {$fab_corte_machine}, {$fab_roll_width},
+                         {$fab_fabric_gr}, {$fab_manilla_length}, {$fab_print_width}, {$fab_print_height},
+                         {$fab_noprint_discount}, {$fab_active}, {$fab_inc_id})";
+               $res = $CON->no_result($sql);
+
+               if($res)
+                  $prc_headerid = mysql_insert_id();
+            }
+            if($res)
+            {
+               foreach(array_keys($_REQUEST) AS $reqkey)
+               {
+                  if(strpos($reqkey, "prc_price_{$fab_type}_{$posidx}_") !== false && strpos($reqkey, "prc_price_{$fab_type}_{$posidx}_") == 0)
+                  {
+                     $idxarr     = explode("_", $reqkey);
+                     $prc_amount = (int)$idxarr[4];
+                     $prc_price  = getPrice($_REQUEST[$reqkey]);
+
+                     if($prc_amount > 0.00 && $prc_price > 0.00)
+                     {
+                        $sql = " insert into price_lists_fab_items_prices
+                                 (prc_headerid, pl_id, prc_amount, prc_price)
+                                 VALUES
+                                 ({$prc_headerid}, {$_REQUEST["id"]}, {$prc_amount}, {$prc_price})";
+                        $CON->no_result($sql);
+                     }
+                     else
+                     {
+                        $sql = " delete from price_lists_fab_items_prices
+                                 where
+                                 pl_id          = {$_REQUEST["id"]} and
+                                 prc_headerid   = {$prc_headerid} and
+                                 prc_amount     = {$prc_amount}";
+                        $CON->no_result($sql);
+                     }
+                  }
+               }
+            }
+         }
+         else
+         {
+            $idxarr     = explode("_", $reqkey);
+            $fab_type   = $idxarr[3];
+            $posidx     = $idxarr[4];
+            $existingid = (int)$_REQUEST["existingid_{$fab_type}_{$posidx}"];
+
+            if((int)$existingid)
+            {
+               $sql = " delete from price_lists_fab_items
+                        where
+                        pl_id = {$_REQUEST["id"]} and
+                        id = {$existingid}";
+               $CON->no_result($sql);
+
+               $sql = " delete from price_lists_fab_items_prices
+                        where
+                        pl_id = {$_REQUEST["id"]} and
+                        prc_headerid = {$existingid}";
+               $CON->no_result($sql);
+            }
+         }
+      }
+   }
+   
+   $savemsg = getSaveMessage(true);
+}
+
+//----------------------------------------------------------------------------------
+/*
+$sql = " select *
+         from price_lists_fab
+         where
+         id = {$_REQUEST["id"]}";
+$headdata = $CON->select($sql);
+$headdata = $headdata[0];
+*/
+//----------------------------------------------------------------------------------
+
+$sql = " select *
+         from fabric_types
+         where
+         fabt_status > 0
+         order by fabt_code";
+$fabric_types = $CON->select($sql);
+foreach($fabric_types AS $fabric_type)
+{
+   $_LISTTYPES[$fabric_type["fabt_code"]] = 1;
+   $_LISTTYPESNAMES[$fabric_type["fabt_code"]] = $fabric_type["fabt_name"];
+}
+
+//---------------------------------------------------------------------------------
+
+$sql = " select *
+         from item
+         where
+         item_status > 0 and
+         item_fabricate_act > 0
+         order by item_number_prod";
+$items = $CON->select($sql);
+
+//---------------------------------------------------------------------------------
+
+$sql = " select t1.*
+         from price_lists_fab_amounts t1
+         where
+         t1.pl_id      = {$_REQUEST["id"]} and
+         t1.amt_status  = 1
+         order by t1.amt_val";
+$amounts = $CON->select($sql);
+
+//---------------------------------------------------------------------------------
+
+$sql = " select t1.*, t2.item_title, t2.item_number_prod
+         from price_lists_fab_items t1
+         LEFT OUTER JOIN item t2 ON t1.fab_item_id = t2.id
+         where
+         t1.pl_id = {$_REQUEST["id"]}
+         order by t2.item_title, t1.fab_desc, t1.fab_item_id, t1.id";
+$data = $CON->select($sql);
+
+foreach($data AS $row)
+{
+   $sql = " select *
+            from price_lists_fab_items_prices
+            where
+            prc_headerid = {$row["id"]}";
+   $prices = $CON->select($sql);
+   foreach($prices AS $price)
+      $row["_prices"][(int)$price["prc_amount"]] = (int)$price["prc_price"];
+
+   $idx = $row["fab_type"];
+   $_RES[$idx][] = $row;
+}
+
+//---------------------------------------------------------------------------------
+
+$sql = " select t1.*
+         from price_lists_fab_increments t1
+         where
+         t1.pl_id      = {$_REQUEST["id"]} and
+         t1.inc_status  = 1
+         order by t1.inc_name";
+$incs = $CON->select($sql);
+
+?>
+<script language="JavaScript">
+   document.all.idx_status_msg.innerHTML = "<?=$savemsg?>";
+</script>
+<form action="index.php" method="post" class="fokusfirst" name="xform_pl">
+<input type="hidden" name="exec" value="<?=$_REQUEST["exec"]?>">
+<input type="hidden" name="subexec" value="save">
+<input type="hidden" name="subcatexec" value="prices">
+<input type="hidden" name="id" value="<?=$_REQUEST["id"]?>">
+<input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+<input type="hidden" name="printXLS" value="">
+<?
+foreach(array_keys($_LISTTYPES) AS $ltype)
+{  ?>
+   <?=Nifty_printH("box1", "99%")?>
+   <table border="0" cellpadding="3" cellspacing="0" width="100%">
+   <colgroup>
+      <col width="50">
+      <col width="200">
+      <col width="50">
+      <col width="50">
+      <col width="120">
+      <col width="55">
+      <col width="40">
+      <col width="40">
+      <col width="40">
+      <col width="40">
+      <col width="80">
+      <?
+      foreach($amounts AS $amount)
+      {  ?>
+         <col>
+         <?
+         $xcols++;
+      }
+      ?>
+      <col width="60">
+      <col width="20">
+   </colgroup>
+   <tr>
+      <td class="content_tbl_header" colspan="<?=(13 + $xcols)?>"><?=$ltype?>: <?=$_LISTTYPESNAMES[$ltype]?></td>
+   </tr>
+   <tr>
+      <td class="content_tbl_subheader content_row_os">Codigo</td>
+      <td class="content_tbl_subheader content_row_os">Producto</td>
+      <td class="content_tbl_subheader content_row_os">Incremento</td>
+      <td class="content_tbl_subheader content_row_os" style="border-right:3px solid #333333">Descripción</td>
+      <td class="content_tbl_subheader content_row_os" align="center">Medidas<br>(Ancho x Alto x Fuelle)</td>
+      <td class="content_tbl_subheader content_row_os" align="center" style="border-right:3px solid #333333">Pedido minimo</td>
+      <td class="content_tbl_subheader content_row_os" align="center">Corte Maquina</td>
+      <td class="content_tbl_subheader content_row_os" align="center">Ancho Rollo</td>
+      <td class="content_tbl_subheader content_row_os" align="center">Gramaje Tela</td>
+      <td class="content_tbl_subheader content_row_os" align="center" style="border-right:3px solid #333333">Largo Manilla</td>
+      <td class="content_tbl_subheader content_row_os" align="center" style="border-right:3px solid #333333">Area de Impresión</td>
+      <?
+      foreach($amounts AS $amount)
+      {  ?>
+         <td class="content_tbl_subheader content_row_os" align="center"><nobr><?=printPrice($amount["amt_val"])?></nobr></td>
+         <?
+      }
+      ?>
+      <td class="content_tbl_subheader content_row_os" align="center">Dsc. s/impresión</td>
+      <td class="content_tbl_subheader content_row_os" align="center">Act.</td>
+   </tr>
+   <?
+   $rowcount = count($_RES[$ltype]) + 5;
+   for($x = 0; $x < $rowcount; $x++)
+   {  ?>
+      <tr bgcolor="<?=getRowColor(0)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+         <td class="content_row"><?=$_RES[$ltype][$x]["item_number_prod"]?></td>
+         <td class="content_row">
+            <input type="hidden" name="existingid_<?=$ltype?>_<?=$x?>" value="<?=$_RES[$ltype][$x]["id"]?>">
+            <select class="text" name="fab_item_id_<?=$ltype?>_<?=$x?>" style="width:100%">
+               <option value="">Seleccione</option>
+               <?
+               for($y = 0; $y < count($items) && $items != false; $y++)
+               {  ?>
+                  <option value="<?=$items[$y]["id"]?>" <? if($items[$y]["id"] == $_RES[$ltype][$x]["fab_item_id"]) echo "selected"?>>
+                  <?=$items[$y]["item_number_prod"]?> (<?=$items[$y]["item_title"]?>)
+                  </option>
+                  <?
+               }
+               ?>
+            </select>
+         </td>
+         <td class="content_row">
+            <select class="text" style="width:100%" name="fab_inc_id_<?=$ltype?>_<?=$x?>">
+               <option value="">Seleccione</option>
+               <?
+               for($y = 0; $y < count($incs) && $incs != false; $y++)
+               {  ?>
+                  <option value="<?=$incs[$y]["id"]?>" <? if($incs[$y]["id"] == $_RES[$ltype][$x]["fab_inc_id"]) echo "selected"?>>
+                     <?=$incs[$y]["inc_name"]?>
+                  </option>
+                  <?
+               }
+               ?>
+            </select>
+         </td>
+         <td class="content_row" style="border-right:3px solid #333333">
+            <input type="text" class="text" style="width:100px" name="fab_desc_<?=$ltype?>_<?=$x?>"
+            value="<?=$_RES[$ltype][$x]["fab_desc"]?>">
+         </td>
+         <td class="content_row">
+            <nobr>
+            <input type="text" class="text" style="width:45px;text-align:center" placeholder="Ancho" name="fab_med_width_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["id"]) echo (int)$_RES[$ltype][$x]["fab_med_width"]?>">
+            <input type="text" class="text" style="width:45px;text-align:center" placeholder="Alto" name="fab_med_height_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["id"]) echo (int)$_RES[$ltype][$x]["fab_med_height"]?>">
+            <input type="text" class="text" style="width:45px;text-align:center" placeholder="Fuelle" name="fab_med_fuelle_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["fab_med_fuelle"]) echo (int)$_RES[$ltype][$x]["fab_med_fuelle"]?>">
+            </nobr>
+         </td>
+         <td class="content_row" style="border-right:3px solid #333333">
+            <input type="text" class="text" style="width:100%;text-align:center" name="fab_min_amt_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["fab_min_amt"]) echo printPrice($_RES[$ltype][$x]["fab_min_amt"])?>">
+         </td>
+         <td class="content_row">
+            <input type="text" class="text" style="width:100%;text-align:center" name="fab_corte_machine_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["fab_corte_machine"]) echo (int)$_RES[$ltype][$x]["fab_corte_machine"]?>">
+         </td>
+         <td class="content_row">
+            <input type="text" class="text" style="width:100%;text-align:center" name="fab_roll_width_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["fab_roll_width"]) echo (int)$_RES[$ltype][$x]["fab_roll_width"]?>">
+         </td>
+         <td class="content_row">
+            <input type="text" class="text" style="width:100%;text-align:center" name="fab_fabric_gr_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["fab_fabric_gr"]) echo (int)$_RES[$ltype][$x]["fab_fabric_gr"]?>">
+         </td>
+         <td class="content_row" style="border-right:3px solid #333333">
+            <input type="text" class="text" style="width:100%;text-align:center" name="fab_manilla_length_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["fab_manilla_length"]) echo (int)$_RES[$ltype][$x]["fab_manilla_length"]?>">
+         </td>
+         <td class="content_row" style="border-right:3px solid #333333">
+            <nobr>
+            <input type="text" class="text" style="width:45px;text-align:center" placeholder="Ancho" name="fab_print_width_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["fab_print_width"]) echo (int)$_RES[$ltype][$x]["fab_print_width"]?>">
+            <input type="text" class="text" style="width:45px;text-align:center" placeholder="Alto" name="fab_print_height_<?=$ltype?>_<?=$x?>"
+            value="<?if((int)$_RES[$ltype][$x]["fab_print_height"]) echo (int)$_RES[$ltype][$x]["fab_print_height"]?>">
+            </nobr>
+         </td>
+         <?
+         foreach($amounts AS $amount)
+         {  ?>
+            <td class="content_row_os" align="center">
+               <input type="text" class="text" style="width:45px;text-align:center" placeholder=""
+               name="prc_price_<?=$ltype?>_<?=$x?>_<?=(int)$amount["amt_val"]?>"
+               value="<?if((int)$_RES[$ltype][$x]["_prices"][(int)$amount["amt_val"]]) echo printPrice($_RES[$ltype][$x]["_prices"][(int)$amount["amt_val"]])?>">
+            </td>
+            <?
+         }
+         ?>
+         <td class="content_row">
+            <input type="text" class="text" style="width:100%;text-align:center" name="fab_noprint_discount_<?=$ltype?>_<?=$x?>"
+            placeholder="$"
+            value="<?if((int)$_RES[$ltype][$x]["fab_noprint_discount"]) echo (int)$_RES[$ltype][$x]["fab_noprint_discount"]?>">
+         </td>
+         <td class="content_row" align="center">
+            <input type="checkbox" name="fab_active_<?=$ltype?>_<?=$x?>" value="1"
+            <?if(!(int)$_RES[$ltype][$x]["id"] || ((int)$_RES[$ltype][$x]["fab_active"])) echo "checked"?>>
+         </td>
+      </tr>
+      <?
+   }
+   ?>
+   </table>
+   <?=Nifty_printF()?>
+   <br>
+   <?
+}
+?>
+<?=Nifty_printH("boxopt_b", "99%")?>
+<table border="0" cellspacing="0" cellpadding="0" width="100%">
+<tr>
+   <td>&nbsp;</td>
+   <td align="right" width="130" style="padding-right:5px">
+      <?
+      printButton("Descargar XLS", "postnav", "javascript: deactivateFormChange()", "document.xform_pl.printXLS.value='1';submitForm(document.xform_pl)", "arrow-stop-270");
+      ?>
+   </td>
+   
+   <td align="right" width="130" style="padding-right:5px">
+      <?
+      printButton("Subir XLS", "postnav", "javascript: deactivateFormChange()", "showFancybox('/libs/modules/pricelists_fab/fancy.import.xls.php?id={$_REQUEST["id"]}&mid={$_REQUEST["mid"]}', 'iframe', 450, 140, 'no')", "arrow-stop-090");
+      ?>
+   </td>
+   <!--
+   <td align="right" width="130" style="padding-right:5px">
+      <?
+      /* printButton("Borrar y Subir XLS", "postnav_del", "javascript: deactivateFormChange()", "showFancybox('/libs/modules/pricelists_fab/fancy.import.xls.php?id={$_REQUEST["id"]}&mid={$_REQUEST["mid"]}&reempl=1', 'iframe', 450, 140, 'no')", "arrow-stop-090");*/
+      ?>
+   </td>
+   -->
+   <td align="right" width="130">
+      <?
+      printButton($_LANG["FORM"]["BUTTON"][0], "postnav_save", "javascript: deactivateFormChange()", "submitForm(document.xform_pl)", "disk-black");
+      ?>
+   </td>
+</tr>
+</table>
+<?=Nifty_printF(false)?>
+</form>
+<iframe id="idxifrsrcitm" height="0" width="0" frameborder="0"></iframe>
+<?
+$_SESSION["JSEXEC"] .= ';$("#obitpanel").html("");';
+
+//----------------------------------------------------------------------------------
+if((int)$_REQUEST["printXLS"])
+{
+   $xlsfile = xls_createFabPlist($CON, $_REQUEST["id"]);
+   $doctitle = "Precios-Fabricacion-".time().".xls";
+   $xlslink = "./libs/modules/structure/document_file.php?type=0&hash={$xlsfile}.xls&name={$doctitle}&path=../../../docs.print/";
+   ?>
+   <iframe height="0" width="0" frameborder="0" src="<?=$xlslink?>"></iframe>
+   <?
+}

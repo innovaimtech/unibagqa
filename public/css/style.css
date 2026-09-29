@@ -1,0 +1,108 @@
+html
+{
+   padding:0px;
+   margin:0px;
+   font-family:Arial;
+   font-size:14px;
+}
+body
+{
+   font-size:14px;
+   font-family:Arial;
+   color:#666666;
+}
+td
+{
+   font-size:14px;
+   font-family:Arial;
+}
+.tdleft
+{
+   border-bottom:1px solid #DDDDDD;
+   font-weight:bold;
+}
+.tdnrm
+{
+   font-size:14px;
+   border-bottom:1px solid #DDDDDD;
+}
+.tdnrmtop
+{
+   font-size:14px;
+   border-top:1px solid #DDDDDD;
+}
+.tdheader
+{
+   border-bottom:1px solid #DDDDDD;
+   color:#115452;
+   font-weight:bold;
+   font-size:14px;
+}
+.tdnoborder
+{
+   border-bottom:0px !important;
+}
+.btnred
+{
+   cursor:pointer;
+   font-size:14px;
+   padding:8px;
+   background-color:#D64141;
+   color:white;
+   text-align:center;
+}
+.btngreen
+{
+   cursor:pointer;
+   font-size:14px;
+   padding:8px;
+   background-color:#00A85A;
+   color:white;
+   text-align:center;
+}
+.btnblue
+{
+   cursor:pointer;
+   font-size:14px;
+   padding:8px;
+   background-color:#3F4C9B;
+   color:white;
+   text-align:center;
+}
+.btnorange
+{
+   cursor:pointer;
+   font-size:14px;
+   padding:8px;
+   background-color:#E1A500;
+   color:white;
+   text-align:center;
+}
+.btngrey
+{
+   cursor:pointer;
+   font-size:14px;
+   padding:8px;
+   background-color:#999999;
+   color:white;
+   text-align:center;
+}
+.msg_save_err
+{
+   font-weight:bold;
+   color:#D64141;
+}
+.msg_save_ok
+{
+   font-weight:bold;
+   color:#5DBA66;
+}
+.inptxt
+{
+   padding:5px;
+   font-size:14px;
+   font-family:Arial;
+   border:1px solid #CCCCCC;
+   border-radius:5px;
+   color:#666666;
+}

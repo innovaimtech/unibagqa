@@ -1,0 +1,2 @@
+http://maps.google.com/maps?f=q&hl=es&q=<?=urlencode(htmlentities($_REQUEST["str"]))?>&t=h
+<iframe src="http://maps.google.com" width="100%" height="100%" scrolling="auto" frameborder=1 frame="none"></iframe>

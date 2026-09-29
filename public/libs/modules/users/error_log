@@ -1,0 +1,2 @@
+[08-Mar-2023 09:37:09 America/Santiago] PHP Deprecated:  mysql_connect(): The mysql extension is deprecated and will be removed in the future: use mysqli or PDO instead in /home/unibag/sistema.unibag.cl/libs/classes/mysql.php on line 38
+[09-Jun-2023 11:32:43 America/Santiago] PHP Deprecated:  mysql_connect(): The mysql extension is deprecated and will be removed in the future: use mysqli or PDO instead in /home/unibag/sistema.unibag.cl/libs/classes/mysql.php on line 38

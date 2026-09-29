@@ -2,8 +2,40 @@
 
 declare(strict_types=1);
 
+// =============================================================================
+// Front Controller · Router principal (public/index.php)
+//
+// Este archivo es el punto de entrada HTTP del sistema. Sus responsabilidades
+// principales son:
+// - Cargar configuración (.env) y establecer timezone.
+// - Inicializar sesión y CSRF.
+// - Crear conexiones a DB (TRZ y ERP) y el servicio principal ReceptionService.
+// - Delegar el ruteo a módulos HTTP especializados (Auth, API, Inventario, Reportes, Bodegas).
+// - Proveer helpers de UI/formatos usados por múltiples pantallas (escape HTML, labels, etc.).
+//
+// Nota:
+// - El proyecto deliberadamente NO usa framework; este archivo cumple el rol de “kernel”.
+// - Los exports tipo “Excel” se entregan como HTML con headers de XLS.
+//
+// ---
+//
+// Front Controller · Main Router (public/index.php)
+//
+// This file is the HTTP entry point of the system. Its main responsibilities are:
+// - Load configuration (.env) and set timezone.
+// - Initialize session and CSRF.
+// - Create DB connections (TRZ and ERP) and the main ReceptionService.
+// - Delegate routing to specialized HTTP modules (Auth, API, Inventory, Reports, Warehouses).
+// - Provide UI/format helpers used by multiple screens (HTML escaping, labels, etc.).
+//
+// Note:
+// - This project intentionally does NOT use a framework; this file acts as the “kernel”.
+// - “Excel” exports are served as HTML with XLS headers.
+// =============================================================================
+
 require_once __DIR__ . '/../src/Env.php';
 require_once __DIR__ . '/../src/Db.php';
+require_once __DIR__ . '/../src/SimpleXlsx.php';
 require_once __DIR__ . '/../src/ReceptionService.php';
 require_once __DIR__ . '/../src/ScaleService.php';
 require_once __DIR__ . '/../src/PrintService.php';
@@ -12,6 +44,9 @@ require_once __DIR__ . '/../src/Http/ApiModule.php';
 require_once __DIR__ . '/../src/Http/InventoryModule.php';
 require_once __DIR__ . '/../src/Http/ErpReportsModule.php';
 require_once __DIR__ . '/../src/Http/WarehousesModule.php';
+require_once __DIR__ . '/../src/MonthlyPresentationService.php';
+require_once __DIR__ . '/../src/ProductionService.php';
+require_once __DIR__ . '/../src/Http/ProductionModule.php';
 
 Env::load(__DIR__ . '/../.env');
 $appTimezone = trim((string)(Env::get('APP_TIMEZONE', 'America/Santiago') ?? 'America/Santiago'));
@@ -48,9 +83,9 @@ $erpPdo = null;
 $service = null;
 $scale = null;
 $printer = null;
-$currentOperatorName = trim((string)($_SESSION['operator_name'] ?? $_SESSION['auth_display_name'] ?? 'Operador Demo'));
+$currentOperatorName = trim((string)($_SESSION['operator_name'] ?? $_SESSION['auth_display_name'] ?? 'Operador'));
 if ($currentOperatorName === '') {
-    $currentOperatorName = 'Operador Demo';
+    $currentOperatorName = 'Operador';
 }
 
 $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
@@ -60,6 +95,19 @@ if ($path === '') {
     $path = '/';
 }
 
+/**
+ * Redirige y finaliza la respuesta HTTP.
+ *
+ * Limpia buffers (si existen) para evitar “headers already sent”, setea headers
+ * anti-cache y emite Location.
+ *
+ * ---
+ *
+ * Redirects and terminates the HTTP response.
+ *
+ * It clears output buffers (if any) to avoid “headers already sent”, sets
+ * no-cache headers and outputs the Location header.
+ */
 function redirectResponse(string $location, int $statusCode = 303): void
 {
     while (ob_get_level() > 0) {
@@ -85,6 +133,7 @@ try {
 }
 
 $service = new ReceptionService($trzPdo, $erpPdo);
+$prodService = new ProductionService($erpPdo, $trzPdo);
 $scale = new ScaleService($_ENV);
 $printer = new PrintService($_ENV);
 
@@ -96,6 +145,17 @@ if (handleInventoryRoutes($path, $method, $service, $currentOperatorName)) {
     exit;
 }
 
+if ($path === '/reception') {
+    $targetQuery = $_GET;
+    if (!isset($targetQuery['status'])) {
+        $targetQuery['status'] = 'active';
+    }
+    if (!isset($targetQuery['supplier_type'])) {
+        $targetQuery['supplier_type'] = 'NATIONAL';
+    }
+    redirectResponse('/purchase-orders?' . http_build_query($targetQuery), 302);
+}
+
 if (handleErpReportRoutes($path, $method, $service)) {
     exit;
 }
@@ -104,12 +164,41 @@ if (handleWarehousesRoutes($path, $method, $service)) {
     exit;
 }
 
+if (handleProductionRoutes($path, $method, $prodService, $service, $scale, $currentOperatorName)) {
+    exit;
+}
+
+/**
+ * Escape HTML seguro para imprimir texto en vistas.
+ *
+ * ---
+ *
+ * Safe HTML escape helper for rendering text in views.
+ */
 function h(string $value): string
 {
     return htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
 /**
+ * Determina si una bobina puede trasladarse a otra bodega o asignarse a una OT.
+ *
+ * Reglas (resumen):
+ * - Si la bobina ya está asignada a una OT, no se permite moverla.
+ * - Si el status no es RECEIVED, no se permite moverla (según motivo).
+ * - Si está RECEIVED: se permite traspaso de bodega; y se permite ingreso a OT
+ *   solo si la etapa es RAW o PRINTED.
+ *
+ * ---
+ *
+ * Determines whether a roll can be transferred to another warehouse or attached to a work order.
+ *
+ * Rules (summary):
+ * - If the roll is already assigned to a work order, it cannot be moved.
+ * - If status is not RECEIVED, it cannot be moved (with a reason).
+ * - If RECEIVED: warehouse transfer is allowed; and work-order attach is allowed
+ *   only when stage is RAW or PRINTED.
+ *
  * @param array<string, mixed> $roll
  * @return array{
  *   warehouse: array{allowed: bool, reason: string},
@@ -156,6 +245,19 @@ function rollTransferAvailability(array $roll): array
     ];
 }
 
+/**
+ * Pantalla estándar de error cuando no se puede conectar a la BD.
+ *
+ * Se usa al inicio del request, antes de instanciar servicios, para dar un
+ * checklist claro de configuración (TRZ/ERP) sin romper la aplicación con un fatal.
+ *
+ * ---
+ *
+ * Standard error screen when database connection cannot be established.
+ *
+ * Used early in the request (before services are instantiated) to show a clear
+ * configuration checklist (TRZ/ERP) instead of throwing a fatal error.
+ */
 function renderDatabaseConnectionError(Throwable $e): void
 {
     $body = '<div class="card">
@@ -173,11 +275,25 @@ function renderDatabaseConnectionError(Throwable $e): void
     exit;
 }
 
+/**
+ * Label amigable para el modo de recepción (por peso vs. por unidades).
+ *
+ * ---
+ *
+ * Human-friendly label for reception mode (by weight vs. by quantity).
+ */
 function receptionModeLabel(string $mode): string
 {
     return strtoupper(trim($mode)) === 'WEIGHT' ? 'Por peso' : 'Por unidades';
 }
 
+/**
+ * Label amigable para la etapa de proceso de una bobina.
+ *
+ * ---
+ *
+ * Human-friendly label for a roll process stage.
+ */
 function rollProcessStageLabel(?string $stage): string
 {
     return match (strtoupper(trim((string)$stage))) {
@@ -188,6 +304,13 @@ function rollProcessStageLabel(?string $stage): string
     };
 }
 
+/**
+ * Label amigable para el estado de una bobina.
+ *
+ * ---
+ *
+ * Human-friendly label for a roll status.
+ */
 function rollStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -199,6 +322,13 @@ function rollStatusLabel(?string $status): string
     };
 }
 
+/**
+ * Label amigable para el estado de una OT.
+ *
+ * ---
+ *
+ * Human-friendly label for a work order status.
+ */
 function workOrderStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -211,6 +341,13 @@ function workOrderStatusLabel(?string $status): string
     };
 }
 
+/**
+ * Label amigable para etapas/secciones del flujo de producción.
+ *
+ * ---
+ *
+ * Human-friendly label for production process stages/sections.
+ */
 function machineProcessStageLabel(?string $stage): string
 {
     return match (strtoupper(trim((string)$stage))) {
@@ -224,6 +361,13 @@ function machineProcessStageLabel(?string $stage): string
     };
 }
 
+/**
+ * Label amigable para el estado de un turno (shift session).
+ *
+ * ---
+ *
+ * Human-friendly label for a shift session status.
+ */
 function shiftSessionStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -233,6 +377,13 @@ function shiftSessionStatusLabel(?string $status): string
     };
 }
 
+/**
+ * Label amigable para el estado de un documento de recepción.
+ *
+ * ---
+ *
+ * Human-friendly label for a reception document status.
+ */
 function receptionDocumentStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -243,6 +394,240 @@ function receptionDocumentStatusLabel(?string $status): string
     };
 }
 
+function renderReceptionNavTabs(string $activeTab): string
+{
+    $tabs = [
+        'national_active' => [
+            'label' => 'Nacional Activa',
+            'icon' => '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>',
+            'url' => '/purchase-orders?status=active&supplier_type=NATIONAL',
+        ],
+        'import_active' => [
+            'label' => 'Importación Activa',
+            'icon' => '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
+            'url' => '/import-containers?status=active',
+        ],
+        'national_complete' => [
+            'label' => 'Nacionales Finalizadas',
+            'icon' => '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>',
+            'url' => '/purchase-orders?status=complete&supplier_type=NATIONAL',
+        ],
+        'import_complete' => [
+            'label' => 'Importación Finalizadas',
+            'icon' => '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>',
+            'url' => '/import-containers?status=complete',
+        ],
+    ];
+
+    $html = '<div class="rec-nav-bar">';
+    foreach ($tabs as $key => $tab) {
+        $isActive = ($key === $activeTab);
+        $html .= '<a href="' . h($tab['url']) . '" class="rec-nav-tab' . ($isActive ? ' active' : '') . '">'
+              . $tab['icon'] . '<span>' . h($tab['label']) . '</span></a>';
+    }
+    $html .= '</div>';
+    return $html;
+}
+
+function renderReceptionStatusBadge(?string $status): string
+{
+    $st = strtoupper(trim((string)$status));
+    if ($st === 'COMPLETE') {
+        return '<span class="rec-badge rec-badge-complete"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>Finalizada</span>';
+    }
+    if ($st === 'PARTIAL') {
+        return '<span class="rec-badge rec-badge-partial"><span class="rec-dot"></span>Parcial</span>';
+    }
+    return '<span class="rec-badge rec-badge-open"><span class="rec-dot"></span>Abierta</span>';
+}
+
+function renderReceptionProgressCol(int $completed, int $total): string
+{
+    $pct = $total > 0 ? min(100, max(0, (int)round(($completed / $total) * 100))) : 0;
+    $isAll = $total > 0 && $completed >= $total;
+    $fillClass = $isAll ? ' rec-fill-complete' : '';
+    return '<div class="rec-prog-container">'
+         . '<div class="rec-prog-bar"><div class="rec-prog-fill' . $fillClass . '" style="width:' . $pct . '%"></div></div>'
+         . '<span class="rec-prog-label' . ($isAll ? ' is-done' : '') . '">' . $completed . ' / ' . $total . '</span>'
+         . '</div>';
+}
+
+function renderReceptionPagination(
+    int $currentPage,
+    int $totalPages,
+    int $totalRecords,
+    int $pageSize,
+    string $baseUrl,
+    array $queryParams
+): string {
+    if ($totalRecords <= 0) {
+        return '';
+    }
+
+    $startItem = max(1, ($currentPage - 1) * $pageSize + 1);
+    $endItem = min($totalRecords, $currentPage * $pageSize);
+
+    $buildUrl = function(int $page) use ($baseUrl, $queryParams): string {
+        $params = $queryParams;
+        $params['page'] = $page;
+        return $baseUrl . '?' . http_build_query($params);
+    };
+
+    if ($totalPages <= 7) {
+        $items = range(1, $totalPages);
+    } else {
+        $items = [];
+        $start = max(1, $currentPage - 2);
+        $end = min($totalPages, $currentPage + 2);
+        if ($start > 1) {
+            $items[] = 1;
+            if ($start > 2) {
+                $items[] = '...';
+            }
+        }
+        for ($i = $start; $i <= $end; $i++) {
+            $items[] = $i;
+        }
+        if ($end < $totalPages) {
+            if ($end < $totalPages - 1) {
+                $items[] = '...';
+            }
+            $items[] = $totalPages;
+        }
+    }
+
+    $html = '<div class="rec-pagination-bar">';
+    $html .= '<div class="rec-pagination-info">';
+    $html .= 'Mostrando <strong>' . $startItem . '</strong> - <strong>' . $endItem . '</strong> de <strong>' . $totalRecords . '</strong> registros';
+    if ($totalPages > 1) {
+        $html .= ' (Página ' . $currentPage . ' de ' . $totalPages . ')';
+    }
+    $html .= '</div>';
+
+    if ($totalPages > 1) {
+        $html .= '<div class="rec-pagination-nav">';
+        if ($currentPage > 1) {
+            $html .= '<a href="' . h($buildUrl($currentPage - 1)) . '" class="rec-page-btn">&laquo; Anterior</a>';
+        } else {
+            $html .= '<span class="rec-page-btn disabled">&laquo; Anterior</span>';
+        }
+
+        foreach ($items as $item) {
+            if ($item === '...') {
+                $html .= '<span class="rec-page-dots">...</span>';
+            } elseif ((int)$item === $currentPage) {
+                $html .= '<span class="rec-page-btn active">' . $item . '</span>';
+            } else {
+                $html .= '<a href="' . h($buildUrl((int)$item)) . '" class="rec-page-btn">' . $item . '</a>';
+            }
+        }
+
+        if ($currentPage < $totalPages) {
+            $html .= '<a href="' . h($buildUrl($currentPage + 1)) . '" class="rec-page-btn">Siguiente &raquo;</a>';
+        } else {
+            $html .= '<span class="rec-page-btn disabled">Siguiente &raquo;</span>';
+        }
+        $html .= '</div>';
+    }
+
+    $html .= '</div>';
+    return $html;
+}
+
+function renderReceptionClosureBanner(?array $closure): string
+{
+    if ($closure === null) {
+        return '';
+    }
+    $reason = h((string)($closure['reason'] ?? 'Cierre con faltantes'));
+    $notes = trim((string)($closure['notes'] ?? ''));
+    $date = h((string)($closure['created_at'] ?? ''));
+
+    $html = '<div style="margin-bottom:16px;padding:14px 18px;background:#fef2f2;border:1px solid #fecdd3;border-left:5px solid #e11d48;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $html .= '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">';
+    $html .= '<div style="font-weight:700;color:#9f1239;font-size:14px;display:flex;align-items:center;gap:6px"><span>🔒</span> Recepción Cerrada Anticipadamente con Faltantes</div>';
+    if ($date !== '') {
+        $html .= '<div style="font-size:12px;color:#881337;font-weight:500">Fecha de cierre: ' . $date . '</div>';
+    }
+    $html .= '</div>';
+    $html .= '<div style="margin-top:6px;font-size:13px;color:#334155"><strong>Motivo registrado:</strong> <span style="color:#9f1239;font-weight:600">' . $reason . '</span></div>';
+    if ($notes !== '') {
+        $html .= '<div style="margin-top:4px;font-size:13px;color:#475569"><strong>Observaciones / Reembolso:</strong> ' . h($notes) . '</div>';
+    }
+    $html .= '</div>';
+    return $html;
+}
+
+function renderCloseReceptionModal(string $actionUrl, string $entityTitle, int $pendingUnits = 0): string
+{
+    $html = '
+    <div id="modal-close-reception" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);z-index:99999;align-items:center;justify-content:center;padding:16px;backdrop-filter:blur(3px)">
+      <div style="background:#ffffff;border-radius:14px;max-width:540px;width:100%;box-shadow:0 25px 50px -12px rgba(0,0,0,0.25);overflow:hidden;border:1px solid #fecdd3">
+        <div style="padding:16px 20px;background:#fff1f2;border-bottom:1px solid #ffe4e6;display:flex;align-items:center;justify-content:space-between">
+          <div style="font-weight:700;font-size:16px;color:#9f1239;display:flex;align-items:center;gap:8px">
+            <span style="font-size:18px">🔒</span> Cerrar Recepción con Faltantes
+          </div>
+          <button type="button" onclick="closeReceptionModal()" style="background:none;border:none;font-size:24px;line-height:1;cursor:pointer;color:#9f1239;padding:0">&times;</button>
+        </div>
+        <form method="post" action="' . h($actionUrl) . '" style="padding:20px;margin:0">
+          <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
+          
+          <div style="background:#fef2f2;border:1px solid #fee2e2;border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:#881337;line-height:1.5">
+            <strong>¿Por qué cerrar anticipadamente?</strong><br>
+            Esta acción dará por finalizada la recepción de <strong>' . h($entityTitle) . '</strong> y la moverá al historial de <strong>Finalizadas</strong>. Úsela cuando el proveedor no entregará el saldo restante (falla de despacho, faltantes o reembolso pactado).
+          </div>';
+
+    if ($pendingUnits > 0) {
+        $html .= '<div style="margin-bottom:14px;padding:10px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#334155;display:flex;justify-content:space-between;align-items:center">
+          <span>Saldo pendiente por ingresar:</span>
+          <strong style="color:#e11d48;font-size:14px">' . number_format($pendingUnits, 0, ',', '.') . ' Unid.</strong>
+        </div>';
+    }
+
+    $html .= '
+          <div style="margin-bottom:14px">
+            <label style="display:block;font-weight:700;font-size:13px;color:#1e293b;margin-bottom:6px">Motivo del Cierre <span style="color:#e11d48">*</span></label>
+            <select name="reason" style="width:100%;padding:9px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;background:#fff;color:#0f172a" required>
+              <option value="Falla de proveedor (Reembolso acordado)" selected>Falla de proveedor (Reembolso acordado)</option>
+              <option value="Entrega incompleta acordada con compras">Entrega incompleta acordada con compras</option>
+              <option value="Mercadería dañada en origen / No enviada">Mercadería dañada en origen / No enviada</option>
+              <option value="Discrepancia de inventario / Otro">Discrepancia de inventario / Otro motivo</option>
+            </select>
+          </div>
+
+          <div style="margin-bottom:18px">
+            <label style="display:block;font-weight:700;font-size:13px;color:#1e293b;margin-bottom:6px">Observaciones / Detalle del Reembolso</label>
+            <textarea name="notes" rows="3" placeholder="Indique detalle del reembolso, nota de crédito pactada o justificación..." style="width:100%;padding:9px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>
+          </div>
+
+          <div style="display:flex;justify-content:flex-end;gap:10px;padding-top:12px;border-top:1px solid #f1f5f9">
+            <button type="button" class="btn secondary" onclick="closeReceptionModal()" style="padding:8px 16px;font-size:13px">Cancelar</button>
+            <button type="submit" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-weight:700;padding:8px 18px;font-size:13px">Confirmar y Cerrar Recepción</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <script>
+      function openCloseReceptionModal() {
+        var m = document.getElementById("modal-close-reception");
+        if (m) { m.style.display = "flex"; }
+      }
+      function closeReceptionModal() {
+        var m = document.getElementById("modal-close-reception");
+        if (m) { m.style.display = "none"; }
+      }
+    </script>';
+
+    return $html;
+}
+
+/**
+ * Label amigable para el estado de una solicitud de material.
+ *
+ * ---
+ *
+ * Human-friendly label for a material request status.
+ */
 function materialRequestStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -254,11 +639,25 @@ function materialRequestStatusLabel(?string $status): string
     };
 }
 
+/**
+ * Determina si una OT permite recibir/entregar materiales según su estado.
+ *
+ * ---
+ *
+ * Determines whether a work order can receive/deliver materials based on its status.
+ */
 function workOrderCanReceiveMaterials(?string $status): bool
 {
     return in_array(strtoupper(trim((string)$status)), ['OPEN', 'ACTIVE', 'CUTTING'], true);
 }
 
+/**
+ * Label amigable para el tipo de solicitud de material.
+ *
+ * ---
+ *
+ * Human-friendly label for a material request type.
+ */
 function materialRequestTypeLabel(?string $type): string
 {
     return match (strtoupper(trim((string)$type))) {
@@ -269,6 +668,13 @@ function materialRequestTypeLabel(?string $type): string
     };
 }
 
+/**
+ * Label amigable para el tipo de movimiento de inventario.
+ *
+ * ---
+ *
+ * Human-friendly label for an inventory movement type.
+ */
 function movementTypeLabel(?string $type): string
 {
     return match (strtoupper(trim((string)$type))) {
@@ -278,6 +684,13 @@ function movementTypeLabel(?string $type): string
     };
 }
 
+/**
+ * Label amigable para el estado de una orden de maquila.
+ *
+ * ---
+ *
+ * Human-friendly label for a maquila order status.
+ */
 function maquilaStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -289,6 +702,13 @@ function maquilaStatusLabel(?string $status): string
     };
 }
 
+/**
+ * Label amigable para el estado de un pallet.
+ *
+ * ---
+ *
+ * Human-friendly label for a pallet status.
+ */
 function palletStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -300,6 +720,13 @@ function palletStatusLabel(?string $status): string
     };
 }
 
+/**
+ * Label amigable para el estado de una caja.
+ *
+ * ---
+ *
+ * Human-friendly label for a box status.
+ */
 function boxStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -311,6 +738,13 @@ function boxStatusLabel(?string $status): string
     };
 }
 
+/**
+ * Label amigable para el estado de un cliché.
+ *
+ * ---
+ *
+ * Human-friendly label for a cliche status.
+ */
 function clicheStatusLabel(?string $status): string
 {
     return match (strtoupper(trim((string)$status))) {
@@ -322,6 +756,13 @@ function clicheStatusLabel(?string $status): string
     };
 }
 
+/**
+ * Label amigable para el tipo de evento (auditoría/bitácora).
+ *
+ * ---
+ *
+ * Human-friendly label for an event type (audit/log).
+ */
 function eventTypeLabel(?string $type): string
 {
     return match (strtoupper(trim((string)$type))) {
@@ -357,6 +798,13 @@ function eventTypeLabel(?string $type): string
     };
 }
 
+/**
+ * Abreviación/label corto para el área ERP activa (para headers y badges).
+ *
+ * ---
+ *
+ * Short label for the current ERP area (used in headers and badges).
+ */
 function erpAreaShortLabel(string $area): string
 {
     return match (normalizeErpArea($area)) {
@@ -367,16 +815,44 @@ function erpAreaShortLabel(string $area): string
     };
 }
 
+/**
+ * Construye un resumen normalizado de una línea de recepción (ordenado/recibido/pendiente).
+ *
+ * Soporta:
+ * - Recepción por peso (WEIGHT): usa ordered_weight_kg / received_weight_kg.
+ * - Recepción por unidades (QUANTITY): usa ordered_rolls / received_qty.
+ *
+ * ---
+ *
+ * Builds a normalized summary for a reception line (ordered/received/pending).
+ *
+ * Supports:
+ * - Weight-based reception (WEIGHT): uses ordered_weight_kg / received_weight_kg.
+ * - Quantity-based reception (QUANTITY): uses ordered_rolls / received_qty.
+ *
+ * @param array<string, mixed> $line
+ * @return array{mode:string,ordered:float,received:float,pending:float,unit:string,ordered_weight_kg:float,received_weight_kg:float,pending_weight_kg:float,ordered_rolls:float,received_rolls:float,pending_rolls:float}
+ */
 function receptionLineSummary(array $line): array
 {
     $mode = strtoupper(trim((string)($line['reception_mode'] ?? 'QUANTITY'))) === 'WEIGHT' ? 'WEIGHT' : 'QUANTITY';
+    $orderedWeight = round((float)($line['ordered_weight_kg'] ?? 0), 3);
+    $receivedWeight = round((float)($line['received_weight_kg'] ?? 0), 3);
+    $pendingWeight = max(0, round($orderedWeight - $receivedWeight, 3));
+
+    $orderedRolls = round((float)($line['ordered_rolls'] ?? 0), 3);
+    $receivedRolls = round((float)($line['received_qty'] ?? $line['received_rolls'] ?? 0), 3);
+    $pendingRolls = max(0, round($orderedRolls - $receivedRolls, 3));
+
     if ($mode === 'WEIGHT') {
-        $ordered = round((float)($line['ordered_weight_kg'] ?? 0), 3);
-        $received = round((float)($line['received_weight_kg'] ?? 0), 3);
+        $ordered = $orderedWeight;
+        $received = $receivedWeight;
+        $pending = $pendingWeight;
         $unit = 'Kg';
     } else {
-        $ordered = round((float)($line['ordered_rolls'] ?? 0), 3);
-        $received = round((float)($line['received_qty'] ?? $line['received_rolls'] ?? 0), 3);
+        $ordered = $orderedRolls;
+        $received = $receivedRolls;
+        $pending = $pendingRolls;
         $unit = 'Unid.';
     }
 
@@ -384,11 +860,28 @@ function receptionLineSummary(array $line): array
         'mode' => $mode,
         'ordered' => $ordered,
         'received' => $received,
-        'pending' => max(0, round($ordered - $received, 3)),
+        'pending' => $pending,
         'unit' => $unit,
+        'ordered_weight_kg' => $orderedWeight,
+        'received_weight_kg' => $receivedWeight,
+        'pending_weight_kg' => $pendingWeight,
+        'ordered_rolls' => $orderedRolls,
+        'received_rolls' => $receivedRolls,
+        'pending_rolls' => $pendingRolls,
     ];
 }
 
+/**
+ * Formatea un valor de recepción según unidad:
+ * - Unid.: se muestra sin decimales cuando es entero.
+ * - Otros: 3 decimales con separador local.
+ *
+ * ---
+ *
+ * Formats a reception value based on unit:
+ * - Unid.: show as integer when the value is effectively whole.
+ * - Others: 3 decimals using local separators.
+ */
 function formatReceptionValue(float $value, string $unit): string
 {
     if ($unit === 'Unid.' && abs($value - round($value)) < 0.0001) {
@@ -397,6 +890,34 @@ function formatReceptionValue(float $value, string $unit): string
     return number_format($value, 3, ',', '.');
 }
 
+/**
+/**
+ * Formatea una línea de recepción mostrando únicamente unidades para una visualización limpia en pantalla.
+ */
+function formatReceptionDual(array $lineSummary, string $type = 'ordered'): string
+{
+    $rollsKey = 'ordered_rolls';
+    if ($type === 'received') {
+        $rollsKey = 'received_rolls';
+    } elseif ($type === 'pending') {
+        $rollsKey = 'pending_rolls';
+    }
+
+    $rolls = (float)($lineSummary[$rollsKey] ?? 0);
+    return (abs($rolls - round($rolls)) < 0.0001 ? (string)(int)round($rolls) : number_format($rolls, 2, ',', '.')) . ' Unid.';
+}
+
+/**
+ * Formatea una fecha (string) a d-m-Y.
+ *
+ * Si no se puede parsear, devuelve el string original.
+ *
+ * ---
+ *
+ * Formats a date (string) as d-m-Y.
+ *
+ * If it cannot be parsed, returns the original string.
+ */
 function formatLabelDate(?string $value): string
 {
     $value = trim((string)$value);
@@ -412,6 +933,17 @@ function formatLabelDate(?string $value): string
     return date('d-m-Y', $ts);
 }
 
+/**
+ * Formatea una duración “hh mm” a partir de timestamps (string).
+ *
+ * Se usa para labels en UI cuando hay inicio y fin de turno/proceso.
+ *
+ * ---
+ *
+ * Formats an elapsed duration “hh mm” from timestamp strings.
+ *
+ * Used for UI labels when there is a start/end time for a shift/process.
+ */
 function formatElapsedLabel(?string $startedAt, ?string $endedAt = null): string
 {
     $startedTs = $startedAt !== null && trim($startedAt) !== '' ? strtotime($startedAt) : false;
@@ -428,6 +960,15 @@ function formatElapsedLabel(?string $startedAt, ?string $endedAt = null): string
     return $hours . 'h ' . $minutes . 'm';
 }
 
+/**
+ * Construye un texto de especificación para una línea (gramos/ancho/color/metros).
+ *
+ * ---
+ *
+ * Builds a specification string for a line (grams/width/color/meters).
+ *
+ * @param array<string, mixed> $line
+ */
 function buildReceptionSpec(array $line): string
 {
     $spec = [];
@@ -439,6 +980,19 @@ function buildReceptionSpec(array $line): string
     return $spec === [] ? '-' : implode(' · ', $spec);
 }
 
+/**
+ * Construye un label para agrupar solicitudes de material.
+ *
+ * Se utiliza en pantallas donde se agrupan pedidos por SKU + atributos (gramos/ancho/color/etc).
+ *
+ * ---
+ *
+ * Builds a grouping label for material requests.
+ *
+ * Used on screens that group requests by SKU + attributes (grams/width/color/etc).
+ *
+ * @param array<string, mixed> $item
+ */
 function materialRequestGroupLabel(array $item): string
 {
     $parts = [];
@@ -467,6 +1021,15 @@ function materialRequestGroupLabel(array $item): string
     return implode(' | ', $parts);
 }
 
+/**
+ * Parsea un groupKey (serializado con “|”) a un arreglo de campos.
+ *
+ * ---
+ *
+ * Parses a groupKey (serialized with “|”) into an array of fields.
+ *
+ * @return array{sku_code:string,sku_description:string,grams:string,width_mm:string,color:string,meters:string,process_stage:string}
+ */
 function parseMaterialRequestGroupKey(?string $groupKey): array
 {
     $parts = explode('|', trim((string)$groupKey));
@@ -481,6 +1044,15 @@ function parseMaterialRequestGroupKey(?string $groupKey): array
     ];
 }
 
+/**
+ * Genera un groupKey para una bobina basado en sus atributos relevantes.
+ *
+ * ---
+ *
+ * Builds a groupKey for a roll based on its relevant attributes.
+ *
+ * @param array<string, mixed> $roll
+ */
 function buildMaterialRequestGroupKeyFromRollData(array $roll): string
 {
     return implode('|', [
@@ -494,6 +1066,17 @@ function buildMaterialRequestGroupKeyFromRollData(array $roll): string
     ]);
 }
 
+/**
+ * Formatea fecha y hora (string) a d.m.Y H:i:s.
+ *
+ * Si no se puede parsear, devuelve el string original.
+ *
+ * ---
+ *
+ * Formats a date-time string as d.m.Y H:i:s.
+ *
+ * If parsing fails, returns the original string.
+ */
 function formatLabelDateTime(?string $value): string
 {
     $value = trim((string)$value);
@@ -509,6 +1092,21 @@ function formatLabelDateTime(?string $value): string
     return date('d.m.Y H:i:s', $ts);
 }
 
+/**
+ * Genera un SVG simple con un código de barras Code39.
+ *
+ * - Valida caracteres permitidos.
+ * - Aplica patrón narrow/wide.
+ * - Útil para etiquetas internas (rolls/pallets/boxes).
+ *
+ * ---
+ *
+ * Generates a simple SVG for a Code39 barcode.
+ *
+ * - Validates allowed characters.
+ * - Applies narrow/wide pattern.
+ * - Useful for internal labels (rolls/pallets/boxes).
+ */
 function code39Svg(string $data, int $height = 70, int $narrow = 2, int $wide = 5): string
 {
     $data = strtoupper(trim($data));
@@ -595,6 +1193,25 @@ function code39Svg(string $data, int $height = 70, int $narrow = 2, int $wide = 
     return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" role="img" aria-label="código de barras">' . implode('', $bars) . '</svg>';
 }
 
+/**
+ * Obtiene o genera el token CSRF para la sesión actual.
+ *
+ * Estrategia:
+ * - Prioriza cookie (persistencia entre requests).
+ * - Si no hay cookie, usa sesión.
+ * - Si no existe ninguno, genera un token seguro (random_bytes).
+ * - Sincroniza cookie + sesión.
+ *
+ * ---
+ *
+ * Gets or generates the CSRF token for the current session.
+ *
+ * Strategy:
+ * - Prefer cookie (persistence across requests).
+ * - If missing, use session value.
+ * - If neither exists, generate a secure token (random_bytes).
+ * - Sync cookie + session.
+ */
 function csrfToken(): string
 {
     $token = trim((string)($_COOKIE[csrfCookieName()] ?? ''));
@@ -611,6 +1228,29 @@ function csrfToken(): string
     return $token;
 }
 
+/**
+ * Valida CSRF para requests POST.
+ *
+ * Requiere que el token enviado en $_POST['_csrf'] coincida con:
+ * - la cookie CSRF, o
+ * - el token en sesión.
+ *
+ * Si falla:
+ * - responde HTTP 400
+ * - renderiza una pantalla de error
+ *
+ * ---
+ *
+ * Validates CSRF for POST requests.
+ *
+ * Requires the token sent in $_POST['_csrf'] to match:
+ * - the CSRF cookie, or
+ * - the session token.
+ *
+ * On failure:
+ * - returns HTTP 400
+ * - renders an error screen
+ */
 function requireCsrf(): void
 {
     $token = (string)($_POST['_csrf'] ?? '');
@@ -632,11 +1272,29 @@ function requireCsrf(): void
     $_SESSION['csrf'] = $token;
 }
 
+/**
+ * Nombre de la cookie CSRF de la aplicación.
+ *
+ * ---
+ *
+ * Application CSRF cookie name.
+ */
 function csrfCookieName(): string
 {
     return 'unibag_csrf';
 }
 
+/**
+ * Setea/actualiza la cookie CSRF con opciones seguras.
+ *
+ * Si headers ya fueron enviados, actualiza $_COOKIE como fallback para el request actual.
+ *
+ * ---
+ *
+ * Sets/updates the CSRF cookie with secure options.
+ *
+ * If headers were already sent, it updates $_COOKIE as a fallback for the current request.
+ */
 function setCsrfCookie(string $token): void
 {
     if ($token === '') {
@@ -664,6 +1322,17 @@ function setCsrfCookie(string $token): void
     $_COOKIE[csrfCookieName()] = $token;
 }
 
+/**
+ * Expira la cookie CSRF del cliente.
+ *
+ * Si headers ya fueron enviados, solo elimina el valor en $_COOKIE (request actual).
+ *
+ * ---
+ *
+ * Expires the client CSRF cookie.
+ *
+ * If headers were already sent, it only unsets $_COOKIE (current request).
+ */
 function expireCsrfCookie(): void
 {
     if (headers_sent()) {
@@ -683,6 +1352,21 @@ function expireCsrfCookie(): void
     unset($_COOKIE[csrfCookieName()]);
 }
 
+/**
+ * Detecta si el request actual se considera HTTPS.
+ *
+ * Soporta:
+ * - $_SERVER['HTTPS'] (modo directo)
+ * - HTTP_X_FORWARDED_PROTO (cuando hay reverse proxy)
+ *
+ * ---
+ *
+ * Detects whether the current request should be treated as HTTPS.
+ *
+ * Supports:
+ * - $_SERVER['HTTPS'] (direct mode)
+ * - HTTP_X_FORWARDED_PROTO (reverse proxy)
+ */
 function isHttpsRequest(): bool
 {
     $https = strtolower((string)($_SERVER['HTTPS'] ?? ''));
@@ -694,6 +1378,15 @@ function isHttpsRequest(): bool
     return $forwardedProto === 'https';
 }
 
+/**
+ * Define los “modos” de autenticación del menú (para login/landing).
+ *
+ * ---
+ *
+ * Defines authentication “modes” for the menu (used on login/landing).
+ *
+ * @return array<int, array{id:int,label:string,icon:string,active_bg:string,inactive_bg:string,show_plant:bool}>
+ */
 function authModeDefinitions(): array
 {
     return [
@@ -701,15 +1394,43 @@ function authModeDefinitions(): array
     ];
 }
 
+/**
+ * Catálogo de “empresas” disponibles para login/navegación.
+ *
+ * Nota: hoy se usa principalmente como metadata visual (label); la lógica de permisos
+ * y acceso real se basa en el usuario autenticado.
+ *
+ * ---
+ *
+ * “Companies” catalog used by login/navigation.
+ *
+ * Note: currently mostly used as visual metadata (label); real access control relies
+ * on the authenticated user permissions.
+ *
+ * @return array<int, array{id:int,label:string}>
+ */
 function authCompanyDefinitions(): array
 {
     return [
-        1 => ['id' => 1, 'label' => 'UNIBAG CHILE'],
-        2 => ['id' => 2, 'label' => 'UNIBAG PERÚ'],
-        3 => ['id' => 3, 'label' => 'UNIBAG MÉXICO'],
+        20010 => ['id' => 20010, 'label' => 'UNIBAG CHILE'],
+        20019 => ['id' => 20019, 'label' => 'UNIBAG PERÚ'],
+        20020 => ['id' => 20020, 'label' => 'UNIBAG MÉXICO'],
     ];
 }
 
+/**
+ * Catálogo de “plantas” (sitios) disponibles para login/navegación.
+ *
+ * Se presenta en UI cuando el modo/área lo requiere.
+ *
+ * ---
+ *
+ * “Plants” (sites) catalog used by login/navigation.
+ *
+ * It is shown in the UI when the selected mode/area requires it.
+ *
+ * @return array<int, array{id:int,label:string}>
+ */
 function authPlantDefinitions(): array
 {
     return [
@@ -719,6 +1440,19 @@ function authPlantDefinitions(): array
     ];
 }
 
+/**
+ * Resuelve la columna de permisos del usuario según el modo (appMode).
+ *
+ * Se usa al autenticar para exigir que el usuario tenga la marca (1) en la columna
+ * correspondiente (ej. can_erp, can_production, etc.).
+ *
+ * ---
+ *
+ * Resolves the user permission column for a given mode (appMode).
+ *
+ * Used during authentication to require the user to have the corresponding flag set (1)
+ * in the relevant column (e.g., can_erp, can_production, etc.).
+ */
 function authPermissionColumn(int $appMode): string
 {
     return match ($appMode) {
@@ -731,6 +1465,23 @@ function authPermissionColumn(int $appMode): string
     };
 }
 
+/**
+ * Define el catálogo de “áreas” disponibles (ERP/Recepción/Producción/Balanza).
+ *
+ * Cada área define:
+ * - label: nombre en UI
+ * - home: ruta de inicio al entrar al área
+ *
+ * ---
+ *
+ * Defines the available “areas” catalog (ERP/Reception/Production/Scale).
+ *
+ * Each area defines:
+ * - label: UI name
+ * - home: landing route when entering the area
+ *
+ * @return array<string, array{id:string,label:string,home:string}>
+ */
 function erpAreaDefinitions(): array
 {
     return [
@@ -747,7 +1498,7 @@ function erpAreaDefinitions(): array
         'PRODUCTION' => [
             'id' => 'PRODUCTION',
             'label' => 'Producción',
-            'home' => '/production/shifts',
+            'home' => '/production/machines',
         ],
         'SCALE' => [
             'id' => 'SCALE',
@@ -757,17 +1508,48 @@ function erpAreaDefinitions(): array
     ];
 }
 
+/**
+ * Normaliza un valor a un área válida del sistema.
+ *
+ * Si el valor no existe en erpAreaDefinitions(), retorna ERP.
+ *
+ * ---
+ *
+ * Normalizes a value into a valid system area.
+ *
+ * If the value is not present in erpAreaDefinitions(), it falls back to ERP.
+ */
 function normalizeErpArea(string $value): string
 {
     $value = strtoupper(trim($value));
     return array_key_exists($value, erpAreaDefinitions()) ? $value : 'ERP';
 }
 
+/**
+ * Devuelve el área “actual” almacenada en sesión (normalizada).
+ *
+ * ---
+ *
+ * Returns the current area stored in session (normalized).
+ */
 function currentSessionArea(): string
 {
     return normalizeErpArea((string)($_SESSION['erp_area'] ?? 'ERP'));
 }
 
+/**
+ * Indica si la navegación actual está en contexto de inventario desde Recepción.
+ *
+ * Se usa para permitir que ciertas rutas (/work-orders, /rolls, etc.) se “traten”
+ * como parte del área RECEPTION cuando se navega desde inventario.
+ *
+ * ---
+ *
+ * Indicates whether the current navigation is in the inventory context from Reception.
+ *
+ * Used to treat certain routes (/work-orders, /rolls, etc.) as part of the RECEPTION
+ * area when navigation originated from inventory.
+ */
 function inventoryNavigationContext(): bool
 {
     return currentSessionArea() === 'RECEPTION'
@@ -775,6 +1557,18 @@ function inventoryNavigationContext(): bool
 }
 
 /**
+ * Construye parámetros “nav” para conservar contexto de inventario al navegar.
+ *
+ * Solo aplica cuando el área actual es RECEPTION. Opcionalmente, agrega el código
+ * de bodega (bodega=...).
+ *
+ * ---
+ *
+ * Builds “nav” parameters to preserve inventory navigation context.
+ *
+ * Only applies when current area is RECEPTION. Optionally includes the selected
+ * warehouse code (bodega=...).
+ *
  * @return array<string, string>
  */
 function inventoryNavigationParams(?int $warehouseCode = null): array
@@ -791,6 +1585,12 @@ function inventoryNavigationParams(?int $warehouseCode = null): array
 }
 
 /**
+ * Agrega querystring a una ruta, ignorando parámetros vacíos.
+ *
+ * ---
+ *
+ * Appends a querystring to a path, ignoring empty parameters.
+ *
  * @param array<string, scalar|null> $params
  */
 function withQuery(string $path, array $params = []): string
@@ -802,6 +1602,13 @@ function withQuery(string $path, array $params = []): string
     return $path . (str_contains($path, '?') ? '&' : '?') . http_build_query($params);
 }
 
+/**
+ * URL de retorno a la pantalla de inventario (/stock), preservando bodega si aplica.
+ *
+ * ---
+ *
+ * Return URL to inventory screen (/stock), preserving warehouse when applicable.
+ */
 function inventoryReturnUrl(): string
 {
     $warehouseCode = isset($_GET['bodega']) ? (int)$_GET['bodega'] : 0;
@@ -809,20 +1616,37 @@ function inventoryReturnUrl(): string
 }
 
 /**
+ * Export simple de inventario disponible a Excel (XLS vía HTML).
+ *
+ * ---
+ *
+ * Simple export of available inventory to Excel (HTML-based XLS).
+ *
  * @param array<int, array<string, mixed>> $rows
  */
 function outputInventoryExcel(string $filename, array $rows): void
 {
-    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . $filename . '"');
-    header('Cache-Control: max-age=0');
-    echo '<html><head><meta charset="UTF-8"></head><body>';
+    ob_start();
+    echo '<html><head><meta charset="UTF-8"><style>';
+    echo 'body{font-family:Arial,sans-serif;color:#0f172a}';
+    echo 'table{border-collapse:collapse;width:100%}';
+    echo 'th,td{border:1px solid #cbd5e1;padding:6px 8px}';
+    echo 'th{background:#0f172a;color:#fff;font-weight:700;text-align:center}';
+    echo 'tr:nth-child(even){background:#f8fafc}';
+    echo '.num-int{mso-number-format:"\#\,\#\#0";text-align:right}';
+    echo '.num-dec3{mso-number-format:"\#\,\#\#0\.000";text-align:right}';
+    echo '.text-cell{mso-number-format:"\@"}';
+    echo '</style></head><body>';
     echo '<table border="1">';
     echo '<tr><th>Codigo SKU</th><th>Cantidad disponible</th></tr>';
     foreach ($rows as $row) {
+        $qty = (float)($row['available_qty'] ?? 0);
+        $isWhole = floor($qty) == $qty;
+        $cls = $isWhole ? 'num-int' : 'num-dec3';
+        $val = $isWhole ? (int)$qty : round($qty, 3);
         echo '<tr>';
-        echo '<td>' . h((string)($row['sku_code'] ?? '')) . '</td>';
-        echo '<td>' . h(number_format((float)($row['available_qty'] ?? 0), 3, '.', '')) . '</td>';
+        echo '<td class="text-cell">' . h((string)($row['sku_code'] ?? '')) . '</td>';
+        echo '<td class="' . $cls . '">' . $val . '</td>';
         echo '</tr>';
     }
     if ($rows === []) {
@@ -830,35 +1654,63 @@ function outputInventoryExcel(string $filename, array $rows): void
     }
     echo '</table>';
     echo '</body></html>';
+    $html = (string)ob_get_clean();
+    SimpleXlsx::streamHtml($filename, $html, 'Inventario');
     exit;
 }
 
 /**
+ * Export del detalle de una toma de inventario a Excel (OpenXML .xlsx).
+ *
+ * Incluye cabecera de columnas con:
+ * - SKU y atributos
+ * - cantidades de sistema / físico / diferencia
+ * - bodega (código + nombre)
+ *
+ * ---
+ *
+ * Inventory count detail export to Excel (OpenXML .xlsx).
+ *
+ * Includes a column header with:
+ * - SKU and attributes
+ * - system / physical / difference quantities
+ * - warehouse (code + name)
+ *
  * @param array<int, array<string, mixed>> $rows
  */
 function outputInventoryCountDetailExcel(string $filename, array $rows, array $inventoryCount): void
 {
     $warehouseLabel = trim((string)($inventoryCount['warehouse_code'] ?? '')) . ' (' . trim((string)($inventoryCount['warehouse_name'] ?? '')) . ')';
-    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . $filename . '"');
-    header('Cache-Control: max-age=0');
-    echo '<html><head><meta charset="UTF-8"></head><body>';
+    ob_start();
+    echo '<html><head><meta charset="UTF-8"><style>';
+    echo 'body{font-family:Arial,sans-serif;color:#0f172a}';
+    echo 'table{border-collapse:collapse;width:100%}';
+    echo 'th,td{border:1px solid #cbd5e1;padding:6px 8px}';
+    echo 'th{background:#0f172a;color:#fff;font-weight:700;text-align:center}';
+    echo 'tr:nth-child(even){background:#f8fafc}';
+    echo '.num-int{mso-number-format:"\#\,\#\#0";text-align:right}';
+    echo '.num-dec3{mso-number-format:"\#\,\#\#0\.000";text-align:right}';
+    echo '.text-cell{mso-number-format:"\@"}';
+    echo '</style></head><body>';
     echo '<table border="1">';
     echo '<tr><th>Numero</th><th>Articulo</th><th>Familia</th><th>Cod. color</th><th>Alto</th><th>Gramos</th><th>Metros</th><th>Unidad</th><th>Bodega</th><th>Sistema</th><th>Fisico</th><th>Dif</th></tr>';
     foreach ($rows as $row) {
+        $sysQty = (float)($row['system_qty'] ?? 0);
+        $phyQty = (float)($row['physical_qty'] ?? 0);
+        $diffQty = (float)($row['diff_qty'] ?? 0);
         echo '<tr>';
-        echo '<td>' . h((string)($row['sku_code'] ?? '')) . '</td>';
-        echo '<td>' . h((string)($row['article_code'] ?? '')) . '</td>';
+        echo '<td class="text-cell">' . h((string)($row['sku_code'] ?? '')) . '</td>';
+        echo '<td class="text-cell">' . h((string)($row['article_code'] ?? '')) . '</td>';
         echo '<td>' . h((string)($row['family_color'] ?? '')) . '</td>';
-        echo '<td>' . h((string)($row['color_code'] ?? '')) . '</td>';
-        echo '<td>' . h((string)($row['height_mm'] ?? '')) . '</td>';
-        echo '<td>' . h((string)($row['grams'] ?? '')) . '</td>';
-        echo '<td>' . h((string)($row['meters'] ?? '')) . '</td>';
-        echo '<td>' . h((string)($row['unit_code'] ?? '')) . '</td>';
+        echo '<td class="text-cell">' . h((string)($row['color_code'] ?? '')) . '</td>';
+        echo '<td class="num-int">' . (int)round((float)($row['height_mm'] ?? 0)) . '</td>';
+        echo '<td class="num-int">' . (int)round((float)($row['grams'] ?? 0)) . '</td>';
+        echo '<td class="num-int">' . (int)round((float)($row['meters'] ?? 0)) . '</td>';
+        echo '<td class="text-cell">' . h((string)($row['unit_code'] ?? '')) . '</td>';
         echo '<td>' . h(trim($warehouseLabel) !== '()' ? $warehouseLabel : '') . '</td>';
-        echo '<td>' . h(number_format((float)($row['system_qty'] ?? 0), 3, '.', '')) . '</td>';
-        echo '<td>' . h(number_format((float)($row['physical_qty'] ?? 0), 3, '.', '')) . '</td>';
-        echo '<td>' . h(number_format((float)($row['diff_qty'] ?? 0), 3, '.', '')) . '</td>';
+        echo '<td class="' . (floor($sysQty) == $sysQty ? 'num-int' : 'num-dec3') . '">' . (floor($sysQty) == $sysQty ? (int)$sysQty : round($sysQty, 3)) . '</td>';
+        echo '<td class="' . (floor($phyQty) == $phyQty ? 'num-int' : 'num-dec3') . '">' . (floor($phyQty) == $phyQty ? (int)$phyQty : round($phyQty, 3)) . '</td>';
+        echo '<td class="' . (floor($diffQty) == $diffQty ? 'num-int' : 'num-dec3') . '">' . (floor($diffQty) == $diffQty ? (int)$diffQty : round($diffQty, 3)) . '</td>';
         echo '</tr>';
     }
     if ($rows === []) {
@@ -866,9 +1718,25 @@ function outputInventoryCountDetailExcel(string $filename, array $rows, array $i
     }
     echo '</table>';
     echo '</body></html>';
+    $html = (string)ob_get_clean();
+    SimpleXlsx::streamHtml($filename, $html, 'Conteo');
     exit;
 }
 
+/**
+ * Calcula permisos por área (ERP/RECEPTION/PRODUCTION/SCALE) desde un registro de usuario.
+ *
+ * Nota: hoy RECEPTION y PRODUCTION se derivan a partir de can_erp y flags específicos.
+ *
+ * ---
+ *
+ * Computes area permissions (ERP/RECEPTION/PRODUCTION/SCALE) from a user row.
+ *
+ * Note: RECEPTION and PRODUCTION are derived from can_erp plus specific flags.
+ *
+ * @param array<string, mixed> $user
+ * @return array{ERP:bool,RECEPTION:bool,PRODUCTION:bool,SCALE:bool}
+ */
 function userAreaPermissions(array $user): array
 {
     $canErp = (int)($user['can_erp'] ?? 0) === 1;
@@ -883,22 +1751,50 @@ function userAreaPermissions(array $user): array
     ];
 }
 
+/**
+ * Lee permisos por área desde la sesión actual.
+ *
+ * ---
+ *
+ * Reads area permissions from the current session.
+ *
+ * @return array{ERP:bool,RECEPTION:bool,PRODUCTION:bool,SCALE:bool}
+ */
 function sessionAreaPermissions(): array
 {
+    $canErp = (int)($_SESSION['perm_area_erp'] ?? 0) === 1;
     return [
-        'ERP' => (int)($_SESSION['perm_area_erp'] ?? 0) === 1,
-        'RECEPTION' => (int)($_SESSION['perm_area_reception'] ?? 0) === 1,
+        'ERP' => $canErp,
+        'RECEPTION' => (int)($_SESSION['perm_area_reception'] ?? ($canErp ? 1 : 0)) === 1,
         'PRODUCTION' => (int)($_SESSION['perm_area_production'] ?? 0) === 1,
         'SCALE' => (int)($_SESSION['perm_area_scale'] ?? $_SESSION['perm_area_production'] ?? 0) === 1,
     ];
 }
 
+/**
+ * Indica si un set de permisos permite acceder a un área.
+ *
+ * ---
+ *
+ * Checks whether a given permissions set can access an area.
+ */
 function userCanAccessArea(string $area, array $permissions): bool
 {
     $area = normalizeErpArea($area);
     return (bool)($permissions[$area] ?? false);
 }
 
+/**
+ * Retorna el “home” de la primera área permitida para un usuario.
+ *
+ * Se usa como fallback cuando el usuario intenta entrar a un área sin permiso.
+ *
+ * ---
+ *
+ * Returns the “home” route for the first allowed area.
+ *
+ * Used as a fallback when the user tries to access a non-permitted area.
+ */
 function firstAllowedAreaHome(array $permissions): string
 {
     foreach (['ERP', 'RECEPTION', 'SCALE', 'PRODUCTION'] as $area) {
@@ -910,67 +1806,96 @@ function firstAllowedAreaHome(array $permissions): string
     return '/logout';
 }
 
+/**
+ * Infere el área solicitada según la ruta del request.
+ *
+ * Canales:
+ * - /scale -> SCALE
+ * - /production, /waste -> PRODUCTION
+ * - Todo lo demás canalizado a ERP
+ *
+ * ---
+ *
+ * Infers the requested area from the request path.
+ */
 function detectRequestedArea(string $path): string
 {
-    if ($path === '/') {
-        return 'ERP';
-    }
-    if (
-        inventoryNavigationContext()
-        && (
-            str_starts_with($path, '/work-orders')
-            || str_starts_with($path, '/rolls')
-            || str_starts_with($path, '/boxes')
-            || str_starts_with($path, '/pallets')
-        )
-    ) {
-        return 'RECEPTION';
-    }
-    if (
-        str_starts_with($path, '/purchase-orders')
-        || str_starts_with($path, '/import-containers')
-        || str_starts_with($path, '/stock')
-        || str_starts_with($path, '/maquila')
-        || (str_starts_with($path, '/pallets') && currentSessionArea() === 'RECEPTION')
-    ) {
-        return 'RECEPTION';
+    if ($path === '/' || $path === '/reports/production-dashboard') {
+        return currentSessionArea();
     }
     if (str_starts_with($path, '/scale')) {
         return 'SCALE';
     }
     if (
-        str_starts_with($path, '/production/shifts')
-        || str_starts_with($path, '/production/machines')
-        || str_starts_with($path, '/work-orders')
-        || str_starts_with($path, '/chemicals')
-        || str_starts_with($path, '/cut')
-        || str_starts_with($path, '/boxes')
-        || str_starts_with($path, '/pallets')
+        str_starts_with($path, '/production')
         || str_starts_with($path, '/waste')
     ) {
         return 'PRODUCTION';
+    }
+    if (
+        str_starts_with($path, '/reception')
+        || str_starts_with($path, '/purchase-orders')
+        || str_starts_with($path, '/import-containers')
+    ) {
+        if (currentSessionArea() === 'ERP') {
+            return 'ERP';
+        }
+        return 'RECEPTION';
     }
 
     return 'ERP';
 }
 
+/**
+ * Determina si una ruta se considera “Producción” (incluye / como dashboard).
+ *
+ * ---
+ *
+ * Determines whether a path is considered “Production” (including / as the dashboard).
+ */
 function isProductionPath(string $path): bool
 {
     return $path === '/' || detectRequestedArea($path) === 'PRODUCTION';
 }
 
+/**
+ * Indica si estamos en modo “solo lectura” de Producción desde el área ERP.
+ *
+ * Se usa para bloquear acciones operativas en la UI cuando el usuario está
+ * navegando producción desde ERP (trazabilidad).
+ *
+ * ---
+ *
+ * Indicates whether we are in “read-only” Production mode from ERP area.
+ *
+ * Used to block operational actions when the user is browsing production from ERP (traceability).
+ */
 function isErpProductionReadOnlyMode(?string $path = null): bool
 {
     $path = $path ?? (string)($GLOBALS['path'] ?? '/');
     return currentSessionArea() === 'ERP' && isProductionPath($path);
 }
 
+/**
+ * Indica si el usuario puede acceder a trazabilidad de OTs desde ERP.
+ *
+ * ---
+ *
+ * Indicates whether the user can access work order traceability from ERP.
+ */
 function canAccessWorkOrderTraceability(): bool
 {
     return userCanAccessArea('ERP', sessionAreaPermissions());
 }
 
 /**
+ * Filtra OTs “pendientes” para dejar solo las que corresponden a la máquina (o tipo)
+ * asociada al turno activo.
+ *
+ * ---
+ *
+ * Filters pending work orders to keep only those matching the active shift machine (or machine type).
+ *
  * @param array<int, array<string, mixed>> $workOrders
  * @param array<string, mixed>|null $activeShiftSession
  * @return array<int, array<string, mixed>>
@@ -1005,6 +1930,17 @@ function filterPendingWorkOrdersByShiftMachine(array $workOrders, ?array $active
     return $filtered;
 }
 
+/**
+ * Bloquea acciones de escritura cuando se navega producción desde ERP en modo solo lectura.
+ *
+ * Responde 403 y muestra una pantalla explicativa.
+ *
+ * ---
+ *
+ * Blocks write actions when browsing production from ERP in read-only mode.
+ *
+ * Responds with 403 and renders an explanatory screen.
+ */
 function denyErpProductionWriteAccess(): void
 {
     if (!isErpProductionReadOnlyMode()) {
@@ -1016,21 +1952,51 @@ function denyErpProductionWriteAccess(): void
     exit;
 }
 
+/**
+ * Indica si el usuario está en el área donde se asignan pallets a bodegas (Recepción).
+ *
+ * ---
+ *
+ * Indicates whether the user is in the area that assigns pallets to warehouses (Reception).
+ */
 function isWarehousePalletAssignmentArea(): bool
 {
-    return currentSessionArea() === 'RECEPTION' && ((bool)(sessionAreaPermissions()['RECEPTION'] ?? false));
+    return (currentSessionArea() === 'RECEPTION' || currentSessionArea() === 'ERP') && ((bool)(sessionAreaPermissions()['RECEPTION'] ?? false));
 }
 
+/**
+ * Retorna el título/label de la sección de Producción según la ruta actual.
+ *
+ * Se usa en el header del “shell” de producción para mostrar contexto al usuario.
+ *
+ * ---
+ *
+ * Returns the Production section title/label based on the current path.
+ *
+ * Used in the production shell header to provide context to the user.
+ */
 function productionSectionLabel(string $path): string
 {
     if ($path === '/') {
         return 'Panel de producción';
     }
-    if (str_starts_with($path, '/production/shifts')) {
+    if (str_starts_with($path, '/production/machines') || str_starts_with($path, '/production/shifts')) {
         return 'Asignación máquina';
     }
-    if (str_starts_with($path, '/work-orders')) {
+    if (str_starts_with($path, '/production/work-orders') || str_starts_with($path, '/work-orders')) {
         return 'Órdenes de trabajo';
+    }
+    if (str_starts_with($path, '/waste/molino')) {
+        return 'Molino · Gestión de residuos';
+    }
+    if (str_starts_with($path, '/waste/compactadora')) {
+        return 'Compactadora · Gestión de residuos';
+    }
+    if (str_starts_with($path, '/waste')) {
+        return 'Gestión de residuos';
+    }
+    if (str_starts_with($path, '/production/traceability')) {
+        return 'Trazabilidad de Inicio a Fin';
     }
     if (str_starts_with($path, '/chemicals')) {
         return 'Pesajes de tintas';
@@ -1045,6 +2011,23 @@ function productionSectionLabel(string $path): string
     return 'Producción';
 }
 
+/**
+ * Renderiza el “shell” (layout) del área Producción.
+ *
+ * Incluye:
+ * - Sidebar de navegación (móvil y escritorio).
+ * - Topbar con sección actual, usuario y empresa.
+ * - Contenedor <main> donde se inyecta $body.
+ *
+ * ---
+ *
+ * Renders the Production area “shell” (layout).
+ *
+ * Includes:
+ * - Navigation sidebar (mobile and desktop).
+ * - Topbar showing current section, user and company.
+ * - <main> container where $body is injected.
+ */
 function renderProductionShell(string $body, string $currentPath, string $displayName, string $companyName): void
 {
     $view = strtolower(trim((string)($_GET['view'] ?? 'pending')));
@@ -1068,13 +2051,21 @@ function renderProductionShell(string $body, string $currentPath, string $displa
     echo '<div class="prod-brand-box"><span class="prod-brand-mark">U</span><span class="prod-brand-word">unibag</span></div>';
     echo '</div>';
     echo '<div class="prod-nav-title">Navegación</div>';
-    echo $group('Asignación máquina', 'machine', str_starts_with($currentPath, '/production/shifts'), [
-        $subLink('/production/shifts', 'Iniciar / Terminar turno', str_starts_with($currentPath, '/production/shifts')),
+    echo $group('Asignación máquina', 'machine', str_starts_with($currentPath, '/production/machines') || str_starts_with($currentPath, '/production/shifts'), [
+        $subLink('/production/machines', 'Iniciar / Terminar turno', str_starts_with($currentPath, '/production/machines') || str_starts_with($currentPath, '/production/shifts')),
     ]);
-    echo $group('Ordenes de trabajo', 'orders', str_starts_with($currentPath, '/work-orders'), [
-        $subLink('/work-orders?view=pending', 'Iniciar nueva OT', str_starts_with($currentPath, '/work-orders') && ($view === 'pending' || $view === '')),
-        $subLink('/work-orders?view=active', 'En cursos', str_starts_with($currentPath, '/work-orders') && $view === 'active'),
-        $subLink('/work-orders?view=closed', 'Historico', str_starts_with($currentPath, '/work-orders') && $view === 'closed'),
+    echo $group('Ordenes de trabajo', 'orders', str_starts_with($currentPath, '/production/work-orders') || str_starts_with($currentPath, '/work-orders'), [
+        $subLink('/production/work-orders/new', 'Iniciar nueva OT', str_starts_with($currentPath, '/production/work-orders/new')),
+        $subLink('/production/work-orders/active', 'En cursos', str_starts_with($currentPath, '/production/work-orders/active')),
+        $subLink('/production/work-orders/history', 'Historico', str_starts_with($currentPath, '/production/work-orders/history')),
+    ]);
+    echo $group('Trazabilidad', 'traceability', str_starts_with($currentPath, '/production/traceability'), [
+        $subLink('/production/traceability', 'Árbol Genealógico 360°', str_starts_with($currentPath, '/production/traceability')),
+    ]);
+    echo $group('Gestión de residuos', 'waste', str_starts_with($currentPath, '/waste'), [
+        $subLink('/waste/management', 'Panel de residuos', $currentPath === '/waste/management'),
+        $subLink('/waste/molino', 'Molino', $currentPath === '/waste/molino'),
+        $subLink('/waste/compactadora', 'Compactadora', $currentPath === '/waste/compactadora'),
     ]);
     echo $group('Mensajes', 'messages', false, [
         $subLink(null, 'Nuevo mensaje'),
@@ -1133,6 +2124,25 @@ function renderProductionShell(string $body, string $currentPath, string $displa
     echo '</div>';
 }
 
+/**
+ * Asegura el esquema mínimo para autenticación (tabla auth_users) en la BD TRZ.
+ *
+ * Características:
+ * - Opera una sola vez por request (static $schemaReady).
+ * - Crea la tabla si no existe.
+ * - Inserta un usuario demo si no existe.
+ * - Intenta registrar un “schema version” en app_settings si la tabla existe.
+ *
+ * ---
+ *
+ * Ensures the minimum authentication schema (auth_users table) in the TRZ database.
+ *
+ * Features:
+ * - Runs once per request (static $schemaReady).
+ * - Creates the table if missing.
+ * - Inserts a demo user if missing.
+ * - Tries to store a schema version in app_settings when available.
+ */
 function ensureAuthSchema(PDO $pdo): void
 {
     static $schemaReady = false;
@@ -1171,24 +2181,6 @@ function ensureAuthSchema(PDO $pdo): void
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
     );
 
-    $stmt = $pdo->prepare('SELECT id FROM auth_users WHERE username = :username LIMIT 1');
-    $stmt->execute(['username' => 'demo']);
-    if ($stmt->fetch() === false) {
-        $insert = $pdo->prepare(
-            'INSERT INTO auth_users (
-                username, password_hash, display_name, is_active,
-                can_erp, can_production, can_operator, can_warehouse, can_marketing
-            ) VALUES (
-                :username, :password_hash, :display_name, 1, 1, 1, 1, 1, 1
-            )'
-        );
-        $insert->execute([
-            'username' => 'demo',
-            'password_hash' => '$2y$10$NEnibNryVcuH8MX2zxUaW.Inrqb0go6.jf3VMFXHERLyLuY0jOAny',
-            'display_name' => 'Operador Demo',
-        ]);
-    }
-
     try {
         $stmt = $pdo->prepare(
             "INSERT INTO app_settings (setting_key, setting_value) VALUES ('auth_schema_version', :v)
@@ -1202,13 +2194,32 @@ function ensureAuthSchema(PDO $pdo): void
     $schemaReady = true;
 }
 
+/**
+ * Renderiza la pantalla de login.
+ *
+ * Entradas:
+ * - $error: mensaje a mostrar (credenciales inválidas, etc.)
+ * - $state: valores para re-render (usuario, empresa, área) al fallar el login.
+ *
+ * Incluye el token CSRF dentro del formulario.
+ *
+ * ---
+ *
+ * Renders the login screen.
+ *
+ * Inputs:
+ * - $error: message to display (invalid credentials, etc.)
+ * - $state: values used to re-render (user, company, area) after a failed login.
+ *
+ * Includes the CSRF token in the form.
+ */
 function renderLoginPage(?string $error = null, array $state = []): void
 {
     http_response_code(200);
     $companies = authCompanyDefinitions();
     $plants = authPlantDefinitions();
     $areas = erpAreaDefinitions();
-    $companyId = isset($state['user_company_id']) ? (int)$state['user_company_id'] : 1;
+    $companyId = isset($state['user_company_id']) ? (int)$state['user_company_id'] : 20010;
     $userLogin = (string)($state['user_login'] ?? '');
     $erpArea = normalizeErpArea((string)($state['erp_area'] ?? 'ERP'));
 
@@ -1225,7 +2236,6 @@ function renderLoginPage(?string $error = null, array $state = []): void
         .logo-mark{font-size:26px;font-weight:700;color:#00A9A6}
         .logo-text{font-size:22px;font-weight:700;color:#666}
         .logo-sub{font-size:13px;color:#00A9A6;text-align:center;margin-top:2px}
-        .logo-badge{width:50px;height:50px;border:3px solid #10b981;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#10b981;font-size:11px;font-weight:700}
         .mode-row{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 18px}
         .mode-card{width:79px;height:60px;border:1px solid #d4d4d4;background:#F9F9F9;box-shadow:0 0 8px 5px rgba(0,0,0,.12);cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:12px;color:#666;line-height:1.1}
         .mode-card .mode-icon{font-size:13px;font-weight:700;margin-bottom:6px}
@@ -1242,7 +2252,6 @@ function renderLoginPage(?string $error = null, array $state = []): void
         .submit-row{margin-top:18px}
         .submit-btn{width:100%;height:30px;border:1px solid #8fb48f;background:#b9ddb9;color:#111;font:700 13px Arial,sans-serif;cursor:pointer}
         .submit-btn:hover{filter:brightness(.98)}
-        .demo-note{margin-top:10px;font-size:11px;color:#666}
         @media (max-width: 640px){
           .login-box{width:100%}
           .login-body{padding:24px 18px 28px}
@@ -1252,7 +2261,7 @@ function renderLoginPage(?string $error = null, array $state = []): void
     echo '<div class="login-shell"><div class="login-box">';
     echo '<div class="login-header">Unibag ERP</div>';
     echo '<div class="login-body">';
-    echo '<div class="login-logo"><div><div class="logo-mark">Unibag</div><div class="logo-sub">Bolsas con vida</div></div><div class="logo-badge">PRUEBA</div></div>';
+    echo '<div class="login-logo"><div><div class="logo-mark">Unibag</div><div class="logo-sub">Bolsas con vida</div></div></div>';
     if ($error !== null && $error !== '') {
         echo '<div class="status">' . h($error) . '</div>';
     }
@@ -1283,7 +2292,6 @@ function renderLoginPage(?string $error = null, array $state = []): void
     echo '</select>';
     echo '</div>';
     echo '<div class="submit-row"><button class="submit-btn" type="submit">Acceder</button></div>';
-    echo '<div class="demo-note">Acceso demo: usuario <b>demo</b> y clave <b>demo123</b>.</div>';
     echo '</form>';
     echo '</div></div></div>';
     echo '<script>
@@ -1291,11 +2299,23 @@ function renderLoginPage(?string $error = null, array $state = []): void
       (function () {
         var areaInput = document.getElementById("erp_area");
         var areaButtons = document.querySelectorAll("[data-erp-area]");
+        var appModeInput = document.getElementById("menu_appmode");
         if (!areaInput || !areaButtons.length) return;
+        function inferAppMode(area) {
+          if (area === "PRODUCTION") return "1";
+          if (area === "SCALE") return "1";
+          return "0";
+        }
+        if (appModeInput) {
+          appModeInput.value = inferAppMode(areaInput.value || "ERP");
+        }
         areaButtons.forEach(function (button) {
           button.addEventListener("click", function () {
-            var area = button.getAttribute("data-erp-area") || "RECEPTION";
+            var area = button.getAttribute("data-erp-area") || "ERP";
             areaInput.value = area;
+            if (appModeInput) {
+              appModeInput.value = inferAppMode(area);
+            }
             areaButtons.forEach(function (item) {
               item.classList.remove("active");
               item.removeAttribute("aria-current");
@@ -1310,6 +2330,27 @@ function renderLoginPage(?string $error = null, array $state = []): void
     exit;
 }
 
+/**
+ * Render HTML base para páginas del sistema (layout general).
+ *
+ * Este helper:
+ * - Emite HTML <head> + estilos base (UI del sistema).
+ * - Inserta una barra superior con navegación según área (ERP/Recepción/Producción).
+ * - Imprime el contenido $body dentro del layout.
+ *
+ * Nota: el layout de Producción tiene su “shell” propio (renderProductionShell).
+ *
+ * ---
+ *
+ * Base HTML renderer for system pages (general layout).
+ *
+ * This helper:
+ * - Outputs the HTML <head> + base styles (system UI).
+ * - Inserts the top navigation depending on the current area (ERP/Reception/Production).
+ * - Prints $body inside the layout.
+ *
+ * Note: Production uses its own shell (renderProductionShell).
+ */
 function render(string $title, string $body): void
 {
     http_response_code(200);
@@ -1326,10 +2367,41 @@ function render(string $title, string $body): void
         .trace-stack{display:grid;grid-template-columns:1fr;gap:14px}
         .kpi-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px}
         .kpi-card{background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:12px}
+        .kpi-card-link{display:block;text-decoration:none;color:inherit}
+        .kpi-card-link:hover{border-color:#00A9A6}
+        .kpi-card-link.active{border-color:#00A9A6;box-shadow:0 0 0 2px rgba(0,169,166,.18) inset}
         .kpi-label{font-size:12px;color:#667085;margin-bottom:6px}
         .kpi-value{font-size:24px;font-weight:800;line-height:1}
         .kpi-sub{font-size:12px;color:#475467;margin-top:6px}
         .dashboard-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:14px}
+        .dashboard-shell{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr);gap:14px;align-items:start}
+        .dashboard-main{min-width:0}
+        .dashboard-side{min-width:0}
+        .dashboard-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start}
+        .dashboard-head-left{min-width:0}
+        .dashboard-title{font-size:18px;font-weight:900;line-height:1.15;text-transform:uppercase}
+        .dashboard-head-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+        .dashboard-filters{margin-top:12px}
+        .dashboard-filters-grid{display:grid;grid-template-columns:220px 160px 180px 180px 140px;gap:10px;align-items:end}
+        .dashboard-field{min-width:0}
+        .dashboard-field .text{height:40px;padding:10px}
+        .dashboard-field-button{display:flex}
+        .dashboard-field-button .btn{min-width:140px}
+        .dashboard-kpis{margin-top:14px;grid-template-columns:repeat(3,minmax(0,1fr))}
+        .modal-backdrop{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(15,23,42,.45);z-index:80}
+        .modal-backdrop.open{display:flex}
+        .modal-card{width:min(1100px,calc(100vw - 24px));max-height:calc(100vh - 24px);background:#fff;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 20px 50px rgba(15,23,42,.25);display:flex;flex-direction:column;overflow:hidden}
+        .modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid #eef2f7;background:#fbfcfd}
+        .modal-title{font-size:14px;font-weight:900;color:#0f172a}
+        .modal-body{padding:14px;overflow:auto}
+        .dashboard-subtitle{font-size:14px;font-weight:900;margin:0 0 10px;color:#0f172a}
+        .erp-prod-table{width:100%;border-collapse:collapse}
+        .erp-prod-table th,.erp-prod-table td{border-bottom:1px solid #e5e7eb;padding:8px;font-size:12px}
+        .erp-prod-table th{background:#0f172a;color:#fff;font-size:11px;text-align:left}
+        .erp-prod-table-wrap{overflow:auto;-webkit-overflow-scrolling:touch}
+        .erp-prod-empty{padding:10px 12px;border:1px dashed #d0d5dd;border-radius:10px;color:#667085;background:#fbfcfd}
+        .erp-prod-code{font-weight:800}
+        .erp-prod-muted{font-size:12px;color:#667085;margin-top:6px}
         .dashboard-alert{border:1px solid #d0d5dd;border-radius:10px;padding:10px 12px;background:#fff}
         .dashboard-alert.warning{border-color:#f7b955;background:#fff9eb}
         .dashboard-alert.info{border-color:#84c5ff;background:#f5faff}
@@ -1352,6 +2424,14 @@ function render(string $title, string $body): void
         .trace-roll-event-line{margin-top:2px;font-size:13px;color:#374151;line-height:1.35}
         .row{display:flex;gap:10px;flex-wrap:wrap}
         .row.nowrap{flex-wrap:nowrap}
+        .bonus-filter-form{display:grid;gap:10px;align-items:end;margin:0}
+        .bonus-filter-form--flexo{grid-template-columns:170px minmax(260px,1fr) 170px 140px}
+        .bonus-filter-form--seri{grid-template-columns:170px minmax(260px,1fr) 140px}
+        .bonus-filter-form--cys{grid-template-columns:170px minmax(260px,1fr) 140px}
+        .bonus-field{min-width:0}
+        .bonus-field-period{grid-column:1 / -1}
+        .bonus-field-button{display:flex}
+        .bonus-field-button .btn{min-width:140px}
         label{display:block;font-size:12px;color:#374151;margin-bottom:4px}
         input,select,textarea{width:100%;padding:10px;border:1px solid #d1d5db;border-radius:8px;background:#fff;font:inherit}
         input:disabled,select:disabled{opacity:1;background:#f3f4f6;color:#111}
@@ -1377,8 +2457,12 @@ function render(string $title, string $body): void
           main{padding:12px}
           .grid{grid-template-columns:1fr}
           .row.nowrap{flex-wrap:wrap}
+          .bonus-filter-form{grid-template-columns:1fr !important}
           .trace-grid{grid-template-columns:1fr}
           .dashboard-grid{grid-template-columns:1fr}
+          .dashboard-shell{grid-template-columns:1fr}
+          .dashboard-filters-grid{grid-template-columns:1fr}
+          .dashboard-field-button .btn{width:100%}
           .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
           .ot-stage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
           .ot-request-grid{grid-template-columns:1fr}
@@ -1418,8 +2502,78 @@ function render(string $title, string $body): void
         .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
         .trace-table{min-width:640px}
         .err{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px;border-radius:10px}
-        .ok{background:#ecfeff;border:1px solid #a5f3fc;color:#155e75;padding:10px;border-radius:10px}
         .muted{color:#6b7280;font-size:12px}
+
+        /* Reception Module Professional Styling */
+        .rec-shell{display:flex;flex-direction:column;gap:14px}
+        .rec-nav-bar{display:flex;gap:6px;padding:4px;background:#e2e8f0;border-radius:10px;margin-bottom:14px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+        .rec-nav-tab{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;font-size:13px;font-weight:600;color:#475569;text-decoration:none;border-radius:7px;transition:all .15s ease;white-space:nowrap}
+        .rec-nav-tab:hover{background:#f1f5f9;color:#0f172a}
+        .rec-nav-tab.active{background:#00A9A6;color:#fff;box-shadow:0 1px 3px rgba(0,169,166,.3)}
+        .rec-header-card{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;box-shadow:0 1px 3px rgba(0,0,0,.03)}
+        .rec-title-group h1{font-size:18px;font-weight:800;color:#0f172a;margin:0 0 3px}
+        .rec-title-group p{font-size:13px;color:#64748b;margin:0}
+        .rec-counter-pill{display:inline-flex;align-items:center;gap:6px;background:#f1f5f9;border:1px solid #cbd5e1;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:700;color:#334155}
+        .rec-filter-card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px 18px;box-shadow:0 1px 3px rgba(0,0,0,.03)}
+        .rec-filter-form{display:flex;flex-direction:column;gap:12px}
+        .rec-filter-grid-nat{display:grid;grid-template-columns:160px 160px 1fr 200px auto;gap:12px;align-items:end}
+        .rec-filter-grid-imp{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;align-items:end}
+        .rec-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+        .rec-field label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:#475569;display:flex;align-items:center;gap:5px}
+        .rec-field input,.rec-field select{height:38px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;color:#0f172a;background:#f8fafc;transition:border-color .15s ease,box-shadow .15s ease}
+        .rec-field input:focus,.rec-field select:focus{background:#fff;border-color:#00A9A6;box-shadow:0 0 0 3px rgba(0,169,166,.15);outline:none}
+        .rec-actions{display:flex;gap:8px;align-items:center}
+        .rec-btn-filter{height:38px;padding:0 16px;background:#00A9A6;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:background .15s ease}
+        .rec-btn-filter:hover{background:#008f8d}
+        .rec-btn-clear{height:38px;padding:0 12px;background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
+        .rec-btn-clear:hover{background:#e2e8f0;color:#0f172a}
+        .rec-btn-excel{height:38px;padding:0 14px;background:#059669;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:background .15s ease;white-space:nowrap}
+        .rec-btn-excel:hover{background:#047857;color:#fff}
+        .rec-table-card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.03)}
+        .rec-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+        .rec-table{width:100%;border-collapse:collapse;font-size:13px}
+        .rec-table thead th{background:#f8fafc;color:#475569;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:11px 14px;border-bottom:1px solid #e2e8f0;text-align:left;white-space:nowrap}
+        .rec-table tbody td{padding:12px 14px;border-bottom:1px solid #f1f5f9;vertical-align:middle;color:#1e293b}
+        .rec-table tbody tr:hover td{background:#f8fafc}
+        .rec-table tbody tr:last-child td{border-bottom:none}
+        .rec-code-link{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;font-weight:700;color:#00A9A6;text-decoration:none;padding:2px 7px;border-radius:5px;background:#f0fdfa;border:1px solid #ccfbf1;display:inline-block}
+        .rec-code-link:hover{background:#00A9A6;color:#fff;border-color:#00A9A6}
+        .rec-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap}
+        .rec-badge-open{background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe}
+        .rec-badge-partial{background:#fffbeb;color:#92400e;border:1px solid #fde68a}
+        .rec-badge-complete{background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0}
+        .rec-dot{width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block}
+        .rec-prog-container{display:flex;align-items:center;gap:8px}
+        .rec-prog-bar{width:65px;height:6px;background:#e2e8f0;border-radius:999px;overflow:hidden}
+        .rec-prog-fill{height:100%;background:#00A9A6;border-radius:999px}
+        .rec-prog-fill.rec-fill-complete{background:#10b981}
+        .rec-prog-label{font-size:12px;font-weight:600;color:#475569}
+        .rec-prog-label.is-done{color:#065f46;font-weight:700}
+        .rec-empty{text-align:center;padding:42px 18px;color:#64748b}
+        .rec-empty-icon{font-size:28px;margin-bottom:8px}
+        .rec-detail-meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+        .rec-meta-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:9px 12px}
+        .rec-meta-box .rec-meta-label{font-size:11px;font-weight:700;text-transform:uppercase;color:#64748b;margin-bottom:2px}
+        .rec-meta-box .rec-meta-val{font-size:14px;font-weight:700;color:#0f172a}
+        .rec-pagination-bar{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:#fff;border-top:1px solid #e2e8f0;font-size:13px;color:#475569;flex-wrap:wrap;gap:12px}
+        .rec-pagination-info{font-size:13px;color:#64748b}
+        .rec-pagination-info strong{color:#0f172a;font-weight:700}
+        .rec-pagination-nav{display:flex;align-items:center;gap:4px}
+        .rec-page-btn{height:32px;min-width:32px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px;border:1px solid #cbd5e1;background:#fff;color:#334155;text-decoration:none;font-weight:600;font-size:13px;transition:all .15s ease}
+        .rec-page-btn:hover:not(.disabled):not(.active){background:#f1f5f9;border-color:#94a3b8;color:#0f172a}
+        .rec-page-btn.active{background:#00A9A6;border-color:#00A9A6;color:#fff}
+        .rec-page-btn.disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
+        .rec-page-dots{padding:0 6px;color:#94a3b8;font-weight:700}
+        @media (max-width:960px){
+          .rec-filter-grid-nat{grid-template-columns:1fr 1fr}
+          .rec-filter-grid-imp{grid-template-columns:1fr 1fr}
+        }
+        @media (max-width:640px){
+          .rec-filter-grid-nat{grid-template-columns:1fr}
+          .rec-filter-grid-imp{grid-template-columns:1fr}
+          .rec-actions{flex-direction:column;width:100%}
+          .rec-btn-filter,.rec-btn-clear{width:100%;justify-content:center}
+        }
 
         .topbar{background:#009f9f;color:#fff}
         .topbar .inner{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 14px}
@@ -1625,89 +2779,130 @@ function render(string $title, string $body): void
     $areaDefinitions = erpAreaDefinitions();
     $appModeLabel = (string)($areaDefinitions[$displayArea]['label'] ?? $_SESSION['erp_area_label'] ?? $_SESSION['app_mode_label'] ?? 'ERP');
     $companyName = (string)($_SESSION['company_name'] ?? 'UNIBAG CHILE');
-    $displayName = (string)($_SESSION['auth_display_name'] ?? $_SESSION['operator_name'] ?? 'Operador Demo');
-    if ($currentArea === 'PRODUCTION' && isProductionPath($currentPath)) {
+    $displayName = (string)($_SESSION['auth_display_name'] ?? $_SESSION['operator_name'] ?? 'Operador');
+    $isProductionArea = str_starts_with($currentPath, '/production')
+        || str_starts_with($currentPath, '/waste')
+        || ($currentArea === 'PRODUCTION' && isProductionPath($currentPath));
+
+    if ($isProductionArea) {
         renderProductionShell($body, $currentPath, $displayName, $companyName);
         echo '</body></html>';
         exit;
     }
 
+    $activeModule = 'dashboard';
+    if ($displayArea === 'ERP' || $displayArea === 'RECEPTION') {
+        if ($currentPath === '/' || $currentPath === '/reports/production-dashboard' || $currentPath === '/reports/graphics') {
+            $activeModule = 'dashboard';
+        } elseif (
+            str_starts_with($currentPath, '/reception')
+            || str_starts_with($currentPath, '/purchase-orders')
+            || str_starts_with($currentPath, '/import-containers')
+        ) {
+            $activeModule = 'reception';
+        } elseif (
+            str_starts_with($currentPath, '/reports/inventory')
+            || str_starts_with($currentPath, '/stock/inventory-counts')
+        ) {
+            $activeModule = 'inventory';
+        } elseif (
+            str_starts_with($currentPath, '/warehouses')
+            || str_starts_with($currentPath, '/stock')
+            || str_starts_with($currentPath, '/rolls')
+            || str_starts_with($currentPath, '/boxes')
+            || str_starts_with($currentPath, '/pallets')
+            || str_starts_with($currentPath, '/maquila')
+            || str_starts_with($currentPath, '/cliches')
+        ) {
+            $activeModule = 'warehouses';
+        } elseif (str_starts_with($currentPath, '/reports')) {
+            $activeModule = 'reports';
+        } elseif (str_starts_with($currentPath, '/bonificaciones')) {
+            $activeModule = 'bonificaciones';
+        } elseif (
+            str_starts_with($currentPath, '/work-orders')
+            || str_starts_with($currentPath, '/chemicals')
+            || str_starts_with($currentPath, '/cut')
+        ) {
+            $activeModule = 'traceability';
+        }
+    } elseif ($displayArea === 'SCALE') {
+        $activeModule = 'scale';
+    } else {
+        $activeModule = 'production';
+    }
+
     echo '<div class="topbar"><div class="inner">';
     echo '<nav class="menu">';
     if ($displayArea === 'ERP' && userCanAccessArea('ERP', $areaPermissions)) {
-        echo $link('/', 'Informes', $currentPath === '/' || str_starts_with($currentPath, '/reports/inventory') || str_starts_with($currentPath, '/reports/graphics') || str_starts_with($currentPath, '/warehouses'));
-        echo $link('/work-orders?view=pending', 'Trazabilidad', str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets'));
-        echo $link('/bonificaciones', 'Bonificaciones', str_starts_with($currentPath, '/bonificaciones'));
+        echo $link('/', 'Dashboard', $activeModule === 'dashboard');
+        echo $link('/reception', 'Recepción', $activeModule === 'reception');
+        echo $link('/reports/operator-waste', 'Informes', $activeModule === 'reports');
+        echo $link('/bonificaciones', 'Bonificaciones', $activeModule === 'bonificaciones');
+        echo $link('/stock', 'Bodega', $activeModule === 'warehouses');
+        echo $link('/reports/inventory', 'Inventario', $activeModule === 'inventory');
     } elseif ($displayArea === 'RECEPTION') {
-        echo $link('/purchase-orders?status=active&supplier_type=NATIONAL', 'Recepción', str_starts_with($currentPath, '/purchase-orders') || str_starts_with($currentPath, '/import-containers'));
-        echo $link('/stock', 'Inventario', str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/pallets') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches') || (inventoryNavigationContext() && (str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/rolls') || str_starts_with($currentPath, '/boxes'))));
+        echo $link('/purchase-orders?status=active&supplier_type=NATIONAL', 'Recepción', $activeModule === 'reception');
+        echo $link('/stock', 'Bodega', $activeModule === 'warehouses');
+        echo $link('/reports/inventory', 'Inventario', $activeModule === 'inventory');
     } elseif ($displayArea === 'SCALE') {
         echo $link('/scale/sealing-waste', 'Balanza', str_starts_with($currentPath, '/scale'));
     } else {
-        echo $link('/production/shifts', 'Producción', str_starts_with($currentPath, '/production/shifts') || str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets'));
+        echo $link('/production/machines', 'Producción', str_starts_with($currentPath, '/production') || str_starts_with($currentPath, '/waste') || str_starts_with($currentPath, '/work-orders'));
     }
     echo '</nav>';
     echo '<div class="top-right">';
     echo '<select aria-label="Sistema" disabled><option>' . h($appModeLabel) . '</option></select>';
-    echo '<a class="pill" href="#"><span>' . h($companyName) . '</span></a>';
+    echo '<a class="pill" href="/"><span>' . h($companyName) . '</span></a>';
     echo '<a class="pill" href="#"><span>' . h($displayName) . '</span></a>';
     echo '<a class="pill" href="/logout">Salir</a>';
     echo '</div>';
     echo '</div></div>';
 
     echo '<div class="subbar"><div class="inner">';
-    $activeModule = 'home';
-    if ($displayArea === 'ERP') {
-        if ($currentPath === '/' || str_starts_with($currentPath, '/reports/inventory') || str_starts_with($currentPath, '/reports/graphics') || str_starts_with($currentPath, '/warehouses')) {
-            $activeModule = 'reports';
-        } elseif (str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets')) {
-            $activeModule = 'traceability';
-        } elseif (str_starts_with($currentPath, '/bonificaciones')) {
-            $activeModule = 'bonificaciones';
-        }
-    } elseif ($displayArea === 'RECEPTION') {
-        if (str_starts_with($currentPath, '/purchase-orders') || str_starts_with($currentPath, '/import-containers')) { $activeModule = 'reception'; }
-        elseif (str_starts_with($currentPath, '/stock') || str_starts_with($currentPath, '/maquila') || str_starts_with($currentPath, '/cliches') || (str_starts_with($currentPath, '/pallets') && currentSessionArea() === 'RECEPTION') || (inventoryNavigationContext() && (str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/rolls') || str_starts_with($currentPath, '/boxes')))) { $activeModule = 'inventory'; }
-    } elseif ($displayArea === 'SCALE') {
-        $activeModule = 'scale';
-    } else {
-        if (str_starts_with($currentPath, '/production/shifts') || str_starts_with($currentPath, '/work-orders') || str_starts_with($currentPath, '/chemicals') || str_starts_with($currentPath, '/cut') || str_starts_with($currentPath, '/boxes') || str_starts_with($currentPath, '/pallets')) { $activeModule = 'production'; }
-    }
-
     echo '<div class="submenu">';
-    if ($activeModule === 'reports') {
-        echo '<a class="subitem" href="/"><span>Panel ERP</span></a>';
-        echo '<a class="subitem" href="/reports/graphics"><span>Gráficos</span></a>';
-        echo '<a class="subitem" href="/reports/inventory"><span>Informe inventario</span></a>';
-        echo '<a class="subitem" href="/warehouses"><span>Bodegas</span></a>';
-    } elseif ($activeModule === 'traceability') {
-        echo '<a class="subitem" href="/work-orders?view=pending"><span>OT pendientes</span></a>';
-        echo '<a class="subitem" href="/work-orders?view=active"><span>OT en curso</span></a>';
-        echo '<a class="subitem" href="/work-orders?view=closed"><span>Histórico OT</span></a>';
-        echo '<a class="subitem" href="/cut"><span>Corte</span></a>';
-        echo '<a class="subitem" href="/chemicals/weighings"><span>Tintas</span></a>';
-        echo '<a class="subitem" href="/pallets"><span>Pallets</span></a>';
+    if ($activeModule === 'dashboard') {
+        $isPanel = $currentPath === '/' || $currentPath === '/reports/production-dashboard';
+        $isGraphics = $currentPath === '/reports/graphics';
+        echo '<a class="subitem' . ($isPanel ? ' active' : '') . '" href="/"><span>Panel Producción & Mermas</span></a>';
+        echo '<a class="subitem' . ($isGraphics ? ' active' : '') . '" href="/reports/graphics"><span>Gráficos</span></a>';
     } elseif ($activeModule === 'reception') {
-        echo '<a class="subitem" href="/purchase-orders?status=active&supplier_type=NATIONAL"><span>Recepción nacional</span></a>';
-        echo '<a class="subitem" href="/import-containers?status=active"><span>Importación</span></a>';
-        echo '<a class="subitem" href="/purchase-orders?status=complete"><span>Recepciones finalizadas</span></a>';
+        $poStatus = (string)($_GET['status'] ?? 'active');
+        $suppType = strtoupper((string)($_GET['supplier_type'] ?? 'NATIONAL'));
+        $isImport = str_starts_with($currentPath, '/import-containers') || ($suppType === 'IMPORT' && $poStatus === 'active');
+        $isComplete = str_starts_with($currentPath, '/purchase-orders') && $poStatus === 'complete';
+        $isNatActive = !$isImport && !$isComplete;
+
+        echo '<a class="subitem' . ($isNatActive ? ' active' : '') . '" href="/purchase-orders?status=active&supplier_type=NATIONAL"><span>OC Nacionales Activas</span></a>';
+        echo '<a class="subitem' . ($isImport ? ' active' : '') . '" href="/import-containers?status=active"><span>OC Importación (Contenedores)</span></a>';
+        echo '<a class="subitem' . ($isComplete ? ' active' : '') . '" href="/purchase-orders?status=complete&supplier_type=NATIONAL"><span>Recepciones Finalizadas</span></a>';
+    } elseif ($activeModule === 'reports') {
+        echo '<a class="subitem' . ($currentPath === '/reports/operator-waste' ? ' active' : '') . '" href="/reports/operator-waste"><span>Merma por Operador</span></a>';
+        echo '<a class="subitem' . ($currentPath === '/reports/machine-production' ? ' active' : '') . '" href="/reports/machine-production"><span>Producción Máquinas</span></a>';
+        echo '<a class="subitem' . ($currentPath === '/reports/machine-events' ? ' active' : '') . '" href="/reports/machine-events"><span>Eventos de Máquina</span></a>';
+        echo '<a class="subitem' . ($currentPath === '/reports/nivel-servicio' ? ' active' : '') . '" href="/reports/nivel-servicio"><span>Nivel de Servicio</span></a>';
+        echo '<a class="subitem' . (str_starts_with($currentPath, '/reports/monthly-presentation') ? ' active' : '') . '" href="/reports/monthly-presentation"><span>Informe Mensual PPT</span></a>';
+    } elseif ($activeModule === 'bonificaciones') {
+        $bonusView = (string)($_GET['view'] ?? 'bonoflexo');
+        echo '<a class="subitem' . ($bonusView === 'bonoflexo' ? ' active' : '') . '" href="/bonificaciones?view=bonoflexo"><span>Bonoflexo</span></a>';
+        echo '<a class="subitem' . ($bonusView === 'bonoseri' ? ' active' : '') . '" href="/bonificaciones?view=bonoseri"><span>Bono seri</span></a>';
+        echo '<a class="subitem' . ($bonusView === 'bonocys' ? ' active' : '') . '" href="/bonificaciones?view=bonocys"><span>Bono CYS</span></a>';
+        echo '<a class="subitem' . ($bonusView === 'bonopulp' ? ' active' : '') . '" href="/bonificaciones?view=bonopulp"><span>Bono pulp</span></a>';
+        echo '<a class="subitem' . ($bonusView === 'bonoayudante' ? ' active' : '') . '" href="/bonificaciones?view=bonoayudante"><span>Bono ayudante</span></a>';
+        echo '<a class="subitem' . ($bonusView === 'configuracion' ? ' active' : '') . '" href="/bonificaciones?view=configuracion"><span>Configuración</span></a>';
+    } elseif ($activeModule === 'warehouses') {
+        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts');
+        $isWh = str_starts_with($currentPath, '/warehouses');
+        echo '<a class="subitem' . ($isStock ? ' active' : '') . '" href="/stock"><span>Consulta de stock</span></a>';
+        echo '<a class="subitem' . ($isWh ? ' active' : '') . '" href="/warehouses"><span>Configuración de bodega</span></a>';
+        echo '<a class="subitem' . (str_starts_with($currentPath, '/purchase-orders') ? ' active' : '') . '" href="/purchase-orders?status=active&supplier_type=NATIONAL"><span>Recepción de bobinas (OC)</span></a>';
     } elseif ($activeModule === 'inventory') {
-        echo '<a class="subitem" href="/stock"><span>Inventario</span></a>';
-        echo '<a class="subitem" href="/stock/inventory-counts"><span>Toma inventario</span></a>';
-        echo '<a class="subitem" href="/stock/material-requests"><span>Solicitudes</span></a>';
-        echo '<a class="subitem" href="/stock/transfers"><span>Traspaso</span></a>';
-        echo '<a class="subitem" href="/pallets"><span>Asignación de pallets</span></a>';
-        echo '<a class="subitem" href="/maquila"><span>Maquila</span></a>';
-        echo '<a class="subitem" href="/cliches"><span>Clisés</span></a>';
+        $isInvReport = str_starts_with($currentPath, '/reports/inventory');
+        $isInvCount = str_starts_with($currentPath, '/stock/inventory-counts');
+        echo '<a class="subitem' . ($isInvReport ? ' active' : '') . '" href="/reports/inventory"><span>Informe de inventario</span></a>';
+        echo '<a class="subitem' . ($isInvCount ? ' active' : '') . '" href="/stock/inventory-counts"><span>Toma de inventario</span></a>';
     } elseif ($activeModule === 'scale') {
         echo '<a class="subitem" href="/scale/sealing-waste"><span>Merma Selladora</span></a>';
-    } elseif ($activeModule === 'bonificaciones') {
-        echo '<a class="subitem" href="/bonificaciones?view=bonoflexo"><span>Bonoflexo</span></a>';
-        echo '<a class="subitem" href="/bonificaciones?view=bonoseri"><span>Bono seri</span></a>';
-        echo '<a class="subitem" href="/bonificaciones?view=bonocys"><span>Bono CYS</span></a>';
-        echo '<a class="subitem" href="/bonificaciones?view=bonopulp"><span>Bono pulp</span></a>';
-        echo '<a class="subitem" href="/bonificaciones?view=bonoayudante"><span>Bono ayudante</span></a>';
-        echo '<a class="subitem" href="/bonificaciones?view=configuracion"><span>Configuración</span></a>';
     } elseif ($activeModule === 'production') {
         echo '<a class="subitem" href="/production/shifts"><span>Asignación máquina</span></a>';
         echo '<a class="subitem" href="/work-orders?view=pending"><span>Iniciar nueva OT</span></a>';
@@ -1835,6 +3030,30 @@ function render(string $title, string $body): void
 }
 
 /**
+ * Construye la matriz de unidades (1..6) para configuración de Anilox en una OT.
+ *
+ * Prioridad de fuentes:
+ * 1) $formSlots (lo que viene del formulario, para re-render con errores)
+ * 2) $savedAssignments (config guardada previamente)
+ * 3) Detección automática a partir de:
+ *    - $colorSlots (colores detectados en la OT)
+ *    - $chemicalInputs (tintas/pesajes asociados)
+ *
+ * Siempre devuelve 6 filas (unidad 1 a 6), completando con valores vacíos.
+ *
+ * ---
+ *
+ * Builds the 1..6 unit matrix for a Work Order Anilox configuration.
+ *
+ * Source priority:
+ * 1) $formSlots (incoming form values, for re-render on errors)
+ * 2) $savedAssignments (previously saved config)
+ * 3) Auto-detection from:
+ *    - $colorSlots (colors detected in the work order)
+ *    - $chemicalInputs (related inks/weighings)
+ *
+ * It always returns 6 rows (units 1 to 6), padding with empty values.
+ *
  * @param array<int,string> $colorSlots
  * @param array<int,array<string,mixed>> $chemicalInputs
  * @param array<int,array<string,mixed>> $savedAssignments
@@ -1909,6 +3128,26 @@ function buildWorkOrderAniloxSlots(array $colorSlots, array $chemicalInputs, arr
 }
 
 /**
+ * Extrae colores sugeridos para el datalist de autocompletado en Anilox.
+ *
+ * Se alimenta de:
+ * - colores detectados en la OT ($colorSlots)
+ * - nombres/códigos de tintas en pesajes ($chemicalInputs)
+ * - nombres de color ya cargados en slots de anilox ($aniloxSlots)
+ *
+ * Devuelve una lista única (sin duplicados) en orden de descubrimiento.
+ *
+ * ---
+ *
+ * Extracts suggested colors for the Anilox autocomplete datalist.
+ *
+ * Sources:
+ * - detected colors in the work order ($colorSlots)
+ * - ink names/codes from weighings ($chemicalInputs)
+ * - already entered slot color names ($aniloxSlots)
+ *
+ * Returns a unique list (no duplicates) in discovery order.
+ *
  * @param array<int,string> $colorSlots
  * @param array<int,array<string,mixed>> $chemicalInputs
  * @param array<int,array<string,mixed>> $aniloxSlots
@@ -1944,6 +3183,20 @@ function extractSuggestedAniloxColors(array $colorSlots, array $chemicalInputs, 
 }
 
 /**
+ * Renderiza la tarjeta de configuración de Anilox para una OT.
+ *
+ * - Muestra 6 unidades (slots) con color + selección de anilox.
+ * - Incluye CSRF y botón de guardado.
+ * - Incluye un <datalist> con colores sugeridos para autocompletar.
+ *
+ * ---
+ *
+ * Renders the Anilox configuration card for a Work Order.
+ *
+ * - Shows 6 units (slots) with color + anilox selection.
+ * - Includes CSRF and a save button.
+ * - Includes a <datalist> with suggested colors for autocomplete.
+ *
  * @param array<int,array{unit_no:int,color_name:string,anilox_id:int}> $slots
  * @param array<int,array<string,mixed>> $aniloxCatalog
  * @param array<int,string> $suggestedColors
@@ -2011,7 +3264,21 @@ function renderWorkOrderAniloxConfigCard(int $workOrderId, array $slots, array $
     return $html;
 }
 
-
+/**
+ * Renderiza una tarjeta de cabecera para la OT (tipo/máquina + ayudante + comentarios).
+ *
+ * Esta tarjeta se usa como punto de partida del alistamiento:
+ * - Permite fijar ayudante y comentarios asociados al turno/OT.
+ * - El botón “Iniciar alistamiento” se deshabilita si no hay turno activo.
+ *
+ * ---
+ *
+ * Renders a header card for the Work Order (type/machine + helper + comments).
+ *
+ * This card is used as the setup entry point:
+ * - Allows selecting a helper and adding comments linked to the shift/WO.
+ * - The “Start setup” button is disabled if there is no active shift session.
+ */
 function renderWorkOrderMachineHeaderCard(
     int $workOrderId,
     ?array $sessionForDisplay,
@@ -2081,6 +3348,33 @@ function renderWorkOrderMachineHeaderCard(
     return $html;
 }
 
+/**
+ * Renderiza la pantalla de “alistamiento” (setup) de una OT.
+ *
+ * Integra información de:
+ * - OT y turno activo
+ * - bobina actual y bobina de salida
+ * - tintas/pesajes
+ * - pallets/cajas
+ * - clichés asignados
+ * - eventos de proceso (bitácora)
+ *
+ * Además, muestra mensajes flash opcionales (éxito/error).
+ *
+ * ---
+ *
+ * Renders the Work Order “setup” screen.
+ *
+ * It integrates:
+ * - Work order and active shift session
+ * - current roll and output roll
+ * - inks/weighings
+ * - pallets/boxes
+ * - assigned cliches
+ * - process events (audit log)
+ *
+ * Also shows optional flash messages (success/error).
+ */
 function renderWorkOrderSetupScreen(
     array $ot,
     ?array $activeShiftSession,
@@ -2760,6 +4054,25 @@ function renderWorkOrderSetupScreen(
     render('Alistamiento', $body);
 }
 
+/**
+ * Renderiza la pantalla de “solicitud de materiales” para una OT.
+ *
+ * Muestra:
+ * - Resumen de OT (medidas/objetivo/máquina).
+ * - Materiales disponibles (bobinas) y solicitudes (work_order_material_requests).
+ * - Acciones para solicitar/aceptar/entregar, según estado y permisos.
+ * - Secciones complementarias: tintas, cajas, clichés, etc.
+ *
+ * ---
+ *
+ * Renders the “materials request” screen for a Work Order.
+ *
+ * Shows:
+ * - Work order summary (dimensions/target/machine).
+ * - Available materials (rolls) and requests (work_order_material_requests).
+ * - Actions to request/accept/deliver based on status and permissions.
+ * - Complementary sections: inks, boxes, cliches, etc.
+ */
 function renderWorkOrderRequestMaterialsScreen(
     array $ot,
     array $chemicals,
@@ -3136,6 +4449,24 @@ function renderWorkOrderRequestMaterialsScreen(
     render('Solicitar materiales', $body);
 }
 
+/**
+ * Renderiza la pantalla de OT “en curso”.
+ *
+ * Se usa durante la producción para:
+ * - Ver datos principales de la OT y su turno.
+ * - Registrar/autogestionar acciones operativas (según UI): autocontrol, avances,
+ *   movimientos de bobinas, etc.
+ * - Visualizar eventos y estado consolidado.
+ *
+ * ---
+ *
+ * Renders the “in progress” Work Order screen.
+ *
+ * Used during production to:
+ * - View work order and shift core data.
+ * - Perform operational actions (as per UI): self-check, progress, roll movements, etc.
+ * - Visualize events and consolidated status.
+ */
 function renderWorkOrderInProgressScreen(
     array $ot,
     ?array $activeShiftSession,
@@ -3343,6 +4674,23 @@ function renderWorkOrderInProgressScreen(
     render('En curso', $body);
 }
 
+/**
+ * Renderiza la pantalla de aprobación de partida (setup) de una OT.
+ *
+ * Flujo típico:
+ * - Supervisor (u otro rol) valida checklist del alistamiento.
+ * - Puede requerir credencial/usuario de aprobación ($approvalUsername).
+ * - Al aprobar, la OT pasa a siguiente estado (según backend).
+ *
+ * ---
+ *
+ * Renders the Work Order setup (start) approval screen.
+ *
+ * Typical flow:
+ * - Supervisor (or other role) validates the setup checklist.
+ * - May require an approval credential/username ($approvalUsername).
+ * - On approval, the work order transitions to the next state (handled by backend).
+ */
 function renderWorkOrderSetupApprovalScreen(
     array $ot,
     ?array $activeShiftSession,
@@ -3517,6 +4865,25 @@ function renderWorkOrderSetupApprovalScreen(
     render('Aprobación partida', $body);
 }
 
+/**
+ * Renderiza la pantalla de aprobación de término (finish) de una OT.
+ *
+ * Integra:
+ * - Último “finish” reportado (metros, merma, etc.).
+ * - Historial de bobinas utilizadas.
+ * - Mermas registradas.
+ * - Bobina de salida y trazabilidad de etiquetas (impresión).
+ *
+ * ---
+ *
+ * Renders the Work Order finish approval screen.
+ *
+ * Integrates:
+ * - Last reported finish data (meters, waste, etc.).
+ * - History of used rolls.
+ * - Recorded wastes.
+ * - Output roll and label printing traceability.
+ */
 function renderWorkOrderFinishApprovalScreen(
     array $ot,
     ?array $activeShiftSession,
@@ -5996,6 +7363,21 @@ function renderWorkOrderMaterialUsageScreen(
     render('Utilizar materiales', $body);
 }
 
+/**
+ * Renderiza la pantalla principal de una OT (flujo operativo).
+ *
+ * Esta pantalla actúa como “hub” y, según el estado/etapa:
+ * - Muestra alistamiento, solicitud/uso de materiales, producción en curso, aprobación, etc.
+ * - Si el usuario está en ERP y producción está en modo solo lectura, deriva a la vista read-only.
+ *
+ * ---
+ *
+ * Renders the main Work Order screen (operational flow).
+ *
+ * This screen acts as a “hub” and, depending on status/stage:
+ * - Shows setup, materials request/usage, in-progress production, approvals, etc.
+ * - If the user is in ERP and production is in read-only mode, it delegates to the read-only view.
+ */
 function renderWorkOrderStartScreen(
     array $ot,
     array $chemicals,
@@ -8221,8 +9603,39 @@ if ($path === '/waste/compactadora' && $method === 'GET') {
     exit;
 }
 
+// =============================================================================
+// ERP · Bonificaciones
+//
+// Pantalla principal: /bonificaciones?view=...
+// - view=configuracion: mantención de tablas base (tramos Flexo, tarifas por unidad, etc.)
+// - view=bonoflexo: previsualización y descarga de planilla (CSV/XLS) para el período 26–25
+//
+// Nota: el cálculo de período 26–25 y la consulta ERP para Flexo están encapsulados en
+// ReceptionService (getBonusPeriodByMonthFinal / listErpFlexoProductionForBonusPeriod).
+// =============================================================================
 if ($path === '/bonificaciones' && $method === 'GET') {
-    $body = '';
+    $body = '<style>
+        .erp-filter-card { width: 100%; box-sizing: border-box; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 20px 24px; box-shadow: 0 4px 16px rgba(15,23,42,.04); display: flex; flex-direction: column; gap: 16px; margin-bottom: 16px; }
+        .erp-filter-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; width: 100%; }
+        .erp-filter-title { font-size: 20px; font-weight: 800; color: #0f172a; letter-spacing: -.02em; text-transform: uppercase; }
+        .erp-filter-sub { font-size: 13px; color: #64748b; font-weight: 500; margin-top: 3px; }
+        .erp-filter-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .erp-filter-form { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; width: 100%; padding-top: 16px; border-top: 1px solid #f1f5f9; }
+        .erp-filter-field { display: flex; flex-direction: column; gap: 5px; }
+        .erp-filter-field.is-hidden { display: none !important; }
+        .erp-filter-field label { font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: .05em; }
+        .erp-filter-field select, .erp-filter-field input { height: 40px; border: 1px solid #cbd5e1; border-radius: 10px; padding: 0 12px; background: #f8fafc; font-size: 13px; font-weight: 600; color: #1e293b; outline: none; transition: all .15s ease; box-sizing: border-box; }
+        .erp-filter-field select:focus, .erp-filter-field input:focus { border-color: #2563eb; background: #fff; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+        .btn-filter-apply { height: 40px; padding: 0 20px; border-radius: 10px; background: linear-gradient(135deg,#2563eb,#1d4ed8); color: #fff; font-weight: 700; font-size: 13px; border: none; cursor: pointer; box-shadow: 0 4px 12px rgba(37,99,235,.25); transition: all .15s ease; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; white-space: nowrap; box-sizing: border-box; }
+        .btn-filter-apply:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37,99,235,.35); color: #fff; }
+        .btn-filter-secondary { height: 40px; padding: 0 16px; border-radius: 10px; background: #ffffff; color: #334155; font-weight: 700; font-size: 13px; border: 1px solid #cbd5e1; cursor: pointer; transition: all .15s ease; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; white-space: nowrap; box-sizing: border-box; }
+        .btn-filter-secondary:hover { background: #f8fafc; border-color: #94a3b8; color: #0f172a; }
+        @media (max-width: 900px) {
+            .erp-filter-header { flex-direction: column; align-items: stretch; }
+            .erp-filter-form { flex-direction: column; align-items: stretch; }
+            .erp-filter-field select, .erp-filter-field input, .btn-filter-apply, .btn-filter-secondary { width: 100%; }
+        }
+    </style>';
     $view = strtolower(trim((string)($_GET['view'] ?? '')));
     $viewLabel = 'Bonificaciones';
     if ($view === 'bonoflexo') { $viewLabel = 'Bonoflexo'; }
@@ -8232,6 +9645,13 @@ if ($path === '/bonificaciones' && $method === 'GET') {
     elseif ($view === 'bonoayudante') { $viewLabel = 'Bono ayudante'; }
     elseif ($view === 'configuracion') { $viewLabel = 'Configuración'; }
     if ($view === 'configuracion') {
+        // -----------------------------------------------------------------------------
+        // Configuración
+        //
+        // - bonus_code: determina qué tabla/forma de cálculo se configura.
+        // - Flexo usa tramos (bonus_brackets) + “Compartido” por operador (bonus_operator_factors).
+        // - Serigrafía / CYS / otros usan tarifas por unidad (bonus_unit_rates).
+        // -----------------------------------------------------------------------------
         $bonusCode = strtolower(trim((string)($_GET['bonus'] ?? 'bonoflexo')));
         $bonusCodes = $service->listBonusCodes();
         if (!in_array($bonusCode, $bonusCodes, true)) {
@@ -8246,8 +9666,10 @@ if ($path === '/bonificaciones' && $method === 'GET') {
         ];
         $selectedLabel = (string)($bonusLabels[$bonusCode] ?? $bonusCode);
 
+        // Tarifas por unidad (si aplican para el bono seleccionado).
         $unitRates = $service->getBonusUnitRates($bonusCode);
 
+        // Tramos (Solo Flexo): Alta/edición/eliminación de rangos “Desde/Hasta/Monto”.
         $editId = (int)($_GET['edit'] ?? 0);
         $rows = $service->listBonusBrackets($bonusCode);
         $editRow = null;
@@ -8291,6 +9713,7 @@ if ($path === '/bonificaciones' && $method === 'GET') {
         $body .= '</div>';
 
         if ($bonusCode === 'bonoseri') {
+            // Serigrafía: bono por unidad con 2 tiers (menor a 3000 / 3000 o más).
             $defaultRates = [
                 'bolsas' => ['LT_3000' => 4.0, 'GTE_3000' => 3.0],
                 'des_menor_25cm' => ['LT_3000' => 2.0, 'GTE_3000' => 1.0],
@@ -8373,17 +9796,47 @@ if ($path === '/bonificaciones' && $method === 'GET') {
         }
 
         if ($bonusCode === 'bonoflexo') {
-            $factorMap = $service->listBonusOperatorFactors('bonoflexo');
-            $operators = $service->listProductionPersonnelNames();
-            $extraOperators = ['JG Operador', 'LE Operador', 'DR Operador', 'SH Operador'];
-            $operators = array_values(array_unique(array_merge($operators, array_keys($factorMap), $extraOperators)));
+            $defaultMonthKey = date('Y-m');
+            $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
+            if ((int)$today->format('j') >= 26) {
+                $defaultMonthKey = $today->modify('+1 month')->format('Y-m');
+            }
+            $flexoCfgMonthKey = trim((string)($_GET['month'] ?? $defaultMonthKey));
+            if (!preg_match('/^\d{4}-\d{2}$/', $flexoCfgMonthKey)) {
+                $flexoCfgMonthKey = $defaultMonthKey;
+            }
+
+            $factorMap = $service->listBonusOperatorFactors('bonoflexo', $flexoCfgMonthKey);
+            $coachCfg = $service->getBonusCoachConfig('bonoflexo', $flexoCfgMonthKey);
+            $coachName = trim((string)($coachCfg['coach_name'] ?? ''));
+            $coachShare = (float)($coachCfg['share_percent'] ?? 0.0);
+            if (abs($coachShare - 0.5) >= 0.0001) {
+                $coachShare = 0.0;
+            }
+            $coachTrainees = [];
+            foreach ((array)($coachCfg['trainees'] ?? []) as $t) {
+                $t = trim((string)$t);
+                if ($t !== '') {
+                    $coachTrainees[$t] = true;
+                }
+            }
+            $operators = $service->listErpWorkerNames();
+            $operators = array_values(array_unique(array_merge($operators, array_keys($factorMap))));
             sort($operators, SORT_NATURAL | SORT_FLAG_CASE);
 
             $configuredCount = count($factorMap);
             $body .= '<div class="card" style="margin-bottom:12px">';
             $body .= '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between">';
-            $body .= '<div><div style="font-weight:900">Compartido por operador</div><div class="muted" style="margin-top:4px">Configurados: <strong>' . h((string)$configuredCount) . '</strong> (valores distintos a 1.0)</div></div>';
-            $body .= '<div><button type="button" class="btn" data-wm-open="flexo-factors" style="min-width:220px">Configurar compartido</button></div>';
+            $body .= '<div><div style="font-weight:900">Compartido por operador</div><div class="muted" style="margin-top:4px">Mes: <strong>' . h($flexoCfgMonthKey) . '</strong> · Configurados: <strong>' . h((string)$configuredCount) . '</strong> (valores distintos a 1.0)</div></div>';
+            $body .= '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:flex-end">';
+            $body .= '<form method="get" action="/bonificaciones" style="display:flex;gap:8px;align-items:end;margin:0">';
+            $body .= '<input type="hidden" name="view" value="configuracion">';
+            $body .= '<input type="hidden" name="bonus" value="bonoflexo">';
+            $body .= '<div><div class="muted" style="margin-bottom:4px">Mes</div><input type="month" name="month" value="' . h($flexoCfgMonthKey) . '" style="width:170px;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></div>';
+            $body .= '<button class="btn secondary" type="submit" style="min-width:140px">Cargar mes</button>';
+            $body .= '</form>';
+            $body .= '<button type="button" class="btn" data-wm-open="flexo-factors" style="min-width:220px">Configurar compartido</button>';
+            $body .= '</div>';
             $body .= '</div>';
             $body .= '</div>';
 
@@ -8403,13 +9856,35 @@ if ($path === '/bonificaciones' && $method === 'GET') {
             $body .= '<div class="wm-modal">';
             $body .= '<div class="wm-modal-head"><h2 class="wm-modal-title">Compartido por operador</h2><button class="wm-modal-close" type="button" data-wm-close="flexo-factors">Cerrar</button></div>';
             $body .= '<div class="wm-modal-body">';
-            $body .= '<div class="muted" style="margin-bottom:12px">Selecciona 1.0 / 0.9 / 0.8 por operador. En la planilla, el bono se multiplica por este valor.</div>';
+            $body .= '<div class="muted" style="margin-bottom:12px">Selecciona 1.0 / 0.9 / 0.8 por operador. En la planilla, el bono se multiplica por este valor. La configuración se guarda por mes.</div>';
             $body .= '<form method="post" action="/bonificaciones/config/save-flexo-factors" style="margin:0">';
             $body .= '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
             $body .= '<input type="hidden" name="bonus_code" value="bonoflexo">';
-            $body .= '<div class="table-wrap"><table class="legacy-sheet-table" style="margin:0"><thead><tr><th style="width:70%">Operador</th><th style="width:30%">Compartido</th></tr></thead><tbody>';
+            $body .= '<input type="hidden" name="month_key" value="' . h($flexoCfgMonthKey) . '">';
+            $body .= '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">';
+            $body .= '<div><div class="muted" style="margin-bottom:4px">Mes (26–25)</div><div style="font-weight:900;padding:8px 10px;border:1px solid #e5e7eb;border-radius:6px;background:#f8fafc">' . h($flexoCfgMonthKey) . '</div></div>';
+            $body .= '<div><div class="muted" style="margin-bottom:4px">Mentor (50% adicional)</div>';
+            $body .= '<div style="display:grid;grid-template-columns:1fr 160px;gap:10px">';
+            $body .= '<select name="coach_name" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box">';
+            $body .= '<option value="">Sin mentor</option>';
+            foreach ($operators as $opName) {
+                $opName = trim((string)$opName);
+                if ($opName === '') {
+                    continue;
+                }
+                $sel = $coachName !== '' && strcasecmp($coachName, $opName) === 0 ? ' selected' : '';
+                $body .= '<option value="' . h($opName) . '"' . $sel . '>' . h($opName) . '</option>';
+            }
+            $body .= '</select>';
+            $body .= '<select name="coach_share" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box">';
+            $body .= '<option value="0"' . ($coachShare <= 0.0 ? ' selected' : '') . '>0%</option>';
+            $body .= '<option value="0.5"' . (abs($coachShare - 0.5) < 0.0001 ? ' selected' : '') . '>50%</option>';
+            $body .= '</select>';
+            $body .= '</div></div>';
+            $body .= '</div>';
+            $body .= '<div class="table-wrap"><table class="legacy-sheet-table" style="margin:0"><thead><tr><th style="width:60%">Operador</th><th style="width:20%">Compartido</th><th style="width:20%">Mentoría</th></tr></thead><tbody>';
             if ($operators === []) {
-                $body .= '<tr><td colspan="2" class="legacy-value-cell" style="text-align:center"><span class="muted">Sin operadores disponibles.</span></td></tr>';
+                $body .= '<tr><td colspan="3" class="legacy-value-cell" style="text-align:center"><span class="muted">Sin operadores disponibles.</span></td></tr>';
             }
             foreach ($operators as $op) {
                 $op = trim((string)$op);
@@ -8428,6 +9903,9 @@ if ($path === '/bonificaciones' && $method === 'GET') {
                 }
                 $body .= '</select>';
                 $body .= '</td>';
+                $checked = isset($coachTrainees[$op]) ? ' checked' : '';
+                $disabled = $coachName !== '' && strcasecmp($coachName, $op) === 0 ? ' disabled' : '';
+                $body .= '<td class="legacy-value-cell center"><input type="checkbox" name="trainees[]" value="' . h($op) . '"' . $checked . $disabled . '></td>';
                 $body .= '</tr>';
             }
             $body .= '</tbody></table></div>';
@@ -8489,17 +9967,28 @@ if ($path === '/bonificaciones' && $method === 'GET') {
 
         $body .= '<script>(function(){var sel=document.getElementById("bonus-config-select");if(!sel)return;sel.addEventListener("change",function(){var v=sel.value||"bonoflexo";window.location.href="/bonificaciones?view=configuracion&bonus="+encodeURIComponent(v);});})();</script>';
         $body .= '<script>(function(){if(window.__wmBound)return;window.__wmBound=true;function openWm(id){var m=document.querySelector("[data-wm-modal=\\x27"+id+"\\x27]");if(m){m.classList.add("is-open");m.style.display="flex";document.body.style.overflow="hidden";}}function closeWm(id){var m=document.querySelector("[data-wm-modal=\\x27"+id+"\\x27]");if(m){m.classList.remove("is-open");m.style.display="none";document.body.style.overflow="";}}document.addEventListener("click",function(e){var t=e.target;var openr=t.closest&&t.closest("[data-wm-open]");if(openr){e.preventDefault();openWm(openr.getAttribute("data-wm-open"));return;}var closer=t.closest&&t.closest("[data-wm-close]");if(closer){e.preventDefault();closeWm(closer.getAttribute("data-wm-close"));return;}if(t.classList&&t.classList.contains("wm-modal-backdrop")&&t.getAttribute("data-wm-modal")){if(t===e.target){closeWm(t.getAttribute("data-wm-modal"));}}});})();</script>';
-    } elseif ($view === 'bonoflexo') {
+    } elseif ($view === 'bonocys') {
         $defaultMonthKey = date('Y-m');
         $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
         if ((int)$today->format('j') >= 26) {
             $defaultMonthKey = $today->modify('+1 month')->format('Y-m');
         }
+        $filterType = trim((string)($_GET['filter_type'] ?? 'period'));
+        if ($filterType !== 'range') {
+            $filterType = 'period';
+        }
         $monthKey = trim((string)($_GET['month'] ?? $defaultMonthKey));
         if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
             $monthKey = $defaultMonthKey;
         }
+        $startDate = trim((string)($_GET['start_date'] ?? ''));
+        $endDate = trim((string)($_GET['end_date'] ?? ''));
+        if ($startDate === '' || $endDate === '') {
+            $startDate = date('Y-m-d', strtotime('-6 days'));
+            $endDate = date('Y-m-d');
+        }
         $selectedOperator = trim((string)($_GET['operator'] ?? ''));
+        $selectedCc = trim((string)($_GET['cc'] ?? ''));
 
         $flashMessage = null;
         $flashIsError = false;
@@ -8512,53 +10001,361 @@ if ($path === '/bonificaciones' && $method === 'GET') {
             $body .= '<div class="' . ($flashIsError ? 'err' : 'ok') . '" style="margin-bottom:12px">' . h($flashMessage) . '</div>';
         }
 
-        $period = $service->getBonusPeriodByMonthFinal($monthKey);
-        $periodLabel = (string)($period['start_date'] ?? '') !== '' && (string)($period['end_date'] ?? '') !== ''
-            ? ('Período 26–25: ' . (string)$period['start_date'] . ' a ' . (string)$period['end_date'])
-            : '';
+        $period = $service->resolveBonusFilterPeriod($filterType, $monthKey, $startDate, $endDate);
+        $periodLabel = (string)($period['label'] ?? '');
 
-        $previewAll = $service->listErpFlexoProductionForBonusPeriod($monthKey);
-        $operatorOptions = [];
-        if (($previewAll['ok'] ?? false) === true) {
-            foreach ((array)($previewAll['rows'] ?? []) as $r) {
-                $name = trim((string)($r['operator_name'] ?? ''));
-                if ($name !== '') {
-                    $operatorOptions[$name] = true;
-                }
+        $operatorNames = [];
+        $cysEquipotypeIds = $service->getErpEquipotypeIdsForBonusCode('bonocys');
+        $cysEquipoIds = $cysEquipotypeIds === null ? $service->getErpEquipoIdsForBonusCode('bonocys') : null;
+        if ($cysEquipotypeIds !== null || $cysEquipoIds !== null) {
+            $operatorsResult = $service->listErpBonusOperatorNamesForPeriod($period, $cysEquipotypeIds, $cysEquipoIds);
+            if (($operatorsResult['ok'] ?? false) === true) {
+                $operatorNames = (array)($operatorsResult['names'] ?? []);
             }
         }
-        $operatorNames = array_keys($operatorOptions);
-        sort($operatorNames, SORT_NATURAL | SORT_FLAG_CASE);
 
-        $body .= '<div class="card" style="margin-bottom:12px">';
-        $body .= '<div style="font-weight:900;margin-bottom:8px">Planilla Flexo</div>';
-        $body .= '<div class="muted" style="margin-bottom:10px">Selecciona el mes final del período 26–25 y descarga el CSV. Puedes separar el informe por operador.</div>';
-        $body .= '<form method="get" action="/bonificaciones" style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:0">';
-        $body .= '<input type="hidden" name="view" value="bonoflexo">';
-        $body .= '<div><div class="muted" style="margin-bottom:4px">Mes (final)</div><input type="month" name="month" value="' . h($monthKey) . '" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></div>';
-        $body .= '<div><div class="muted" style="margin-bottom:4px">Operador</div><select name="operator" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box;min-width:220px">';
+        $body .= '<div class="erp-filter-card">';
+        $body .= '<div style="font-weight:900;font-size:16px;color:#1e293b;margin-bottom:6px">Planilla Corte y Sellado</div>';
+        $body .= '<div class="muted" style="margin-bottom:14px;font-size:13px">Filtra por período mensual operativo (26 al 25) o define un rango de fechas con inicio y final. Puedes descargar la planilla Excel y filtrar por operador.</div>';
+        $body .= '<form method="get" action="/bonificaciones" class="erp-filter-form" id="bonus-filter-form-cys">';
+        $body .= '<input type="hidden" name="view" value="bonocys">';
+        $body .= '<div class="erp-filter-field"><label for="filter_type_cys">Modo de consulta</label><select name="filter_type" id="filter_type_cys" class="erp-filter-select">';
+        $body .= '<option value="period"' . ($filterType === 'period' ? ' selected' : '') . '>Por Período (26 al 25)</option>';
+        $body .= '<option value="range"' . ($filterType === 'range' ? ' selected' : '') . '>Por Rango (Inicio - Fin)</option>';
+        $body .= '</select></div>';
+
+        $body .= '<div class="erp-filter-field bonus-filter-period-box" id="period-box-cys"' . ($filterType === 'range' ? ' style="display:none"' : '') . '><label for="month_cys">Mes (Ciclo 26–25)</label><input type="month" name="month" id="month_cys" value="' . h($monthKey) . '"></div>';
+        $body .= '<div class="erp-filter-field bonus-filter-range-box" id="range-box-start-cys"' . ($filterType !== 'range' ? ' style="display:none"' : '') . '><label for="start_date_cys">Fecha Inicio</label><input type="date" name="start_date" id="start_date_cys" value="' . h($startDate) . '"></div>';
+        $body .= '<div class="erp-filter-field bonus-filter-range-box" id="range-box-end-cys"' . ($filterType !== 'range' ? ' style="display:none"' : '') . '><label for="end_date_cys">Fecha Final</label><input type="date" name="end_date" id="end_date_cys" value="' . h($endDate) . '"></div>';
+
+        $body .= '<div class="erp-filter-field"><label for="operator_cys">Operador</label><select name="operator" id="operator_cys">';
         $body .= '<option value="">Todos</option>';
         foreach ($operatorNames as $operatorName) {
             $selected = $selectedOperator === $operatorName ? ' selected' : '';
             $body .= '<option value="' . h($operatorName) . '"' . $selected . '>' . h($operatorName) . '</option>';
         }
         $body .= '</select></div>';
-        $body .= '<div><button class="btn secondary" type="submit" style="min-width:140px">Ver período</button></div>';
-        $body .= '<div class="muted" style="font-size:12px">' . h($periodLabel) . '</div>';
+        $body .= '<div class="erp-filter-field erp-filter-actions"><button class="btn btn-filter-apply" type="submit">Consultar</button></div>';
         $body .= '</form>';
-        $body .= '<div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">';
-        $exportUrl = '/bonificaciones/flexo/export?month=' . rawurlencode($monthKey);
-        if ($selectedOperator !== '') {
-            $exportUrl .= '&operator=' . rawurlencode($selectedOperator);
+
+        $body .= '<div class="erp-filter-badge" style="margin-top:14px"><strong>' . h($periodLabel) . '</strong></div>';
+
+        $exportParams = ['filter_type' => $filterType];
+        if ($filterType === 'range') {
+            $exportParams['start_date'] = $startDate;
+            $exportParams['end_date'] = $endDate;
+        } else {
+            $exportParams['month'] = $monthKey;
         }
-        $exportXlsUrl = '/bonificaciones/flexo/export-xls?month=' . rawurlencode($monthKey);
         if ($selectedOperator !== '') {
-            $exportXlsUrl .= '&operator=' . rawurlencode($selectedOperator);
+            $exportParams['operator'] = $selectedOperator;
         }
-        $body .= '<a class="btn" href="' . h($exportXlsUrl) . '" style="min-width:260px;text-align:center">Descargar planilla Flexo (Excel)</a>';
+        $exportXlsUrl = '/bonificaciones/cys/export-xls?' . http_build_query($exportParams);
+
+        $body .= '<div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">';
+        $body .= '<a class="btn btn-filter-secondary" href="' . h($exportXlsUrl) . '" style="min-width:300px;text-align:center">Descargar planilla CYS (Excel)</a>';
+        $body .= '</div>';
         $body .= '</div>';
 
-        $preview = $previewAll;
+        $body .= '<script>(function(){';
+        $body .= 'var sel=document.getElementById("filter_type_cys");if(!sel)return;';
+        $body .= 'var pBox=document.getElementById("period-box-cys");var rStart=document.getElementById("range-box-start-cys");var rEnd=document.getElementById("range-box-end-cys");';
+        $body .= 'sel.addEventListener("change",function(){';
+        $body .= 'if(this.value==="range"){if(pBox)pBox.style.display="none";if(rStart)rStart.style.display="";if(rEnd)rEnd.style.display="";}';
+        $body .= 'else{if(pBox)pBox.style.display="";if(rStart)rStart.style.display="none";if(rEnd)rEnd.style.display="none";}';
+        $body .= '});';
+        $body .= '})();</script>';
+
+        $preview = $service->listErpCysProductionPreviewForBonusPeriod(
+            $period,
+            $selectedOperator !== '' ? $selectedOperator : null,
+            12
+        );
+        if (($preview['ok'] ?? false) === true) {
+            $rowsPreview = (array)($preview['rows'] ?? []);
+            if ($rowsPreview !== []) {
+                $body .= '<div class="legacy-sheet-card" style="margin-top:12px"><div class="table-wrap"><table class="legacy-sheet-table legacy-setup-event-table" style="margin:0"><thead><tr>';
+                $body .= '<th>Fecha</th><th>N° CC</th><th>Cliente</th><th>Selladora</th><th>Tipo</th><th>Unidades</th><th>Operador</th>';
+                $body .= '</tr></thead><tbody>';
+                foreach (array_slice($rowsPreview, 0, 12) as $r) {
+                    $cysPreviewBag = strtoupper(trim((string)($r['bag_type'] ?? '')));
+                    $cysPreviewTypeUp = strtoupper(trim((string)($r['product_type'] ?? '')));
+                    $cysPreviewDescUp = strtoupper(trim((string)($r['erp_desc'] ?? '')));
+                    $cysPreviewItemUp = strtoupper(trim((string)($r['item_title'] ?? '')));
+                    $cysPreviewType = $cysPreviewBag !== '' ? $cysPreviewBag : $cysPreviewTypeUp;
+                    if (
+                        str_contains($cysPreviewType, 'SAC')
+                        || str_contains($cysPreviewType, 'SACO')
+                        || str_contains($cysPreviewType, 'SACOS')
+                        || str_contains($cysPreviewDescUp, 'SAC')
+                        || str_contains($cysPreviewDescUp, 'SACO')
+                        || str_contains($cysPreviewDescUp, 'SACOS')
+                        || str_contains($cysPreviewItemUp, 'SAC')
+                        || str_contains($cysPreviewItemUp, 'SACO')
+                        || str_contains($cysPreviewItemUp, 'SACOS')
+                    ) {
+                        $cysPreviewType = 'SAC';
+                    }
+                    $body .= '<tr>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['event_date'] ?? '')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
+                    $body .= '<td class="legacy-value-cell">' . h((string)($r['client_label'] ?? '')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['printer_no'] ?? '')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h($cysPreviewType) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:right;font-weight:800">' . h(number_format((float)($r['produced_units'] ?? 0), 0, ',', '.')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['operator_name'] ?? '')) . '</td>';
+                    $body .= '</tr>';
+                }
+                $body .= '</tbody></table></div></div>';
+            }
+        }
+    } elseif ($view === 'bonoseri') {
+        $defaultMonthKey = date('Y-m');
+        $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
+        if ((int)$today->format('j') >= 26) {
+            $defaultMonthKey = $today->modify('+1 month')->format('Y-m');
+        }
+        $filterType = trim((string)($_GET['filter_type'] ?? 'period'));
+        if ($filterType !== 'range') {
+            $filterType = 'period';
+        }
+        $monthKey = trim((string)($_GET['month'] ?? $defaultMonthKey));
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            $monthKey = $defaultMonthKey;
+        }
+        $startDate = trim((string)($_GET['start_date'] ?? ''));
+        $endDate = trim((string)($_GET['end_date'] ?? ''));
+        if ($startDate === '' || $endDate === '') {
+            $startDate = date('Y-m-d', strtotime('-6 days'));
+            $endDate = date('Y-m-d');
+        }
+        $selectedOperator = trim((string)($_GET['operator'] ?? ''));
+        $selectedCc = trim((string)($_GET['cc'] ?? ''));
+
+        $flashMessage = null;
+        $flashIsError = false;
+        if (isset($_GET['error']) && trim((string)$_GET['error']) !== '') {
+            $flashMessage = trim((string)$_GET['error']);
+            $flashIsError = true;
+        }
+
+        if ($flashMessage !== null) {
+            $body .= '<div class="' . ($flashIsError ? 'err' : 'ok') . '" style="margin-bottom:12px">' . h($flashMessage) . '</div>';
+        }
+
+        $period = $service->resolveBonusFilterPeriod($filterType, $monthKey, $startDate, $endDate);
+        $periodLabel = (string)($period['label'] ?? '');
+
+        $operatorNames = [];
+        $seriEquipotypeIds = $service->getErpEquipotypeIdsForBonusCode('bonoseri');
+        $seriEquipoIds = $service->getErpEquipoIdsForBonusCode('bonoseri');
+        if ($seriEquipotypeIds !== null || $seriEquipoIds !== null) {
+            $operatorsResult = $service->listErpBonusOperatorNamesForPeriod($period, $seriEquipotypeIds, $seriEquipoIds);
+            if (($operatorsResult['ok'] ?? false) === true) {
+                $operatorNames = (array)($operatorsResult['names'] ?? []);
+            }
+        }
+
+        $body .= '<div class="erp-filter-card">';
+        $body .= '<div style="font-weight:900;font-size:16px;color:#1e293b;margin-bottom:6px">Planilla Serigrafía</div>';
+        $body .= '<div class="muted" style="margin-bottom:14px;font-size:13px">Filtra por período mensual operativo (26 al 25) o define un rango de fechas con inicio y final. Puedes descargar la planilla Excel y filtrar por operador.</div>';
+        $body .= '<form method="get" action="/bonificaciones" class="erp-filter-form" id="bonus-filter-form-seri">';
+        $body .= '<input type="hidden" name="view" value="bonoseri">';
+        $body .= '<div class="erp-filter-field"><label for="filter_type_seri">Modo de consulta</label><select name="filter_type" id="filter_type_seri" class="erp-filter-select">';
+        $body .= '<option value="period"' . ($filterType === 'period' ? ' selected' : '') . '>Por Período (26 al 25)</option>';
+        $body .= '<option value="range"' . ($filterType === 'range' ? ' selected' : '') . '>Por Rango (Inicio - Fin)</option>';
+        $body .= '</select></div>';
+
+        $body .= '<div class="erp-filter-field bonus-filter-period-box" id="period-box-seri"' . ($filterType === 'range' ? ' style="display:none"' : '') . '><label for="month_seri">Mes (Ciclo 26–25)</label><input type="month" name="month" id="month_seri" value="' . h($monthKey) . '"></div>';
+        $body .= '<div class="erp-filter-field bonus-filter-range-box" id="range-box-start-seri"' . ($filterType !== 'range' ? ' style="display:none"' : '') . '><label for="start_date_seri">Fecha Inicio</label><input type="date" name="start_date" id="start_date_seri" value="' . h($startDate) . '"></div>';
+        $body .= '<div class="erp-filter-field bonus-filter-range-box" id="range-box-end-seri"' . ($filterType !== 'range' ? ' style="display:none"' : '') . '><label for="end_date_seri">Fecha Final</label><input type="date" name="end_date" id="end_date_seri" value="' . h($endDate) . '"></div>';
+
+        $body .= '<div class="erp-filter-field"><label for="operator_seri">Operador</label><select name="operator" id="operator_seri">';
+        $body .= '<option value="">Todos</option>';
+        foreach ($operatorNames as $operatorName) {
+            $selected = $selectedOperator === $operatorName ? ' selected' : '';
+            $body .= '<option value="' . h($operatorName) . '"' . $selected . '>' . h($operatorName) . '</option>';
+        }
+        $body .= '</select></div>';
+        $body .= '<div class="erp-filter-field erp-filter-actions"><button class="btn btn-filter-apply" type="submit">Consultar</button></div>';
+        $body .= '</form>';
+
+        $body .= '<div class="erp-filter-badge" style="margin-top:14px"><strong>' . h($periodLabel) . '</strong></div>';
+
+        $exportParams = ['filter_type' => $filterType];
+        if ($filterType === 'range') {
+            $exportParams['start_date'] = $startDate;
+            $exportParams['end_date'] = $endDate;
+        } else {
+            $exportParams['month'] = $monthKey;
+        }
+        if ($selectedOperator !== '') {
+            $exportParams['operator'] = $selectedOperator;
+        }
+        $exportXlsUrl = '/bonificaciones/seri/export-xls?' . http_build_query($exportParams);
+
+        $body .= '<div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">';
+        $body .= '<a class="btn btn-filter-secondary" href="' . h($exportXlsUrl) . '" style="min-width:260px;text-align:center">Descargar planilla Seri (Excel)</a>';
+        $body .= '</div>';
+        $body .= '</div>';
+
+        $body .= '<script>(function(){';
+        $body .= 'var sel=document.getElementById("filter_type_seri");if(!sel)return;';
+        $body .= 'var pBox=document.getElementById("period-box-seri");var rStart=document.getElementById("range-box-start-seri");var rEnd=document.getElementById("range-box-end-seri");';
+        $body .= 'sel.addEventListener("change",function(){';
+        $body .= 'if(this.value==="range"){if(pBox)pBox.style.display="none";if(rStart)rStart.style.display="";if(rEnd)rEnd.style.display="";}';
+        $body .= 'else{if(pBox)pBox.style.display="";if(rStart)rStart.style.display="none";if(rEnd)rEnd.style.display="none";}';
+        $body .= '});';
+        $body .= '})();</script>';
+
+        $preview = $service->listErpSeriProductionPreviewForBonusPeriod(
+            $period,
+            $selectedOperator !== '' ? $selectedOperator : null,
+            12
+        );
+        if (($preview['ok'] ?? false) === true) {
+            $rowsPreview = (array)($preview['rows'] ?? []);
+            if ($rowsPreview !== []) {
+                $body .= '<div class="legacy-sheet-card" style="margin-top:12px"><div class="table-wrap"><table class="legacy-sheet-table legacy-setup-event-table" style="margin:0"><thead><tr>';
+                $body .= '<th>N° OT</th><th>N° CC</th><th>Fecha</th><th>Cliente</th><th>Tipo</th><th>Solicitadas</th><th>Impresas</th><th>Operador</th>';
+                $body .= '</tr></thead><tbody>';
+                foreach (array_slice($rowsPreview, 0, 12) as $r) {
+                    $seriPreviewDescUp = strtoupper(trim((string)($r['erp_desc'] ?? '')));
+                    $seriPreviewTypeUp = strtoupper(trim((string)($r['bag_type'] ?? '')));
+                    if ($seriPreviewTypeUp === '') {
+                        $seriPreviewTypeUp = strtoupper(trim((string)($r['product_type'] ?? '')));
+                    }
+                    $seriPreviewItemUp = strtoupper(trim((string)($r['item_title'] ?? '')));
+                    $seriPreviewType = (str_contains($seriPreviewDescUp, 'SAC') || str_contains($seriPreviewDescUp, 'SACO') || str_contains($seriPreviewDescUp, 'SACOS') || str_contains($seriPreviewItemUp, 'SAC') || str_contains($seriPreviewItemUp, 'SACO') || str_contains($seriPreviewItemUp, 'SACOS') || $seriPreviewTypeUp === 'SACO' || $seriPreviewTypeUp === 'SACOS' || str_starts_with($seriPreviewTypeUp, 'SAC'))
+                        ? 'SAC'
+                        : strtoupper(substr($seriPreviewTypeUp !== '' ? $seriPreviewTypeUp : 'BOL', 0, 3));
+                    $body .= '<tr>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['work_order_number'] ?? '')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['event_date'] ?? '')) . '</td>';
+                    $body .= '<td class="legacy-value-cell">' . h((string)($r['client_label'] ?? '')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h($seriPreviewType) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:right">' . h(number_format((float)($r['requested_units'] ?? 0), 0, ',', '.')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:right">' . h(number_format((float)($r['produced_units'] ?? 0), 0, ',', '.')) . '</td>';
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['operator_name'] ?? '')) . '</td>';
+                    $body .= '</tr>';
+                }
+                $body .= '</tbody></table></div></div>';
+            }
+        }
+    } elseif ($view === 'bonoflexo') {
+        $defaultMonthKey = date('Y-m');
+        $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
+        if ((int)$today->format('j') >= 26) {
+            $defaultMonthKey = $today->modify('+1 month')->format('Y-m');
+        }
+        $filterType = trim((string)($_GET['filter_type'] ?? 'period'));
+        if ($filterType !== 'range') {
+            $filterType = 'period';
+        }
+        $monthKey = trim((string)($_GET['month'] ?? $defaultMonthKey));
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            $monthKey = $defaultMonthKey;
+        }
+        $startDate = trim((string)($_GET['start_date'] ?? ''));
+        $endDate = trim((string)($_GET['end_date'] ?? ''));
+        if ($startDate === '' || $endDate === '') {
+            $startDate = date('Y-m-d', strtotime('-6 days'));
+            $endDate = date('Y-m-d');
+        }
+        $selectedOperator = trim((string)($_GET['operator'] ?? ''));
+        $selectedCc = trim((string)($_GET['cc'] ?? ''));
+
+        $flashMessage = null;
+        $flashIsError = false;
+        if (isset($_GET['error']) && trim((string)$_GET['error']) !== '') {
+            $flashMessage = trim((string)$_GET['error']);
+            $flashIsError = true;
+        }
+
+        if ($flashMessage !== null) {
+            $body .= '<div class="' . ($flashIsError ? 'err' : 'ok') . '" style="margin-bottom:12px">' . h($flashMessage) . '</div>';
+        }
+
+        $period = $service->resolveBonusFilterPeriod($filterType, $monthKey, $startDate, $endDate);
+        $periodLabel = (string)($period['label'] ?? '');
+
+        $operatorNames = [];
+        $flexoEquipotypeIds = $service->getErpEquipotypeIdsForBonusCode('bonoflexo');
+        $flexoEquipoIds = $flexoEquipotypeIds === null ? $service->getErpEquipoIdsForBonusCode('bonoflexo') : null;
+        if ($flexoEquipotypeIds !== null || $flexoEquipoIds !== null) {
+            $operatorsResult = $service->listErpBonusOperatorNamesForPeriod(
+                $period,
+                $flexoEquipotypeIds,
+                $flexoEquipoIds
+            );
+            if (($operatorsResult['ok'] ?? false) === true) {
+                $operatorNames = (array)($operatorsResult['names'] ?? []);
+            }
+        }
+
+        $body .= '<div class="erp-filter-card">';
+        $body .= '<div style="font-weight:900;font-size:16px;color:#1e293b;margin-bottom:6px">Planilla Flexo</div>';
+        $body .= '<div class="muted" style="margin-bottom:14px;font-size:13px">Filtra por período mensual operativo (26 al 25) o define un rango de fechas con inicio y final. Puedes descargar en Excel y filtrar por operador o Centro de Costo.</div>';
+        $body .= '<form method="get" action="/bonificaciones" class="erp-filter-form" id="bonus-filter-form-flexo">';
+        $body .= '<input type="hidden" name="view" value="bonoflexo">';
+        $body .= '<div class="erp-filter-field"><label for="filter_type_flexo">Modo de consulta</label><select name="filter_type" id="filter_type_flexo" class="erp-filter-select">';
+        $body .= '<option value="period"' . ($filterType === 'period' ? ' selected' : '') . '>Por Período (26 al 25)</option>';
+        $body .= '<option value="range"' . ($filterType === 'range' ? ' selected' : '') . '>Por Rango (Inicio - Fin)</option>';
+        $body .= '</select></div>';
+
+        $body .= '<div class="erp-filter-field bonus-filter-period-box" id="period-box-flexo"' . ($filterType === 'range' ? ' style="display:none"' : '') . '><label for="month_flexo">Mes (Ciclo 26–25)</label><input type="month" name="month" id="month_flexo" value="' . h($monthKey) . '"></div>';
+        $body .= '<div class="erp-filter-field bonus-filter-range-box" id="range-box-start-flexo"' . ($filterType !== 'range' ? ' style="display:none"' : '') . '><label for="start_date_flexo">Fecha Inicio</label><input type="date" name="start_date" id="start_date_flexo" value="' . h($startDate) . '"></div>';
+        $body .= '<div class="erp-filter-field bonus-filter-range-box" id="range-box-end-flexo"' . ($filterType !== 'range' ? ' style="display:none"' : '') . '><label for="end_date_flexo">Fecha Final</label><input type="date" name="end_date" id="end_date_flexo" value="' . h($endDate) . '"></div>';
+
+        $body .= '<div class="erp-filter-field"><label for="operator_flexo">Operador</label><select name="operator" id="operator_flexo">';
+        $body .= '<option value="">Todos</option>';
+        foreach ($operatorNames as $operatorName) {
+            $selected = $selectedOperator === $operatorName ? ' selected' : '';
+            $body .= '<option value="' . h($operatorName) . '"' . $selected . '>' . h($operatorName) . '</option>';
+        }
+        $body .= '</select></div>';
+        $body .= '<div class="erp-filter-field"><label for="cc_flexo">N° CC</label><input type="text" name="cc" id="cc_flexo" value="' . h((string)$selectedCc) . '" placeholder="Ej: 12345"></div>';
+        $body .= '<div class="erp-filter-field erp-filter-actions"><button class="btn btn-filter-apply" type="submit">Consultar</button></div>';
+        $body .= '</form>';
+
+        $body .= '<div class="erp-filter-badge" style="margin-top:14px"><strong>' . h($periodLabel) . '</strong></div>';
+
+        $exportParams = ['filter_type' => $filterType];
+        if ($filterType === 'range') {
+            $exportParams['start_date'] = $startDate;
+            $exportParams['end_date'] = $endDate;
+        } else {
+            $exportParams['month'] = $monthKey;
+        }
+        if ($selectedOperator !== '') {
+            $exportParams['operator'] = $selectedOperator;
+        }
+        if ($selectedCc !== '') {
+            $exportParams['cc'] = $selectedCc;
+        }
+        $exportXlsUrl = '/bonificaciones/flexo/export-xls?' . http_build_query($exportParams);
+
+        $body .= '<div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">';
+        $body .= '<a class="btn btn-filter-secondary" href="' . h($exportXlsUrl) . '" style="min-width:260px;text-align:center">Descargar planilla Flexo (Excel)</a>';
+        $body .= '</div>';
+        $body .= '</div>';
+
+        $body .= '<script>(function(){';
+        $body .= 'var sel=document.getElementById("filter_type_flexo");if(!sel)return;';
+        $body .= 'var pBox=document.getElementById("period-box-flexo");var rStart=document.getElementById("range-box-start-flexo");var rEnd=document.getElementById("range-box-end-flexo");';
+        $body .= 'sel.addEventListener("change",function(){';
+        $body .= 'if(this.value==="range"){if(pBox)pBox.style.display="none";if(rStart)rStart.style.display="";if(rEnd)rEnd.style.display="";}';
+        $body .= 'else{if(pBox)pBox.style.display="";if(rStart)rStart.style.display="none";if(rEnd)rEnd.style.display="none";}';
+        $body .= '});';
+        $body .= '})();</script>';
+
+        $preview = $service->listErpFlexoProductionPreviewForBonusPeriod(
+            $period,
+            $selectedOperator !== '' ? $selectedOperator : null,
+            $selectedCc !== '' ? $selectedCc : null,
+            12
+        );
         if (($preview['ok'] ?? false) !== true) {
             $errList = $preview['errors'] ?? [];
             $error = $errList !== [] ? trim((string)reset($errList)) : '';
@@ -8571,6 +10368,12 @@ if ($path === '/bonificaciones' && $method === 'GET') {
                 $rowsPreview = array_values(array_filter($rowsPreview, function ($row) use ($selectedOperator) {
                     $name = is_array($row) ? trim((string)($row['operator_name'] ?? '')) : '';
                     return $name === $selectedOperator;
+                }));
+            }
+            if ($selectedCc !== '') {
+                $rowsPreview = array_values(array_filter($rowsPreview, function ($row) use ($selectedCc) {
+                    $cc = is_array($row) ? trim((string)($row['cost_center'] ?? '')) : '';
+                    return $cc === $selectedCc;
                 }));
             }
             if ($rowsPreview === []) {
@@ -8595,9 +10398,7 @@ if ($path === '/bonificaciones' && $method === 'GET') {
                     $body .= '</tr>';
                 }
                 $body .= '</tbody></table></div></div>';
-                if (count((array)($preview['rows'] ?? [])) > count($rowsPreview)) {
-                    $body .= '<div class="muted" style="margin-top:6px">Mostrando ' . count($rowsPreview) . ' de ' . count((array)($preview['rows'] ?? [])) . ' registros.</div>';
-                }
+                $body .= '<div class="muted" style="margin-top:6px">Mostrando vista previa (máximo ' . count($rowsPreview) . ' registros).</div>';
             }
         }
 
@@ -8740,148 +10541,65 @@ if ($path === '/bonificaciones' && $method === 'GET') {
 }
 
 if ($path === '/bonificaciones/flexo/export' && $method === 'GET') {
-    $defaultMonthKey = date('Y-m');
-    $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
-    if ((int)$today->format('j') >= 26) {
-        $defaultMonthKey = $today->modify('+1 month')->format('Y-m');
-    }
-    $monthKey = trim((string)($_GET['month'] ?? $defaultMonthKey));
-    if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
-        $monthKey = $defaultMonthKey;
-    }
-    $operatorName = trim((string)($_GET['operator'] ?? ''));
-    if ($operatorName === '') {
-        $operatorName = null;
-    }
-
-    $result = $service->listErpFlexoProductionForBonusPeriod($monthKey, $operatorName);
-    if (($result['ok'] ?? false) !== true) {
-        $errList = $result['errors'] ?? [];
-        $error = $errList !== [] ? trim((string)reset($errList)) : '';
-        header('Location: /bonificaciones?view=bonoflexo&month=' . rawurlencode($monthKey) . '&error=' . rawurlencode($error !== '' ? $error : 'No se pudo generar la planilla.'));
-        exit;
-    }
-
-    $period = (array)($result['period'] ?? []);
-    $start = (string)($period['start_date'] ?? '');
-    $end = (string)($period['end_date'] ?? '');
-    $filename = 'planilla_flexo_' . $monthKey . '_26-25';
-    if (is_string($operatorName) && $operatorName !== '') {
-        $safeOperator = preg_replace('/[^A-Za-z0-9._-]+/', '_', $operatorName);
-        $safeOperator = trim((string)$safeOperator, '_');
-        if ($safeOperator !== '') {
-            $filename .= '_operador_' . $safeOperator;
-        }
-    }
-    if ($start !== '' && $end !== '') {
-        $filename .= '_' . $start . '_a_' . $end;
-    }
-    $filename .= '.csv';
-
-    header('Content-Type: text/csv; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . $filename . '"');
-
-    echo "\xEF\xBB\xBF";
-    $out = fopen('php://output', 'w');
-    if ($out === false) {
-        exit;
-    }
-
-    $brackets = $service->listBonusBrackets('bonoflexo');
-    $factorMap = $service->listBonusOperatorFactors('bonoflexo');
-
-    $headers = [
-        'N° IMPRESORA',
-        'N° CC',
-        'N° OT',
-        'FECHA',
-        'CLIENTE',
-        'TIPO PRODUCTO',
-        'MEDIDA [cm]',
-        'APOYO',
-        'BONIFICACIÓN',
-        'Total UNID. IMPRESAS',
-        '%',
-        'Compartido',
-        'Bono',
-        'OBSERVACIONES',
-        'UNID SOLICITADAS',
-        'unid impresas',
-        'DIFERENCIA',
-    ];
-    fputcsv($out, $headers, ';');
-
-    foreach ((array)($result['rows'] ?? []) as $r) {
-        $units = (float)($r['produced_units'] ?? 0);
-        $requested = (float)($r['requested_units'] ?? 0);
-        $diff = $requested > 0 ? ($requested - $units) : 0;
-        $unitsLabel = rtrim(rtrim(number_format($units, 3, '.', ''), '0'), '.');
-        $reqLabel = $requested > 0 ? rtrim(rtrim(number_format($requested, 3, '.', ''), '0'), '.') : '';
-        $operatorRow = trim((string)($r['operator_name'] ?? ''));
-        $factor = (float)($factorMap[$operatorRow] ?? 1.0);
-        $factorLabel = rtrim(rtrim(number_format($factor, 1, '.', ''), '0'), '.');
-        $bonusClp = $service->resolveBonusBracketAmount($brackets, $units);
-        $bonusClp = $bonusClp > 0 ? round($bonusClp * $factor, 0) : 0.0;
-        $bonusLabel = $bonusClp > 0 ? ('$ ' . number_format($bonusClp, 0, ',', '.')) : '$ -';
-        $mermaPercent = $requested > 0 ? (abs($diff) / $requested * 100.0) : 0.0;
-        $mermaLabel = number_format($mermaPercent, 2, ',', '.') . '%';
-        $hasBonus = $mermaPercent <= 5.0;
-        $bonificacionLabel = $hasBonus ? 'PAGO' : 'NO HAY BONO';
-        if (!$hasBonus) {
-            $bonusLabel = '$ -';
-        }
-        fputcsv($out, [
-            (string)($r['printer_no'] ?? ''),
-            (string)($r['cost_center'] ?? ''),
-            (string)($r['work_order_number'] ?? ''),
-            (string)($r['event_date'] ?? ''),
-            (string)($r['client_label'] ?? ''),
-            (string)($r['product_type'] ?? ''),
-            (string)($r['measure_cm'] ?? ''),
-            (string)($r['helper_label'] ?? ''),
-            $bonificacionLabel,
-            $unitsLabel,
-            $mermaLabel,
-            $factorLabel,
-            $bonusLabel,
-            '',
-            $reqLabel,
-            $unitsLabel,
-            $reqLabel !== '' ? rtrim(rtrim(number_format($diff, 3, '.', ''), '0'), '.') : '',
-        ], ';');
-    }
-
-    fclose($out);
+    $qs = (string)($_SERVER['QUERY_STRING'] ?? '');
+    header('Location: /bonificaciones/flexo/export-xls' . ($qs !== '' ? ('?' . $qs) : ''));
     exit;
 }
 
-if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
+// -----------------------------------------------------------------------------
+// Export Bono CYS (Excel .xls en HTML)
+// -----------------------------------------------------------------------------
+if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
     $defaultMonthKey = date('Y-m');
     $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
     if ((int)$today->format('j') >= 26) {
         $defaultMonthKey = $today->modify('+1 month')->format('Y-m');
     }
+    $filterType = trim((string)($_GET['filter_type'] ?? 'period'));
+    if ($filterType !== 'range') {
+        $filterType = 'period';
+    }
     $monthKey = trim((string)($_GET['month'] ?? $defaultMonthKey));
     if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
         $monthKey = $defaultMonthKey;
+    }
+    $startDate = trim((string)($_GET['start_date'] ?? ''));
+    $endDate = trim((string)($_GET['end_date'] ?? ''));
+    if ($startDate === '' || $endDate === '') {
+        $startDate = date('Y-m-d', strtotime('-6 days'));
+        $endDate = date('Y-m-d');
     }
     $operatorName = trim((string)($_GET['operator'] ?? ''));
     if ($operatorName === '') {
         $operatorName = null;
     }
 
-    $result = $service->listErpFlexoProductionForBonusPeriod($monthKey, $operatorName);
+    $period = $service->resolveBonusFilterPeriod($filterType, $monthKey, $startDate, $endDate);
+    $result = $service->listErpCysProductionForBonusPeriod($period, $operatorName);
     if (($result['ok'] ?? false) !== true) {
         $errList = $result['errors'] ?? [];
         $error = $errList !== [] ? trim((string)reset($errList)) : '';
-        header('Location: /bonificaciones?view=bonoflexo&month=' . rawurlencode($monthKey) . '&operator=' . rawurlencode((string)($operatorName ?? '')) . '&error=' . rawurlencode($error !== '' ? $error : 'No se pudo generar la planilla.'));
+        $redirectParams = ['view' => 'bonocys', 'filter_type' => $filterType];
+        if ($filterType === 'range') {
+            $redirectParams['start_date'] = $startDate;
+            $redirectParams['end_date'] = $endDate;
+        } else {
+            $redirectParams['month'] = $monthKey;
+        }
+        if (is_string($operatorName) && $operatorName !== '') {
+            $redirectParams['operator'] = $operatorName;
+        }
+        $redirectParams['error'] = $error !== '' ? $error : 'No se pudo generar la planilla.';
+        header('Location: /bonificaciones?' . http_build_query($redirectParams));
         exit;
     }
 
-    $period = (array)($result['period'] ?? []);
-    $start = (string)($period['start_date'] ?? '');
-    $end = (string)($period['end_date'] ?? '');
-    $filename = 'planilla_flexo_' . $monthKey . '_26-25';
+    $periodData = (array)($result['period'] ?? []);
+    $start = (string)($periodData['start_date'] ?? '');
+    $end = (string)($periodData['end_date'] ?? '');
+    $filename = $filterType === 'range'
+        ? ('planilla_cys_rango_' . $start . '_a_' . $end)
+        : ('planilla_cys_' . $monthKey . '_26-25');
     if (is_string($operatorName) && $operatorName !== '') {
         $safeOperator = preg_replace('/[^A-Za-z0-9._-]+/', '_', $operatorName);
         $safeOperator = trim((string)$safeOperator, '_');
@@ -8889,14 +10607,232 @@ if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
             $filename .= '_operador_' . $safeOperator;
         }
     }
-    if ($start !== '' && $end !== '') {
-        $filename .= '_' . $start . '_a_' . $end;
-    }
-    $filename .= '.xls';
+    $filename .= '.xlsx';
 
     $rows = (array)($result['rows'] ?? []);
-    $brackets = $service->listBonusBrackets('bonoflexo');
-    $factorMap = $service->listBonusOperatorFactors('bonoflexo');
+
+    #region debug-point cys-export-snapshot
+    $debugEnvPath = __DIR__ . '/../.dbg/cys-totals-mismatch.env';
+    $debugUrl = '';
+    if (is_file($debugEnvPath)) {
+        $envRaw = (string)@file_get_contents($debugEnvPath);
+        if ($envRaw !== '') {
+            foreach (preg_split('/\r?\n/', $envRaw) ?: [] as $line) {
+                $line = trim((string)$line);
+                if ($line === '' || !str_contains($line, '=')) {
+                    continue;
+                }
+                [$k, $v] = array_map('trim', explode('=', $line, 2));
+                if ($k === 'DEBUG_SERVER_URL') {
+                    $debugUrl = $v;
+                    break;
+                }
+            }
+        }
+    }
+    if ($debugUrl !== '') {
+        $dbgPost = static function (string $url, array $payload): void {
+            $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
+            if (!is_string($body)) {
+                return;
+            }
+            $ctx = stream_context_create([
+                'http' => [
+                    'method' => 'POST',
+                    'header' => "Content-Type: application/json\r\n",
+                    'content' => $body,
+                    'timeout' => 1,
+                ],
+            ]);
+            @file_get_contents($url, false, $ctx);
+        };
+
+        $runId = trim((string)($_GET['debug_run'] ?? 'pre'));
+        if ($runId === '') {
+            $runId = 'pre';
+        }
+
+        $rowCount = count($rows);
+        $sumProduced = 0.0;
+        $keys = [];
+        $dupes = [];
+        $sample = [];
+
+        foreach ($rows as $i => $r) {
+            if (!is_array($r)) {
+                continue;
+            }
+            $produced = (float)($r['produced_units'] ?? 0.0);
+            $sumProduced += $produced;
+
+            $k = (string)($r['event_date'] ?? '') . '|' . (string)($r['cost_center'] ?? '') . '|' . (string)($r['operator_name'] ?? '') . '|' . (string)$produced;
+            if (isset($keys[$k])) {
+                $dupes[$k] = (int)($dupes[$k] ?? 1) + 1;
+            } else {
+                $keys[$k] = true;
+            }
+
+            if (count($sample) < 12) {
+                $sample[] = [
+                    'event_date' => (string)($r['event_date'] ?? ''),
+                    'cc' => (string)($r['cost_center'] ?? ''),
+                    'operator' => (string)($r['operator_name'] ?? ''),
+                    'product_type' => (string)($r['product_type'] ?? ''),
+                    'measure' => (string)($r['measure_cm'] ?? ''),
+                    'produced_units' => $produced,
+                    'requested_units' => (float)($r['requested_units'] ?? 0.0),
+                    'erp_desc' => (string)($r['erp_desc'] ?? ''),
+                ];
+            }
+        }
+
+        $dupeTop = [];
+        if ($dupes !== []) {
+            arsort($dupes);
+            foreach ($dupes as $k => $cnt) {
+                $dupeTop[] = ['key' => $k, 'count' => $cnt];
+                if (count($dupeTop) >= 10) {
+                    break;
+                }
+            }
+        }
+
+        $dbgPost($debugUrl, [
+            'sessionId' => 'cys-totals-mismatch',
+            'hypothesisId' => 'precheck',
+            'runId' => $runId,
+            'event' => 'cys_export_rows_snapshot',
+            'ts' => time(),
+            'monthKey' => $monthKey,
+            'operatorFilter' => $operatorName,
+            'rowCount' => $rowCount,
+            'uniqueKeyCount' => count($keys),
+            'dupeTop' => $dupeTop,
+            'sumProducedUnits' => $sumProduced,
+            'sample' => $sample,
+        ]);
+    }
+    #endregion debug-point cys-export-snapshot
+
+    $toDmy = static function (string $ymd): string {
+        $ymd = trim($ymd);
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $ymd) !== 1) {
+            return $ymd;
+        }
+        try {
+            return (new DateTimeImmutable($ymd))->format('d/m/Y');
+        } catch (Throwable) {
+            return $ymd;
+        }
+    };
+
+    $operatorCodeFromName = static function (string $name): string {
+        $raw = strtoupper(trim($name));
+        if ($raw === '') {
+            return 'SIN';
+        }
+        if (preg_match('/^[A-Z0-9]{2,5}$/', $raw) === 1) {
+            return $raw;
+        }
+        $parts = preg_split('/\s+/', $raw) ?: [];
+        $code = '';
+        foreach ($parts as $p) {
+            $p = trim($p);
+            if ($p === '') {
+                continue;
+            }
+            $code .= mb_substr($p, 0, 1);
+            if (mb_strlen($code) >= 2) {
+                break;
+            }
+        }
+        if ($code === '') {
+            $code = mb_substr($raw, 0, 2);
+        }
+        return strtoupper($code);
+    };
+
+    $defaultRates = [
+        'bolsas' => ['BASE' => 1.0],
+        'sacos' => ['BASE' => 2.0],
+        'bolsas_xxl' => ['BASE' => 1.5],
+        'basurines_troqueles' => ['BASE' => 0.5],
+        'embalaje' => ['BASE' => 0.5],
+        'cambio_configuracion' => ['AMOUNT' => 5000.0],
+    ];
+    $effectiveRates = $service->getBonusUnitRates('bonocys');
+    if (!is_array($effectiveRates) || $effectiveRates === []) {
+        $effectiveRates = $defaultRates;
+    }
+    $normalizeCysProductType = static function (string $bagType, string $fallbackType, string $erpDesc, string $itemTitle): array {
+        $raw = trim($bagType) !== '' ? trim($bagType) : trim($fallbackType);
+        $rawUp = strtoupper($raw);
+        $descUp = strtoupper(trim($erpDesc));
+        $itemUp = strtoupper(trim($itemTitle));
+        $label = $rawUp;
+        $code = $rawUp;
+        if (
+            str_contains($rawUp, 'SAC')
+            || str_contains($rawUp, 'SACO')
+            || str_contains($rawUp, 'SACOS')
+            || str_contains($descUp, 'SAC')
+            || str_contains($descUp, 'SACO')
+            || str_contains($descUp, 'SACOS')
+            || str_contains($itemUp, 'SAC')
+            || str_contains($itemUp, 'SACO')
+            || str_contains($itemUp, 'SACOS')
+        ) {
+            $label = 'SAC';
+            $code = 'SAC';
+        } elseif ($rawUp === 'TRO' || str_contains($rawUp, 'TROQ')) {
+            $label = 'TRO';
+            $code = 'TRO';
+        } elseif ($rawUp === 'BAS' || str_contains($rawUp, 'BASUR')) {
+            $label = 'BAS';
+            $code = 'BAS';
+        }
+        return ['label' => $label, 'code' => $code];
+    };
+    $resolveCysCategory = static function (string $erpDesc, string $productType, string $measureLabel): string {
+        $typeUp = strtoupper(trim($productType));
+        if ($typeUp === 'SAC') {
+            return 'sacos';
+        }
+        if ($typeUp === 'BAS' || $typeUp === 'TRO') {
+            return 'basurines_troqueles';
+        }
+        $m = strtoupper(trim($measureLabel));
+        $m = preg_replace('/\s+/', '', $m) ?? '';
+        if ($m === '44X39X23' || $m === '48X40X20' || $m === '44X40X23') {
+            return 'bolsas_xxl';
+        }
+        return 'bolsas';
+    };
+    $resolveCysRate = static function (array $rates, string $category): float {
+        if (isset($rates[$category]) && is_array($rates[$category])) {
+            return (float)($rates[$category]['BASE'] ?? 0.0);
+        }
+        return 0.0;
+    };
+    $money = static function (float $amount): string {
+        if ($amount <= 0) {
+            return '$ -';
+        }
+        return '$' . number_format((float)round($amount, 0), 0, ',', '.');
+    };
+    $formatVariation = static function (?float $value): string {
+        if ($value === null) {
+            return '';
+        }
+        $label = number_format($value, 9, ',', '.');
+        $label = rtrim($label, '0');
+        $label = rtrim($label, ',');
+        if ($label === '-0' || $label === '') {
+            return '0';
+        }
+        return $label;
+    };
+
     $grouped = [];
     if ($operatorName !== null) {
         $grouped[(string)$operatorName] = $rows;
@@ -8914,9 +10850,7 @@ if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
         ksort($grouped, SORT_NATURAL | SORT_FLAG_CASE);
     }
 
-    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . $filename . '"');
-    header('Cache-Control: max-age=0');
+    ob_start();
 
     echo '<html><head><meta charset="UTF-8"><style>';
     echo 'body{font-family:Arial,sans-serif;color:#0f172a}';
@@ -8930,38 +10864,1305 @@ if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
     echo '.report tr:nth-child(even) td{background:#f8fafc}';
     echo '.right{text-align:right}';
     echo '.center{text-align:center}';
+    echo '.th2{background:#145e5b;color:#fff;text-align:center;font-size:11px}';
+    echo '.num-int{mso-number-format:"\#\,\#\#0";text-align:right}';
+    echo '.text-cell{mso-number-format:"\@"}';
     echo '</style></head><body>';
-    echo '<div class="title">Planilla Bonos Flexografía</div>';
+
+    echo '<div class="title">Planilla Bonos Corte y Sellado</div>';
     echo '<div class="sub">Unibag ERP · Bonificaciones</div>';
     echo '<div class="meta"><strong>Período:</strong> ' . h($start !== '' && $end !== '' ? ($start . ' a ' . $end) : ('Mes ' . $monthKey)) . '<br><strong>Generado:</strong> ' . h((new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get())))->format('d/m/Y H:i:s')) . '</div>';
 
+    $formatUnits = static function (float $value): string {
+        if ($value <= 0) {
+            return '';
+        }
+        return (string)(int)round($value);
+    };
+    $formatMultiplier = static function (float $value): string {
+        if ($value <= 0) {
+            return '';
+        }
+        $label = number_format($value, 3, ',', '.');
+        $label = rtrim($label, '0');
+        $label = rtrim($label, ',');
+        return 'x' . $label;
+    };
+    $moneyRow = static function (float $amount): string {
+        if ($amount <= 0) {
+            return '$ -';
+        }
+        return '$ ' . number_format((float)round($amount, 0), 0, ',', '.');
+    };
+
     $operatorTotals = [];
-    $grandTotalClp = 0.0;
+    $grandUnits = 0.0;
+    $grandAmount = 0.0;
+
     foreach ($grouped as $operatorLabel => $operatorRows) {
-        $sumClp = 0.0;
+        $rowsByDate = [];
         foreach ((array)$operatorRows as $r) {
-            $units = (float)($r['produced_units'] ?? 0);
-            $requested = (float)($r['requested_units'] ?? 0);
-            $diff = $requested > 0 ? ($requested - $units) : 0;
-            $mermaPercent = $requested > 0 ? (abs($diff) / $requested * 100.0) : 0.0;
-            if ($mermaPercent > 5.0) {
+            if (!is_array($r)) {
                 continue;
             }
-            $factor = (float)($factorMap[(string)$operatorLabel] ?? 1.0);
-            $bonusClp = $service->resolveBonusBracketAmount($brackets, $units);
-            $bonusClp = $bonusClp > 0 ? round($bonusClp * $factor, 0) : 0.0;
-            if ($bonusClp > 0) {
-                $sumClp += $bonusClp;
+            $date = trim((string)($r['event_date'] ?? ''));
+            if ($date === '') {
+                $date = 'Sin fecha';
+            }
+            if (!isset($rowsByDate[$date])) {
+                $rowsByDate[$date] = [];
+            }
+            $rowsByDate[$date][] = $r;
+        }
+        ksort($rowsByDate, SORT_NATURAL | SORT_FLAG_CASE);
+
+        echo '<div class="section">Operador: ' . h((string)$operatorLabel) . '</div>';
+
+        $sumUnits = 0.0;
+        $sumAmount = 0.0;
+
+        echo '<table class="report"><thead>';
+        echo '<tr class="op-header-row"><th colspan="13" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . '</th></tr>';
+        echo '<tr>';
+        echo '<th colspan="13" class="th2">Suma de CANTIDAD</th>';
+        echo '</tr>';
+        echo '<tr>';
+        echo '<th>OPERADOR</th>';
+        echo '<th>FECHA</th>';
+        echo '<th>N° CC</th>';
+        echo '<th>CLIENTE</th>';
+        echo '<th>SELLADORA</th>';
+        echo '<th>TIPO<br>PRODUCTO</th>';
+        echo '<th>MEDIDAS</th>';
+        echo '<th>MULT</th>';
+        echo '<th>MONTO</th>';
+        echo '<th>% VARIACIÓN</th>';
+        echo '<th>BONIFICACIÓN</th>';
+        echo '<th>UNIDADES</th>';
+        echo '<th>Total general</th>';
+        echo '</tr>';
+        echo '</thead><tbody>';
+
+        foreach ($rowsByDate as $dateYmd => $dayRows) {
+            $dayLabel = $toDmy((string)$dateYmd);
+            $dayUnits = 0.0;
+            $dayAmount = 0.0;
+            $firstRowOfDay = true;
+
+            foreach ((array)$dayRows as $r) {
+                $produced = (float)($r['produced_units'] ?? 0);
+                $requested = (float)($r['requested_units'] ?? 0);
+                $variation = null;
+                if ($requested > 0) {
+                    $variation = ($produced - $requested) / $requested;
+                }
+                $bagType = (string)($r['bag_type'] ?? '');
+                $productType = (string)($r['product_type'] ?? '');
+                $erpDesc = (string)($r['erp_desc'] ?? '');
+                $itemTitle = (string)($r['item_title'] ?? '');
+                $measureLabel = (string)($r['measure_cm'] ?? '');
+                $typeDef = $normalizeCysProductType($bagType, $productType, $erpDesc, $itemTitle);
+                $typeLabel = (string)($typeDef['label'] ?? '');
+                $typeCode = (string)($typeDef['code'] ?? $typeLabel);
+                $category = $resolveCysCategory($erpDesc, $typeCode, $measureLabel);
+                $rate = $resolveCysRate($effectiveRates, $category);
+                $rowAmount = $produced > 0 ? ($produced * $rate) : 0.0;
+                $bonificacionLabel = 'PAGO';
+
+                $dayUnits += $produced > 0 ? $produced : 0.0;
+                $dayAmount += $rowAmount;
+                $sumUnits += $produced > 0 ? $produced : 0.0;
+                $sumAmount += $rowAmount;
+                $grandUnits += $produced > 0 ? $produced : 0.0;
+                $grandAmount += $rowAmount;
+
+                echo '<tr>';
+                echo '<td>' . h((string)$operatorLabel) . '</td>';
+                echo '<td class="center">' . h($firstRowOfDay ? $dayLabel : '') . '</td>';
+                $firstRowOfDay = false;
+                echo '<td class="center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
+                echo '<td>' . h((string)($r['client_label'] ?? '')) . '</td>';
+                echo '<td class="center">' . h((string)($r['printer_no'] ?? '')) . '</td>';
+                echo '<td class="center">' . h($typeLabel) . '</td>';
+                echo '<td class="center">' . h($measureLabel) . '</td>';
+                echo '<td class="center">' . h($formatMultiplier((float)$rate)) . '</td>';
+                echo '<td class="right" style="font-weight:800">' . h($moneyRow((float)$rowAmount)) . '</td>';
+                echo '<td class="center">' . h($formatVariation($variation)) . '</td>';
+                echo '<td class="center">' . h($bonificacionLabel) . '</td>';
+                echo '<td class="right num-int" style="font-weight:800">' . h($formatUnits($produced)) . '</td>';
+                echo '<td class="right num-int" style="font-weight:800">' . h($formatUnits($produced)) . '</td>';
+                echo '</tr>';
+            }
+
+            echo '<tr>';
+            echo '<td colspan="8" style="font-weight:900">Total ' . h($dayLabel) . ' (' . h((string)$operatorLabel) . ')</td>';
+            echo '<td class="right" style="font-weight:900">' . h($moneyRow((float)$dayAmount)) . '</td>';
+            echo '<td colspan="2"></td>';
+            echo '<td class="right num-int" style="font-weight:900">' . h($formatUnits($dayUnits)) . '</td>';
+            echo '<td class="right num-int" style="font-weight:900">' . h($formatUnits($dayUnits)) . '</td>';
+            echo '</tr>';
+        }
+
+        echo '<tr>';
+        echo '<td colspan="8" style="font-weight:900">Total ' . h((string)$operatorLabel) . '</td>';
+        echo '<td class="right" style="font-weight:900">' . h($moneyRow((float)$sumAmount)) . '</td>';
+        echo '<td colspan="2"></td>';
+        echo '<td class="right num-int" style="font-weight:900">' . h($formatUnits($sumUnits)) . '</td>';
+        echo '<td class="right num-int" style="font-weight:900">' . h($formatUnits($sumUnits)) . '</td>';
+        echo '</tr>';
+
+        echo '</tbody></table>';
+
+        $operatorTotals[(string)$operatorLabel] = $sumUnits;
+    }
+
+    echo '<div class="section">Totales por operador</div>';
+    echo '<table class="report" style="max-width:620px"><thead><tr><th>Operador</th><th>UNIDADES</th></tr></thead><tbody>';
+    foreach ($operatorTotals as $operatorLabel => $u) {
+        echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="right num-int" style="font-weight:800">' . h($formatUnits((float)$u)) . '</td></tr>';
+    }
+    echo '<tr><td style="font-weight:900">TOTAL</td><td class="right num-int" style="font-weight:900">' . h($formatUnits($grandUnits)) . '</td></tr>';
+    echo '</tbody></table>';
+
+    $operatorLabelFromName = static function (string $name): string {
+        $name = strtoupper(trim($name));
+        if ($name === '') {
+            return 'SIN';
+        }
+        if (preg_match('/^([A-Z]{2,4})\b/', $name, $m) === 1) {
+            return (string)$m[1];
+        }
+        $parts = preg_split('/\s+/', $name) ?: [];
+        $code = '';
+        foreach ($parts as $p) {
+            $p = trim($p);
+            if ($p === '') {
+                continue;
+            }
+            $code .= mb_substr($p, 0, 1);
+            if (mb_strlen($code) >= 2) {
+                break;
             }
         }
-        $operatorTotals[(string)$operatorLabel] = $sumClp;
-        $grandTotalClp += $sumClp;
+        if ($code === '') {
+            $code = mb_substr($name, 0, 2);
+        }
+        return strtoupper($code);
+    };
+
+    $money = static function (float $amount): string {
+        if ($amount <= 0) {
+            return '$ -';
+        }
+        return '$ ' . number_format((float)round($amount, 0), 0, ',', '.');
+    };
+
+    $cfgAmount = (float)($effectiveRates['cambio_configuracion']['AMOUNT'] ?? (float)($defaultRates['cambio_configuracion']['AMOUNT'] ?? 0.0));
+    $embRate = (float)($effectiveRates['embalaje']['BASE'] ?? (float)($defaultRates['embalaje']['BASE'] ?? 0.0));
+
+    $opUnits = [];
+    $opBase = [];
+    $opSacos = [];
+    $opXxl = [];
+    $opBolsas = [];
+    $opBasurines = [];
+
+    foreach ($rows as $r) {
+        if (!is_array($r)) {
+            continue;
+        }
+        $opName = trim((string)($r['operator_name'] ?? ''));
+        if ($operatorName !== null && $opName !== (string)$operatorName) {
+            continue;
+        }
+        $units = (float)($r['produced_units'] ?? 0);
+        if ($units <= 0) {
+            continue;
+        }
+        $opLabel = $operatorLabelFromName($opName);
+        $opUnits[$opLabel] = (float)($opUnits[$opLabel] ?? 0.0) + $units;
+
+        $erpDesc = (string)($r['erp_desc'] ?? '');
+        $bagType = (string)($r['bag_type'] ?? '');
+        $productType = (string)($r['product_type'] ?? '');
+        $itemTitle = (string)($r['item_title'] ?? '');
+        $measureLabel = (string)($r['measure_cm'] ?? '');
+        $typeDef = $normalizeCysProductType($bagType, $productType, $erpDesc, $itemTitle);
+        $typeCode = (string)($typeDef['code'] ?? (string)($typeDef['label'] ?? ''));
+        $category = $resolveCysCategory($erpDesc, $typeCode, $measureLabel);
+        $rate = $resolveCysRate($effectiveRates, $category);
+        $amount = $units * $rate;
+
+        $opBase[$opLabel] = (float)($opBase[$opLabel] ?? 0.0) + $amount;
+        if ($category === 'sacos') {
+            $opSacos[$opLabel] = (float)($opSacos[$opLabel] ?? 0.0) + $amount;
+        } elseif ($category === 'bolsas_xxl') {
+            $opXxl[$opLabel] = (float)($opXxl[$opLabel] ?? 0.0) + $amount;
+        } elseif ($category === 'bolsas') {
+            $opBolsas[$opLabel] = (float)($opBolsas[$opLabel] ?? 0.0) + $amount;
+        } elseif ($category === 'basurines_troqueles') {
+            $opBasurines[$opLabel] = (float)($opBasurines[$opLabel] ?? 0.0) + $amount;
+        }
+    }
+
+    $opCols = array_keys($opUnits);
+    sort($opCols, SORT_NATURAL | SORT_FLAG_CASE);
+
+    if ($opCols !== []) {
+        $rowTotal = static function (array $map, array $cols): float {
+            $sum = 0.0;
+            foreach ($cols as $c) {
+                $sum += (float)($map[$c] ?? 0.0);
+            }
+            return $sum;
+        };
+
+        $opChangeCounts = [];
+        $changeRes = $service->listErpCysConfigChangeCountsForBonusPeriod($monthKey, $operatorName);
+        if (is_array($changeRes) && ($changeRes['ok'] ?? false) === true && is_array($changeRes['counts'] ?? null)) {
+            foreach ((array)$changeRes['counts'] as $name => $cnt) {
+                $name = trim((string)$name);
+                if ($name === '') {
+                    continue;
+                }
+                $label = $operatorLabelFromName($name);
+                if (!in_array($label, $opCols, true)) {
+                    continue;
+                }
+                $opChangeCounts[$label] = (float)($opChangeCounts[$label] ?? 0.0) + (float)$cnt;
+            }
+        }
+        $opChangePay = [];
+        $opTotalPay = [];
+        foreach ($opCols as $c) {
+            $cnt = (float)($opChangeCounts[$c] ?? 0.0);
+            $opChangePay[$c] = $cnt > 0 ? ($cnt * $cfgAmount) : 0.0;
+            $opTotalPay[$c] = (float)($opBase[$c] ?? 0.0) + (float)($opChangePay[$c] ?? 0.0);
+        }
+
+        $opPackUnits = [];
+        $packRes = $service->listErpCysPackagingUnitsForBonusPeriod($monthKey, $operatorName);
+        if (is_array($packRes) && ($packRes['ok'] ?? false) === true && is_array($packRes['units'] ?? null)) {
+            foreach ((array)$packRes['units'] as $name => $u) {
+                $name = trim((string)$name);
+                if ($name === '') {
+                    continue;
+                }
+                $label = $operatorLabelFromName($name);
+                if (!in_array($label, $opCols, true)) {
+                    continue;
+                }
+                $opPackUnits[$label] = (float)($opPackUnits[$label] ?? 0.0) + (float)$u;
+            }
+        }
+        $opPackPay = [];
+        $opTotalWithPack = [];
+        foreach ($opCols as $c) {
+            $u = (float)($opPackUnits[$c] ?? 0.0);
+            $opPackPay[$c] = $u > 0 ? ($u * $embRate) : 0.0;
+            $opTotalWithPack[$c] = (float)($opTotalPay[$c] ?? 0.0) + (float)($opPackPay[$c] ?? 0.0);
+        }
+
+        echo '<div class="section">Resumen</div>';
+        echo '<table class="report"><thead><tr><th style="min-width:240px">Concepto</th>';
+        foreach ($opCols as $c) {
+            echo '<th>' . h((string)$c) . '</th>';
+        }
+        echo '<th>Total</th></tr></thead><tbody>';
+
+        $rowsSummary = [
+            ['label' => 'DESCUENTO', 'type' => 'money', 'map' => []],
+            ['label' => 'SACOS (x2)', 'type' => 'money', 'map' => $opSacos],
+            ['label' => 'BOLSAS XXL (x1,5)', 'type' => 'money', 'map' => $opXxl],
+            ['label' => 'BOLSAS (x1)', 'type' => 'money', 'map' => $opBolsas],
+            ['label' => 'BASURINES/TROQUELES (x0,5)', 'type' => 'money', 'map' => $opBasurines],
+            ['label' => 'ADICIONAL', 'type' => 'money', 'map' => []],
+            ['label' => 'CAMBIOS DE CONFIGURACIÓN', 'type' => 'count', 'map' => $opChangeCounts],
+            ['label' => 'VALOR CAMBIOS ($)', 'type' => 'fixed_money', 'value' => $cfgAmount],
+            ['label' => 'A PAGAR POR CAMBIOS', 'type' => 'money', 'map' => $opChangePay],
+            ['label' => 'PISO DE PRODUCCIÓN', 'type' => 'money', 'map' => []],
+            ['label' => 'BONIFICACIÓN (BASE)', 'type' => 'money', 'map' => $opBase],
+            ['label' => 'TOTAL A PAGAR', 'type' => 'money', 'map' => $opTotalPay],
+        ];
+
+        foreach ($rowsSummary as $rowDef) {
+            $label = (string)($rowDef['label'] ?? '');
+            $type = (string)($rowDef['type'] ?? 'money');
+            echo '<tr><td style="font-weight:800">' . h($label) . '</td>';
+            if ($type === 'fixed_money') {
+                $val = (float)($rowDef['value'] ?? 0.0);
+                foreach ($opCols as $c) {
+                    echo '<td class="right">' . h($money($val)) . '</td>';
+                }
+                echo '<td class="right" style="font-weight:900">' . h($money($val)) . '</td></tr>';
+                continue;
+            }
+            $map = (array)($rowDef['map'] ?? []);
+            foreach ($opCols as $c) {
+                $v = (float)($map[$c] ?? 0.0);
+                if ($type === 'count') {
+                    echo '<td class="right">' . h($v > 0 ? (string)(int)$v : '0') . '</td>';
+                } else {
+                    echo '<td class="right">' . h($money($v)) . '</td>';
+                }
+            }
+            $total = $rowTotal($map, $opCols);
+            if ($type === 'count') {
+                echo '<td class="right" style="font-weight:900">' . h((string)(int)$total) . '</td></tr>';
+            } else {
+                echo '<td class="right" style="font-weight:900">' . h($money($total)) . '</td></tr>';
+            }
+        }
+        echo '</tbody></table>';
+
+        echo '<div class="section">Embalaje</div>';
+        echo '<table class="report"><thead><tr><th style="min-width:240px">Concepto</th>';
+        foreach ($opCols as $c) {
+            echo '<th>' . h((string)$c) . '</th>';
+        }
+        echo '<th>Total</th></tr></thead><tbody>';
+
+        echo '<tr><td style="font-weight:800">PESOS POR BOLSA EMBALADA</td>';
+        foreach ($opCols as $c) {
+            echo '<td class="right">' . h(number_format($embRate, 1, ',', '.')) . '</td>';
+        }
+        echo '<td class="right">' . h(number_format($embRate, 1, ',', '.')) . '</td></tr>';
+
+        echo '<tr><td style="font-weight:800">CANTIDAD EMBALADA</td>';
+        foreach ($opCols as $c) {
+            $uLabel = $formatUnits((float)($opPackUnits[$c] ?? 0.0));
+            echo '<td class="right">' . h($uLabel !== '' ? $uLabel : '0') . '</td>';
+        }
+        $uTotalLabel = $formatUnits($rowTotal($opPackUnits, $opCols));
+        echo '<td class="right" style="font-weight:900">' . h($uTotalLabel !== '' ? $uTotalLabel : '0') . '</td></tr>';
+
+        echo '<tr><td style="font-weight:800">PESOS A PAGAR POR EMBALAJE</td>';
+        foreach ($opCols as $c) {
+            echo '<td class="right">' . h($money((float)($opPackPay[$c] ?? 0.0))) . '</td>';
+        }
+        echo '<td class="right" style="font-weight:900">' . h($money($rowTotal($opPackPay, $opCols))) . '</td></tr>';
+
+        echo '<tr><td style="font-weight:800">TOTAL A PAGAR BOLSA Y EMBALAJE</td>';
+        foreach ($opCols as $c) {
+            echo '<td class="right">' . h($money((float)($opTotalWithPack[$c] ?? 0.0))) . '</td>';
+        }
+        echo '<td class="right" style="font-weight:900">' . h($money($rowTotal($opTotalWithPack, $opCols))) . '</td></tr>';
+
+        echo '</tbody></table>';
+    }
+
+    echo '</body></html>';
+    $htmlCys = (string)ob_get_clean();
+
+    // =========================================================================
+    // HOJA 2: Embalaje CyS (Solo operadores de Corte y Sellado)
+    // =========================================================================
+    $packRowsRes = $service->listErpCysPackagingRowsForBonusPeriod($period, $operatorName);
+    $packAllRows = (array)($packRowsRes['rows'] ?? []);
+
+    // Identificar el conjunto de operadores que trabajaron en Corte y Sellado
+    $cysOperatorNamesMap = [];
+    foreach ($rows as $r) {
+        if (!is_array($r)) continue;
+        $name = trim((string)($r['operator_name'] ?? ''));
+        if ($name !== '') {
+            $cysOperatorNamesMap[$name] = true;
+        }
+    }
+
+    // Filtrar: EXCLUSIVAMENTE los operadores de Corte y Sellado, nadie más
+    $packCysRows = [];
+    foreach ($packAllRows as $pr) {
+        if (!is_array($pr)) continue;
+        $op = trim((string)($pr['operator_name'] ?? ''));
+        if ($op !== '' && isset($cysOperatorNamesMap[$op])) {
+            $packCysRows[] = $pr;
+        }
+    }
+
+    // Agrupar filas de embalaje por operador de CyS
+    $groupedPack = [];
+    if ($operatorName !== null) {
+        if (isset($cysOperatorNamesMap[$operatorName])) {
+            $groupedPack[(string)$operatorName] = $packCysRows;
+        }
+    } else {
+        foreach ($packCysRows as $pr) {
+            $op = trim((string)($pr['operator_name'] ?? ''));
+            if (!isset($groupedPack[$op])) {
+                $groupedPack[$op] = [];
+            }
+            $groupedPack[$op][] = $pr;
+        }
+        ksort($groupedPack, SORT_NATURAL | SORT_FLAG_CASE);
+    }
+
+    ob_start();
+    echo '<html><head><meta charset="UTF-8"><style>';
+    echo 'body{font-family:Arial,sans-serif;color:#0f172a}';
+    echo '.title{font-size:22px;font-weight:800;color:#0f172a}';
+    echo '.sub{font-size:12px;color:#475569;margin:6px 0 14px 0}';
+    echo '.meta{margin:10px 0 16px 0;font-size:12px;color:#334155}';
+    echo '.section{font-size:14px;font-weight:800;margin:20px 0 8px 0;color:#0f172a}';
+    echo '.report{border-collapse:collapse;width:100%;font-size:12px}';
+    echo '.report td,.report th{border:1px solid #cbd5e1;padding:6px 8px;vertical-align:middle}';
+    echo '.report th{background:#0f172a;color:#fff;text-align:center;font-size:11px}';
+    echo '.report tr:nth-child(even) td{background:#f8fafc}';
+    echo '.right{text-align:right}';
+    echo '.center{text-align:center}';
+    echo '.th2{background:#145e5b;color:#fff;text-align:center;font-size:11px}';
+    echo '.num-int{mso-number-format:"\#\,\#\#0";text-align:right}';
+    echo '.text-cell{mso-number-format:"\@"}';
+    echo '</style></head><body>';
+
+    echo '<div class="title">Planilla Embalaje · Operadores Corte y Sellado</div>';
+    echo '<div class="sub">Unibag ERP · Bonificaciones</div>';
+    echo '<div class="meta"><strong>Período:</strong> ' . h($start !== '' && $end !== '' ? ($start . ' a ' . $end) : ('Mes ' . $monthKey)) . '<br><strong>Personal incluido:</strong> Exclusivo operadores de Corte y Sellado<br><strong>Tarifa Embalaje:</strong> $' . number_format($embRate, 2, ',', '.') . ' / unid.<br><strong>Generado:</strong> ' . h((new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get())))->format('d/m/Y H:i:s')) . '</div>';
+
+    $packOperatorTotals = [];
+    $packGrandUnits = 0.0;
+    $packGrandAmount = 0.0;
+
+    if ($groupedPack === []) {
+        echo '<div class="section">Sin registros de embalaje</div>';
+        echo '<p style="color:#64748b;font-size:13px;padding:12px 0">No se registraron unidades embaladas por operadores de Corte y Sellado en este período.</p>';
+    } else {
+        foreach ($groupedPack as $operatorLabel => $operatorRows) {
+            $rowsByDate = [];
+            foreach ((array)$operatorRows as $r) {
+                if (!is_array($r)) continue;
+                $date = trim((string)($r['event_date'] ?? ''));
+                if ($date === '') $date = 'Sin fecha';
+                if (!isset($rowsByDate[$date])) {
+                    $rowsByDate[$date] = [];
+                }
+                $rowsByDate[$date][] = $r;
+            }
+            ksort($rowsByDate, SORT_NATURAL | SORT_FLAG_CASE);
+
+            echo '<div class="section">Operador: ' . h((string)$operatorLabel) . '</div>';
+
+            $sumUnits = 0.0;
+            $sumAmount = 0.0;
+
+            echo '<table class="report"><thead>';
+            echo '<tr class="op-header-row"><th colspan="13" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . '</th></tr>';
+            echo '<tr>';
+            echo '<th colspan="13" class="th2">Suma de CANTIDAD EMBALADA</th>';
+            echo '</tr>';
+            echo '<tr>';
+            echo '<th>OPERADOR</th>';
+            echo '<th>FECHA</th>';
+            echo '<th>N° CC</th>';
+            echo '<th>CLIENTE</th>';
+            echo '<th>SELLADORA / MÁQ.</th>';
+            echo '<th>TIPO<br>PRODUCTO</th>';
+            echo '<th>MEDIDAS</th>';
+            echo '<th>MULT</th>';
+            echo '<th>MONTO</th>';
+            echo '<th>% VARIACIÓN</th>';
+            echo '<th>BONIFICACIÓN</th>';
+            echo '<th>UNIDADES</th>';
+            echo '<th>Total general</th>';
+            echo '</tr>';
+            echo '</thead><tbody>';
+
+            foreach ($rowsByDate as $dateYmd => $dayRows) {
+                $dayLabel = $toDmy((string)$dateYmd);
+                $dayUnits = 0.0;
+                $dayAmount = 0.0;
+                $firstRowOfDay = true;
+
+                foreach ((array)$dayRows as $r) {
+                    $produced = (float)($r['produced_units'] ?? 0);
+                    $requested = (float)($r['requested_units'] ?? 0);
+                    $variation = null;
+                    if ($requested > 0) {
+                        $variation = ($produced - $requested) / $requested;
+                    }
+                    $bagType = (string)($r['bag_type'] ?? '');
+                    $productType = (string)($r['product_type'] ?? '');
+                    $erpDesc = (string)($r['erp_desc'] ?? '');
+                    $itemTitle = (string)($r['item_title'] ?? '');
+                    $measureLabel = (string)($r['measure_cm'] ?? '');
+                    $typeDef = $normalizeCysProductType($bagType, $productType, $erpDesc, $itemTitle);
+                    $typeLabel = (string)($typeDef['label'] ?? '');
+                    $rowAmount = $produced > 0 ? ($produced * $embRate) : 0.0;
+                    $bonificacionLabel = 'PAGO';
+
+                    $dayUnits += $produced > 0 ? $produced : 0.0;
+                    $dayAmount += $rowAmount;
+                    $sumUnits += $produced > 0 ? $produced : 0.0;
+                    $sumAmount += $rowAmount;
+                    $packGrandUnits += $produced > 0 ? $produced : 0.0;
+                    $packGrandAmount += $rowAmount;
+
+                    echo '<tr>';
+                    echo '<td>' . h((string)$operatorLabel) . '</td>';
+                    echo '<td class="center">' . h($firstRowOfDay ? $dayLabel : '') . '</td>';
+                    $firstRowOfDay = false;
+                    echo '<td class="center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
+                    echo '<td>' . h((string)($r['client_label'] ?? '')) . '</td>';
+                    echo '<td class="center">' . h((string)($r['printer_no'] ?? '')) . '</td>';
+                    echo '<td class="center">' . h($typeLabel) . '</td>';
+                    echo '<td class="center">' . h($measureLabel) . '</td>';
+                    echo '<td class="center">' . h($formatMultiplier((float)$embRate)) . '</td>';
+                    echo '<td class="right" style="font-weight:800">' . h($moneyRow((float)$rowAmount)) . '</td>';
+                    echo '<td class="center">' . h($formatVariation($variation)) . '</td>';
+                    echo '<td class="center">' . h($bonificacionLabel) . '</td>';
+                    echo '<td class="right num-int" style="font-weight:800">' . h($formatUnits($produced)) . '</td>';
+                    echo '<td class="right num-int" style="font-weight:800">' . h($formatUnits($produced)) . '</td>';
+                    echo '</tr>';
+                }
+
+                echo '<tr>';
+                echo '<td colspan="8" style="font-weight:900">Total ' . h($dayLabel) . ' (' . h((string)$operatorLabel) . ')</td>';
+                echo '<td class="right" style="font-weight:900">' . h($moneyRow((float)$dayAmount)) . '</td>';
+                echo '<td colspan="2"></td>';
+                echo '<td class="right num-int" style="font-weight:900">' . h($formatUnits($dayUnits)) . '</td>';
+                echo '<td class="right num-int" style="font-weight:900">' . h($formatUnits($dayUnits)) . '</td>';
+                echo '</tr>';
+            }
+
+            echo '<tr>';
+            echo '<td colspan="8" style="font-weight:900">Total ' . h((string)$operatorLabel) . '</td>';
+            echo '<td class="right" style="font-weight:900">' . h($moneyRow((float)$sumAmount)) . '</td>';
+            echo '<td colspan="2"></td>';
+            echo '<td class="right num-int" style="font-weight:900">' . h($formatUnits($sumUnits)) . '</td>';
+            echo '<td class="right num-int" style="font-weight:900">' . h($formatUnits($sumUnits)) . '</td>';
+            echo '</tr>';
+
+            echo '</tbody></table>';
+
+            $packOperatorTotals[(string)$operatorLabel] = [
+                'units' => $sumUnits,
+                'amount' => $sumAmount,
+            ];
+        }
+
+        echo '<div class="section">Totales Embalaje por operador (Corte y Sellado)</div>';
+        echo '<table class="report" style="max-width:720px"><thead><tr><th>Operador</th><th>UNIDADES EMBALADAS</th><th>MONTO A PAGAR</th></tr></thead><tbody>';
+        foreach ($packOperatorTotals as $operatorLabel => $tot) {
+            $u = (float)($tot['units'] ?? 0.0);
+            $amt = (float)($tot['amount'] ?? 0.0);
+            echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="right num-int" style="font-weight:800">' . h($formatUnits($u)) . '</td><td class="right" style="font-weight:800">' . h($moneyRow($amt)) . '</td></tr>';
+        }
+        echo '<tr><td style="font-weight:900">TOTAL</td><td class="right num-int" style="font-weight:900">' . h($formatUnits($packGrandUnits)) . '</td><td class="right" style="font-weight:900">' . h($moneyRow($packGrandAmount)) . '</td></tr>';
+        echo '</tbody></table>';
+    }
+
+    echo '</body></html>';
+    $htmlPackaging = (string)ob_get_clean();
+
+    SimpleXlsx::streamHtmlSheets($filename, [
+        ['title' => 'Corte y Sellado', 'html' => $htmlCys],
+        ['title' => 'Embalaje CyS', 'html' => $htmlPackaging],
+    ]);
+    exit;
+}
+
+// -----------------------------------------------------------------------------
+// Export Bono Serigrafía (Excel .xls en HTML)
+//
+// Nota: en esta etapa se configura principalmente el formato para que calce con
+// el look & feel del Excel de Flexo. Las reglas completas de cálculo se integran
+// después (el usuario confirmará qué campos ERP usar y qué lógicas aplicar).
+// -----------------------------------------------------------------------------
+if ($path === '/bonificaciones/seri/export-xls' && $method === 'GET') {
+    $defaultMonthKey = date('Y-m');
+    $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
+    if ((int)$today->format('j') >= 26) {
+        $defaultMonthKey = $today->modify('+1 month')->format('Y-m');
+    }
+    $filterType = trim((string)($_GET['filter_type'] ?? 'period'));
+    if ($filterType !== 'range') {
+        $filterType = 'period';
+    }
+    $monthKey = trim((string)($_GET['month'] ?? $defaultMonthKey));
+    if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+        $monthKey = $defaultMonthKey;
+    }
+    $startDate = trim((string)($_GET['start_date'] ?? ''));
+    $endDate = trim((string)($_GET['end_date'] ?? ''));
+    if ($startDate === '' || $endDate === '') {
+        $startDate = date('Y-m-d', strtotime('-6 days'));
+        $endDate = date('Y-m-d');
+    }
+    $operatorName = trim((string)($_GET['operator'] ?? ''));
+    if ($operatorName === '') {
+        $operatorName = null;
+    }
+
+    $period = $service->resolveBonusFilterPeriod($filterType, $monthKey, $startDate, $endDate);
+    $result = $service->listErpSeriProductionForBonusPeriod($period, $operatorName);
+    if (($result['ok'] ?? false) !== true) {
+        $errList = $result['errors'] ?? [];
+        $error = $errList !== [] ? trim((string)reset($errList)) : '';
+        $redirectParams = ['view' => 'bonoseri', 'filter_type' => $filterType];
+        if ($filterType === 'range') {
+            $redirectParams['start_date'] = $startDate;
+            $redirectParams['end_date'] = $endDate;
+        } else {
+            $redirectParams['month'] = $monthKey;
+        }
+        if (is_string($operatorName) && $operatorName !== '') {
+            $redirectParams['operator'] = $operatorName;
+        }
+        $redirectParams['error'] = $error !== '' ? $error : 'No se pudo generar la planilla.';
+        header('Location: /bonificaciones?' . http_build_query($redirectParams));
+        exit;
+    }
+
+    $periodData = (array)($result['period'] ?? []);
+    $start = (string)($periodData['start_date'] ?? '');
+    $end = (string)($periodData['end_date'] ?? '');
+    $filename = $filterType === 'range'
+        ? ('planilla_seri_rango_' . $start . '_a_' . $end)
+        : ('planilla_seri_' . $monthKey . '_26-25');
+    if (is_string($operatorName) && $operatorName !== '') {
+        $safeOperator = preg_replace('/[^A-Za-z0-9._-]+/', '_', $operatorName);
+        $safeOperator = trim((string)$safeOperator, '_');
+        if ($safeOperator !== '') {
+            $filename .= '_operador_' . $safeOperator;
+        }
+    }
+    $filename .= '.xlsx';
+
+    $rows = (array)($result['rows'] ?? []);
+    $grouped = [];
+    if ($operatorName !== null) {
+        $grouped[(string)$operatorName] = $rows;
+    } else {
+        foreach ($rows as $row) {
+            $name = is_array($row) ? trim((string)($row['operator_name'] ?? '')) : '';
+            if ($name === '') {
+                $name = 'Sin operador';
+            }
+            if (!isset($grouped[$name])) {
+                $grouped[$name] = [];
+            }
+            $grouped[$name][] = $row;
+        }
+        ksort($grouped, SORT_NATURAL | SORT_FLAG_CASE);
+    }
+
+    $toDmy = static function (string $ymd): string {
+        $ymd = trim($ymd);
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $ymd) !== 1) {
+            return $ymd;
+        }
+        try {
+            return (new DateTimeImmutable($ymd))->format('d/m/Y');
+        } catch (Throwable) {
+            return $ymd;
+        }
+    };
+    $allEquipoParams = $service->listErpEquipoParams();
+
+    $normalizeSeriProductType = static function (string $erpDesc, string $productType, string $itemTitle): string {
+        $descUp = strtoupper(trim($erpDesc));
+        $typeUp = strtoupper(trim($productType));
+        $itemUp = strtoupper(trim($itemTitle));
+        if (
+            str_contains($descUp, 'SAC')
+            || str_contains($descUp, 'SACO')
+            || str_contains($descUp, 'SACOS')
+            || str_contains($itemUp, 'SAC')
+            || str_contains($itemUp, 'SACO')
+            || str_contains($itemUp, 'SACOS')
+            || $typeUp === 'SACO'
+            || $typeUp === 'SACOS'
+            || str_starts_with($typeUp, 'SAC')
+        ) {
+            return 'SAC';
+        }
+        if ($typeUp === '' || $typeUp === 'BOL') {
+            if (str_contains($descUp, 'BOU') || str_contains($itemUp, 'BOU')) {
+                return 'BOU';
+            }
+            if (str_contains($descUp, 'TRO') || str_contains($itemUp, 'TRO')) {
+                return 'TRO';
+            }
+            if (str_contains($descUp, 'BAS') || str_contains($itemUp, 'BAS')) {
+                return 'BAS';
+            }
+            if (str_contains($descUp, 'PRO') || str_contains($itemUp, 'PRO')) {
+                return 'PRO';
+            }
+        }
+        if ($typeUp === '') {
+            $typeUp = 'BOL';
+        }
+        // Solo las 3 primeras letras
+        return strtoupper(substr($typeUp, 0, 3));
+    };
+
+    $resolveSeriDesarrolloCm = static function (array $allParams, int $equipoId, float $ancho, float $fuelle, float $alto, int $calcFuelle): int {
+        $paramMedida = $calcFuelle === 1 ? (int)round($ancho + $fuelle) : (int)round($ancho);
+        if ($paramMedida <= 0) {
+            $paramMedida = (int)round($ancho);
+        }
+
+        // 1. Buscar en equipo específico
+        $corteM2 = null;
+        if ($equipoId > 0) {
+            foreach ($allParams as $ep) {
+                if ((int)$ep['param_equipo_id'] === $equipoId && (int)$ep['param_medida'] >= $paramMedida) {
+                    $corteM2 = (float)$ep['param_corte'];
+                    break;
+                }
+            }
+        }
+
+        // 2. Si no encontró en ese equipo, buscar en cualquier equipo de serigrafía (equipo_type_id = 11)
+        if ($corteM2 === null || $corteM2 <= 0.0) {
+            foreach ($allParams as $ep) {
+                if ((int)$ep['equipo_type_id'] === 11 && (int)$ep['param_medida'] >= $paramMedida) {
+                    $corteM2 = (float)$ep['param_corte'];
+                    break;
+                }
+            }
+        }
+
+        // 3. Fallback
+        if ($corteM2 === null || $corteM2 <= 0.0) {
+            $corteM2 = $alto > 0.0 ? ($alto / 100.0) : ($ancho / 100.0);
+        }
+
+        // Corte de bolsa * 100 redondeado a entero sin decimales
+        return (int)round($corteM2 * 100.0);
+    };
+
+    $parseSeriDesarrollo = static function (array $row, array $allParams) use ($resolveSeriDesarrolloCm): string {
+        $ancho = (float)($row['dim_width_cm'] ?? 0);
+        $alto = (float)($row['dim_height_cm'] ?? 0);
+        $fuelle = (float)($row['dim_fuelle_cm'] ?? 0);
+        $calcFuelle = (int)($row['item_prodcalc_fuelle_act'] ?? 0);
+        $equipoId = (int)($row['win_equipoid'] ?? ($row['printer_no'] ?? 0));
+
+        if ($ancho <= 0.0 || $alto <= 0.0) {
+            $measure = strtoupper(trim((string)($row['measure_cm'] ?? '')));
+            if ($measure !== '' && preg_match('/^(\d+(?:\.\d+)?)(?:X(\d+(?:\.\d+)?))?(?:X(\d+(?:\.\d+)?))?/', $measure, $m)) {
+                if ($ancho <= 0.0 && isset($m[1])) {
+                    $ancho = (float)$m[1];
+                }
+                if ($alto <= 0.0 && isset($m[2])) {
+                    $alto = (float)$m[2];
+                }
+                if ($fuelle <= 0.0 && isset($m[3])) {
+                    $fuelle = (float)$m[3];
+                }
+            }
+        }
+
+        if ($ancho <= 0.0 && $alto <= 0.0) {
+            return '';
+        }
+
+        $desarrolloInt = $resolveSeriDesarrolloCm($allParams, $equipoId, $ancho, $fuelle, $alto, $calcFuelle);
+        return $desarrolloInt > 0 ? (string)$desarrolloInt : '';
+    };
+
+    ob_start();
+
+    echo '<html><head><meta charset="UTF-8"><style>';
+    echo 'body{font-family:Arial,sans-serif;color:#0f172a}';
+    echo '.title{font-size:22px;font-weight:800;color:#0f172a}';
+    echo '.sub{font-size:12px;color:#475569;margin:6px 0 14px 0}';
+    echo '.meta{margin:10px 0 16px 0;font-size:12px;color:#334155}';
+    echo '.section{font-size:14px;font-weight:800;margin:20px 0 8px 0;color:#0f172a}';
+    echo '.report{border-collapse:collapse;width:100%;font-size:12px}';
+    echo '.report td,.report th{border:1px solid #cbd5e1;padding:6px 8px;vertical-align:middle}';
+    echo '.report th{background:#0f172a;color:#fff;text-align:center;font-size:11px}';
+    echo '.report tr:nth-child(even) td{background:#f8fafc}';
+    echo '.right{text-align:right}';
+    echo '.center{text-align:center}';
+    echo '.th2{background:#145e5b;color:#fff;text-align:center;font-size:11px}';
+    echo '.num-int{mso-number-format:"\#\,\#\#0";text-align:right}';
+    echo '.text-cell{mso-number-format:"\@"}';
+    echo '</style></head><body>';
+
+    echo '<div class="title">Planilla Bonos Serigrafía</div>';
+    echo '<div class="sub">Unibag ERP · Bonificaciones</div>';
+    echo '<div class="meta"><strong>Período:</strong> ' . h($start !== '' && $end !== '' ? ($start . ' a ' . $end) : ('Mes ' . $monthKey)) . '<br><strong>Generado:</strong> ' . h((new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get())))->format('d/m/Y H:i:s')) . '</div>';
+
+    $defaultRates = [
+        'bolsas' => ['LT_3000' => 4.0, 'GTE_3000' => 3.0],
+        'des_menor_25cm' => ['LT_3000' => 2.0, 'GTE_3000' => 1.0],
+        'sacos' => ['LT_3000' => 8.0, 'GTE_3000' => 6.0],
+    ];
+    $effectiveRates = $service->getBonusUnitRates('bonoseri');
+    if (!is_array($effectiveRates) || $effectiveRates === []) {
+        $effectiveRates = $defaultRates;
+    }
+    // Pre-calcular producción total y cantidad solicitada por CC en todo el período consultado.
+    // Si una CC se realizó en más de una vez (ej: 2 días), se toma el total acumulado producido
+    // de la CC para determinar el tramo correspondiente (< 3000 vs >= 3000), evitando que
+    // producciones parciales a medias cobren indebidamente la tarifa de menor a 3.000.
+    $allPeriodSeriRows = $rows;
+    if ($operatorName !== null) {
+        $allPeriodResult = $service->listErpSeriProductionForBonusPeriod($period, null);
+        if (($allPeriodResult['ok'] ?? false) === true && is_array($allPeriodResult['rows'] ?? null)) {
+            $allPeriodSeriRows = (array)$allPeriodResult['rows'];
+        }
+    }
+    $totalUnitsByCc = [];
+    $maxReqByCc = [];
+    foreach ($allPeriodSeriRows as $r) {
+        if (!is_array($r)) {
+            continue;
+        }
+        $ccKey = trim((string)($r['cost_center'] ?? ''));
+        if ($ccKey === '') {
+            $ccKey = trim((string)($r['work_order_number'] ?? ''));
+        }
+        if ($ccKey === '') {
+            continue;
+        }
+        $totalUnitsByCc[$ccKey] = ($totalUnitsByCc[$ccKey] ?? 0.0) + (float)($r['produced_units'] ?? 0.0);
+        $reqVal = (float)($r['requested_units'] ?? 0.0);
+        if (!isset($maxReqByCc[$ccKey]) || $reqVal > $maxReqByCc[$ccKey]) {
+            $maxReqByCc[$ccKey] = $reqVal;
+        }
+    }
+
+    $resolveSeriRate = static function (
+        array $rates,
+        float $ccTotalUnits,
+        float $ccRequested,
+        float $desarrolloCm,
+        string $erpDesc,
+        string $normalizedType
+    ): float {
+        // Para aplicar la tarifa menor a 3.000 (< 3000), debe ser la producción completa de la CC
+        // menor a 3000 y que la cantidad solicitada no sea >= 3000 (no una producción a medias).
+        $isGte3000 = ($ccTotalUnits >= 3000.0) || ($ccRequested >= 3000.0);
+        $tier = $isGte3000 ? 'GTE_3000' : 'LT_3000';
+
+        $descUp = strtoupper(trim($erpDesc));
+        $typeUp = strtoupper(trim($normalizedType));
+        $category = 'bolsas';
+        if ($typeUp === 'SAC' || preg_match('/\bSAC\b/', $descUp) === 1 || str_contains($descUp, 'SACO') || str_contains($descUp, 'SACOS')) {
+            $category = 'sacos';
+        } elseif ($desarrolloCm > 0 && $desarrolloCm < 25) {
+            $category = 'des_menor_25cm';
+        }
+        $rate = 0.0;
+        if (isset($rates[$category]) && is_array($rates[$category])) {
+            $rate = (float)($rates[$category][$tier] ?? 0.0);
+        }
+        return $rate;
+    };
+    $money = static function (float $amount): string {
+        if ($amount <= 0) {
+            return '$ -';
+        }
+        return '$ ' . number_format($amount, 2, ',', '.');
+    };
+
+    $operatorTotals = [];
+    $grandUnits = 0.0;
+    $grandCounter = 0.0;
+    $grandBonus = 0.0;
+
+    foreach ($grouped as $operatorLabel => $operatorRows) {
+        $sumUnits = 0.0;
+        $sumCounter = 0.0;
+        $sumBonus = 0.0;
+        foreach ((array)$operatorRows as $r) {
+            $u = (float)($r['produced_units'] ?? 0);
+            $counter = (float)($r['produced_machine_meters'] ?? 0);
+            if ($counter <= 0 && $u > 0) {
+                $counter = round($u / 5.0, 0);
+            }
+            $ccKey = trim((string)($r['cost_center'] ?? ''));
+            if ($ccKey === '') {
+                $ccKey = trim((string)($r['work_order_number'] ?? ''));
+            }
+            $ccTotal = (float)($totalUnitsByCc[$ccKey] ?? $u);
+            $ccReq = (float)($maxReqByCc[$ccKey] ?? (float)($r['requested_units'] ?? 0));
+
+            $normalizedType = $normalizeSeriProductType((string)($r['erp_desc'] ?? ''), (string)($r['bag_type'] ?? (string)($r['product_type'] ?? '')), (string)($r['item_title'] ?? ''));
+            $desarrollo = $parseSeriDesarrollo((array)$r, $allEquipoParams);
+            $desVal = (float)($desarrollo !== '' ? str_replace(',', '.', $desarrollo) : '0');
+            $rate = $resolveSeriRate($effectiveRates, $ccTotal, $ccReq, $desVal, (string)($r['erp_desc'] ?? ''), $normalizedType);
+            $bonus = $u > 0 ? ($u * $rate) : 0.0;
+            if ($u > 0) {
+                $sumUnits += $u;
+            }
+            if ($counter > 0) {
+                $sumCounter += $counter;
+            }
+            if ($bonus > 0) {
+                $sumBonus += $bonus;
+            }
+        }
+        $operatorTotals[(string)$operatorLabel] = ['units' => $sumUnits, 'counter' => $sumCounter, 'bonus' => $sumBonus];
+        $grandUnits += $sumUnits;
+        $grandCounter += $sumCounter;
+        $grandBonus += $sumBonus;
     }
 
     foreach ($grouped as $operatorLabel => $operatorRows) {
         echo '<div class="section">Operador: ' . h((string)$operatorLabel) . '</div>';
         echo '<table class="report"><thead>';
+        echo '<tr class="op-header-row"><th colspan="15" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . '</th></tr>';
         echo '<tr>';
+        echo '<th colspan="12"></th>';
+        echo '<th colspan="2" class="th2">Valores · Operador</th>';
+        echo '<th class="th2">Bono</th>';
+        echo '</tr>';
+        echo '<tr>';
+        echo '<th>OPERADOR</th>';
+        echo '<th>N° OT</th>';
+        echo '<th>N°</th>';
+        echo '<th>FECHA</th>';
+        echo '<th>CLIENTE</th>';
+        echo '<th>DESARROLLO<br>[cm]</th>';
+        echo '<th>TIPO</th>';
+        echo '<th>CANTIDAD DE<br>COLORES</th>';
+        echo '<th>IMPRESIÓN POR<br>DESARROLLO</th>';
+        echo '<th>% VARIACIÓN</th>';
+        echo '<th>CANTIDAD<br>SOLICITADA EN CC</th>';
+        echo '<th>BONIFICACIÓN</th>';
+        echo '<th>Suma de UNID. IMPRESAS</th>';
+        echo '<th>Suma de CANTIDAD PRODUCIDA (CONTADOR)</th>';
+        echo '<th>BONO</th>';
+        echo '</tr>';
+        echo '</thead><tbody>';
+
+        $sumUnits = 0.0;
+        $sumCounter = 0.0;
+        $sumBonus = 0.0;
+        foreach ((array)$operatorRows as $r) {
+            $units = (float)($r['produced_units'] ?? 0);
+            $counter = (float)($r['produced_machine_meters'] ?? 0);
+            if ($counter <= 0 && $units > 0) {
+                $counter = round($units / 5.0, 0);
+            }
+            $sumUnits += $units > 0 ? $units : 0.0;
+            $sumCounter += $counter > 0 ? $counter : 0.0;
+
+            $unitsLabel = $units > 0 ? (string)(int)round($units) : '';
+            $counterLabel = $counter > 0 ? (string)(int)round($counter) : '';
+            $req = (float)($r['requested_units'] ?? 0);
+            $reqLabel = $req > 0 ? (string)(int)round($req) : '';
+            $dateLabel = $toDmy((string)($r['event_date'] ?? ''));
+            $normalizedType = $normalizeSeriProductType((string)($r['erp_desc'] ?? ''), (string)($r['bag_type'] ?? (string)($r['product_type'] ?? '')), (string)($r['item_title'] ?? ''));
+            $desarrollo = $parseSeriDesarrollo((array)$r, $allEquipoParams);
+            $desarrolloVal = $desarrollo !== '' ? (float)str_replace(',', '.', $desarrollo) : 0.0;
+            $bonificacionLabel = 'PAGO';
+
+            $ccKey = trim((string)($r['cost_center'] ?? ''));
+            if ($ccKey === '') {
+                $ccKey = trim((string)($r['work_order_number'] ?? ''));
+            }
+            $ccTotal = (float)($totalUnitsByCc[$ccKey] ?? $units);
+            $ccReq = (float)($maxReqByCc[$ccKey] ?? $req);
+
+            $rate = $resolveSeriRate($effectiveRates, $ccTotal, $ccReq, $desarrolloVal, (string)($r['erp_desc'] ?? ''), $normalizedType);
+            $bonusAmount = $bonificacionLabel === 'PAGO' ? ($units > 0 ? ($units * $rate) : 0.0) : 0.0;
+            $sumBonus += $bonusAmount > 0 ? $bonusAmount : 0.0;
+
+            echo '<tr>';
+            echo '<td>' . h((string)$operatorLabel) . '</td>';
+            echo '<td class="center">' . h((string)($r['work_order_number'] ?? '')) . '</td>';
+            echo '<td class="center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
+            echo '<td class="center">' . h($dateLabel) . '</td>';
+            echo '<td>' . h((string)($r['client_label'] ?? '')) . '</td>';
+            echo '<td class="center">' . h($desarrollo) . '</td>';
+            echo '<td class="center">' . h($normalizedType) . '</td>';
+            echo '<td class="center"></td>';
+            echo '<td class="center"></td>';
+            echo '<td class="center"></td>';
+            echo '<td class="num-int">' . h($reqLabel) . '</td>';
+            echo '<td class="center">' . h($bonificacionLabel) . '</td>';
+            echo '<td class="num-int">' . h($unitsLabel) . '</td>';
+            echo '<td class="num-int">' . h($counterLabel) . '</td>';
+            echo '<td class="right">' . h($money($bonusAmount)) . '</td>';
+            echo '</tr>';
+        }
+
+        echo '<tr>';
+        echo '<td colspan="12" style="font-weight:900">Total ' . h((string)$operatorLabel) . '</td>';
+        echo '<td class="num-int" style="font-weight:900">' . ($sumUnits > 0 ? (string)(int)round($sumUnits) : '') . '</td>';
+        echo '<td class="num-int" style="font-weight:900">' . ($sumCounter > 0 ? (string)(int)round($sumCounter) : '') . '</td>';
+        echo '<td class="right" style="font-weight:900">' . h($money($sumBonus)) . '</td>';
+        echo '</tr>';
+
+        echo '</tbody></table>';
+    }
+
+    echo '<div class="section">Totales por operador</div>';
+    echo '<table class="report" style="max-width:860px"><thead><tr><th>Operador</th><th>Suma de UNID. IMPRESAS</th><th>Suma de CANTIDAD PRODUCIDA (CONTADOR)</th><th>Bono</th></tr></thead><tbody>';
+    foreach ($operatorTotals as $operatorLabel => $tot) {
+        $u = (float)($tot['units'] ?? 0);
+        $c = (float)($tot['counter'] ?? 0);
+        $b = (float)($tot['bonus'] ?? 0);
+        echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="num-int" style="font-weight:800">' . ($u > 0 ? (string)(int)round($u) : '') . '</td><td class="num-int" style="font-weight:800">' . ($c > 0 ? (string)(int)round($c) : '') . '</td><td class="right" style="font-weight:800">' . h($money($b)) . '</td></tr>';
+    }
+    echo '<tr><td style="font-weight:900">TOTAL</td><td class="num-int" style="font-weight:900">' . ($grandUnits > 0 ? (string)(int)round($grandUnits) : '') . '</td><td class="num-int" style="font-weight:900">' . ($grandCounter > 0 ? (string)(int)round($grandCounter) : '') . '</td><td class="right" style="font-weight:900">' . h($money($grandBonus)) . '</td></tr>';
+    echo '</tbody></table>';
+
+    echo '</body></html>';
+    $html = (string)ob_get_clean();
+    SimpleXlsx::streamHtml($filename, $html, 'Bono Serigrafía');
+    exit;
+}
+
+// -----------------------------------------------------------------------------
+// Export Bonoflexo (Excel .xls en HTML)
+//
+// - Lee month=YYYY-MM como “mes final” del período 26–25.
+// - Consulta producción ERP via ReceptionService::listErpFlexoProductionForBonusPeriod().
+// - Calcula:
+//   - Merma % = merma declarada / solicitadas * 100 (ERP: prod_worker_ot_defectunits evt_type='merma' cuando exista).
+//   - Regla: si merma% > 5 => “NO HAY BONO” y bono = $ -.
+//   - Tramo Flexo: ReceptionService::resolveBonusBracketAmount() según unidades impresas.
+//   - Bono por OT: se paga una vez por OT (cap por OT). Si el OT aparece en varios días, se paga el “restante”.
+//   - Compartido: factor por operador (bonus_operator_factors), se multiplica el bono base.
+// - Al final agrega tabla “Totales por operador” (solo bonos efectivamente pagables).
+// -----------------------------------------------------------------------------
+if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
+    $defaultMonthKey = date('Y-m');
+    $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
+    if ((int)$today->format('j') >= 26) {
+        $defaultMonthKey = $today->modify('+1 month')->format('Y-m');
+    }
+    $filterType = trim((string)($_GET['filter_type'] ?? 'period'));
+    if ($filterType !== 'range') {
+        $filterType = 'period';
+    }
+    $monthKey = trim((string)($_GET['month'] ?? $defaultMonthKey));
+    if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+        $monthKey = $defaultMonthKey;
+    }
+    $startDate = trim((string)($_GET['start_date'] ?? ''));
+    $endDate = trim((string)($_GET['end_date'] ?? ''));
+    if ($startDate === '' || $endDate === '') {
+        $startDate = date('Y-m-d', strtotime('-6 days'));
+        $endDate = date('Y-m-d');
+    }
+    $operatorName = trim((string)($_GET['operator'] ?? ''));
+    if ($operatorName === '') {
+        $operatorName = null;
+    }
+    $costCenter = trim((string)($_GET['cc'] ?? ''));
+    if ($costCenter === '') {
+        $costCenter = null;
+    }
+
+    $period = $service->resolveBonusFilterPeriod($filterType, $monthKey, $startDate, $endDate);
+    $result = $service->listErpFlexoProductionForBonusPeriod($period, $operatorName, $costCenter);
+    if (($result['ok'] ?? false) !== true) {
+        $errList = $result['errors'] ?? [];
+        $error = $errList !== [] ? trim((string)reset($errList)) : '';
+        $redirectParams = ['view' => 'bonoflexo', 'filter_type' => $filterType];
+        if ($filterType === 'range') {
+            $redirectParams['start_date'] = $startDate;
+            $redirectParams['end_date'] = $endDate;
+        } else {
+            $redirectParams['month'] = $monthKey;
+        }
+        if (is_string($operatorName) && $operatorName !== '') {
+            $redirectParams['operator'] = $operatorName;
+        }
+        if (is_string($costCenter) && $costCenter !== '') {
+            $redirectParams['cc'] = $costCenter;
+        }
+        $redirectParams['error'] = $error !== '' ? $error : 'No se pudo generar la planilla.';
+        header('Location: /bonificaciones?' . http_build_query($redirectParams));
+        exit;
+    }
+
+    $periodData = (array)($result['period'] ?? []);
+    $start = (string)($periodData['start_date'] ?? '');
+    $end = (string)($periodData['end_date'] ?? '');
+    $filename = $filterType === 'range'
+        ? ('planilla_flexo_rango_' . $start . '_a_' . $end)
+        : ('planilla_flexo_' . $monthKey . '_26-25');
+    if (is_string($operatorName) && $operatorName !== '') {
+        $safeOperator = preg_replace('/[^A-Za-z0-9._-]+/', '_', $operatorName);
+        $safeOperator = trim((string)$safeOperator, '_');
+        if ($safeOperator !== '') {
+            $filename .= '_operador_' . $safeOperator;
+        }
+    }
+    if (is_string($costCenter) && $costCenter !== '') {
+        $safeCc = preg_replace('/[^A-Za-z0-9._-]+/', '_', $costCenter);
+        $safeCc = trim((string)$safeCc, '_');
+        if ($safeCc !== '') {
+            $filename .= '_cc_' . $safeCc;
+        }
+    }
+    $filename .= '.xlsx';
+
+    $rows = (array)($result['rows'] ?? []);
+    $brackets = $service->listBonusBrackets('bonoflexo');
+    $factorMap = $service->listBonusOperatorFactors('bonoflexo', $monthKey);
+    $coachCfg = $service->getBonusCoachConfig('bonoflexo', $monthKey);
+    $coachName = trim((string)($coachCfg['coach_name'] ?? ''));
+    $coachShare = (float)($coachCfg['share_percent'] ?? 0.0);
+    if (abs($coachShare - 0.5) >= 0.0001) {
+        $coachShare = 0.0;
+    }
+    $coachTrainees = [];
+    foreach ((array)($coachCfg['trainees'] ?? []) as $t) {
+        $t = trim((string)$t);
+        if ($t !== '') {
+            $coachTrainees[$t] = true;
+        }
+    }
+    $grouped = [];
+    if ($operatorName !== null) {
+        $grouped[(string)$operatorName] = $rows;
+    } else {
+        foreach ($rows as $row) {
+            $name = is_array($row) ? trim((string)($row['operator_name'] ?? '')) : '';
+            if ($name === '') {
+                $name = 'Sin operador';
+            }
+            if (!isset($grouped[$name])) {
+                $grouped[$name] = [];
+            }
+            $grouped[$name][] = $row;
+        }
+        ksort($grouped, SORT_NATURAL | SORT_FLAG_CASE);
+    }
+
+    ob_start();
+
+    echo '<html><head><meta charset="UTF-8"><style>';
+    echo 'body{font-family:Arial,sans-serif;color:#0f172a}';
+    echo '.title{font-size:22px;font-weight:800;color:#0f172a}';
+    echo '.sub{font-size:12px;color:#475569;margin:6px 0 14px 0}';
+    echo '.meta{margin:10px 0 16px 0;font-size:12px;color:#334155}';
+    echo '.section{font-size:14px;font-weight:800;margin:20px 0 8px 0;color:#0f172a}';
+    echo '.report{border-collapse:collapse;width:100%;font-size:12px}';
+    echo '.report td,.report th{border:1px solid #cbd5e1;padding:6px 8px;vertical-align:middle}';
+    echo '.report th{background:#0f172a;color:#fff;text-align:center;font-size:11px}';
+    echo '.report tr:nth-child(even) td{background:#f8fafc}';
+    echo '.right{text-align:right}';
+    echo '.center{text-align:center}';
+    echo '.num-int{mso-number-format:"\#\,\#\#0";text-align:right}';
+    echo '.text-cell{mso-number-format:"\@"}';
+    echo '</style></head><body>';
+    echo '<div class="title">Planilla Bonos Flexografía</div>';
+    echo '<div class="sub">Unibag ERP · Bonificaciones</div>';
+    echo '<div class="meta"><strong>Período:</strong> ' . h($start !== '' && $end !== '' ? ($start . ' a ' . $end) : ('Mes ' . $monthKey)) . '<br><strong>Generado:</strong> ' . h((new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get())))->format('d/m/Y H:i:s')) . '</div>';
+
+    $operatorBaseTotals = [];
+    $operatorCoachTotals = [];
+    $operatorTotals = [];
+    foreach ($grouped as $operatorLabel => $operatorRows) {
+        $sumClp = 0.0;
+        $totalUnitsByOt = [];
+        foreach ((array)$operatorRows as $r) {
+            if (!is_array($r)) {
+                continue;
+            }
+            $ot = trim((string)($r['work_order_number'] ?? ''));
+            $cc = trim((string)($r['cost_center'] ?? ''));
+            $key = $ot . '|' . $cc;
+            $totalUnitsByOt[$key] = (float)($totalUnitsByOt[$key] ?? 0.0) + (float)($r['produced_units'] ?? 0.0);
+        }
+        $maxBaseBonusByOt = [];
+        foreach ($totalUnitsByOt as $key => $totalUnits) {
+            $maxBaseBonusByOt[(string)$key] = (float)$service->resolveBonusBracketAmount($brackets, (float)$totalUnits);
+        }
+        $usedBaseBonusByOt = [];
+
+        foreach ((array)$operatorRows as $r) {
+            $units = (float)($r['produced_units'] ?? 0);
+            // Para el bono de flexografía se toma exclusivamente la merma de impresión (dejando afuera alistamiento de bobina y reparación)
+            $declaredWasteUnits = (float)($r['waste_print_units'] ?? 0.0);
+            $declaredWasteKg    = (float)($r['waste_print_kg']    ?? 0.0);
+            $grammageG  = (float)($r['grammage_g']         ?? 0.0);
+            $dimWidth   = (float)($r['dim_width_cm']       ?? 0.0);
+            $dimHeight  = (float)($r['dim_height_cm']      ?? 0.0);
+            $dimFuelle  = (float)($r['dim_fuelle_cm']      ?? 0.0);
+            $dimManilla = (float)($r['dim_manilla_length'] ?? 0.0);
+            $itemWeight = (float)($r['item_weight']        ?? 0.0);
+
+            // Calcular peso unitario teórico (igual que informe de producción)
+            $unitWeightKg = 0.0;
+            if ($itemWeight > 0) {
+                $unitWeightKg = $itemWeight / 1000.0;
+            } elseif ($dimWidth > 0 && $dimHeight > 0 && $grammageG > 0) {
+                $areaM2       = (2.0 * ($dimWidth + $dimFuelle) * $dimHeight) / 10000.0;
+                $bodyKg       = $areaM2 * ($grammageG / 1000.0);
+                $manillaKg    = ($dimManilla > 0) ? (2.0 * ($dimManilla / 100.0) * 0.025 * ($grammageG / 1000.0)) : 0.0;
+                $unitWeightKg = $bodyKg + $manillaKg;
+            }
+
+            // Convertir kg de merma a unidades si hay kg y peso unitario; si no, usar unidades declaradas
+            if ($unitWeightKg > 0 && $declaredWasteKg > 0) {
+                $effectiveWasteUnits = round($declaredWasteKg / $unitWeightKg);
+            } else {
+                $effectiveWasteUnits = $declaredWasteUnits;
+            }
+
+            // Denominador: si hubo producción, calcular porcentaje sobre unidades producidas (igual a informe producción).
+            // Si no hubo producción, comparar contra solicitadas.
+            $denom = $units > 0 ? $units : $requested;
+            $mermaPercent = $denom > 0 ? (abs($effectiveWasteUnits) / $denom * 100.0) : 0.0;
+            if ($mermaPercent > 5.0) {
+                continue;
+            }
+            $factor = (float)($factorMap[(string)$operatorLabel] ?? 1.0);
+            $ot = trim((string)($r['work_order_number'] ?? ''));
+            $cc = trim((string)($r['cost_center'] ?? ''));
+            $otKey = $ot . '|' . $cc;
+            $maxBaseBonus = (float)($maxBaseBonusByOt[$otKey] ?? 0.0);
+            $usedBase = (float)($usedBaseBonusByOt[$otKey] ?? 0.0);
+            $rowBaseBonus = (float)$service->resolveBonusBracketAmount($brackets, $units);
+            $allowedBase = max(0.0, $maxBaseBonus - $usedBase);
+            $payBase = min($rowBaseBonus, $allowedBase);
+            if ($payBase > 0) {
+                $usedBaseBonusByOt[$otKey] = $usedBase + $payBase;
+            }
+            $bonusClp = $payBase > 0 ? round($payBase * $factor, 0) : 0.0;
+            if ($bonusClp > 0) {
+                $sumClp += $bonusClp;
+            }
+
+            $operatorRowName = trim((string)($r['operator_name'] ?? ''));
+            $coachBonusClp = ($payBase > 0 && $coachName !== '' && $coachShare > 0 && isset($coachTrainees[$operatorRowName]))
+                ? round($payBase * $coachShare, 0)
+                : 0.0;
+            if ($coachBonusClp > 0) {
+                $operatorCoachTotals[$coachName] = (float)($operatorCoachTotals[$coachName] ?? 0.0) + $coachBonusClp;
+                $operatorTotals[$coachName] = (float)($operatorTotals[$coachName] ?? 0.0) + $coachBonusClp;
+            }
+        }
+        $operatorBaseTotals[(string)$operatorLabel] = (float)($operatorBaseTotals[(string)$operatorLabel] ?? 0.0) + $sumClp;
+        $operatorTotals[(string)$operatorLabel] = (float)($operatorTotals[(string)$operatorLabel] ?? 0.0) + $sumClp;
+    }
+    ksort($operatorTotals, SORT_NATURAL | SORT_FLAG_CASE);
+    $grandTotalClp = array_sum(array_map('floatval', $operatorTotals));
+
+    foreach ($grouped as $operatorLabel => $operatorRows) {
+        $totalUnitsByOt = [];
+        foreach ((array)$operatorRows as $r) {
+            if (!is_array($r)) {
+                continue;
+            }
+            $ot = trim((string)($r['work_order_number'] ?? ''));
+            $cc = trim((string)($r['cost_center'] ?? ''));
+            $key = $ot . '|' . $cc;
+            $totalUnitsByOt[$key] = (float)($totalUnitsByOt[$key] ?? 0.0) + (float)($r['produced_units'] ?? 0.0);
+        }
+        $maxBaseBonusByOt = [];
+        foreach ($totalUnitsByOt as $key => $totalUnits) {
+            $maxBaseBonusByOt[(string)$key] = (float)$service->resolveBonusBracketAmount($brackets, (float)$totalUnits);
+        }
+        $usedBaseBonusByOt = [];
+
+        echo '<div class="section">Operador: ' . h((string)$operatorLabel) . '</div>';
+        echo '<table class="report"><thead>';
+        echo '<tr class="op-header-row"><th colspan="20" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . '</th></tr>';
+        echo '<tr>';
+        echo '<th>OPERADOR</th>';
         echo '<th>N°<br>IMPRESORA</th>';
         echo '<th>N°<br>CC</th>';
         echo '<th>N°<br>OT</th>';
@@ -8975,6 +12176,8 @@ if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
         echo '<th>%</th>';
         echo '<th>Compartido</th>';
         echo '<th>Bono</th>';
+        echo '<th>Mentor</th>';
+        echo '<th>Bono<br>Mentor</th>';
         echo '<th>OBSERVACIONES</th>';
         echo '<th>UNID<br>SOLICITADAS</th>';
         echo '<th>unid<br>impresas</th>';
@@ -8986,22 +12189,66 @@ if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
             $units = (float)($r['produced_units'] ?? 0);
             $requested = (float)($r['requested_units'] ?? 0);
             $diff = $requested > 0 ? ($requested - $units) : 0;
-            $unitsLabel = rtrim(rtrim(number_format($units, 3, '.', ''), '0'), '.');
-            $reqLabel = $requested > 0 ? rtrim(rtrim(number_format($requested, 3, '.', ''), '0'), '.') : '';
-            $diffLabel = $reqLabel !== '' ? rtrim(rtrim(number_format($diff, 3, '.', ''), '0'), '.') : '';
+            $unitsLabel = $units > 0 ? (string)(int)round($units) : '';
+            $reqLabel = $requested > 0 ? (string)(int)round($requested) : '';
+            $diffLabel = $reqLabel !== '' ? (string)(int)round($diff) : '';
             $factor = (float)($factorMap[(string)$operatorLabel] ?? 1.0);
-            $bonusClp = $service->resolveBonusBracketAmount($brackets, $units);
-            $bonusClp = $bonusClp > 0 ? round($bonusClp * $factor, 0) : 0.0;
-            $bonusLabel = $bonusClp > 0 ? ('$ ' . number_format($bonusClp, 0, ',', '.')) : '$ -';
-            $mermaPercent = $requested > 0 ? (abs($diff) / $requested * 100.0) : 0.0;
+            // Para el bono de flexografía se toma exclusivamente la merma de impresión (dejando afuera alistamiento de bobina y reparación)
+            $declaredWasteUnits = (float)($r['waste_print_units'] ?? 0.0);
+            $declaredWasteKg    = (float)($r['waste_print_kg']    ?? 0.0);
+            $grammageG  = (float)($r['grammage_g']         ?? 0.0);
+            $dimWidth   = (float)($r['dim_width_cm']       ?? 0.0);
+            $dimHeight  = (float)($r['dim_height_cm']      ?? 0.0);
+            $dimFuelle  = (float)($r['dim_fuelle_cm']      ?? 0.0);
+            $dimManilla = (float)($r['dim_manilla_length'] ?? 0.0);
+            $itemWeight = (float)($r['item_weight']        ?? 0.0);
+
+            // Calcular peso unitario teórico (igual que informe de producción)
+            $unitWeightKg = 0.0;
+            if ($itemWeight > 0) {
+                $unitWeightKg = $itemWeight / 1000.0;
+            } elseif ($dimWidth > 0 && $dimHeight > 0 && $grammageG > 0) {
+                $areaM2       = (2.0 * ($dimWidth + $dimFuelle) * $dimHeight) / 10000.0;
+                $bodyKg       = $areaM2 * ($grammageG / 1000.0);
+                $manillaKg    = ($dimManilla > 0) ? (2.0 * ($dimManilla / 100.0) * 0.025 * ($grammageG / 1000.0)) : 0.0;
+                $unitWeightKg = $bodyKg + $manillaKg;
+            }
+
+            // Convertir kg de merma a unidades si hay kg y peso unitario; si no, usar unidades declaradas
+            if ($unitWeightKg > 0 && $declaredWasteKg > 0) {
+                $effectiveWasteUnits = round($declaredWasteKg / $unitWeightKg);
+            } else {
+                $effectiveWasteUnits = $declaredWasteUnits;
+            }
+
+            // Denominador: si hubo producción, calcular porcentaje sobre unidades producidas (igual a informe producción).
+            // Si no hubo producción, comparar contra solicitadas.
+            $denom = $units > 0 ? $units : $requested;
+            $mermaPercent = $denom > 0 ? (abs($effectiveWasteUnits) / $denom * 100.0) : 0.0;
             $mermaLabel = number_format($mermaPercent, 2, ',', '.') . '%';
             $hasBonus = $mermaPercent <= 5.0;
             $bonificacionLabel = $hasBonus ? 'PAGO' : 'NO HAY BONO';
-            if (!$hasBonus) {
-                $bonusLabel = '$ -';
+            $ot = trim((string)($r['work_order_number'] ?? ''));
+            $cc = trim((string)($r['cost_center'] ?? ''));
+            $otKey = $ot . '|' . $cc;
+            $maxBaseBonus = (float)($maxBaseBonusByOt[$otKey] ?? 0.0);
+            $usedBase = (float)($usedBaseBonusByOt[$otKey] ?? 0.0);
+            $rowBaseBonus = (float)$service->resolveBonusBracketAmount($brackets, $units);
+            $allowedBase = max(0.0, $maxBaseBonus - $usedBase);
+            $payBase = $hasBonus ? min($rowBaseBonus, $allowedBase) : 0.0;
+            if ($hasBonus && $payBase > 0) {
+                $usedBaseBonusByOt[$otKey] = $usedBase + $payBase;
             }
+            $bonusClp = $payBase > 0 ? round($payBase * $factor, 0) : 0.0;
+            $bonusLabel = $bonusClp > 0 ? ('$ ' . number_format($bonusClp, 0, ',', '.')) : '$ -';
+            $operatorRowName = trim((string)($r['operator_name'] ?? ''));
+            $coachBonusClp = ($hasBonus && $payBase > 0 && $coachName !== '' && $coachShare > 0 && isset($coachTrainees[$operatorRowName]))
+                ? round($payBase * $coachShare, 0)
+                : 0.0;
+            $coachBonusLabel = $coachBonusClp > 0 ? ('$ ' . number_format($coachBonusClp, 0, ',', '.')) : '$ -';
 
             echo '<tr>';
+            echo '<td>' . h((string)$operatorLabel) . '</td>';
             echo '<td class="center">' . h((string)($r['printer_no'] ?? '')) . '</td>';
             echo '<td class="center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
             echo '<td class="center">' . h((string)($r['work_order_number'] ?? '')) . '</td>';
@@ -9011,30 +12258,50 @@ if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
             echo '<td class="center">' . h((string)($r['measure_cm'] ?? '')) . '</td>';
             echo '<td class="center">' . h((string)($r['helper_label'] ?? '')) . '</td>';
             echo '<td class="center">' . h($bonificacionLabel) . '</td>';
-            echo '<td class="right">' . h($unitsLabel) . '</td>';
+            echo '<td class="num-int">' . h($unitsLabel) . '</td>';
             echo '<td class="center">' . h($mermaLabel) . '</td>';
             echo '<td class="center">' . h(rtrim(rtrim(number_format($factor, 1, '.', ''), '0'), '.')) . '</td>';
             echo '<td class="right">' . h($bonusLabel) . '</td>';
+            echo '<td class="center">' . h($coachName !== '' && isset($coachTrainees[$operatorRowName]) ? $coachName : '') . '</td>';
+            echo '<td class="right">' . h($coachBonusLabel) . '</td>';
             echo '<td></td>';
-            echo '<td class="right">' . h($reqLabel) . '</td>';
-            echo '<td class="right">' . h($unitsLabel) . '</td>';
-            echo '<td class="right">' . h($diffLabel) . '</td>';
+            echo '<td class="num-int">' . h($reqLabel) . '</td>';
+            echo '<td class="num-int">' . h($unitsLabel) . '</td>';
+            echo '<td class="num-int">' . h($diffLabel) . '</td>';
             echo '</tr>';
         }
+        $opBaseBonusTotal = (float)($operatorBaseTotals[(string)$operatorLabel] ?? 0.0);
+        $opBaseBonusLabel = $opBaseBonusTotal > 0 ? ('$ ' . number_format($opBaseBonusTotal, 0, ',', '.')) : '$ -';
+        echo '<tr><td colspan="13" style="font-weight:900">Total ' . h((string)$operatorLabel) . '</td><td class="right" style="font-weight:900">' . h($opBaseBonusLabel) . '</td><td colspan="6"></td></tr>';
         echo '</tbody></table>';
     }
 
     echo '<div class="section">Totales por operador</div>';
-    echo '<table class="report" style="max-width:520px"><thead><tr><th>Operador</th><th>Total bono (CLP)</th></tr></thead><tbody>';
-    foreach ($operatorTotals as $operatorLabel => $sumClp) {
-        $label = $sumClp > 0 ? ('$ ' . number_format((float)$sumClp, 0, ',', '.')) : '$ -';
-        echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="right" style="font-weight:800">' . h($label) . '</td></tr>';
+    $allTotalNames = array_values(array_unique(array_merge(array_keys($operatorBaseTotals), array_keys($operatorCoachTotals), array_keys($operatorTotals))));
+    sort($allTotalNames, SORT_NATURAL | SORT_FLAG_CASE);
+    echo '<table class="report" style="max-width:760px"><thead><tr><th>Operador</th><th>Bono operador</th><th>Bono mentor</th><th>Total</th></tr></thead><tbody>';
+    $sumBaseAll = 0.0;
+    $sumCoachAll = 0.0;
+    foreach ($allTotalNames as $operatorLabel) {
+        $baseClp = (float)($operatorBaseTotals[(string)$operatorLabel] ?? 0.0);
+        $coachClp = (float)($operatorCoachTotals[(string)$operatorLabel] ?? 0.0);
+        $totalClp = (float)($operatorTotals[(string)$operatorLabel] ?? 0.0);
+        $sumBaseAll += $baseClp;
+        $sumCoachAll += $coachClp;
+        $baseLabel = $baseClp > 0 ? ('$ ' . number_format($baseClp, 0, ',', '.')) : '$ -';
+        $coachLabel = $coachClp > 0 ? ('$ ' . number_format($coachClp, 0, ',', '.')) : '$ -';
+        $totalLabel = $totalClp > 0 ? ('$ ' . number_format($totalClp, 0, ',', '.')) : '$ -';
+        echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="right">' . h($baseLabel) . '</td><td class="right">' . h($coachLabel) . '</td><td class="right" style="font-weight:800">' . h($totalLabel) . '</td></tr>';
     }
+    $sumBaseLabel = $sumBaseAll > 0 ? ('$ ' . number_format($sumBaseAll, 0, ',', '.')) : '$ -';
+    $sumCoachLabel = $sumCoachAll > 0 ? ('$ ' . number_format($sumCoachAll, 0, ',', '.')) : '$ -';
     $grandLabel = $grandTotalClp > 0 ? ('$ ' . number_format((float)$grandTotalClp, 0, ',', '.')) : '$ -';
-    echo '<tr><td style="font-weight:900">TOTAL</td><td class="right" style="font-weight:900">' . h($grandLabel) . '</td></tr>';
+    echo '<tr><td style="font-weight:900">TOTAL</td><td class="right" style="font-weight:900">' . h($sumBaseLabel) . '</td><td class="right" style="font-weight:900">' . h($sumCoachLabel) . '</td><td class="right" style="font-weight:900">' . h($grandLabel) . '</td></tr>';
     echo '</tbody></table>';
 
     echo '</body></html>';
+    $html = (string)ob_get_clean();
+    SimpleXlsx::streamHtml($filename, $html, 'Bono Flexo');
     exit;
 }
 
@@ -9168,12 +12435,27 @@ if ($path === '/bonificaciones/config/save-cys' && $method === 'POST') {
     exit;
 }
 
+// -----------------------------------------------------------------------------
+// Configuración Bonoflexo · Guardar “Compartido” (factor) por operador
+//
+// - Se recibe desde el modal como dos arrays paralelos:
+//   operators[] + factors[].
+// - Los factores permitidos se validan en ReceptionService::replaceBonusOperatorFactors():
+//   {1.0, 0.9, 0.8}. El 1.0 no se persiste (se asume por defecto).
+// -----------------------------------------------------------------------------
 if ($path === '/bonificaciones/config/save-flexo-factors' && $method === 'POST') {
     denyErpProductionWriteAccess();
     requireCsrf();
     $bonusCode = strtolower(trim((string)($_POST['bonus_code'] ?? 'bonoflexo')));
+    $monthKey = trim((string)($_POST['month_key'] ?? date('Y-m')));
+    if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+        $monthKey = date('Y-m');
+    }
     $operators = $_POST['operators'] ?? [];
     $factors = $_POST['factors'] ?? [];
+    $coachName = trim((string)($_POST['coach_name'] ?? ''));
+    $coachShare = (float)($_POST['coach_share'] ?? 0.0);
+    $trainees = $_POST['trainees'] ?? [];
     $byOp = [];
     if (is_array($operators) && is_array($factors)) {
         foreach ($operators as $i => $op) {
@@ -9187,14 +12469,15 @@ if ($path === '/bonificaciones/config/save-flexo-factors' && $method === 'POST')
             $byOp[$name] = $factors[$i];
         }
     }
-    $result = $service->replaceBonusOperatorFactors($bonusCode, $byOp);
-    if (($result['ok'] ?? false) === true) {
-        header('Location: /bonificaciones?view=configuracion&bonus=' . rawurlencode($bonusCode) . '&saved=1');
+    $result = $service->replaceBonusOperatorFactors($bonusCode, $monthKey, $byOp);
+    $resultCoach = $service->replaceBonusCoachConfig($bonusCode, $monthKey, $coachName, $coachShare, is_array($trainees) ? $trainees : []);
+    if (($result['ok'] ?? false) === true && ($resultCoach['ok'] ?? false) === true) {
+        header('Location: /bonificaciones?view=configuracion&bonus=' . rawurlencode($bonusCode) . '&month=' . rawurlencode($monthKey) . '&saved=1');
         exit;
     }
-    $errList = $result['errors'] ?? [];
+    $errList = array_merge((array)($result['errors'] ?? []), (array)($resultCoach['errors'] ?? []));
     $error = $errList !== [] ? trim((string)reset($errList)) : '';
-    header('Location: /bonificaciones?view=configuracion&bonus=' . rawurlencode($bonusCode) . '&error=' . rawurlencode($error !== '' ? $error : 'No se pudo guardar la configuración.'));
+    header('Location: /bonificaciones?view=configuracion&bonus=' . rawurlencode($bonusCode) . '&month=' . rawurlencode($monthKey) . '&error=' . rawurlencode($error !== '' ? $error : 'No se pudo guardar la configuración.'));
     exit;
 }
 
@@ -9687,164 +12970,751 @@ if ($path === '/scale/sealing-waste' && $method === 'POST') {
     ]));
 }
 
+if ($path === '/purchase-orders/export-excel' && $method === 'GET') {
+    $supplierId = isset($_GET['supplier_id']) ? (int)$_GET['supplier_id'] : 0;
+    $q = isset($_GET['q']) ? trim((string)$_GET['q']) : '';
+    $status = isset($_GET['status']) ? (string)$_GET['status'] : 'active';
+    if (!in_array($status, ['active', 'complete'], true)) {
+        $status = 'active';
+    }
+    $supplierType = isset($_GET['supplier_type']) ? strtoupper(trim((string)$_GET['supplier_type'])) : 'NATIONAL';
+    $dateFrom = isset($_GET['date_from']) ? trim((string)$_GET['date_from']) : '';
+    $dateTo = isset($_GET['date_to']) ? trim((string)$_GET['date_to']) : '';
+
+    $pos = $service->listPurchaseOrders(
+        $supplierId > 0 ? $supplierId : null,
+        $q !== '' ? $q : null,
+        $status,
+        $supplierType,
+        5000,
+        $dateFrom !== '' ? $dateFrom : null,
+        $dateTo !== '' ? $dateTo : null
+    );
+
+    $isComplete = ($status === 'complete');
+    $statusText = $isComplete ? 'Finalizadas' : 'Activas';
+    $filename = 'informe_recepcion_nacional_' . ($isComplete ? 'finalizadas' : 'activas') . '_' . date('Ymd_His') . '.xlsx';
+
+    $metaFilters = [];
+    $metaFilters[] = 'Estado: ' . $statusText;
+    if ($dateFrom !== '' || $dateTo !== '') {
+        $metaFilters[] = 'Rango Fechas: ' . ($dateFrom ?: 'Inicio') . ' al ' . ($dateTo ?: 'Fin');
+    }
+    if ($supplierId > 0 && !empty($pos)) {
+        $metaFilters[] = 'Proveedor ID: ' . $supplierId;
+    }
+    if ($q !== '') {
+        $metaFilters[] = 'Búsqueda OC: ' . $q;
+    }
+    $metaFilters[] = 'Total Órdenes: ' . count($pos);
+    $metaLine = implode(' | ', $metaFilters);
+
+    $poIds = array_column($pos, 'id');
+    $allLines = $service->listPurchaseOrderLinesForOrders($poIds);
+    $linesByPo = [];
+    $wOrdByPo = [];
+    $wRecByPo = [];
+    foreach ($allLines as $ln) {
+        $pId = (int)$ln['purchase_order_id'];
+        $linesByPo[$pId][] = $ln;
+        $wOrdByPo[$pId] = ($wOrdByPo[$pId] ?? 0.0) + (float)($ln['ordered_weight_kg'] ?? 0);
+        $wRecByPo[$pId] = ($wRecByPo[$pId] ?? 0.0) + (float)($ln['received_weight_kg'] ?? 0);
+    }
+
+    $html = '<!doctype html><html><head><meta charset="utf-8"></head><body>';
+    $html .= '<h1>INFORME DE RECEPCIÓN NACIONAL (' . strtoupper($statusText) . ')</h1>';
+    $html .= '<div class="meta">Fecha de descarga: ' . date('d/m/Y H:i') . ' | ' . h($metaLine) . '</div>';
+
+    // Parte 1: Resumen General
+    $html .= '<h2>1. RESUMEN GENERAL DE ÓRDENES DE COMPRA (INCLUYE COMPARATIVA DE KILOS)</h2>';
+    $html .= '<table border="1">';
+    $html .= '<thead><tr>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Orden de Compra</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Proveedor</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Tipo Proveedor</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">País</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Estado</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Líneas Completadas</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Total Líneas</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Avance Líneas (%)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Kilos a Recibir (Debían Recibirse)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Kilos Recibidos</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Diferencia Kilos (kg)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Cumplimiento Kilos (%)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Fecha Creación</th>
+    </tr></thead><tbody>';
+    foreach ($pos as $po) {
+        $pId = (int)$po['id'];
+        $compl = (int)($po['completed_lines'] ?? 0);
+        $tot = (int)($po['total_lines'] ?? 0);
+        $pct = $tot > 0 ? (int)round(($compl / $tot) * 100) : 0;
+        $stLabel = match((string)$po['status']) {
+            'COMPLETE' => 'Finalizada',
+            'PARTIAL' => 'Parcial',
+            default => 'Abierta',
+        };
+        $wOrd = (float)($wOrdByPo[$pId] ?? 0.0);
+        $wRec = (float)($wRecByPo[$pId] ?? 0.0);
+        $wDiff = max(0, $wOrd - $wRec);
+        $wPct = $wOrd > 0 ? (round(($wRec / $wOrd) * 100, 1) . '%') : '-';
+
+        $html .= '<tr>';
+        $html .= '<td class="text-cell">' . h((string)$po['po_code']) . '</td>';
+        $html .= '<td>' . h((string)$po['supplier_name']) . '</td>';
+        $html .= '<td>' . h((string)($po['supplier_type'] ?? 'Nacional')) . '</td>';
+        $html .= '<td>' . h((string)($po['supplier_country_name'] ?? '-')) . '</td>';
+        $html .= '<td>' . $stLabel . '</td>';
+        $html .= '<td class="num-int">' . $compl . '</td>';
+        $html .= '<td class="num-int">' . $tot . '</td>';
+        $html .= '<td class="num-int">' . $pct . '%</td>';
+        $html .= '<td class="num-dec2">' . number_format($wOrd, 2, '.', '') . '</td>';
+        $html .= '<td class="num-dec2">' . number_format($wRec, 2, '.', '') . '</td>';
+        $html .= '<td class="num-dec2">' . number_format($wDiff, 2, '.', '') . '</td>';
+        $html .= '<td class="num-int">' . $wPct . '</td>';
+        $html .= '<td>' . h((string)$po['created_at']) . '</td>';
+        $html .= '</tr>';
+    }
+    if ($pos === []) {
+        $html .= '<tr><td colspan="13">Sin órdenes encontradas con los filtros seleccionados.</td></tr>';
+    }
+    $html .= '</tbody></table>';
+
+    // Parte 2: Detalle por cada una de las recepciones
+    $html .= '<h2>2. DETALLE DE LÍNEAS Y RECEPCIÓN POR ORDEN DE COMPRA (KILOS RECIBIDOS VS DEBÍAN RECIBIRSE)</h2>';
+    $html .= '<table border="1">';
+    $html .= '<thead><tr>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Orden de Compra</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Proveedor</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Estado OC</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">SKU / Código Item</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Modo Recepción</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Especificación / Título</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Rollos / Unid. Ordenadas</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Rollos / Unid. Recibidas</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Rollos / Unid. Pendientes</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Kilos a Recibir (Debían Recibirse)</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Kilos Recibidos</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Diferencia / Pendiente Kilos (kg)</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Cumplimiento Kilos (%)</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Estado Línea</th>
+    </tr></thead><tbody>';
+    $totalLinesDetail = 0;
+    foreach ($pos as $po) {
+        $lines = $linesByPo[(int)$po['id']] ?? [];
+        $poStLabel = match((string)$po['status']) {
+            'COMPLETE' => 'Finalizada',
+            'PARTIAL' => 'Parcial',
+            default => 'Abierta',
+        };
+        foreach ($lines as $ln) {
+            $totalLinesDetail++;
+            $sm = $service->summarizeReceptionLine($ln);
+            $spec = buildReceptionSpec($ln);
+            $lnStLabel = $sm['is_complete'] ? 'Completa' : ($sm['has_progress'] ? 'Parcial' : 'Pendiente');
+            $modeLabel = ((string)($ln['reception_mode'] ?? '')) === 'WEIGHT' ? 'Peso (kg)' : 'Cantidad (Rollos)';
+
+            $lWOrd = (float)($ln['ordered_weight_kg'] ?? 0);
+            $lWRec = (float)($ln['received_weight_kg'] ?? 0);
+            $lWDiff = (float)($sm['pending_weight_kg'] ?? max(0, $lWOrd - $lWRec));
+            $lWPct = $lWOrd > 0 ? (round(($lWRec / $lWOrd) * 100, 1) . '%') : '-';
+
+            $html .= '<tr>';
+            $html .= '<td class="text-cell">' . h((string)$po['po_code']) . '</td>';
+            $html .= '<td>' . h((string)$po['supplier_name']) . '</td>';
+            $html .= '<td>' . $poStLabel . '</td>';
+            $html .= '<td class="text-cell">' . h((string)($ln['sku_code'] ?? '')) . '</td>';
+            $html .= '<td>' . $modeLabel . '</td>';
+            $html .= '<td>' . h($spec) . '</td>';
+            $html .= '<td class="num-int">' . (int)($ln['ordered_rolls'] ?? 0) . '</td>';
+            $html .= '<td class="num-int">' . (int)($ln['received_rolls'] ?? 0) . '</td>';
+            $html .= '<td class="num-int">' . (int)($sm['pending_rolls'] ?? 0) . '</td>';
+            $html .= '<td class="num-dec2">' . number_format($lWOrd, 2, '.', '') . '</td>';
+            $html .= '<td class="num-dec2">' . number_format($lWRec, 2, '.', '') . '</td>';
+            $html .= '<td class="num-dec2">' . number_format($lWDiff, 2, '.', '') . '</td>';
+            $html .= '<td class="num-int">' . $lWPct . '</td>';
+            $html .= '<td>' . $lnStLabel . '</td>';
+            $html .= '</tr>';
+        }
+    }
+    if ($totalLinesDetail === 0) {
+        $html .= '<tr><td colspan="14">Sin líneas de recepción en las órdenes seleccionadas.</td></tr>';
+    }
+    $html .= '</tbody></table>';
+    $html .= '</body></html>';
+
+    SimpleXlsx::streamHtml($filename, $html, 'Recepción Nacional');
+    exit;
+}
+
 if ($path === '/purchase-orders' && $method === 'GET') {
     $supplierId = isset($_GET['supplier_id']) ? (int)$_GET['supplier_id'] : 0;
-    $q = isset($_GET['q']) ? (string)$_GET['q'] : '';
+    $q = isset($_GET['q']) ? trim((string)$_GET['q']) : '';
     $status = isset($_GET['status']) ? (string)$_GET['status'] : 'active';
+    if (!in_array($status, ['active', 'complete'], true)) {
+        $status = 'active';
+    }
     $supplierType = isset($_GET['supplier_type']) ? strtoupper(trim((string)$_GET['supplier_type'])) : '';
     if (!in_array($supplierType, ['', 'ALL', 'NATIONAL', 'IMPORT'], true)) {
         $supplierType = '';
     }
-    if ($supplierType === '' && $status === 'active') {
+    if ($supplierType === '') {
         $supplierType = 'NATIONAL';
     }
-    $suppliers = $service->listSuppliersForPurchaseOrders($status, $supplierType);
+    $dateFrom = isset($_GET['date_from']) ? trim((string)$_GET['date_from']) : '';
+    $dateTo = isset($_GET['date_to']) ? trim((string)$_GET['date_to']) : '';
+
     if ($supplierType === 'IMPORT') {
         $query = ['status=' . rawurlencode($status)];
         if ($supplierId > 0) {
             $query[] = 'supplier_id=' . $supplierId;
         }
         if ($q !== '') {
-            $query[] = 'q=' . rawurlencode($q);
+            $query[] = 'po_code=' . rawurlencode($q);
+        }
+        if ($dateFrom !== '') {
+            $query[] = 'date_from=' . rawurlencode($dateFrom);
+        }
+        if ($dateTo !== '') {
+            $query[] = 'date_to=' . rawurlencode($dateTo);
         }
         header('Location: /import-containers?' . implode('&', $query));
         exit;
     }
-    $pos = $service->listPurchaseOrders($supplierId > 0 ? $supplierId : null, $q !== '' ? $q : null, $status, $supplierType);
 
-    $pageTitle = 'Recepción por Orden de Compra';
-    if ($status === 'complete') {
-        $pageTitle = 'Recepciones finalizadas';
-    } elseif ($supplierType === 'IMPORT') {
-        $pageTitle = 'Importación';
-    } elseif ($supplierType === 'NATIONAL') {
-        $pageTitle = 'Recepción nacional';
+    $page = max(1, (int)($_GET['page'] ?? 1));
+    $pageSize = 20;
+    $totalCount = $service->countPurchaseOrders(
+        $supplierId > 0 ? $supplierId : null,
+        $q !== '' ? $q : null,
+        $status,
+        $supplierType,
+        $dateFrom !== '' ? $dateFrom : null,
+        $dateTo !== '' ? $dateTo : null
+    );
+    $totalPages = max(1, (int)ceil($totalCount / $pageSize));
+    if ($page > $totalPages) {
+        $page = $totalPages;
     }
+    $offset = ($page - 1) * $pageSize;
 
-    $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div>
-          <div style="font-size:18px;font-weight:700">' . h($pageTitle) . '</div>
-          <div class="muted">Buscar OC y recepcionar parcial o completa. Separación por proveedor nacional o importación según país de origen en ERP.</div>
+    $suppliers = $service->listSuppliersForPurchaseOrders($status, $supplierType);
+    $pos = $service->listPurchaseOrders(
+        $supplierId > 0 ? $supplierId : null,
+        $q !== '' ? $q : null,
+        $status,
+        $supplierType,
+        $pageSize,
+        $dateFrom !== '' ? $dateFrom : null,
+        $dateTo !== '' ? $dateTo : null,
+        $offset
+    );
+
+    $isComplete = ($status === 'complete');
+    $activeTab = $isComplete ? 'national_complete' : 'national_active';
+    $pageTitle = $isComplete ? 'Recepciones Nacionales Finalizadas' : 'Recepción Nacional Activa';
+    $pageSubtitle = $isComplete
+        ? 'Historial de órdenes de compra nacionales recepcionadas y cerradas (desde 2024 en adelante).'
+        : 'Órdenes de compra nacionales vigentes para recepcionar en planta.';
+
+    $body = '<div class="rec-shell">';
+    $body .= renderReceptionNavTabs($activeTab);
+
+    // Header Card
+    $body .= '<div class="rec-header-card">
+        <div class="rec-title-group">
+          <h1>' . h($pageTitle) . '</h1>
+          <p>' . h($pageSubtitle) . '</p>
+        </div>
+        <div class="rec-counter-pill">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+          <span>' . $totalCount . ' ' . ($totalCount === 1 ? 'orden' : 'órdenes') . '</span>
         </div>
       </div>';
 
-    $body .= '<div class="card" style="margin-bottom:12px">
-        <form method="get" action="/purchase-orders">
+    // Filter Card
+    $clearUrl = '/purchase-orders?status=' . h($status) . '&supplier_type=NATIONAL';
+    $exportParams = [
+        'status' => $status,
+        'supplier_type' => 'NATIONAL',
+    ];
+    if ($supplierId > 0) $exportParams['supplier_id'] = (string)$supplierId;
+    if ($q !== '') $exportParams['q'] = $q;
+    if ($dateFrom !== '') $exportParams['date_from'] = $dateFrom;
+    if ($dateTo !== '') $exportParams['date_to'] = $dateTo;
+    $exportUrl = '/purchase-orders/export-excel?' . http_build_query($exportParams);
+
+    $body .= '<div class="rec-filter-card">
+        <form method="get" action="/purchase-orders" class="rec-filter-form">
           <input type="hidden" name="status" value="' . h($status) . '">
           <input type="hidden" name="supplier_type" value="' . h($supplierType) . '">
-          <div class="row" style="align-items:end">
-            <div style="flex:1;min-width:260px">
-              <label>Proveedor</label>
+          <div class="rec-filter-grid-nat">
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Fecha Inicio</label>
+              <input type="date" name="date_from" value="' . h($dateFrom) . '">
+            </div>
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Fecha Final</label>
+              <input type="date" name="date_to" value="' . h($dateTo) . '">
+            </div>
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>Proveedor</label>
               <select name="supplier_id">
-                <option value="">Todos</option>';
+                <option value="">Todos los proveedores</option>';
     foreach ($suppliers as $s) {
         $selected = ((int)$s['id'] === $supplierId) ? ' selected' : '';
-        $typeLabel = ((string)($s['supplier_type'] ?? 'NATIONAL')) === 'IMPORT' ? 'Importación' : 'Nacional';
-        $countryLabel = trim((string)($s['country_name'] ?? ''));
-        $optionLabel = (string)$s['name'] . ' [' . $typeLabel . ($countryLabel !== '' ? ' · ' . $countryLabel : '') . ']';
-        $body .= '<option value="' . (int)$s['id'] . '"' . $selected . '>' . h($optionLabel) . '</option>';
+        $body .= '<option value="' . (int)$s['id'] . '"' . $selected . '>' . h((string)$s['name']) . '</option>';
     }
     $body .= '</select>
             </div>
-            <div style="flex:1;min-width:260px">
-              <label>Buscar OC</label>
-              <input name="q" type="text" value="' . h($q) . '" placeholder="OC-10001">
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>Orden de Compra (OC)</label>
+              <input name="q" type="text" value="' . h($q) . '" placeholder="Ej. OC0004207">
             </div>
-            <div style="min-width:160px">
-              <button class="btn" type="submit">Filtrar</button>
+            <div class="rec-actions">
+              <button class="rec-btn-filter" type="submit">
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                Filtrar
+              </button>
+              <a href="' . h($clearUrl) . '" class="rec-btn-clear">Limpiar</a>
+              <a href="' . h($exportUrl) . '" class="rec-btn-excel" title="Descargar informe en Excel">
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                Descargar Excel
+              </a>
             </div>
           </div>
         </form>
       </div>';
 
-    $body .= '<div class="card"><table><thead><tr>
-        <th>OC</th><th>Proveedor</th><th>Tipo</th><th>País</th><th>Estado</th><th>Avance</th><th>Fecha</th>
+    // Table Card
+    $body .= '<div class="rec-table-card"><div class="rec-table-wrap"><table class="rec-table"><thead><tr>
+        <th>Orden de Compra</th><th>Proveedor</th><th>País</th><th>Estado</th><th>Avance</th><th>Fecha Emisión</th><th style="text-align:right">Acción</th>
       </tr></thead><tbody>';
     foreach ($pos as $po) {
         $completedLines = (int)($po['completed_lines'] ?? 0);
         $totalLines = (int)($po['total_lines'] ?? 0);
-        $typeLabel = ((string)($po['supplier_type'] ?? 'NATIONAL')) === 'IMPORT' ? 'Importación' : 'Nacional';
+        $poUrl = '/purchase-orders/' . (int)$po['id'];
         $body .= '<tr>';
-        $body .= '<td><a href="/purchase-orders/' . (int)$po['id'] . '">' . h((string)$po['po_code']) . '</a></td>';
-        $body .= '<td>' . h((string)$po['supplier_name']) . '</td>';
-        $body .= '<td>' . h($typeLabel) . '</td>';
+        $body .= '<td><a class="rec-code-link" href="' . h($poUrl) . '">' . h((string)$po['po_code']) . '</a></td>';
+        $body .= '<td><span style="font-weight:600">' . h((string)$po['supplier_name']) . '</span></td>';
         $body .= '<td>' . h((string)($po['supplier_country_name'] ?? '-')) . '</td>';
-        $body .= '<td>' . h(receptionDocumentStatusLabel((string)$po['status'])) . '</td>';
-        $body .= '<td>' . $completedLines . ' / ' . $totalLines . '</td>';
-        $body .= '<td>' . h((string)$po['created_at']) . '</td>';
+        $body .= '<td>' . renderReceptionStatusBadge((string)$po['status']) . '</td>';
+        $body .= '<td>' . renderReceptionProgressCol($completedLines, $totalLines) . '</td>';
+        $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)$po['created_at']) . '</span></td>';
+        $body .= '<td style="text-align:right"><a class="btn" style="padding:5px 12px;font-size:12px" href="' . h($poUrl) . '">' . ($isComplete ? 'Ver detalle' : 'Recepcionar') . '</a></td>';
         $body .= '</tr>';
     }
     if ($pos === []) {
-        $body .= '<tr><td colspan="7" class="muted">Sin resultados.</td></tr>';
+        $body .= '<tr><td colspan="7"><div class="rec-empty">
+          <div class="rec-empty-icon">📦</div>
+          <div style="font-weight:700;font-size:14px;color:#334155;margin-bottom:4px">No se encontraron órdenes de compra</div>
+          <div style="font-size:12px">Intenta modificar los filtros de búsqueda o fecha seleccionados.</div>
+        </div></td></tr>';
     }
     $body .= '</tbody></table></div>';
 
-    render('Recepción OC', $body);
+    $queryParams = [
+        'status' => $status,
+        'supplier_type' => $supplierType,
+    ];
+    if ($supplierId > 0) $queryParams['supplier_id'] = $supplierId;
+    if ($q !== '') $queryParams['q'] = $q;
+    if ($dateFrom !== '') $queryParams['date_from'] = $dateFrom;
+    if ($dateTo !== '') $queryParams['date_to'] = $dateTo;
+
+    $body .= renderReceptionPagination($page, $totalPages, $totalCount, $pageSize, '/purchase-orders', $queryParams);
+    $body .= '</div>'; // Closes .rec-table-card
+    $body .= '</div>';
+
+    render($pageTitle, $body);
+    exit;
+}
+
+if ($path === '/import-containers/export-excel' && $method === 'GET') {
+    $supplierId = isset($_GET['supplier_id']) ? (int)$_GET['supplier_id'] : 0;
+    $status = isset($_GET['status']) ? (string)$_GET['status'] : 'active';
+    if (!in_array($status, ['active', 'complete'], true)) {
+        $status = 'active';
+    }
+    $dateFrom = isset($_GET['date_from']) ? trim((string)$_GET['date_from']) : '';
+    $dateTo = isset($_GET['date_to']) ? trim((string)$_GET['date_to']) : '';
+    $poCode = isset($_GET['po_code']) ? trim((string)$_GET['po_code']) : '';
+    $bl = isset($_GET['bl']) ? trim((string)$_GET['bl']) : '';
+    $containerCode = isset($_GET['container_code']) ? trim((string)$_GET['container_code']) : '';
+    $productType = isset($_GET['product_type']) ? trim((string)$_GET['product_type']) : '';
+    $q = isset($_GET['q']) ? trim((string)$_GET['q']) : '';
+
+    $containers = $service->listImportContainers(
+        $supplierId > 0 ? $supplierId : null,
+        $q !== '' ? $q : null,
+        $status,
+        5000,
+        $dateFrom !== '' ? $dateFrom : null,
+        $dateTo !== '' ? $dateTo : null,
+        $poCode !== '' ? $poCode : null,
+        $bl !== '' ? $bl : null,
+        $containerCode !== '' ? $containerCode : null,
+        $productType !== '' ? $productType : null
+    );
+
+    $isComplete = ($status === 'complete');
+    $statusText = $isComplete ? 'Finalizados' : 'Activos';
+    $filename = 'informe_recepcion_importacion_' . ($isComplete ? 'finalizados' : 'activos') . '_' . date('Ymd_His') . '.xlsx';
+
+    $metaFilters = [];
+    $metaFilters[] = 'Estado: ' . $statusText;
+    if ($dateFrom !== '' || $dateTo !== '') {
+        $metaFilters[] = 'Rango Fechas: ' . ($dateFrom ?: 'Inicio') . ' al ' . ($dateTo ?: 'Fin');
+    }
+    if ($containerCode !== '') $metaFilters[] = 'Contenedor: ' . $containerCode;
+    if ($bl !== '') $metaFilters[] = 'BL: ' . $bl;
+    if ($poCode !== '') $metaFilters[] = 'OC: ' . $poCode;
+    if ($productType !== '') $metaFilters[] = 'Tipo Producto: ' . $productType;
+    if ($supplierId > 0) $metaFilters[] = 'Proveedor ID: ' . $supplierId;
+    $metaFilters[] = 'Total Cargamentos: ' . count($containers);
+    $metaLine = implode(' | ', $metaFilters);
+
+    $cIds = array_column($containers, 'id');
+    $allLines = $service->listImportContainerLinesForContainers($cIds);
+    $linesByContainer = [];
+    $wOrdByContainer = [];
+    $wRecByContainer = [];
+    foreach ($allLines as $ln) {
+        $cId = (int)$ln['import_container_id'];
+        $linesByContainer[$cId][] = $ln;
+        $wOrdByContainer[$cId] = ($wOrdByContainer[$cId] ?? 0.0) + (float)($ln['ordered_weight_kg'] ?? 0);
+        $wRecByContainer[$cId] = ($wRecByContainer[$cId] ?? 0.0) + (float)($ln['received_weight_kg'] ?? 0);
+    }
+
+    $html = '<!doctype html><html><head><meta charset="utf-8"></head><body>';
+    $html .= '<h1>INFORME DE IMPORTACIÓN Y CONTENEDORES (' . strtoupper($statusText) . ')</h1>';
+    $html .= '<div class="meta">Fecha de descarga: ' . date('d/m/Y H:i') . ' | ' . h($metaLine) . '</div>';
+
+    // Parte 1: Resumen General
+    $html .= '<h2>1. RESUMEN GENERAL DE CARGAMENTOS Y CONTENEDORES (INCLUYE COMPARATIVA DE KILOS)</h2>';
+    $html .= '<table border="1">';
+    $html .= '<thead><tr>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Contenedor</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Bill of Lading (BL)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Embarcador</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Buque</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">OCs Asociadas</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Estado</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Líneas Completadas</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Total Líneas</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Avance Líneas (%)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Kilos a Recibir (Debían Recibirse)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Kilos Recibidos</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Diferencia Kilos (kg)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Cumplimiento Kilos (%)</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">ETA Planta</th>
+        <th style="background-color:#0f172a;color:#ffffff;font-weight:bold">Fecha Registro</th>
+    </tr></thead><tbody>';
+    foreach ($containers as $c) {
+        $cId = (int)$c['id'];
+        $compl = (int)($c['completed_lines'] ?? 0);
+        $tot = (int)($c['total_lines'] ?? 0);
+        $pct = $tot > 0 ? (int)round(($compl / $tot) * 100) : 0;
+        $cCode = trim((string)$c['container_code']);
+        if ($cCode === '') {
+            $blVal = trim((string)$c['bill_of_lading']);
+            $cCode = $blVal !== '' ? ('BL ' . $blVal) : ('Cargamento #' . $cId);
+        }
+        $stLabel = match((string)$c['status']) {
+            'COMPLETE' => 'Finalizado',
+            'PARTIAL' => 'Parcial',
+            default => 'Abierto',
+        };
+        $wOrd = (float)($wOrdByContainer[$cId] ?? 0.0);
+        $wRec = (float)($wRecByContainer[$cId] ?? 0.0);
+        $wDiff = max(0, $wOrd - $wRec);
+        $wPct = $wOrd > 0 ? (round(($wRec / $wOrd) * 100, 1) . '%') : '-';
+
+        $html .= '<tr>';
+        $html .= '<td class="text-cell">' . h($cCode) . '</td>';
+        $html .= '<td class="text-cell">' . h((string)($c['bill_of_lading'] ?: '-')) . '</td>';
+        $html .= '<td>' . h((string)($c['forwarder_name'] ?: '-')) . '</td>';
+        $html .= '<td>' . h((string)($c['vessel_name'] ?: '-')) . '</td>';
+        $html .= '<td class="text-cell">' . h((string)($c['po_codes'] ?: '-')) . '</td>';
+        $html .= '<td>' . $stLabel . '</td>';
+        $html .= '<td class="num-int">' . $compl . '</td>';
+        $html .= '<td class="num-int">' . $tot . '</td>';
+        $html .= '<td class="num-int">' . $pct . '%</td>';
+        $html .= '<td class="num-dec2">' . number_format($wOrd, 2, '.', '') . '</td>';
+        $html .= '<td class="num-dec2">' . number_format($wRec, 2, '.', '') . '</td>';
+        $html .= '<td class="num-dec2">' . number_format($wDiff, 2, '.', '') . '</td>';
+        $html .= '<td class="num-int">' . $wPct . '</td>';
+        $html .= '<td>' . h((string)($c['eta_plant'] ?: '-')) . '</td>';
+        $html .= '<td>' . h((string)($c['created_at'] ?? '-')) . '</td>';
+        $html .= '</tr>';
+    }
+    if ($containers === []) {
+        $html .= '<tr><td colspan="15">Sin cargamentos encontrados con los filtros seleccionados.</td></tr>';
+    }
+    $html .= '</tbody></table>';
+
+    // Parte 2: Detalle por cada una de las recepciones
+    $html .= '<h2>2. DETALLE DE LÍNEAS Y RECEPCIÓN POR CARGAMENTO (KILOS RECIBIDOS VS DEBÍAN RECIBIRSE)</h2>';
+    $html .= '<table border="1">';
+    $html .= '<thead><tr>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Contenedor</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Bill of Lading</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Orden de Compra</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Proveedor</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Estado Cargamento</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">SKU / Código Item</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Modo Recepción</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Especificación / Título</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Rollos / Unid. Ordenadas</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Rollos / Unid. Recibidas</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Rollos / Unid. Pendientes</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Kilos a Recibir (Debían Recibirse)</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Kilos Recibidos</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Diferencia / Pendiente Kilos (kg)</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Cumplimiento Kilos (%)</th>
+        <th style="background-color:#1e3a8a;color:#ffffff;font-weight:bold">Estado Línea</th>
+    </tr></thead><tbody>';
+    $totalLinesDetail = 0;
+    foreach ($containers as $c) {
+        $lines = $linesByContainer[(int)$c['id']] ?? [];
+        $cCode = trim((string)$c['container_code']);
+        if ($cCode === '') {
+            $blVal = trim((string)$c['bill_of_lading']);
+            $cCode = $blVal !== '' ? ('BL ' . $blVal) : ('Cargamento #' . (int)$c['id']);
+        }
+        $cStLabel = match((string)$c['status']) {
+            'COMPLETE' => 'Finalizado',
+            'PARTIAL' => 'Parcial',
+            default => 'Abierto',
+        };
+        foreach ($lines as $ln) {
+            $totalLinesDetail++;
+            $sm = $service->summarizeReceptionLine($ln);
+            $spec = buildReceptionSpec($ln);
+            $lnStLabel = $sm['is_complete'] ? 'Completa' : ($sm['has_progress'] ? 'Parcial' : 'Pendiente');
+            $modeLabel = ((string)($ln['reception_mode'] ?? '')) === 'WEIGHT' ? 'Peso (kg)' : 'Cantidad (Rollos)';
+
+            $lWOrd = (float)($ln['ordered_weight_kg'] ?? 0);
+            $lWRec = (float)($ln['received_weight_kg'] ?? 0);
+            $lWDiff = (float)($sm['pending_weight_kg'] ?? max(0, $lWOrd - $lWRec));
+            $lWPct = $lWOrd > 0 ? (round(($lWRec / $lWOrd) * 100, 1) . '%') : '-';
+
+            $html .= '<tr>';
+            $html .= '<td class="text-cell">' . h($cCode) . '</td>';
+            $html .= '<td class="text-cell">' . h((string)($c['bill_of_lading'] ?: '-')) . '</td>';
+            $html .= '<td class="text-cell">' . h((string)($ln['po_code'] ?? '')) . '</td>';
+            $html .= '<td>' . h((string)($ln['supplier_name'] ?? '')) . '</td>';
+            $html .= '<td>' . $cStLabel . '</td>';
+            $html .= '<td class="text-cell">' . h((string)($ln['sku_code'] ?? '')) . '</td>';
+            $html .= '<td>' . $modeLabel . '</td>';
+            $html .= '<td>' . h($spec) . '</td>';
+            $html .= '<td class="num-int">' . (int)($ln['ordered_rolls'] ?? 0) . '</td>';
+            $html .= '<td class="num-int">' . (int)($ln['received_rolls'] ?? 0) . '</td>';
+            $html .= '<td class="num-int">' . (int)($sm['pending_rolls'] ?? 0) . '</td>';
+            $html .= '<td class="num-dec2">' . number_format($lWOrd, 2, '.', '') . '</td>';
+            $html .= '<td class="num-dec2">' . number_format($lWRec, 2, '.', '') . '</td>';
+            $html .= '<td class="num-dec2">' . number_format($lWDiff, 2, '.', '') . '</td>';
+            $html .= '<td class="num-int">' . $lWPct . '</td>';
+            $html .= '<td>' . $lnStLabel . '</td>';
+            $html .= '</tr>';
+        }
+    }
+    if ($totalLinesDetail === 0) {
+        $html .= '<tr><td colspan="16">Sin líneas de recepción en los cargamentos seleccionados.</td></tr>';
+    }
+    $html .= '</tbody></table>';
+    $html .= '</body></html>';
+
+    SimpleXlsx::streamHtml($filename, $html, 'Importación');
     exit;
 }
 
 if ($path === '/import-containers' && $method === 'GET') {
     $supplierId = isset($_GET['supplier_id']) ? (int)$_GET['supplier_id'] : 0;
-    $q = isset($_GET['q']) ? (string)$_GET['q'] : '';
     $status = isset($_GET['status']) ? (string)$_GET['status'] : 'active';
-    $suppliers = $service->listSuppliersForImportContainers($status);
-    $containers = $service->listImportContainers($supplierId > 0 ? $supplierId : null, $q !== '' ? $q : null, $status);
+    if (!in_array($status, ['active', 'complete'], true)) {
+        $status = 'active';
+    }
+    $dateFrom = isset($_GET['date_from']) ? trim((string)$_GET['date_from']) : '';
+    $dateTo = isset($_GET['date_to']) ? trim((string)$_GET['date_to']) : '';
+    $poCode = isset($_GET['po_code']) ? trim((string)$_GET['po_code']) : '';
+    $bl = isset($_GET['bl']) ? trim((string)$_GET['bl']) : '';
+    $containerCode = isset($_GET['container_code']) ? trim((string)$_GET['container_code']) : '';
+    $productType = isset($_GET['product_type']) ? trim((string)$_GET['product_type']) : '';
+    $q = isset($_GET['q']) ? trim((string)$_GET['q']) : '';
 
-    $pageTitle = $status === 'complete' ? 'Contenedores finalizados' : 'Importación';
-    $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div>
-          <div style="font-size:18px;font-weight:700">' . h($pageTitle) . '</div>
-          <div class="muted">Selecciona por número de contenedor para recepcionar importaciones aunque un contenedor tenga varias OCs y una OC llegue en varios contenedores.</div>
+    $page = max(1, (int)($_GET['page'] ?? 1));
+    $pageSize = 20;
+    $totalCount = $service->countImportContainers(
+        $supplierId > 0 ? $supplierId : null,
+        $q !== '' ? $q : null,
+        $status,
+        $dateFrom !== '' ? $dateFrom : null,
+        $dateTo !== '' ? $dateTo : null,
+        $poCode !== '' ? $poCode : null,
+        $bl !== '' ? $bl : null,
+        $containerCode !== '' ? $containerCode : null,
+        $productType !== '' ? $productType : null
+    );
+    $totalPages = max(1, (int)ceil($totalCount / $pageSize));
+    if ($page > $totalPages) {
+        $page = $totalPages;
+    }
+    $offset = ($page - 1) * $pageSize;
+
+    $suppliers = $service->listSuppliersForImportContainers($status);
+    $containers = $service->listImportContainers(
+        $supplierId > 0 ? $supplierId : null,
+        $q !== '' ? $q : null,
+        $status,
+        $pageSize,
+        $dateFrom !== '' ? $dateFrom : null,
+        $dateTo !== '' ? $dateTo : null,
+        $poCode !== '' ? $poCode : null,
+        $bl !== '' ? $bl : null,
+        $containerCode !== '' ? $containerCode : null,
+        $productType !== '' ? $productType : null,
+        $offset
+    );
+
+    $isComplete = ($status === 'complete');
+    $activeTab = $isComplete ? 'import_complete' : 'import_active';
+    $pageTitle = $isComplete ? 'Cargamentos de Importación Finalizados' : 'Importación Activa (Contenedores)';
+    $pageSubtitle = $isComplete
+        ? 'Historial completo de contenedores y cargamentos internacionales finalizados e históricos.'
+        : 'Contenedores y cargamentos internacionales en planta o puerto para recepción.';
+
+    $body = '<div class="rec-shell">';
+    $body .= renderReceptionNavTabs($activeTab);
+
+    // Header Card
+    $body .= '<div class="rec-header-card">
+        <div class="rec-title-group">
+          <h1>' . h($pageTitle) . '</h1>
+          <p>' . h($pageSubtitle) . '</p>
+        </div>
+        <div class="rec-counter-pill">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          <span>' . $totalCount . ' ' . ($totalCount === 1 ? 'cargamento' : 'cargamentos') . '</span>
         </div>
       </div>';
 
-    $body .= '<div class="card" style="margin-bottom:12px">
-        <form method="get" action="/import-containers">
+    // Filter Card
+    $clearUrl = '/import-containers?status=' . h($status);
+    $exportParams = [
+        'status' => $status,
+    ];
+    if ($supplierId > 0) $exportParams['supplier_id'] = (string)$supplierId;
+    if ($poCode !== '') $exportParams['po_code'] = $poCode;
+    if ($bl !== '') $exportParams['bl'] = $bl;
+    if ($containerCode !== '') $exportParams['container_code'] = $containerCode;
+    if ($productType !== '') $exportParams['product_type'] = $productType;
+    if ($q !== '') $exportParams['q'] = $q;
+    if ($dateFrom !== '') $exportParams['date_from'] = $dateFrom;
+    if ($dateTo !== '') $exportParams['date_to'] = $dateTo;
+    $exportUrl = '/import-containers/export-excel?' . http_build_query($exportParams);
+
+    $body .= '<div class="rec-filter-card">
+        <form method="get" action="/import-containers" class="rec-filter-form">
           <input type="hidden" name="status" value="' . h($status) . '">
-          <div class="row" style="align-items:end">
-            <div style="flex:1;min-width:260px">
-              <label>Proveedor importación</label>
+          <div class="rec-filter-grid-imp">
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Fecha Inicio</label>
+              <input type="date" name="date_from" value="' . h($dateFrom) . '">
+            </div>
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Fecha Final</label>
+              <input type="date" name="date_to" value="' . h($dateTo) . '">
+            </div>
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>Proveedor</label>
               <select name="supplier_id">
-                <option value="">Todos</option>';
+                <option value="">Todos los proveedores</option>';
     foreach ($suppliers as $s) {
         $selected = ((int)$s['id'] === $supplierId) ? ' selected' : '';
-        $countryLabel = trim((string)($s['country_name'] ?? ''));
-        $optionLabel = (string)$s['name'] . ($countryLabel !== '' ? ' [' . $countryLabel . ']' : '');
-        $body .= '<option value="' . (int)$s['id'] . '"' . $selected . '>' . h($optionLabel) . '</option>';
+        $cName = trim((string)($s['country_name'] ?? ''));
+        $body .= '<option value="' . (int)$s['id'] . '"' . $selected . '>' . h((string)$s['name'] . ($cName !== '' ? ' (' . $cName . ')' : '')) . '</option>';
     }
     $body .= '</select>
             </div>
-            <div style="flex:1;min-width:260px">
-              <label>Buscar contenedor</label>
-              <input name="q" type="text" value="' . h($q) . '" placeholder="CONT-001 / BL / barco">
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>Tipo de Producto</label>
+              <input name="product_type" type="text" value="' . h($productType) . '" placeholder="Ej. PLA, W80, Bobina, SKU">
             </div>
-            <div style="min-width:160px">
-              <button class="btn" type="submit">Filtrar</button>
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="1" y="3" width="22" height="13" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>N° Contenedor</label>
+              <input name="container_code" type="text" value="' . h($containerCode) . '" placeholder="Ej. FFAU7684870">
+            </div>
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>Bill of Lading (BL)</label>
+              <input name="bl" type="text" value="' . h($bl) . '" placeholder="Ej. STL26055086">
+            </div>
+            <div class="rec-field">
+              <label><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>Orden de Compra (OC)</label>
+              <input name="po_code" type="text" value="' . h($poCode) . '" placeholder="Ej. OC0003963">
+            </div>
+            <div class="rec-actions">
+              <button class="rec-btn-filter" type="submit">
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                Filtrar
+              </button>
+              <a href="' . h($clearUrl) . '" class="rec-btn-clear">Limpiar</a>
+              <a href="' . h($exportUrl) . '" class="rec-btn-excel" title="Descargar informe en Excel">
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                Descargar Excel
+              </a>
             </div>
           </div>
         </form>
       </div>';
 
-    $body .= '<div class="card"><table><thead><tr>
-        <th>Contenedor</th><th>BL</th><th>Embarcador</th><th>OCs</th><th>Estado</th><th>Avance</th><th>ETA planta</th>
+    // Table Card
+    $body .= '<div class="rec-table-card"><div class="rec-table-wrap"><table class="rec-table"><thead><tr>
+        <th>Contenedor</th><th>Bill of Lading</th><th>Embarcador</th><th>OCs Asociadas</th><th>Estado</th><th>Avance</th><th>ETA Planta</th><th style="text-align:right">Acción</th>
       </tr></thead><tbody>';
     foreach ($containers as $container) {
+        $cLabel = trim((string)$container['container_code']);
+        if ($cLabel === '') {
+            $blVal = trim((string)$container['bill_of_lading']);
+            $cLabel = $blVal !== '' ? ('BL ' . $blVal) : ('Cargamento #' . (int)$container['id']);
+        }
+        $cUrl = '/import-containers/' . (int)$container['id'];
         $body .= '<tr>';
-        $body .= '<td><a href="/import-containers/' . (int)$container['id'] . '">' . h((string)($container['container_code'] ?: ('Contenedor #' . (int)$container['id']))) . '</a></td>';
+        $body .= '<td><a class="rec-code-link" href="' . h($cUrl) . '">' . h($cLabel) . '</a></td>';
         $body .= '<td>' . h((string)($container['bill_of_lading'] ?: '-')) . '</td>';
-        $body .= '<td>' . h((string)($container['forwarder_name'] ?: '-')) . '</td>';
-        $body .= '<td>' . h((string)($container['po_codes'] ?: '-')) . '</td>';
-        $body .= '<td>' . h(receptionDocumentStatusLabel((string)$container['status'])) . '</td>';
-        $body .= '<td>' . (int)($container['completed_lines'] ?? 0) . ' / ' . (int)($container['total_lines'] ?? 0) . '</td>';
-        $body .= '<td>' . h((string)($container['eta_plant'] ?: '-')) . '</td>';
+        $body .= '<td><span style="font-weight:600">' . h((string)($container['forwarder_name'] ?: '-')) . '</span></td>';
+        $body .= '<td><span style="font-family:ui-monospace,monospace;font-size:12px;color:#0f766e">' . h((string)($container['po_codes'] ?: '-')) . '</span></td>';
+        $body .= '<td>' . renderReceptionStatusBadge((string)$container['status']) . '</td>';
+        $body .= '<td>' . renderReceptionProgressCol((int)($container['completed_lines'] ?? 0), (int)($container['total_lines'] ?? 0)) . '</td>';
+        $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)($container['eta_plant'] ?: '-')) . '</span></td>';
+        $body .= '<td style="text-align:right"><a class="btn" style="padding:5px 12px;font-size:12px" href="' . h($cUrl) . '">' . ($isComplete ? 'Ver detalle' : 'Recepcionar') . '</a></td>';
         $body .= '</tr>';
     }
     if ($containers === []) {
-        $body .= '<tr><td colspan="7" class="muted">Sin contenedores.</td></tr>';
+        $body .= '<tr><td colspan="8"><div class="rec-empty">
+          <div class="rec-empty-icon">🚢</div>
+          <div style="font-weight:700;font-size:14px;color:#334155;margin-bottom:4px">No se encontraron contenedores o cargamentos</div>
+          <div style="font-size:12px">Intenta modificar los filtros de búsqueda o fecha seleccionados.</div>
+        </div></td></tr>';
     }
     $body .= '</tbody></table></div>';
 
-    render('Importación', $body);
+    $queryParams = [
+        'status' => $status,
+    ];
+    if ($supplierId > 0) $queryParams['supplier_id'] = $supplierId;
+    if ($poCode !== '') $queryParams['po_code'] = $poCode;
+    if ($bl !== '') $queryParams['bl'] = $bl;
+    if ($containerCode !== '') $queryParams['container_code'] = $containerCode;
+    if ($productType !== '') $queryParams['product_type'] = $productType;
+    if ($q !== '') $queryParams['q'] = $q;
+    if ($dateFrom !== '') $queryParams['date_from'] = $dateFrom;
+    if ($dateTo !== '') $queryParams['date_to'] = $dateTo;
+
+    $body .= renderReceptionPagination($page, $totalPages, $totalCount, $pageSize, '/import-containers', $queryParams);
+    $body .= '</div>'; // Closes .rec-table-card
+    $body .= '</div>';
+
+    render($pageTitle, $body);
     exit;
 }
 
@@ -9858,56 +13728,112 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
     }
     $lines = $service->listImportContainerLines($containerId);
 
-    $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div>
-          <div style="font-size:18px;font-weight:700">Contenedor ' . h((string)($container['container_code'] ?: ('#' . $containerId))) . '</div>
-          <div class="muted">OCs: ' . h((string)($container['po_codes'] ?: '-')) . ' · BL: ' . h((string)($container['bill_of_lading'] ?: '-')) . ' · Estado: ' . h(receptionDocumentStatusLabel((string)$container['status'])) . '</div>
+    $totalPendingUnits = 0;
+    foreach ($lines as $ln) {
+        $sm = receptionLineSummary($ln);
+        $totalPendingUnits += max(0, (int)($sm['pending_rolls'] ?? 0));
+    }
+
+    $closure = $service->getReceptionClosure('IMPORT_CONTAINER', $containerId);
+    $closureBanner = renderReceptionClosureBanner($closure);
+
+    $isComplete = ((string)$container['status'] === 'COMPLETE');
+    $archiveBtn = '';
+    if (!$isComplete) {
+        $archiveBtn = '<button type="button" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-weight:600;display:inline-flex;align-items:center;gap:6px" onclick="openCloseReceptionModal()"><span>🔒</span> Cerrar Recepción (Con Faltantes)</button>';
+    }
+
+    $successAlert = '';
+    if (isset($_GET['closed']) && $_GET['closed'] === '1') {
+        $successAlert = '<div style="margin-bottom:16px;padding:12px 16px;background:#ecfdf5;border:1px solid #a7f3d0;border-left:5px solid #10b981;border-radius:10px;color:#065f46;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px"><span>✅</span> La recepción del cargamento ha sido cerrada y finalizada exitosamente.</div>';
+    }
+
+    $cCode = trim((string)$container['container_code']);
+    $cTitle = $cCode !== '' ? ('Contenedor ' . $cCode) : (trim((string)$container['bill_of_lading']) !== '' ? ('Cargamento BL ' . trim((string)$container['bill_of_lading'])) : ('Cargamento #' . $containerId));
+
+    $backUrl = $isComplete ? '/import-containers?status=complete' : '/import-containers?status=active';
+    $body = '<div class="rec-shell">';
+    $body .= '<div class="rec-header-card">
+        <div class="rec-title-group">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+            <h1>' . h($cTitle) . '</h1>
+            ' . renderReceptionStatusBadge((string)$container['status']) . '
+          </div>
+          <p>Cargamento internacional · OCs: ' . h((string)($container['po_codes'] ?: '-')) . ' · BL: ' . h((string)($container['bill_of_lading'] ?: '-')) . '</p>
         </div>
-        <a class="btn secondary" href="/import-containers">Volver</a>
+        <div style="display:flex;gap:8px;align-items:center">
+          ' . $archiveBtn . '
+          <a class="rec-btn-clear" href="' . h($backUrl) . '">
+            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+            Volver
+          </a>
+        </div>
       </div>';
 
-    $body .= '<div class="card" style="margin-bottom:12px">
-        <div class="row">
-          <div style="flex:1;min-width:220px"><div class="muted">Buque</div><div style="font-weight:800">' . h((string)($container['vessel_name'] ?: '-')) . '</div></div>
-          <div style="flex:1;min-width:220px"><div class="muted">Embarcador</div><div style="font-weight:800">' . h((string)($container['forwarder_name'] ?: '-')) . '</div></div>
-          <div style="flex:1;min-width:220px"><div class="muted">Incoterm</div><div style="font-weight:800">' . h((string)($container['incoterm'] ?: '-')) . '</div></div>
-          <div style="flex:1;min-width:220px"><div class="muted">ETA planta</div><div style="font-weight:800">' . h((string)($container['eta_plant'] ?: '-')) . '</div></div>
-        </div>
+    $body .= $successAlert;
+    $body .= $closureBanner;
+
+    $body .= '<div class="rec-detail-meta-grid">
+        <div class="rec-meta-box"><div class="rec-meta-label">Buque</div><div class="rec-meta-val">' . h((string)($container['vessel_name'] ?: '-')) . '</div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">Embarcador</div><div class="rec-meta-val">' . h((string)($container['forwarder_name'] ?: '-')) . '</div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">Incoterm</div><div class="rec-meta-val">' . h((string)($container['incoterm'] ?: '-')) . '</div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">ETA planta</div><div class="rec-meta-val">' . h((string)($container['eta_plant'] ?: '-')) . '</div></div>
       </div>';
 
-    $body .= '<div class="card"><table><thead><tr>
-        <th>OC</th><th>SKU</th><th>Modo</th><th>Especificación</th><th>Ordenado cont.</th><th>Recibido cont.</th><th>Pendiente</th><th></th>
+    $body .= '<div class="rec-table-card"><div class="rec-table-wrap"><table class="rec-table"><thead><tr>
+        <th>OC</th><th>SKU</th><th>Modo</th><th>Especificación</th><th>Ordenado (Unid.)</th><th>Recibido (Unid.)</th><th>Pendiente (Unid.)</th><th style="text-align:right">Acción</th>
       </tr></thead><tbody>';
     foreach ($lines as $ln) {
         $lineSummary = receptionLineSummary($ln);
-        $ordered = formatReceptionValue($lineSummary['ordered'], $lineSummary['unit']) . ' ' . $lineSummary['unit'];
-        $received = formatReceptionValue($lineSummary['received'], $lineSummary['unit']) . ' ' . $lineSummary['unit'];
-        $pending = formatReceptionValue($lineSummary['pending'], $lineSummary['unit']) . ' ' . $lineSummary['unit'];
+        $ordered = formatReceptionDual($lineSummary, 'ordered');
+        $received = formatReceptionDual($lineSummary, 'received');
+        $pending = formatReceptionDual($lineSummary, 'pending');
         $specText = buildReceptionSpec($ln);
 
         $body .= '<tr>';
-        $body .= '<td>' . h((string)$ln['po_code']) . '</td>';
-        $body .= '<td>' . h((string)$ln['sku_code']) . '</td>';
+        $body .= '<td><span class="rec-code-link">' . h((string)$ln['po_code']) . '</span></td>';
+        $body .= '<td><span style="font-weight:700">' . h((string)$ln['sku_code']) . '</span></td>';
         $body .= '<td>' . h(receptionModeLabel((string)$ln['reception_mode'])) . '</td>';
         $body .= '<td>' . $specText . '</td>';
         $body .= '<td>' . $ordered . '</td>';
         $body .= '<td>' . $received . '</td>';
         $body .= '<td>' . $pending . '</td>';
         if ((string)$container['status'] === 'COMPLETE') {
-            $body .= '<td class="muted">Finalizada</td>';
+            $body .= '<td style="text-align:right"><span class="rec-badge rec-badge-complete">Finalizada</span></td>';
         } elseif ($lineSummary['pending'] <= 0) {
-            $body .= '<td class="muted">Completa</td>';
+            $body .= '<td style="text-align:right"><span class="rec-badge rec-badge-complete">Completa</span></td>';
         } else {
-            $body .= '<td><a class="btn secondary" href="/import-containers/' . $containerId . '/receive?line=' . (int)$ln['import_container_item_id'] . '">Recepcionar</a></td>';
+            $body .= '<td style="text-align:right"><a class="btn" style="padding:5px 12px;font-size:12px" href="/import-containers/' . $containerId . '/receive?line=' . (int)$ln['import_container_item_id'] . '">Recepcionar</a></td>';
         }
         $body .= '</tr>';
     }
     if ($lines === []) {
-        $body .= '<tr><td colspan="8" class="muted">Sin líneas.</td></tr>';
+        $body .= '<tr><td colspan="8"><div class="rec-empty">Sin líneas en este cargamento.</div></td></tr>';
     }
-    $body .= '</tbody></table></div>';
+    $body .= '</tbody></table></div></div>';
 
-    render('Contenedor', $body);
+    if (!$isComplete) {
+        $body .= renderCloseReceptionModal('/import-containers/' . $containerId . '/close', $cTitle, $totalPendingUnits);
+    }
+    $body .= '</div>';
+
+    render('Contenedor ' . $cCode, $body);
+    exit;
+}
+
+if (preg_match('#^/import-containers/(\\d+)/(?:close|archive)$#', $path, $m) === 1 && $method === 'POST') {
+    requireCsrf();
+    $containerId = (int)$m[1];
+    $reason = trim((string)($_POST['reason'] ?? ''));
+    $notes = trim((string)($_POST['notes'] ?? ''));
+    $userId = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 1);
+    $res = $service->closeImportContainerReception($containerId, $userId, $reason, $notes);
+    if ($res['ok'] === true) {
+        header('Location: /import-containers/' . $containerId . '?closed=1');
+        exit;
+    }
+    http_response_code(400);
+    render('Error', '<div class="err">' . h($res['error'] ?? 'Error al cerrar el cargamento') . '</div><div style="margin-top:12px"><a class="btn secondary" href="/import-containers/' . $containerId . '">Volver</a></div>');
     exit;
 }
 
@@ -9938,9 +13864,20 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
     $lineUnit = $lineSummary['unit'];
     $pendingInputMax = $isWeightMode ? number_format((float)$lineSummary['pending'], 3, '.', '') : '';
 
+    $allContainerLines = $service->listImportContainerLines($containerId);
+    $cPendingUnits = 0;
+    foreach ($allContainerLines as $cLn) {
+        $sm = receptionLineSummary($cLn);
+        $cPendingUnits += max(0, (int)($sm['pending_rolls'] ?? 0));
+    }
+
+    $cCode = trim((string)($line['container_code'] ?: ('#' . $containerId)));
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Recepcionar producto importado</div>
-        <a class="btn secondary" href="/import-containers/' . $containerId . '">Volver</a>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button type="button" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-size:12px;padding:6px 14px;font-weight:600;display:inline-flex;align-items:center;gap:6px" onclick="openCloseReceptionModal()"><span>🔒</span> Cerrar Recepción (Faltantes)</button>
+          <a class="btn secondary" href="/import-containers/' . $containerId . '">Volver</a>
+        </div>
       </div>';
 
     $body .= '<div class="card" style="margin-bottom:12px">
@@ -9952,11 +13889,30 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         </div>
         <div class="row" style="margin-top:10px">
           <div style="flex:1;min-width:180px"><div class="muted">Recepción</div><div style="font-weight:800">' . h(receptionModeLabel((string)$line['reception_mode'])) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Ordenado contenedor</div><div style="font-weight:800">' . h(formatReceptionValue($lineSummary['ordered'], $lineUnit)) . ' ' . h($lineUnit) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Recibido contenedor</div><div style="font-weight:800">' . h(formatReceptionValue($lineSummary['received'], $lineUnit)) . ' ' . h($lineUnit) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Pendiente</div><div style="font-weight:800">' . h(formatReceptionValue($lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit) . '</div></div>
+          <div style="flex:1;min-width:180px"><div class="muted">Ordenado contenedor</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'ordered') . '</div></div>
+          <div style="flex:1;min-width:180px"><div class="muted">Recibido contenedor</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'received') . '</div></div>
+          <div style="flex:1;min-width:180px"><div class="muted">Pendiente</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'pending') . '</div></div>
         </div>
       </div>';
+
+    if ($isWeightMode) {
+        $orderedUnits = (int)$lineSummary['ordered_rolls'];
+        $receivedUnits = (int)$lineSummary['received_rolls'];
+        $pendingUnits = (int)$lineSummary['pending_rolls'];
+        $body .= '<div class="card" style="background:#f8fafc;border:1px solid #cbd5e1;margin-bottom:12px">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+              <div>
+                <span style="font-weight:800;font-size:14px">📦 Control de Unidades / Bobinas a ingresar:</span>
+                <span style="margin-left:8px;color:#475569">Cada pesaje registra <strong>1 bobina/unidad</strong> con su peso individual en balanza.</span>
+              </div>
+              <div style="display:flex;gap:16px;font-size:13px">
+                <div>Total ordenadas: <strong>' . number_format($orderedUnits, 0, ',', '.') . ' Unid.</strong></div>
+                <div>Recibidas: <strong style="color:#16a34a">' . number_format($receivedUnits, 0, ',', '.') . ' Unid.</strong></div>
+                <div>Pendientes por ingresar: <strong style="color:' . ($pendingUnits > 0 ? '#ea580c' : '#16a34a') . '">' . number_format($pendingUnits, 0, ',', '.') . ' Unid.</strong></div>
+              </div>
+            </div>
+        </div>';
+    }
 
     $body .= '<div class="card">
         <form method="post" id="receive_form" action="/import-containers/' . $containerId . '/receive">
@@ -10450,6 +14406,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
       })();
     </script>';
 
+    $body .= renderCloseReceptionModal('/import-containers/' . $containerId . '/close', 'Contenedor ' . $cCode, $cPendingUnits);
+
     render('Recepción importación', $body);
     exit;
 }
@@ -10499,46 +14457,110 @@ if (preg_match('#^/purchase-orders/(\\d+)$#', $path, $m) === 1 && $method === 'G
     }
     $lines = $service->listPurchaseOrderLines($poId);
 
-    $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div>
-          <div style="font-size:18px;font-weight:700">OC ' . h((string)$po['po_code']) . '</div>
-          <div class="muted">Proveedor: ' . h((string)$po['supplier_name']) . ' · Tipo: ' . h(((string)($po['supplier_type'] ?? 'NATIONAL')) === 'IMPORT' ? 'Importación' : 'Nacional') . ' · País: ' . h((string)($po['supplier_country_name'] ?? '-')) . ' · Estado: ' . h(receptionDocumentStatusLabel((string)$po['status'])) . '</div>
+    $totalPendingUnits = 0;
+    foreach ($lines as $ln) {
+        $sm = receptionLineSummary($ln);
+        $totalPendingUnits += max(0, (int)($sm['pending_rolls'] ?? 0));
+    }
+
+    $closure = $service->getReceptionClosure('PURCHASE_ORDER', $poId);
+    $closureBanner = renderReceptionClosureBanner($closure);
+
+    $isComplete = ((string)$po['status'] === 'COMPLETE');
+    $closeBtn = '';
+    if (!$isComplete) {
+        $closeBtn = '<button type="button" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-weight:600;display:inline-flex;align-items:center;gap:6px" onclick="openCloseReceptionModal()"><span>🔒</span> Cerrar Recepción (Con Faltantes)</button>';
+    }
+
+    $successAlert = '';
+    if (isset($_GET['closed']) && $_GET['closed'] === '1') {
+        $successAlert = '<div style="margin-bottom:16px;padding:12px 16px;background:#ecfdf5;border:1px solid #a7f3d0;border-left:5px solid #10b981;border-radius:10px;color:#065f46;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px"><span>✅</span> La recepción de la orden de compra ha sido cerrada y finalizada exitosamente.</div>';
+    }
+
+    $backUrl = $isComplete ? '/purchase-orders?status=complete&supplier_type=NATIONAL' : '/purchase-orders?status=active&supplier_type=NATIONAL';
+    $typeLabel = ((string)($po['supplier_type'] ?? 'NATIONAL')) === 'IMPORT' ? 'Importación' : 'Nacional';
+
+    $body = '<div class="rec-shell">';
+    $body .= '<div class="rec-header-card">
+        <div class="rec-title-group">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+            <h1>OC ' . h((string)$po['po_code']) . '</h1>
+            ' . renderReceptionStatusBadge((string)$po['status']) . '
+          </div>
+          <p>Recepción ' . h($typeLabel) . ' · Proveedor: ' . h((string)$po['supplier_name']) . ' · País: ' . h((string)($po['supplier_country_name'] ?? '-')) . '</p>
         </div>
-        <a class="btn secondary" href="/purchase-orders">Volver</a>
+        <div style="display:flex;gap:8px;align-items:center">
+          ' . $closeBtn . '
+          <a class="rec-btn-clear" href="' . h($backUrl) . '">
+            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+            Volver
+          </a>
+        </div>
       </div>';
 
-    $body .= '<div class="card"><table><thead><tr>
-        <th>SKU</th><th>Modo</th><th>Especificación</th><th>Ordenado</th><th>Recibido</th><th>Pendiente</th><th></th>
+    $body .= $successAlert;
+    $body .= $closureBanner;
+
+    $body .= '<div class="rec-detail-meta-grid">
+        <div class="rec-meta-box"><div class="rec-meta-label">Proveedor</div><div class="rec-meta-val">' . h((string)$po['supplier_name']) . '</div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">Tipo Proveedor</div><div class="rec-meta-val">' . h($typeLabel) . '</div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">País</div><div class="rec-meta-val">' . h((string)($po['supplier_country_name'] ?? '-')) . '</div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">Fecha Creación</div><div class="rec-meta-val">' . h((string)$po['created_at']) . '</div></div>
+      </div>';
+
+    $body .= '<div class="rec-table-card"><div class="rec-table-wrap"><table class="rec-table"><thead><tr>
+        <th>SKU</th><th>Modo</th><th>Especificación</th><th>Ordenado (Unid.)</th><th>Recibido (Unid.)</th><th>Pendiente (Unid.)</th><th style="text-align:right">Acción</th>
       </tr></thead><tbody>';
     foreach ($lines as $ln) {
         $lineSummary = receptionLineSummary($ln);
-        $ordered = formatReceptionValue($lineSummary['ordered'], $lineSummary['unit']) . ' ' . $lineSummary['unit'];
-        $received = formatReceptionValue($lineSummary['received'], $lineSummary['unit']) . ' ' . $lineSummary['unit'];
-        $pending = formatReceptionValue($lineSummary['pending'], $lineSummary['unit']) . ' ' . $lineSummary['unit'];
+        $ordered = formatReceptionDual($lineSummary, 'ordered');
+        $received = formatReceptionDual($lineSummary, 'received');
+        $pending = formatReceptionDual($lineSummary, 'pending');
         $specText = buildReceptionSpec($ln);
 
         $body .= '<tr>';
-        $body .= '<td>' . h((string)$ln['sku_code']) . '</td>';
+        $body .= '<td><span class="rec-code-link">' . h((string)$ln['sku_code']) . '</span></td>';
         $body .= '<td>' . h(receptionModeLabel((string)$ln['reception_mode'])) . '</td>';
         $body .= '<td>' . $specText . '</td>';
         $body .= '<td>' . $ordered . '</td>';
         $body .= '<td>' . $received . '</td>';
         $body .= '<td>' . $pending . '</td>';
-        if ((string)$po['status'] === 'COMPLETE') {
-            $body .= '<td class="muted">Finalizada</td>';
+        if ($isComplete) {
+            $body .= '<td style="text-align:right"><span class="rec-badge rec-badge-complete">Finalizada</span></td>';
         } elseif ($lineSummary['pending'] <= 0) {
-            $body .= '<td class="muted">Completa</td>';
+            $body .= '<td style="text-align:right"><span class="rec-badge rec-badge-complete">Completa</span></td>';
         } else {
-            $body .= '<td><a class="btn secondary" href="/purchase-orders/' . (int)$poId . '/receive?line=' . (int)$ln['id'] . '">Recepcionar</a></td>';
+            $body .= '<td style="text-align:right"><a class="btn" style="padding:5px 12px;font-size:12px" href="/purchase-orders/' . (int)$poId . '/receive?line=' . (int)$ln['id'] . '">Recepcionar</a></td>';
         }
         $body .= '</tr>';
     }
     if ($lines === []) {
-        $body .= '<tr><td colspan="7" class="muted">Sin líneas.</td></tr>';
+        $body .= '<tr><td colspan="7"><div class="rec-empty">Sin líneas en esta orden de compra.</div></td></tr>';
     }
-    $body .= '</tbody></table></div>';
+    $body .= '</tbody></table></div></div>';
 
-    render('OC', $body);
+    if (!$isComplete) {
+        $body .= renderCloseReceptionModal('/purchase-orders/' . $poId . '/close', 'OC ' . (string)$po['po_code'], $totalPendingUnits);
+    }
+    $body .= '</div>';
+
+    render('OC ' . (string)$po['po_code'], $body);
+    exit;
+}
+
+if (preg_match('#^/purchase-orders/(\\d+)/(?:close|archive)$#', $path, $m) === 1 && $method === 'POST') {
+    requireCsrf();
+    $purchaseOrderId = (int)$m[1];
+    $reason = trim((string)($_POST['reason'] ?? ''));
+    $notes = trim((string)($_POST['notes'] ?? ''));
+    $userId = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 1);
+    $res = $service->closePurchaseOrderReception($purchaseOrderId, $userId, $reason, $notes);
+    if ($res['ok'] === true) {
+        header('Location: /purchase-orders/' . $purchaseOrderId . '?closed=1');
+        exit;
+    }
+    http_response_code(400);
+    render('Error', '<div class="err">' . h($res['error'] ?? 'Error al cerrar la recepción') . '</div><div style="margin-top:12px"><a class="btn secondary" href="/purchase-orders/' . $purchaseOrderId . '">Volver</a></div>');
     exit;
 }
 
@@ -10569,9 +14591,19 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
     $lineUnit = $lineSummary['unit'];
     $pendingInputMax = $isWeightMode ? number_format((float)$lineSummary['pending'], 3, '.', '') : '';
 
+    $allPoLines = $service->listPurchaseOrderLines($poId);
+    $poPendingUnits = 0;
+    foreach ($allPoLines as $pLn) {
+        $sm = receptionLineSummary($pLn);
+        $poPendingUnits += max(0, (int)($sm['pending_rolls'] ?? 0));
+    }
+
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Recepcionar producto</div>
-        <a class="btn secondary" href="/purchase-orders/' . (int)$poId . '">Volver</a>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button type="button" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-size:12px;padding:6px 14px;font-weight:600;display:inline-flex;align-items:center;gap:6px" onclick="openCloseReceptionModal()"><span>🔒</span> Cerrar Recepción (Faltantes)</button>
+          <a class="btn secondary" href="/purchase-orders/' . (int)$poId . '">Volver</a>
+        </div>
       </div>';
 
     $body .= '<div class="card" style="margin-bottom:12px">
@@ -10582,12 +14614,31 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           <div style="flex:1;min-width:220px"><div class="muted">Recepción</div><div style="font-weight:800">' . h(receptionModeLabel((string)$line['reception_mode'])) . '</div></div>
         </div>
         <div class="row" style="margin-top:10px">
-          <div style="flex:1;min-width:180px"><div class="muted">Ordenado</div><div style="font-weight:800">' . h(formatReceptionValue($lineSummary['ordered'], $lineUnit)) . ' ' . h($lineUnit) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Recibido</div><div style="font-weight:800">' . h(formatReceptionValue($lineSummary['received'], $lineUnit)) . ' ' . h($lineUnit) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Pendiente</div><div style="font-weight:800">' . h(formatReceptionValue($lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit) . '</div></div>
+          <div style="flex:1;min-width:180px"><div class="muted">Ordenado</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'ordered') . '</div></div>
+          <div style="flex:1;min-width:180px"><div class="muted">Recibido</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'received') . '</div></div>
+          <div style="flex:1;min-width:180px"><div class="muted">Pendiente</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'pending') . '</div></div>
           <div style="flex:1;min-width:180px"><div class="muted">Tipo proveedor</div><div style="font-weight:800">' . h(((string)($line['supplier_type'] ?? 'NATIONAL')) === 'IMPORT' ? 'Importación' : 'Nacional') . '</div></div>
         </div>
       </div>';
+
+    if ($isWeightMode) {
+        $orderedUnits = (int)$lineSummary['ordered_rolls'];
+        $receivedUnits = (int)$lineSummary['received_rolls'];
+        $pendingUnits = (int)$lineSummary['pending_rolls'];
+        $body .= '<div class="card" style="background:#f8fafc;border:1px solid #cbd5e1;margin-bottom:12px">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+              <div>
+                <span style="font-weight:800;font-size:14px">📦 Control de Unidades / Bobinas a ingresar:</span>
+                <span style="margin-left:8px;color:#475569">Cada pesaje registra <strong>1 bobina/unidad</strong> con su peso individual en balanza.</span>
+              </div>
+              <div style="display:flex;gap:16px;font-size:13px">
+                <div>Total ordenadas: <strong>' . number_format($orderedUnits, 0, ',', '.') . ' Unid.</strong></div>
+                <div>Recibidas: <strong style="color:#16a34a">' . number_format($receivedUnits, 0, ',', '.') . ' Unid.</strong></div>
+                <div>Pendientes por ingresar: <strong style="color:' . ($pendingUnits > 0 ? '#ea580c' : '#16a34a') . '">' . number_format($pendingUnits, 0, ',', '.') . ' Unid.</strong></div>
+              </div>
+            </div>
+        </div>';
+    }
 
     $body .= '<div class="card">
         <form method="post" id="receive_form" action="/purchase-orders/' . (int)$poId . '/receive">
@@ -11129,6 +15180,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         saveBtn.addEventListener("click", function () { saveAndPrint(); });
       })();
     </script>';
+
+    $body .= renderCloseReceptionModal('/purchase-orders/' . $poId . '/close', 'OC ' . (string)($po['po_code'] ?? ('#' . $poId)), $poPendingUnits);
 
     render('Recepción OC', $body);
     exit;

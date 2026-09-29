@@ -2,9 +2,61 @@
 
 declare(strict_types=1);
 
+// =============================================================================
+// Servicio principal · Recepción / Producción / Inventario / Bonificaciones
+//
+// Esta clase es el “núcleo” de lógica de negocio del proyecto. Agrupa:
+// - Operaciones de recepción de bobinas (integración con compras/importaciones del ERP).
+// - Inventario por bodega (rolls/pallets/boxes) y toma de inventario.
+// - KPIs y dashboard de producción (métricas, merma, semielaborados).
+// - Reportes/consultas para bonificaciones (Flexo/Seri/CYS).
+// - Aseguramiento y migraciones livianas de esquema (tablas/columnas) en TRZ.
+//
+// Arquitectura:
+// - $pdo     => conexión TRZ (base de datos del sistema / app).
+// - $erpPdo  => conexión ERP (producción / planificación / soporte).
+//
+// Importante:
+// - El proyecto no usa framework; el router crea esta clase y la inyecta en módulos HTTP.
+// - Se implementan “ensure*Schema” para mantener compatibilidad en despliegues donde la BD
+//   puede venir con versiones distintas.
+//
+// ---
+//
+// Main Service · Reception / Production / Inventory / Bonuses
+//
+// This class is the core business-logic layer of the project. It groups:
+// - Roll reception operations (integration with ERP purchases/imports).
+// - Warehouse inventory (rolls/pallets/boxes) and inventory count flows.
+// - Production KPIs and dashboard (metrics, waste, semi-finished).
+// - Reports/queries for bonuses (Flexo/Seri/CYS).
+// - Lightweight schema assurance/migrations (tables/columns) in TRZ.
+//
+// Architecture:
+// - $pdo     => TRZ connection (application/system database).
+// - $erpPdo  => ERP connection (production/planning/support database).
+//
+// Important:
+// - This project does not use a framework; the router instantiates this class and injects it into HTTP modules.
+// - Several “ensure*Schema” methods exist to keep compatibility across deployments with different DB versions.
+// =============================================================================
+
 require_once __DIR__ . '/InventoryCountService.php';
 require_once __DIR__ . '/RollReceptionService.php';
 
+/**
+ * Servicio principal de acceso a datos y operaciones del dominio.
+ *
+ * Nota: la clase mantiene caches en memoria (por request) para disminuir roundtrips
+ * hacia el ERP en pantallas que requieren muchas resoluciones de nombres/IDs.
+ *
+ * ---
+ *
+ * Main domain service for data access and operations.
+ *
+ * Note: the class keeps in-memory caches (per request) to reduce roundtrips
+ * to ERP on screens that require many name/ID resolutions.
+ */
 final class ReceptionService
 {
     private const RECEPTION_SCHEMA_VERSION = 'reception_v10';
@@ -28,13 +80,43 @@ final class ReceptionService
     /** @var array<int, array{code:string,eta_plant:string}> */
     private array $erpImportContainersCache = [];
 
+    /** @var array<string, list<int>|null> */
+    private array $erpEquipotypeIdsByBonusCache = [];
+
+    /** @var array<string, list<int>|null> */
+    private array $erpEquipoIdsByBonusCache = [];
+
+    private array $erpEquipotypeIdsByFeatureCache = [];
+
+    /** @var array<string, array<string, bool>> */
+    private array $erpColumnExistsCache = [];
+
     private InventoryCountService $inventoryCountService;
     private RollReceptionService $rollReceptionService;
 
+    /**
+     * Constructor.
+     *
+     * Inicializa servicios internos y asegura el esquema mínimo requerido:
+     * - Migra/asegura tablas/columnas de recepción e inventario en TRZ.
+     * - Sincroniza compatibilidad para datos legacy (ej. bodegas en producción).
+     * - Asegura catálogos/esquemas auxiliares (máquinas, merma, bonos).
+     *
+     * ---
+     *
+     * Constructor.
+     *
+     * Initializes internal services and ensures the minimum required schema:
+     * - Migrates/ensures reception and inventory tables/columns in TRZ.
+     * - Syncs legacy compatibility (e.g., production roll warehouses).
+     * - Ensures auxiliary catalogs/schemas (machines, waste, bonuses).
+     */
     public function __construct(private PDO $pdo, private PDO $erpPdo)
     {
-        $this->inventoryCountService = new InventoryCountService($this->pdo);
+        $this->inventoryCountService = new InventoryCountService($this->pdo, $this->erpPdo);
         $this->rollReceptionService = new RollReceptionService($this->pdo);
+        $this->ensureTrzBaseSchema();
+        $this->ensureAppSettingsSchema();
         if (!self::$schemaEnsured) {
             if ($this->getAppSetting('reception_schema_version', '') !== self::RECEPTION_SCHEMA_VERSION) {
                 $this->ensureReceptionSchema();
@@ -51,6 +133,102 @@ final class ReceptionService
         $this->ensureBonusSchema();
     }
 
+    /**
+     * Asegura que exista el esquema base de TRZ antes de aplicar migraciones incrementales.
+     *
+     * Este proyecto mantiene un esquema “bootstrap” en database/schema.sql para
+     * instalaciones nuevas o ambientes sin trazabilidad inicializada.
+     *
+     * ---
+     *
+     * Ensures the TRZ base schema exists before running incremental migrations.
+     *
+     * This project keeps a “bootstrap” schema in database/schema.sql for fresh
+     * installs or environments where traceability schema is not initialized.
+     */
+    private function ensureTrzBaseSchema(): void
+    {
+        if ($this->tableExists('rolls') && $this->tableExists('warehouses') && $this->tableExists('skus')) {
+            return;
+        }
+
+        $schemaPath = __DIR__ . '/../database/schema.sql';
+        if (!is_file($schemaPath)) {
+            return;
+        }
+
+        $sql = (string)file_get_contents($schemaPath);
+        $sql = trim($sql);
+        if ($sql === '') {
+            return;
+        }
+
+        $statements = preg_split('/;\\s*(?:\\r?\\n|$)/', $sql) ?: [];
+        foreach ($statements as $statement) {
+            $statement = trim($statement);
+            if ($statement === '') {
+                continue;
+            }
+            try {
+                $this->pdo->exec($statement);
+            } catch (Throwable) {
+                continue;
+            }
+        }
+    }
+
+    /**
+     * Asegura la tabla app_settings en TRZ.
+     *
+     * Esta tabla se utiliza como “key-value store” para:
+     * - versionar migraciones livianas (schema_version)
+     * - guardar flags/configuración de la app
+     *
+     * ---
+     *
+     * Ensures the app_settings table in TRZ.
+     *
+     * This table acts as a key-value store for:
+     * - lightweight migration versioning (schema_version)
+     * - application flags/configuration
+     */
+    private function ensureAppSettingsSchema(): void
+    {
+        if ($this->tableExists('app_settings')) {
+            return;
+        }
+        try {
+            $this->pdo->exec(
+                "CREATE TABLE IF NOT EXISTS app_settings (
+                    setting_key VARCHAR(190) NOT NULL,
+                    setting_value TEXT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (setting_key)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+            );
+        } catch (Throwable) {
+            return;
+        }
+    }
+
+    /**
+     * Asegura/migra el esquema de “recepción” en la BD TRZ.
+     *
+     * Qué hace típicamente:
+     * - Agrega columnas faltantes en rolls para vínculo con compras/importaciones y trazabilidad.
+     * - Crea tablas auxiliares (solicitudes de materiales, merma, capacidades, pallets/cajas, etc.).
+     * - Aplica defaults de configuración inicial en app_settings cuando corresponde.
+     *
+     * ---
+     *
+     * Ensures/migrates the “reception” schema in the TRZ database.
+     *
+     * Typical actions:
+     * - Add missing columns to rolls for purchase/import linking and traceability.
+     * - Create auxiliary tables (material requests, waste, capacities, pallets/boxes, etc.).
+     * - Apply initial configuration defaults in app_settings when applicable.
+     */
     private function ensureReceptionSchema(): void
     {
         if (!$this->columnExists('rolls', 'purchase_order_id')) {
@@ -179,6 +357,9 @@ final class ReceptionService
         }
         if (!$this->columnExists('warehouse_capacities', 'capacity_pallets')) {
             $this->pdo->exec("ALTER TABLE warehouse_capacities ADD COLUMN capacity_pallets INT UNSIGNED NOT NULL DEFAULT 0 AFTER capacity_units_total");
+        }
+        if (!$this->columnExists('warehouses', 'erp_storehouse_id')) {
+            $this->pdo->exec("ALTER TABLE warehouses ADD COLUMN erp_storehouse_id INT UNSIGNED NULL DEFAULT NULL AFTER id, ADD INDEX idx_warehouses_erp_storehouse_id (erp_storehouse_id)");
         }
 
         $this->pdo->exec(
@@ -557,6 +738,27 @@ final class ReceptionService
         );
     }
 
+    /**
+     * Asegura/migra el esquema de gestión de residuos (mermas) en TRZ.
+     *
+     * Crea/ajusta:
+     * - waste_inventory_entries: entradas de merma a inventario (con trazabilidad de origen).
+     * - waste_operations: operaciones agregadas de residuos (retiros/compactadora/etc.).
+     *
+     * También agrega columnas nuevas de forma compatible (ALTER TABLE) cuando se detectan
+     * despliegues con versiones anteriores.
+     *
+     * ---
+     *
+     * Ensures/migrates the waste management schema in TRZ.
+     *
+     * Creates/updates:
+     * - waste_inventory_entries: waste inventory entries (with origin traceability).
+     * - waste_operations: aggregated waste operations (withdrawals/compactor/etc.).
+     *
+     * It also adds new columns in a backward-compatible way (ALTER TABLE) when older
+     * deployments are detected.
+     */
     private function ensureWasteSchema(): void
     {
         $this->pdo->exec(
@@ -629,6 +831,25 @@ final class ReceptionService
         );
     }
 
+    /**
+     * Asegura/migra el esquema de configuración de bonificaciones en TRZ.
+     *
+     * Tablas principales:
+     * - bonus_brackets: tramos por rango (cuando el bono se calcula por tramos).
+     * - bonus_unit_rates: tarifas por unidad según categoría/nivel (para bonos por unidad).
+     * - bonus_operator_factors: factores por operador (ajustes multiplicativos).
+     * - bonus_helper_roster / bonus_helper_monthly: roster y datos mensuales para bonos de ayudante.
+     *
+     * ---
+     *
+     * Ensures/migrates the bonuses configuration schema in TRZ.
+     *
+     * Main tables:
+     * - bonus_brackets: range brackets (when the bonus is computed by ranges).
+     * - bonus_unit_rates: per-unit rates by category/tier (for unit-based bonuses).
+     * - bonus_operator_factors: operator factors (multiplicative adjustments).
+     * - bonus_helper_roster / bonus_helper_monthly: roster and monthly data for helper bonuses.
+     */
     private function ensureBonusSchema(): void
     {
         $this->pdo->exec(
@@ -666,14 +887,65 @@ final class ReceptionService
             "CREATE TABLE IF NOT EXISTS bonus_operator_factors (
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 bonus_code VARCHAR(40) NOT NULL,
+                month_key CHAR(7) NOT NULL DEFAULT '',
                 operator_name VARCHAR(120) NOT NULL,
                 factor DECIMAL(4,2) NOT NULL DEFAULT 1.00,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
                 PRIMARY KEY (id),
-                UNIQUE KEY uniq_bonus_operator_factor (bonus_code, operator_name),
-                KEY idx_bonus_operator_factor_bonus (bonus_code),
+                UNIQUE KEY uniq_bonus_operator_factor (bonus_code, month_key, operator_name),
+                KEY idx_bonus_operator_factor_bonus (bonus_code, month_key),
                 KEY idx_bonus_operator_factor_operator (operator_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        try {
+            $col = $this->pdo->query("SHOW COLUMNS FROM bonus_operator_factors LIKE 'month_key'")->fetchAll();
+            if ($col === [] || $col === false) {
+                $this->pdo->exec("ALTER TABLE bonus_operator_factors ADD COLUMN month_key CHAR(7) NOT NULL DEFAULT '' AFTER bonus_code");
+            }
+        } catch (Throwable) {
+        }
+
+        try {
+            $this->pdo->exec("ALTER TABLE bonus_operator_factors DROP INDEX uniq_bonus_operator_factor");
+        } catch (Throwable) {
+        }
+        try {
+            $this->pdo->exec("ALTER TABLE bonus_operator_factors ADD UNIQUE KEY uniq_bonus_operator_factor (bonus_code, month_key, operator_name)");
+        } catch (Throwable) {
+        }
+        try {
+            $this->pdo->exec("ALTER TABLE bonus_operator_factors DROP INDEX idx_bonus_operator_factor_bonus");
+        } catch (Throwable) {
+        }
+        try {
+            $this->pdo->exec("ALTER TABLE bonus_operator_factors ADD KEY idx_bonus_operator_factor_bonus (bonus_code, month_key)");
+        } catch (Throwable) {
+        }
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS bonus_operator_coach_configs (
+                bonus_code VARCHAR(40) NOT NULL,
+                month_key CHAR(7) NOT NULL,
+                coach_name VARCHAR(120) NOT NULL,
+                share_percent DECIMAL(5,2) NOT NULL DEFAULT 0.50,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (bonus_code, month_key),
+                KEY idx_bonus_coach_month (bonus_code, month_key),
+                KEY idx_bonus_coach_name (coach_name)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
+
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS bonus_operator_coach_trainees (
+                bonus_code VARCHAR(40) NOT NULL,
+                month_key CHAR(7) NOT NULL,
+                trainee_name VARCHAR(120) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (bonus_code, month_key, trainee_name),
+                KEY idx_bonus_coach_trainee (trainee_name)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
         );
 
@@ -711,6 +983,25 @@ final class ReceptionService
         );
     }
 
+    /**
+     * Sincroniza bodegas “legacy” para bobinas que están en producción.
+     *
+     * Objetivo:
+     * - En versiones anteriores algunas bobinas podían quedar con warehouse_id distinto
+     *   a la bodega “Producción”, aun estando IN_PROCESS o asignadas a una OT.
+     * - Este método reubica esas bobinas en la bodega de producción (código 3000) y
+     *   registra movimientos y eventos automáticamente.
+     *
+     * ---
+     *
+     * Syncs legacy warehouse assignment for rolls that are in production.
+     *
+     * Goal:
+     * - In older versions, some rolls could remain in a non-production warehouse while
+     *   being IN_PROCESS or attached to a work order.
+     * - This method moves them into the production warehouse (code 3000) and
+     *   automatically records movements and events.
+     */
     private function syncLegacyProductionRollWarehouses(): void
     {
         $this->syncWarehousesFromErp();
@@ -789,6 +1080,31 @@ final class ReceptionService
         }
     }
 
+    /**
+     * Asegura el catálogo local de máquinas y tipos de máquina para Producción.
+     *
+     * Se usa para:
+     * - Pantallas de turnos (shift sessions).
+     * - Asignación de OTs a máquinas.
+     * - Clasificar áreas de producción (PRINTING/REWINDING/SEALING/PACKAGING/RESIDUOS).
+     *
+     * Inserta/actualiza:
+     * - production_machine_types
+     * - production_machines
+     *
+     * ---
+     *
+     * Ensures the local machine and machine-type catalog used by Production.
+     *
+     * Used by:
+     * - Shift sessions screens.
+     * - Work order assignment to machines.
+     * - Production area classification (PRINTING/REWINDING/SEALING/PACKAGING/RESIDUOS).
+     *
+     * Inserts/updates:
+     * - production_machine_types
+     * - production_machines
+     */
     private function ensureProductionMachineCatalog(): void
     {
         $machineTypes = [
@@ -900,59 +1216,66 @@ final class ReceptionService
         return (int)$stmt->fetchColumn() > 0;
     }
 
-    private function syncWarehousesFromErp(): void
+    public function syncWarehousesFromErp(bool $force = false): void
     {
-        if ($this->erpWarehousesSynced) {
+        if ($this->erpWarehousesSynced && !$force) {
             return;
         }
 
-        if ($this->shouldSkipWarehouseSync()) {
+        if (!$force && $this->shouldSkipWarehouseSync()) {
             $this->erpWarehousesSynced = true;
             return;
         }
 
-        $stmt = $this->erpPdo->query(
-            'SELECT id, st_name
-             FROM company_shops_storehouses
-             WHERE st_status = 1
-             ORDER BY id ASC'
-        );
-        $rows = $stmt->fetchAll();
-        foreach ($rows as $row) {
-            $name = trim((string)($row['st_name'] ?? ''));
-            $code = $this->parseWarehouseCodeFromName($name);
-            if ($code === null) {
-                continue;
+        try {
+            $stmt = $this->erpPdo->query(
+                'SELECT id, st_name, st_desc, st_shop_id, st_status
+                 FROM company_shops_storehouses
+                 WHERE st_status = 1
+                 ORDER BY id ASC'
+            );
+            $rows = $stmt->fetchAll();
+            foreach ($rows as $row) {
+                $erpId = (int)$row['id'];
+                $name = trim((string)($row['st_name'] ?? ''));
+                if ($name === '') {
+                    continue;
+                }
+                $code = $this->parseWarehouseCodeFromName($name);
+                if ($code === null) {
+                    $code = $erpId;
+                }
+                $this->upsertTraceWarehouse($code, $name, $erpId);
             }
-            $this->upsertTraceWarehouse($code, $name);
-        }
-
-        foreach ([
-            100 => '100 (MP PLA)',
-            110 => '110 (MP PLA DESCALIBRADO)',
-            120 => '120 (MP PLA EMPALMADO)',
-            150 => '150 (BODEGA RESERVA MATERIALES)',
-            200 => '200 (MP PP)',
-            300 => '300 (PROD. TERMINADO FABRICACION INTERNA)',
-            400 => '400 (PROD TERMINADOS REVENTA)',
-            500 => '500 (PRODUCCION - BODEGA)',
-            510 => '510 (RESIDUOS)',
-            600 => '600 (REPUESTOS)',
-            700 => '700 (BODEGA CANAL TRADICIONAL)',
-            800 => '800 (EPP Y ROPAS)',
-            900 => '900 (TINTAS FLEXOGRAFIA)',
-            910 => '910 (TINTAS SERIGRAFIA)',
-            920 => '920 (TINTAS PULPO SERIGRAFIA)',
-            1000 => '1000 (BODEGA RETAIL A y B)',
-            2000 => '2000 TALLERES EXTERNOS',
-            3000 => '3000 INSUMOS EN PRODUCCION',
-            3100 => '3100 INSUMOS-LIMPIEZA',
-            3200 => '3200 INSUMOS DISPONIBLES (MP)',
-            4000 => '4000 (BOBINAS USADAS)',
-            5000 => '5000 (PRODUCTOS INMOVILIZADOS)',
-            6000 => '6000 Facturacion de servicios No productivos',
-        ] as $code => $name) {
-            $this->upsertTraceWarehouse($code, $name);
+        } catch (Throwable $e) {
+            // Fallback to static list if ERP query fails
+            foreach ([
+                100 => '100 (MP PLA)',
+                110 => '110 (MP PLA DESCALIBRADO)',
+                120 => '120 (MP PLA EMPALMADO)',
+                150 => '150 (BODEGA RESERVA MATERIALES)',
+                200 => '200 (MP PP)',
+                300 => '300 (PROD. TERMINADO FABRICACION INTERNA)',
+                400 => '400 (PROD TERMINADOS REVENTA)',
+                500 => '500 (PRODUCCION - BODEGA)',
+                510 => '510 (RESIDUOS)',
+                600 => '600 (REPUESTOS)',
+                700 => '700 (BODEGA CANAL TRADICIONAL)',
+                800 => '800 (EPP Y ROPAS)',
+                900 => '900 (TINTAS FLEXOGRAFIA)',
+                910 => '910 (TINTAS SERIGRAFIA)',
+                920 => '920 (TINTAS PULPO SERIGRAFIA)',
+                1000 => '1000 (BODEGA RETAIL A y B)',
+                2000 => '2000 TALLERES EXTERNOS',
+                3000 => '3000 INSUMOS EN PRODUCCION',
+                3100 => '3100 INSUMOS-LIMPIEZA',
+                3200 => '3200 INSUMOS DISPONIBLES (MP)',
+                4000 => '4000 (BOBINAS USADAS)',
+                5000 => '5000 (PRODUCTOS INMOVILIZADOS)',
+                6000 => '6000 Facturacion de servicios No productivos',
+            ] as $code => $name) {
+                $this->upsertTraceWarehouse($code, $name);
+            }
         }
 
         $this->setAppSetting('erp_warehouses_synced_at', (string)time());
@@ -980,20 +1303,47 @@ final class ReceptionService
         return (int)$matches[1];
     }
 
-    private function upsertTraceWarehouse(int $code, string $name): int
+    private function upsertTraceWarehouse(int $code, string $name, ?int $erpStorehouseId = null): int
     {
-        $stmt = $this->pdo->prepare('SELECT id FROM warehouses WHERE code = :code LIMIT 1');
+        if ($erpStorehouseId !== null && $erpStorehouseId > 0) {
+            $stmt = $this->pdo->prepare('SELECT id, code FROM warehouses WHERE erp_storehouse_id = :erp_id LIMIT 1');
+            $stmt->execute([':erp_id' => $erpStorehouseId]);
+            $row = $stmt->fetch();
+            if ($row !== false) {
+                $id = (int)$row['id'];
+                $chk = $this->pdo->prepare('SELECT id FROM warehouses WHERE code = :code AND id != :id LIMIT 1');
+                $chk->execute([':code' => $code, ':id' => $id]);
+                if ($chk->fetch() !== false) {
+                    $code = (int)$row['code'] > 0 ? (int)$row['code'] : $erpStorehouseId;
+                }
+                $update = $this->pdo->prepare('UPDATE warehouses SET code = :code, name = :name WHERE id = :id');
+                $update->execute([':code' => $code, ':name' => $name, ':id' => $id]);
+                return $id;
+            }
+        }
+
+        $stmt = $this->pdo->prepare('SELECT id, erp_storehouse_id FROM warehouses WHERE code = :code LIMIT 1');
         $stmt->execute([':code' => $code]);
         $row = $stmt->fetch();
         if ($row !== false) {
-            $id = (int)$row['id'];
-            $update = $this->pdo->prepare('UPDATE warehouses SET name = :name WHERE id = :id');
-            $update->execute([':name' => $name, ':id' => $id]);
-            return $id;
+            $existingErpId = $row['erp_storehouse_id'] !== null ? (int)$row['erp_storehouse_id'] : null;
+            if ($existingErpId === null || $existingErpId === $erpStorehouseId) {
+                $id = (int)$row['id'];
+                $update = $this->pdo->prepare('UPDATE warehouses SET name = :name, erp_storehouse_id = COALESCE(erp_storehouse_id, :erp_id) WHERE id = :id');
+                $update->execute([':name' => $name, ':erp_id' => $erpStorehouseId, ':id' => $id]);
+                return $id;
+            }
+            // Code already belongs to a different ERP storehouse; use distinct code
+            $code = $erpStorehouseId !== null && $erpStorehouseId > 0 ? $erpStorehouseId : ($code * 10 + 1);
+            $chk2 = $this->pdo->prepare('SELECT id FROM warehouses WHERE code = :code LIMIT 1');
+            $chk2->execute([':code' => $code]);
+            if ($chk2->fetch() !== false) {
+                $code = 10000 + (int)$erpStorehouseId;
+            }
         }
 
-        $insert = $this->pdo->prepare('INSERT INTO warehouses (code, name) VALUES (:code, :name)');
-        $insert->execute([':code' => $code, ':name' => $name]);
+        $insert = $this->pdo->prepare('INSERT INTO warehouses (code, name, erp_storehouse_id) VALUES (:code, :name, :erp_id)');
+        $insert->execute([':code' => $code, ':name' => $name, ':erp_id' => $erpStorehouseId]);
         return (int)$this->pdo->lastInsertId();
     }
 
@@ -1091,7 +1441,8 @@ SQL;
                 );
                 $otCode = $this->buildErpWorkOrderCode($row);
                 $skuFinal = $this->buildErpWorkOrderSku($row);
-                $targetQty = isset($row['ag_amount']) ? (int)round((float)$row['ag_amount']) : null;
+                $rawAmount = isset($row['ag_amount']) ? (float)$row['ag_amount'] : null;
+                $targetQty = $rawAmount !== null ? (int)round(max(0.0, $rawAmount)) : null;
                 $machineId = isset($row['ag_equipo_id']) ? (int)$row['ag_equipo_id'] : null;
                 $machineTypeId = isset($row['ag_equipotype_id']) ? (int)$row['ag_equipotype_id'] : null;
                 $machineLabel = $this->buildErpMachineLabel($machineId, $machineTypeId);
@@ -1497,6 +1848,32 @@ SQL;
             ];
         }
 
+        try {
+            $erpStmt = $this->erpPdo->prepare(
+                "SELECT id, COALESCE(item_amount_shipped, 0) AS shipped_amount
+                 FROM supplier_order_items
+                 WHERE id IN ($placeholders)"
+            );
+            $erpStmt->execute($lineIds);
+            foreach ($erpStmt->fetchAll() as $erpRow) {
+                $lineId = (int)$erpRow['id'];
+                $shipped = (float)$erpRow['shipped_amount'];
+                if ($shipped > 0) {
+                    if (!isset($summary[$lineId])) {
+                        $summary[$lineId] = [
+                            'received_rolls' => (int)round($shipped),
+                            'received_qty' => $shipped,
+                            'received_weight_kg' => 0.0,
+                        ];
+                    } else {
+                        $summary[$lineId]['received_rolls'] = max($summary[$lineId]['received_rolls'], (int)round($shipped));
+                        $summary[$lineId]['received_qty'] = max($summary[$lineId]['received_qty'], $shipped);
+                    }
+                }
+            }
+        } catch (\Throwable) {
+        }
+
         return $summary;
     }
 
@@ -1594,6 +1971,36 @@ SQL;
                 'received_qty' => (float)$row['received_qty'],
                 'received_weight_kg' => (float)$row['received_weight_kg'],
             ];
+        }
+
+        try {
+            $erpStmt = $this->erpPdo->prepare(
+                "SELECT t3.item_contenedor_refid AS container_item_id,
+                        COALESCE(SUM(t3.item_amount), 0) AS erp_amount
+                 FROM stockchanges ta
+                 INNER JOIN stockchanges_items t3 ON t3.stk_id = ta.id
+                 WHERE ta.stk_status > 1
+                   AND t3.item_contenedor_refid IN ($placeholders)
+                 GROUP BY t3.item_contenedor_refid"
+            );
+            $erpStmt->execute($containerItemIds);
+            foreach ($erpStmt->fetchAll() as $erpRow) {
+                $cItemId = (int)$erpRow['container_item_id'];
+                $erpAmount = (float)$erpRow['erp_amount'];
+                if ($erpAmount > 0) {
+                    if (!isset($summary[$cItemId])) {
+                        $summary[$cItemId] = [
+                            'received_rolls' => (int)round($erpAmount),
+                            'received_qty' => $erpAmount,
+                            'received_weight_kg' => 0.0,
+                        ];
+                    } else {
+                        $summary[$cItemId]['received_rolls'] = max($summary[$cItemId]['received_rolls'], (int)round($erpAmount));
+                        $summary[$cItemId]['received_qty'] = max($summary[$cItemId]['received_qty'], $erpAmount);
+                    }
+                }
+            }
+        } catch (\Throwable) {
         }
 
         return $summary;
@@ -1930,22 +2337,33 @@ SQL;
         return strtoupper(trim((string)$mode)) === 'WEIGHT' ? 'WEIGHT' : 'QUANTITY';
     }
 
-    private function summarizeReceptionLine(array $line): array
+    public function summarizeReceptionLine(array $line): array
     {
         $mode = $this->normalizeReceptionMode((string)($line['reception_mode'] ?? $this->inferReceptionModeFromErpLine($line)));
+        $orderedWeight = round((float)($line['ordered_weight_kg'] ?? 0), 3);
+        $receivedWeight = round((float)($line['received_weight_kg'] ?? 0), 3);
+        $pendingWeight = max(0, round($orderedWeight - $receivedWeight, 3));
+
+        $orderedRolls = round((float)($line['ordered_rolls'] ?? 0), 3);
+        $receivedRolls = round((float)($line['received_qty'] ?? $line['received_rolls'] ?? 0), 3);
+        $pendingRolls = max(0, round($orderedRolls - $receivedRolls, 3));
+
         if ($mode === 'WEIGHT') {
-            $ordered = round((float)($line['ordered_weight_kg'] ?? 0), 3);
-            $received = round((float)($line['received_weight_kg'] ?? 0), 3);
+            $ordered = $orderedWeight;
+            $received = $receivedWeight;
+            $pending = $pendingWeight;
             $unit = 'Kg';
         } else {
-            $ordered = round((float)($line['ordered_rolls'] ?? 0), 3);
-            $received = round((float)($line['received_qty'] ?? $line['received_rolls'] ?? 0), 3);
+            $ordered = $orderedRolls;
+            $received = $receivedRolls;
+            $pending = $pendingRolls;
             $unit = 'Unid.';
         }
 
-        $pending = max(0, round($ordered - $received, 3));
-        $complete = $ordered > 0 && $received >= $ordered;
-        $hasProgress = $received > 0;
+        $complete = ($ordered > 0 && $received >= $ordered)
+            || ($orderedRolls > 0 && $receivedRolls >= $orderedRolls)
+            || ($orderedWeight > 0 && $receivedWeight >= $orderedWeight);
+        $hasProgress = $received > 0 || $receivedRolls > 0 || $receivedWeight > 0;
 
         return [
             'mode' => $mode,
@@ -1953,6 +2371,12 @@ SQL;
             'received_value' => $received,
             'pending_value' => $pending,
             'unit_label' => $unit,
+            'ordered_weight_kg' => $orderedWeight,
+            'received_weight_kg' => $receivedWeight,
+            'pending_weight_kg' => $pendingWeight,
+            'ordered_rolls' => $orderedRolls,
+            'received_rolls' => $receivedRolls,
+            'pending_rolls' => $pendingRolls,
             'is_complete' => $complete,
             'has_progress' => $hasProgress,
         ];
@@ -1983,6 +2407,14 @@ SQL;
     {
         $supplierType = $supplierType !== null ? strtoupper(trim($supplierType)) : '';
         $statusFilter = $status !== null ? strtolower(trim($status)) : '';
+        $where = ['s.supp_status = 1', 'po.sord_type = 0', 'po.sord_status > 0', 'po.sord_crtdat >= 1704067200'];
+        if ($statusFilter === 'active' || $statusFilter === '') {
+            $where[] = 'po.sord_status IN (1, 2, 3) AND COALESCE(po.sord_order_shipped, 0) = 0';
+        } elseif ($statusFilter === 'complete') {
+            $where[] = '(po.sord_status = 4 OR COALESCE(po.sord_order_shipped, 0) = 1)';
+        }
+        $whereSql = implode(' AND ', $where);
+
         $stmt = $this->erpPdo->query(
             "SELECT s.id,
                     s.supp_company AS name,
@@ -1994,8 +2426,7 @@ SQL;
              JOIN supplier s ON s.id = po.sord_supplier_id
              LEFT JOIN country c ON c.id = s.supp_countryid
              JOIN supplier_order_items soi ON soi.sord_id = po.id
-             WHERE s.supp_status = 1
-               AND po.sord_type = 0
+             WHERE $whereSql
              ORDER BY s.supp_company ASC, soi.id ASC"
         );
         $rows = $stmt->fetchAll();
@@ -2064,21 +2495,33 @@ SQL;
     public function listSuppliersForImportContainers(?string $status = 'active'): array
     {
         $statusFilter = $status !== null ? strtolower(trim($status)) : '';
+        $where = ['s.supp_status = 1', 'sc.sord_status > 0', 'so.sord_status > 0'];
+        if ($statusFilter === 'active' || $statusFilter === '') {
+            $where[] = 'sc.sord_status IN (2, 3)';
+            $where[] = 'sc.sord_crtdat >= 1704067200';
+        } elseif ($statusFilter === 'complete') {
+            $where[] = '(sc.sord_status = 4 OR sc.sord_crtdat < 1704067200)';
+        }
+        $whereSql = implode(' AND ', $where);
+
         $stmt = $this->erpPdo->prepare(
-            'SELECT s.id,
+            "SELECT s.id,
                     s.supp_company AS name,
                     c.country_name AS country_name,
                     sci.id AS container_item_id,
                     sci.sord_id AS container_id,
+                    sc.sord_status AS container_status,
+                    sc.sord_crtdat AS container_crtdat,
                     sci.sord_amount AS ordered_rolls,
                     sci.sord_kgs_amount AS ordered_weight_kg
              FROM supplier_contenedor_items sci
+             JOIN supplier_contenedor sc ON sc.id = sci.sord_id
              JOIN supplier_order_items soi ON soi.id = sci.sord_pos_id
              JOIN supplier_order so ON so.id = soi.sord_id
              JOIN supplier s ON s.id = so.sord_supplier_id
              LEFT JOIN country c ON c.id = s.supp_countryid
-             WHERE s.supp_status = 1
-             ORDER BY s.supp_company ASC, sci.id ASC'
+             WHERE $whereSql
+             ORDER BY s.supp_company ASC, sci.id ASC"
         );
         $stmt->execute();
         $rows = $stmt->fetchAll();
@@ -2120,7 +2563,9 @@ SQL;
             ];
             $summary = $this->summarizeReceptionLine($line);
             $result[$supplierId]['_total_lines']++;
-            if ($summary['is_complete']) {
+            $crtdat = (int)($row['container_crtdat'] ?? 0);
+            $isComplete = ((int)($row['container_status'] ?? 0) === 4) || ($crtdat < 1704067200) || $summary['is_complete'];
+            if ($isComplete) {
                 $result[$supplierId]['_completed_lines']++;
             }
         }
@@ -2144,14 +2589,125 @@ SQL;
         return $filtered;
     }
 
-    public function listPurchaseOrders(?int $supplierId, ?string $search, ?string $status, ?string $supplierType = null, int $limit = 50): array
-    {
-        $where = ['po.sord_type = 0'];
+    public function countPurchaseOrders(
+        ?int $supplierId = null,
+        ?string $search = null,
+        ?string $status = 'active',
+        ?string $supplierType = null,
+        ?string $dateFrom = null,
+        ?string $dateTo = null
+    ): int {
+        $statusFilter = $status !== null ? strtolower(trim($status)) : '';
+        $supplierType = $supplierType !== null ? strtoupper(trim($supplierType)) : '';
+
+        $where = ['po.sord_type = 0', 'po.sord_status > 0', 'po.sord_crtdat >= 1704067200'];
         $params = [];
+
+        if ($statusFilter === 'active' || $statusFilter === '') {
+            $where[] = 'po.sord_status IN (1, 2, 3) AND COALESCE(po.sord_order_shipped, 0) = 0';
+        } elseif ($statusFilter === 'complete') {
+            $where[] = '(po.sord_status = 4 OR COALESCE(po.sord_order_shipped, 0) = 1)';
+        }
+
+        if ($supplierType === 'NATIONAL') {
+            $where[] = "(c.country_name = 'Chile' OR c.country_name IS NULL OR c.country_name = '')";
+        } elseif ($supplierType === 'IMPORT') {
+            $where[] = "(c.country_name != 'Chile' AND c.country_name IS NOT NULL AND c.country_name != '')";
+        }
+
+        $where[] = 'EXISTS (SELECT 1 FROM supplier_order_items soi WHERE soi.sord_id = po.id)';
 
         if ($supplierId !== null && $supplierId > 0) {
             $where[] = 'po.sord_supplier_id = :supplier_id';
             $params[':supplier_id'] = $supplierId;
+        }
+
+        if ($dateFrom !== null && trim($dateFrom) !== '') {
+            $tsFrom = strtotime(trim($dateFrom) . ' 00:00:00');
+            if ($tsFrom !== false) {
+                $where[] = 'po.sord_crtdat >= :date_from';
+                $params[':date_from'] = max(1704067200, $tsFrom);
+            }
+        }
+
+        if ($dateTo !== null && trim($dateTo) !== '') {
+            $tsTo = strtotime(trim($dateTo) . ' 23:59:59');
+            if ($tsTo !== false) {
+                $where[] = 'po.sord_crtdat <= :date_to';
+                $params[':date_to'] = $tsTo;
+            }
+        }
+
+        $search = $search !== null ? trim($search) : null;
+        if ($search !== null && $search !== '') {
+            $where[] = 'po.sord_number LIKE :q';
+            $params[':q'] = '%' . $search . '%';
+        }
+
+        $whereSql = 'WHERE ' . implode(' AND ', $where);
+        $sql = "SELECT COUNT(*)
+                FROM supplier_order po
+                JOIN supplier s ON s.id = po.sord_supplier_id
+                LEFT JOIN country c ON c.id = s.supp_countryid
+                $whereSql";
+
+        $stmt = $this->erpPdo->prepare($sql);
+        foreach ($params as $k => $v) {
+            $stmt->bindValue($k, $v);
+        }
+        $stmt->execute();
+        return (int)$stmt->fetchColumn();
+    }
+
+    public function listPurchaseOrders(
+        ?int $supplierId = null,
+        ?string $search = null,
+        ?string $status = 'active',
+        ?string $supplierType = null,
+        int $limit = 20,
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        int $offset = 0
+    ): array {
+        $statusFilter = $status !== null ? strtolower(trim($status)) : '';
+        $supplierType = $supplierType !== null ? strtoupper(trim($supplierType)) : '';
+
+        $where = ['po.sord_type = 0', 'po.sord_status > 0', 'po.sord_crtdat >= 1704067200'];
+        $params = [];
+
+        if ($statusFilter === 'active' || $statusFilter === '') {
+            $where[] = 'po.sord_status IN (1, 2, 3) AND COALESCE(po.sord_order_shipped, 0) = 0';
+        } elseif ($statusFilter === 'complete') {
+            $where[] = '(po.sord_status = 4 OR COALESCE(po.sord_order_shipped, 0) = 1)';
+        }
+
+        if ($supplierType === 'NATIONAL') {
+            $where[] = "(c.country_name = 'Chile' OR c.country_name IS NULL OR c.country_name = '')";
+        } elseif ($supplierType === 'IMPORT') {
+            $where[] = "(c.country_name != 'Chile' AND c.country_name IS NOT NULL AND c.country_name != '')";
+        }
+
+        $where[] = 'EXISTS (SELECT 1 FROM supplier_order_items soi WHERE soi.sord_id = po.id)';
+
+        if ($supplierId !== null && $supplierId > 0) {
+            $where[] = 'po.sord_supplier_id = :supplier_id';
+            $params[':supplier_id'] = $supplierId;
+        }
+
+        if ($dateFrom !== null && trim($dateFrom) !== '') {
+            $tsFrom = strtotime(trim($dateFrom) . ' 00:00:00');
+            if ($tsFrom !== false) {
+                $where[] = 'po.sord_crtdat >= :date_from';
+                $params[':date_from'] = max(1704067200, $tsFrom);
+            }
+        }
+
+        if ($dateTo !== null && trim($dateTo) !== '') {
+            $tsTo = strtotime(trim($dateTo) . ' 23:59:59');
+            if ($tsTo !== false) {
+                $where[] = 'po.sord_crtdat <= :date_to';
+                $params[':date_to'] = $tsTo;
+            }
         }
 
         $search = $search !== null ? trim($search) : null;
@@ -2165,6 +2721,8 @@ SQL;
             SELECT po.id,
                    po.sord_number AS po_code,
                    po.sord_supplier_id AS supplier_id,
+                   po.sord_status,
+                   po.sord_order_shipped,
                    po.sord_crtdat,
                    s.supp_company AS supplier_name,
                    c.country_name AS supplier_country_name
@@ -2173,7 +2731,7 @@ SQL;
             LEFT JOIN country c ON c.id = s.supp_countryid
             $whereSql
             ORDER BY po.id DESC
-            LIMIT :limit
+            LIMIT :limit OFFSET :offset
         ";
 
         $stmt = $this->erpPdo->prepare($sql);
@@ -2181,13 +2739,12 @@ SQL;
             $stmt->bindValue($k, $v);
         }
         $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->bindValue(':offset', max(0, $offset), PDO::PARAM_INT);
         $stmt->execute();
         $rows = $stmt->fetchAll();
         $orderIds = array_column($rows, 'id');
         $statsByOrder = $this->getPurchaseOrderStatsByIds($orderIds);
 
-        $statusFilter = $status !== null ? strtolower(trim($status)) : '';
-        $supplierType = $supplierType !== null ? strtoupper(trim($supplierType)) : '';
         $result = [];
         foreach ($rows as $row) {
             $derivedSupplierType = $this->classifySupplierType((string)($row['supplier_country_name'] ?? ''));
@@ -2203,15 +2760,20 @@ SQL;
             $totalLines = (int)$stats['total_lines'];
             $completedLines = (int)$stats['completed_lines'];
             $linesWithProgress = (int)$stats['lines_with_progress'];
+            $erpStatus = (int)($row['sord_status'] ?? 0);
+            $erpShipped = (int)($row['sord_order_shipped'] ?? 0);
+
             $derivedStatus = 'OPEN';
-            if ($totalLines > 0 && $completedLines >= $totalLines) {
+            if ($erpStatus === 4 || $erpShipped === 1 || ($totalLines > 0 && $completedLines >= $totalLines)) {
                 $derivedStatus = 'COMPLETE';
             } elseif ($linesWithProgress > 0) {
                 $derivedStatus = 'PARTIAL';
             }
 
-            if (($statusFilter === '' || $statusFilter === 'active') && !in_array($derivedStatus, ['OPEN', 'PARTIAL'], true)) {
-                continue;
+            if (($statusFilter === '' || $statusFilter === 'active')) {
+                if ($totalLines <= 0 || !in_array($derivedStatus, ['OPEN', 'PARTIAL'], true)) {
+                    continue;
+                }
             }
             if ($statusFilter === 'complete' && $derivedStatus !== 'COMPLETE') {
                 continue;
@@ -2305,6 +2867,8 @@ SQL;
             'SELECT po.id,
                     po.sord_number AS po_code,
                     po.sord_supplier_id AS supplier_id,
+                    po.sord_status,
+                    po.sord_order_shipped,
                     po.sord_crtdat,
                     s.supp_company AS supplier_name,
                     c.country_name AS supplier_country_name
@@ -2320,17 +2884,21 @@ SQL;
             return null;
         }
 
+        $erpStatus = (int)($row['sord_status'] ?? 0);
+        $erpShipped = (int)($row['sord_order_shipped'] ?? 0);
         $status = 'OPEN';
         $stats = $this->getPurchaseOrderStatsByIds([$id])[$id] ?? null;
         if (is_array($stats)) {
             $totalLines = (int)$stats['total_lines'];
             $completedLines = (int)$stats['completed_lines'];
             $hasProgress = (int)$stats['lines_with_progress'] > 0;
-            if ($totalLines > 0 && $completedLines >= $totalLines) {
+            if ($erpStatus === 4 || $erpShipped === 1 || ($totalLines > 0 && $completedLines >= $totalLines)) {
                 $status = 'COMPLETE';
             } elseif ($hasProgress) {
                 $status = 'PARTIAL';
             }
+        } elseif ($erpStatus === 4 || $erpShipped === 1) {
+            $status = 'COMPLETE';
         }
 
         return [
@@ -2345,10 +2913,27 @@ SQL;
         ];
     }
 
-    public function listImportContainers(?int $supplierId, ?string $search, ?string $status, int $limit = 50): array
-    {
-        $where = ['1=1'];
+    public function countImportContainers(
+        ?int $supplierId = null,
+        ?string $search = null,
+        ?string $status = 'active',
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        ?string $poCode = null,
+        ?string $bl = null,
+        ?string $containerCode = null,
+        ?string $productType = null
+    ): int {
+        $statusFilter = $status !== null ? strtolower(trim($status)) : '';
+        $where = ['sc.sord_status > 0', 'EXISTS (SELECT 1 FROM supplier_contenedor_items sci WHERE sci.sord_id = sc.id)'];
         $params = [];
+
+        if ($statusFilter === 'active' || $statusFilter === '') {
+            $where[] = 'sc.sord_status IN (2, 3)';
+            $where[] = 'sc.sord_crtdat >= 1704067200';
+        } elseif ($statusFilter === 'complete') {
+            $where[] = '(sc.sord_status = 4 OR sc.sord_crtdat < 1704067200)';
+        }
 
         if ($supplierId !== null && $supplierId > 0) {
             $where[] = 'EXISTS (
@@ -2360,6 +2945,183 @@ SQL;
                   AND so.sord_supplier_id = :supplier_id
             )';
             $params[':supplier_id'] = $supplierId;
+        }
+
+        if ($dateFrom !== null && trim($dateFrom) !== '') {
+            $tsFrom = strtotime(trim($dateFrom) . ' 00:00:00');
+            if ($tsFrom !== false) {
+                $where[] = 'sc.sord_crtdat >= :date_from';
+                $params[':date_from'] = ($statusFilter === 'active' || $statusFilter === '') ? max(1704067200, $tsFrom) : $tsFrom;
+            }
+        }
+
+        if ($dateTo !== null && trim($dateTo) !== '') {
+            $tsTo = strtotime(trim($dateTo) . ' 23:59:59');
+            if ($tsTo !== false) {
+                $where[] = 'sc.sord_crtdat <= :date_to';
+                $params[':date_to'] = $tsTo;
+            }
+        }
+
+        if ($poCode !== null && trim($poCode) !== '') {
+            $where[] = '(sc.sord_ocs LIKE :po_code OR EXISTS (
+                SELECT 1
+                FROM supplier_contenedor_items sci_po
+                JOIN supplier_order_items soi_po ON soi_po.id = sci_po.sord_pos_id
+                JOIN supplier_order so_po ON so_po.id = soi_po.sord_id
+                WHERE sci_po.sord_id = sc.id
+                  AND so_po.sord_number LIKE :po_code_sub
+            ))';
+            $params[':po_code'] = '%' . trim($poCode) . '%';
+            $params[':po_code_sub'] = '%' . trim($poCode) . '%';
+        }
+
+        if ($bl !== null && trim($bl) !== '') {
+            $where[] = 'sc.sord_billoflanding LIKE :bl';
+            $params[':bl'] = '%' . trim($bl) . '%';
+        }
+
+        if ($containerCode !== null && trim($containerCode) !== '') {
+            $where[] = 'sc.sord_contenedor LIKE :container_code';
+            $params[':container_code'] = '%' . trim($containerCode) . '%';
+        }
+
+        if ($productType !== null && trim($productType) !== '') {
+            $where[] = 'EXISTS (
+                SELECT 1
+                FROM supplier_contenedor_items sci_pt
+                JOIN supplier_order_items soi_pt ON soi_pt.id = sci_pt.sord_pos_id
+                LEFT JOIN item i_pt ON i_pt.id = soi_pt.item_id
+                WHERE sci_pt.sord_id = sc.id
+                  AND (
+                      i_pt.item_number LIKE :product_type_num
+                      OR i_pt.item_title LIKE :product_type_title
+                      OR soi_pt.item_desc LIKE :product_type_desc
+                  )
+            )';
+            $ptLike = '%' . trim($productType) . '%';
+            $params[':product_type_num'] = $ptLike;
+            $params[':product_type_title'] = $ptLike;
+            $params[':product_type_desc'] = $ptLike;
+        }
+
+        $search = $search !== null ? trim($search) : null;
+        if ($search !== null && $search !== '') {
+            $where[] = '(sc.sord_contenedor LIKE :q_container
+                OR sc.sord_billoflanding LIKE :q_bl
+                OR sc.sord_buque LIKE :q_vessel
+                OR sc.sord_forward LIKE :q_forwarder
+                OR sc.sord_ocs LIKE :q_po)';
+            $searchLike = '%' . $search . '%';
+            $params[':q_container'] = $searchLike;
+            $params[':q_bl'] = $searchLike;
+            $params[':q_vessel'] = $searchLike;
+            $params[':q_forwarder'] = $searchLike;
+            $params[':q_po'] = $searchLike;
+        }
+
+        $whereSql = 'WHERE ' . implode(' AND ', $where);
+        $sql = "SELECT COUNT(*) FROM supplier_contenedor sc $whereSql";
+        $stmt = $this->erpPdo->prepare($sql);
+        foreach ($params as $k => $v) {
+            $stmt->bindValue($k, $v);
+        }
+        $stmt->execute();
+        return (int)$stmt->fetchColumn();
+    }
+
+    public function listImportContainers(
+        ?int $supplierId = null,
+        ?string $search = null,
+        ?string $status = 'active',
+        int $limit = 20,
+        ?string $dateFrom = null,
+        ?string $dateTo = null,
+        ?string $poCode = null,
+        ?string $bl = null,
+        ?string $containerCode = null,
+        ?string $productType = null,
+        int $offset = 0
+    ): array {
+        $statusFilter = $status !== null ? strtolower(trim($status)) : '';
+        $where = ['sc.sord_status > 0', 'EXISTS (SELECT 1 FROM supplier_contenedor_items sci WHERE sci.sord_id = sc.id)'];
+        $params = [];
+
+        if ($statusFilter === 'active' || $statusFilter === '') {
+            $where[] = 'sc.sord_status IN (2, 3)';
+            $where[] = 'sc.sord_crtdat >= 1704067200';
+        } elseif ($statusFilter === 'complete') {
+            $where[] = '(sc.sord_status = 4 OR sc.sord_crtdat < 1704067200)';
+        }
+
+        if ($supplierId !== null && $supplierId > 0) {
+            $where[] = 'EXISTS (
+                SELECT 1
+                FROM supplier_contenedor_items sci
+                JOIN supplier_order_items soi ON soi.id = sci.sord_pos_id
+                JOIN supplier_order so ON so.id = soi.sord_id
+                WHERE sci.sord_id = sc.id
+                  AND so.sord_supplier_id = :supplier_id
+            )';
+            $params[':supplier_id'] = $supplierId;
+        }
+
+        if ($dateFrom !== null && trim($dateFrom) !== '') {
+            $tsFrom = strtotime(trim($dateFrom) . ' 00:00:00');
+            if ($tsFrom !== false) {
+                $where[] = 'sc.sord_crtdat >= :date_from';
+                $params[':date_from'] = ($statusFilter === 'active' || $statusFilter === '') ? max(1704067200, $tsFrom) : $tsFrom;
+            }
+        }
+
+        if ($dateTo !== null && trim($dateTo) !== '') {
+            $tsTo = strtotime(trim($dateTo) . ' 23:59:59');
+            if ($tsTo !== false) {
+                $where[] = 'sc.sord_crtdat <= :date_to';
+                $params[':date_to'] = $tsTo;
+            }
+        }
+
+        if ($poCode !== null && trim($poCode) !== '') {
+            $where[] = '(sc.sord_ocs LIKE :po_code OR EXISTS (
+                SELECT 1
+                FROM supplier_contenedor_items sci_po
+                JOIN supplier_order_items soi_po ON soi_po.id = sci_po.sord_pos_id
+                JOIN supplier_order so_po ON so_po.id = soi_po.sord_id
+                WHERE sci_po.sord_id = sc.id
+                  AND so_po.sord_number LIKE :po_code_sub
+            ))';
+            $params[':po_code'] = '%' . trim($poCode) . '%';
+            $params[':po_code_sub'] = '%' . trim($poCode) . '%';
+        }
+
+        if ($bl !== null && trim($bl) !== '') {
+            $where[] = 'sc.sord_billoflanding LIKE :bl';
+            $params[':bl'] = '%' . trim($bl) . '%';
+        }
+
+        if ($containerCode !== null && trim($containerCode) !== '') {
+            $where[] = 'sc.sord_contenedor LIKE :container_code';
+            $params[':container_code'] = '%' . trim($containerCode) . '%';
+        }
+
+        if ($productType !== null && trim($productType) !== '') {
+            $where[] = 'EXISTS (
+                SELECT 1
+                FROM supplier_contenedor_items sci_pt
+                JOIN supplier_order_items soi_pt ON soi_pt.id = sci_pt.sord_pos_id
+                LEFT JOIN item i_pt ON i_pt.id = soi_pt.item_id
+                WHERE sci_pt.sord_id = sc.id
+                  AND (
+                      i_pt.item_number LIKE :product_type_num
+                      OR i_pt.item_title LIKE :product_type_title
+                      OR soi_pt.item_desc LIKE :product_type_desc
+                  )
+            )';
+            $ptLike = '%' . trim($productType) . '%';
+            $params[':product_type_num'] = $ptLike;
+            $params[':product_type_title'] = $ptLike;
+            $params[':product_type_desc'] = $ptLike;
         }
 
         $search = $search !== null ? trim($search) : null;
@@ -2380,6 +3142,7 @@ SQL;
         $stmt = $this->erpPdo->prepare(
             "SELECT sc.id,
                     sc.sord_contenedor AS container_code,
+                    sc.sord_status,
                     sc.sord_buque AS vessel_name,
                     sc.sord_forward AS forwarder_name,
                     sc.sord_billoflanding AS bill_of_lading,
@@ -2390,21 +3153,22 @@ SQL;
              FROM supplier_contenedor sc
              WHERE " . implode(' AND ', $where) . "
              ORDER BY sc.id DESC
-             LIMIT :limit"
+             LIMIT :limit OFFSET :offset"
         );
         foreach ($params as $k => $v) {
             $stmt->bindValue($k, $v);
         }
         $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
+        $stmt->bindValue(':offset', max(0, $offset), PDO::PARAM_INT);
         $stmt->execute();
         $rows = $stmt->fetchAll();
         $containerIds = array_column($rows, 'id');
         $statsByContainer = $this->getImportContainerStatsByIds($containerIds);
 
-        $statusFilter = $status !== null ? strtolower(trim($status)) : '';
         $result = [];
         foreach ($rows as $row) {
-            $stats = $statsByContainer[(int)$row['id']] ?? [
+            $containerId = (int)$row['id'];
+            $stats = $statsByContainer[$containerId] ?? [
                 'total_lines' => 0,
                 'completed_lines' => 0,
                 'lines_with_progress' => 0,
@@ -2412,22 +3176,27 @@ SQL;
             $totalLines = (int)$stats['total_lines'];
             $completedLines = (int)$stats['completed_lines'];
             $hasProgress = (int)$stats['lines_with_progress'] > 0;
+            $erpStatus = (int)($row['sord_status'] ?? 0);
+            $crtdat = (int)($row['sord_crtdat'] ?? 0);
+
             $derivedStatus = 'OPEN';
-            if ($totalLines > 0 && $completedLines >= $totalLines) {
+            if ($erpStatus === 4 || $crtdat < 1704067200 || ($totalLines > 0 && $completedLines >= $totalLines)) {
                 $derivedStatus = 'COMPLETE';
             } elseif ($hasProgress) {
                 $derivedStatus = 'PARTIAL';
             }
 
-            if (($statusFilter === '' || $statusFilter === 'active') && !in_array($derivedStatus, ['OPEN', 'PARTIAL'], true)) {
-                continue;
+            if (($statusFilter === '' || $statusFilter === 'active')) {
+                if ($totalLines <= 0 || !in_array($derivedStatus, ['OPEN', 'PARTIAL'], true)) {
+                    continue;
+                }
             }
             if ($statusFilter === 'complete' && $derivedStatus !== 'COMPLETE') {
                 continue;
             }
 
             $result[] = [
-                'id' => (int)$row['id'],
+                'id' => $containerId,
                 'container_code' => trim((string)($row['container_code'] ?? '')),
                 'vessel_name' => trim((string)($row['vessel_name'] ?? '')),
                 'forwarder_name' => trim((string)($row['forwarder_name'] ?? '')),
@@ -2437,6 +3206,7 @@ SQL;
                 'eta_port' => (int)($row['sord_eta_puerto'] ?? 0) > 0 ? gmdate('Y-m-d', (int)$row['sord_eta_puerto']) : '',
                 'eta_plant' => (int)($row['sord_eta_puertounibag'] ?? 0) > 0 ? gmdate('Y-m-d', (int)$row['sord_eta_puertounibag']) : '',
                 'status' => $derivedStatus,
+                'sord_status' => $erpStatus,
                 'total_lines' => $totalLines,
                 'completed_lines' => $completedLines,
             ];
@@ -2516,6 +3286,7 @@ SQL;
         $stmt = $this->erpPdo->prepare(
             "SELECT sc.id,
                     sc.sord_contenedor AS container_code,
+                    sc.sord_status,
                     sc.sord_desc AS description,
                     sc.sord_buque AS vessel_name,
                     sc.sord_forward AS forwarder_name,
@@ -2535,22 +3306,27 @@ SQL;
             return null;
         }
 
+        $erpStatus = (int)($row['sord_status'] ?? 0);
+        $crtdat = (int)($row['sord_crtdat'] ?? 0);
         $status = 'OPEN';
         $stats = $this->getImportContainerStatsByIds([$id])[$id] ?? null;
         if (is_array($stats)) {
             $totalLines = (int)$stats['total_lines'];
             $completedLines = (int)$stats['completed_lines'];
             $hasProgress = (int)$stats['lines_with_progress'] > 0;
-            if ($totalLines > 0 && $completedLines >= $totalLines) {
+            if ($erpStatus === 4 || $crtdat < 1704067200 || ($totalLines > 0 && $completedLines >= $totalLines)) {
                 $status = 'COMPLETE';
             } elseif ($hasProgress) {
                 $status = 'PARTIAL';
             }
+        } elseif ($erpStatus === 4 || $crtdat < 1704067200) {
+            $status = 'COMPLETE';
         }
 
         return [
             'id' => (int)$row['id'],
             'container_code' => trim((string)($row['container_code'] ?? '')),
+            'sord_status' => $erpStatus,
             'description' => trim((string)($row['description'] ?? '')),
             'vessel_name' => trim((string)($row['vessel_name'] ?? '')),
             'forwarder_name' => trim((string)($row['forwarder_name'] ?? '')),
@@ -2615,6 +3391,101 @@ SQL;
                 $normalizedLine['reception_mode'] = $savedModesByItem[$containerItemId];
             }
             $normalized[] = $normalizedLine;
+        }
+
+        return $normalized;
+    }
+
+    public function listImportContainerLinesForContainers(array $containerIds): array
+    {
+        if ($containerIds === []) {
+            return [];
+        }
+        $in = implode(',', array_fill(0, count($containerIds), '?'));
+        $stmt = $this->erpPdo->prepare(
+            "SELECT sci.id AS container_item_id,
+                    sci.sord_id AS container_id,
+                    sci.sord_amount AS container_ordered_rolls,
+                    sci.sord_kgs_amount AS container_ordered_weight_kg,
+                    sc.sord_contenedor AS container_code,
+                    soi.id,
+                    soi.sord_id AS purchase_order_id,
+                    so.sord_supplier_id AS supplier_id,
+                    soi.item_id AS erp_item_id,
+                    soi.item_desc AS line_description,
+                    so.sord_number AS po_code,
+                    so.sord_crtdat,
+                    s.supp_company AS supplier_name,
+                    c.country_name AS supplier_country_name,
+                    i.item_number AS sku_code,
+                    i.item_title AS sku_title,
+                    i.item_reg_gsm AS grams,
+                    i.item_reg_width AS width_mm,
+                    '' AS color,
+                    i.item_reg_length AS meters
+             FROM supplier_contenedor_items sci
+             JOIN supplier_contenedor sc ON sc.id = sci.sord_id
+             JOIN supplier_order_items soi ON soi.id = sci.sord_pos_id
+             JOIN supplier_order so ON so.id = soi.sord_id
+             JOIN supplier s ON s.id = so.sord_supplier_id
+             LEFT JOIN country c ON c.id = s.supp_countryid
+             LEFT JOIN item i ON i.id = soi.item_id
+             WHERE sci.sord_id IN ($in)
+             ORDER BY sci.sord_id DESC, sci.id ASC"
+        );
+        $stmt->execute($containerIds);
+        $rows = $stmt->fetchAll();
+        if ($rows === []) {
+            return [];
+        }
+        $summaryByItem = $this->getReceivedSummaryByImportContainerItemIds(array_column($rows, 'container_item_id'));
+        $savedModesByItem = $this->getSavedReceptionModesByImportContainerItemIds(array_column($rows, 'container_item_id'));
+
+        $normalized = [];
+        foreach ($rows as $row) {
+            $containerItemId = (int)$row['container_item_id'];
+            $received = $summaryByItem[$containerItemId] ?? [
+                'received_rolls' => 0,
+                'received_qty' => 0.0,
+                'received_weight_kg' => 0.0,
+            ];
+            $lineId = (int)$row['id'];
+            $erpItemId = (int)($row['erp_item_id'] ?? 0);
+            $skuCode = trim((string)($row['sku_code'] ?? ''));
+            if ($skuCode === '') {
+                $skuCode = $erpItemId > 0 ? ('ERPITEM-' . $erpItemId) : ('ERP-LINE-' . $lineId);
+            }
+            $skuDesc = trim((string)($row['sku_title'] ?? ''));
+            if ($skuDesc === '') {
+                $skuDesc = trim((string)($row['line_description'] ?? ''));
+            }
+            $mode = $savedModesByItem[$containerItemId] ?? ($row['container_ordered_weight_kg'] > 0 ? 'WEIGHT' : 'QUANTITY');
+
+            $normalized[] = [
+                'id' => $lineId,
+                'import_container_id' => (int)$row['container_id'],
+                'import_container_item_id' => $containerItemId,
+                'container_code' => trim((string)($row['container_code'] ?? '')),
+                'purchase_order_id' => (int)($row['purchase_order_id'] ?? 0),
+                'supplier_id' => (int)($row['supplier_id'] ?? 0),
+                'erp_item_id' => $erpItemId,
+                'ordered_rolls' => (float)($row['container_ordered_rolls'] ?? 0),
+                'ordered_weight_kg' => (float)($row['container_ordered_weight_kg'] ?? 0),
+                'grams' => (float)($row['grams'] ?? 0),
+                'width_mm' => (float)($row['width_mm'] ?? 0),
+                'color' => (string)($row['color'] ?? ''),
+                'meters' => (float)($row['meters'] ?? 0),
+                'created_at' => gmdate('Y-m-d H:i:s', (int)($row['sord_crtdat'] ?? 0)),
+                'sku_code' => $skuCode,
+                'sku_description' => $skuDesc,
+                'received_rolls' => (int)$received['received_rolls'],
+                'received_qty' => (float)$received['received_qty'],
+                'received_weight_kg' => (float)$received['received_weight_kg'],
+                'po_code' => (string)($row['po_code'] ?? ''),
+                'supplier_name' => (string)($row['supplier_name'] ?? ''),
+                'supplier_country_name' => trim((string)($row['supplier_country_name'] ?? '')),
+                'reception_mode' => $mode,
+            ];
         }
 
         return $normalized;
@@ -2708,6 +3579,91 @@ SQL;
                 $line['reception_mode'] = $savedModesByLine[$lineId];
             }
             $normalized[] = $line;
+        }
+
+        return $normalized;
+    }
+
+    public function listPurchaseOrderLinesForOrders(array $purchaseOrderIds): array
+    {
+        if ($purchaseOrderIds === []) {
+            return [];
+        }
+        $in = implode(',', array_fill(0, count($purchaseOrderIds), '?'));
+        $stmt = $this->erpPdo->prepare(
+            "SELECT soi.id,
+                    soi.sord_id AS purchase_order_id,
+                    so.sord_supplier_id AS supplier_id,
+                    soi.item_id AS erp_item_id,
+                    soi.item_amount AS ordered_rolls,
+                    soi.item_kgs AS ordered_weight_kg,
+                    soi.item_desc AS line_description,
+                    so.sord_number AS po_code,
+                    so.sord_crtdat,
+                    s.supp_company AS supplier_name,
+                    c.country_name AS supplier_country_name,
+                    i.item_number AS sku_code,
+                    i.item_title AS sku_title,
+                    i.item_reg_gsm AS grams,
+                    i.item_reg_width AS width_mm,
+                    '' AS color,
+                    i.item_reg_length AS meters
+             FROM supplier_order_items soi
+             JOIN supplier_order so ON so.id = soi.sord_id
+             JOIN supplier s ON s.id = so.sord_supplier_id
+             LEFT JOIN country c ON c.id = s.supp_countryid
+             LEFT JOIN item i ON i.id = soi.item_id
+             WHERE soi.sord_id IN ($in)
+             ORDER BY soi.sord_id DESC, soi.id ASC"
+        );
+        $stmt->execute($purchaseOrderIds);
+        $rows = $stmt->fetchAll();
+        if ($rows === []) {
+            return [];
+        }
+        $summaryByLine = $this->getReceivedSummaryByPurchaseOrderLineIds(array_column($rows, 'id'));
+        $savedModesByLine = $this->getSavedReceptionModesByPurchaseOrderLineIds(array_column($rows, 'id'));
+        $normalized = [];
+        foreach ($rows as $row) {
+            $lineId = (int)$row['id'];
+            $received = $summaryByLine[$lineId] ?? [
+                'received_rolls' => 0,
+                'received_qty' => 0.0,
+                'received_weight_kg' => 0.0,
+            ];
+            $erpItemId = (int)($row['erp_item_id'] ?? 0);
+            $skuCode = trim((string)($row['sku_code'] ?? ''));
+            if ($skuCode === '') {
+                $skuCode = $erpItemId > 0 ? ('ERPITEM-' . $erpItemId) : ('ERP-LINE-' . $lineId);
+            }
+            $skuDesc = trim((string)($row['sku_title'] ?? ''));
+            if ($skuDesc === '') {
+                $skuDesc = trim((string)($row['line_description'] ?? ''));
+            }
+            $mode = $savedModesByLine[$lineId] ?? ($row['ordered_weight_kg'] > 0 ? 'WEIGHT' : 'QUANTITY');
+
+            $normalized[] = [
+                'id' => $lineId,
+                'purchase_order_id' => (int)($row['purchase_order_id'] ?? 0),
+                'supplier_id' => (int)($row['supplier_id'] ?? 0),
+                'erp_item_id' => $erpItemId,
+                'ordered_rolls' => (float)($row['ordered_rolls'] ?? 0),
+                'ordered_weight_kg' => (float)($row['ordered_weight_kg'] ?? 0),
+                'grams' => (float)($row['grams'] ?? 0),
+                'width_mm' => (float)($row['width_mm'] ?? 0),
+                'color' => (string)($row['color'] ?? ''),
+                'meters' => (float)($row['meters'] ?? 0),
+                'created_at' => gmdate('Y-m-d H:i:s', (int)($row['sord_crtdat'] ?? 0)),
+                'sku_code' => $skuCode,
+                'sku_description' => $skuDesc,
+                'received_rolls' => (int)$received['received_rolls'],
+                'received_qty' => (float)$received['received_qty'],
+                'received_weight_kg' => (float)$received['received_weight_kg'],
+                'po_code' => (string)($row['po_code'] ?? ''),
+                'supplier_name' => (string)($row['supplier_name'] ?? ''),
+                'supplier_country_name' => trim((string)($row['supplier_country_name'] ?? '')),
+                'reception_mode' => $mode,
+            ];
         }
 
         return $normalized;
@@ -2908,7 +3864,176 @@ SQL;
         }
 
         $this->refreshPurchaseOrderStatus((int)$line['purchase_order_id']);
+        $containerId = (int)($line['import_container_id'] ?? 0);
+        if ($containerId > 0) {
+            $this->refreshImportContainerStatus($containerId);
+        }
         return $result;
+    }
+
+    public function ensureReceptionClosureSchema(): void
+    {
+        try {
+            $this->pdo->exec(
+                "CREATE TABLE IF NOT EXISTS reception_closures (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                    entity_type ENUM('PURCHASE_ORDER', 'IMPORT_CONTAINER') NOT NULL,
+                    entity_id INT UNSIGNED NOT NULL,
+                    closed_by_user_id INT UNSIGNED NOT NULL DEFAULT 0,
+                    reason VARCHAR(150) NOT NULL,
+                    notes TEXT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    KEY idx_entity (entity_type, entity_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
+            );
+        } catch (Throwable) {
+        }
+    }
+
+    public function closePurchaseOrderReception(int $purchaseOrderId, int $userId = 0, string $reason = '', ?string $notes = null): array
+    {
+        if ($purchaseOrderId <= 0) {
+            return ['ok' => false, 'error' => 'ID de orden de compra inválido'];
+        }
+        $this->ensureReceptionClosureSchema();
+
+        $stmt = $this->erpPdo->prepare(
+            'UPDATE supplier_order
+             SET sord_status = 4,
+                 sord_order_shipped = 1,
+                 sord_upddat = :upddat,
+                 sord_updusr = :updusr
+             WHERE id = :id'
+        );
+        $ok = $stmt->execute([
+            ':upddat' => time(),
+            ':updusr' => $userId > 0 ? $userId : 1,
+            ':id' => $purchaseOrderId,
+        ]);
+
+        if (!$ok) {
+            return ['ok' => false, 'error' => 'No se pudo actualizar la orden de compra en el ERP'];
+        }
+
+        try {
+            $stmtIns = $this->pdo->prepare(
+                'INSERT INTO reception_closures (entity_type, entity_id, closed_by_user_id, reason, notes)
+                 VALUES ("PURCHASE_ORDER", :entity_id, :user_id, :reason, :notes)'
+            );
+            $stmtIns->execute([
+                ':entity_id' => $purchaseOrderId,
+                ':user_id' => $userId,
+                ':reason' => $reason !== '' ? $reason : 'Falla de proveedor (Reembolso acordado)',
+                ':notes' => $notes !== '' ? $notes : null,
+            ]);
+        } catch (Throwable) {
+        }
+
+        return ['ok' => true];
+    }
+
+    public function closeImportContainerReception(int $containerId, int $userId = 0, string $reason = '', ?string $notes = null): array
+    {
+        if ($containerId <= 0) {
+            return ['ok' => false, 'error' => 'ID de contenedor inválido'];
+        }
+        $this->ensureReceptionClosureSchema();
+
+        $stmt = $this->erpPdo->prepare(
+            'UPDATE supplier_contenedor
+             SET sord_status = 4,
+                 sord_upddat = :upddat,
+                 sord_updusr = :updusr
+             WHERE id = :id'
+        );
+        $ok = $stmt->execute([
+            ':upddat' => time(),
+            ':updusr' => $userId > 0 ? $userId : 1,
+            ':id' => $containerId,
+        ]);
+
+        if (!$ok) {
+            return ['ok' => false, 'error' => 'No se pudo actualizar el contenedor en el ERP'];
+        }
+
+        try {
+            $stmtIns = $this->pdo->prepare(
+                'INSERT INTO reception_closures (entity_type, entity_id, closed_by_user_id, reason, notes)
+                 VALUES ("IMPORT_CONTAINER", :entity_id, :user_id, :reason, :notes)'
+            );
+            $stmtIns->execute([
+                ':entity_id' => $containerId,
+                ':user_id' => $userId,
+                ':reason' => $reason !== '' ? $reason : 'Falla de proveedor (Reembolso acordado)',
+                ':notes' => $notes !== '' ? $notes : null,
+            ]);
+        } catch (Throwable) {
+        }
+
+        return ['ok' => true];
+    }
+
+    public function getReceptionClosure(string $entityType, int $entityId): ?array
+    {
+        $this->ensureReceptionClosureSchema();
+        try {
+            $stmt = $this->pdo->prepare(
+                'SELECT id, entity_type, entity_id, closed_by_user_id, reason, notes, created_at
+                 FROM reception_closures
+                 WHERE entity_type = :entity_type AND entity_id = :entity_id
+                 ORDER BY id DESC
+                 LIMIT 1'
+            );
+            $stmt->execute([
+                ':entity_type' => $entityType,
+                ':entity_id' => $entityId,
+            ]);
+            $res = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $res ?: null;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    public function archiveImportContainer(int $containerId, int $userId = 0): bool
+    {
+        if ($containerId <= 0) {
+            return false;
+        }
+        $stmt = $this->erpPdo->prepare(
+            'UPDATE supplier_contenedor
+             SET sord_status = 4,
+                 sord_upddat = :upddat,
+                 sord_updusr = :updusr
+             WHERE id = :id'
+        );
+        return $stmt->execute([
+            ':upddat' => time(),
+            ':updusr' => $userId > 0 ? $userId : 1,
+            ':id' => $containerId,
+        ]);
+    }
+
+    public function refreshImportContainerStatus(int $containerId): void
+    {
+        if ($containerId <= 0) {
+            return;
+        }
+        $lines = $this->listImportContainerLines($containerId);
+        if ($lines === []) {
+            return;
+        }
+        $allComplete = true;
+        foreach ($lines as $line) {
+            $summary = $this->summarizeReceptionLine($line);
+            if (!$summary['is_complete']) {
+                $allComplete = false;
+                break;
+            }
+        }
+        if ($allComplete) {
+            $this->archiveImportContainer($containerId);
+        }
     }
 
     public function refreshPurchaseOrderStatus(int $purchaseOrderId): void
@@ -2953,6 +4078,18 @@ SQL;
             ':is_complete' => $allComplete ? 1 : 0,
             ':id' => $purchaseOrderId,
         ]);
+        if ($allComplete) {
+            $updateStatus = $this->erpPdo->prepare(
+                'UPDATE supplier_order
+                 SET sord_status = 4,
+                     sord_upddat = :upddat
+                 WHERE id = :id'
+            );
+            $updateStatus->execute([
+                ':upddat' => time(),
+                ':id' => $purchaseOrderId,
+            ]);
+        }
     }
 
     public function listWorkOrders(int $limit = 50): array
@@ -3640,9 +4777,13 @@ SQL;
 
     private function getAppSetting(string $key, ?string $default = null): ?string
     {
-        $stmt = $this->pdo->prepare('SELECT setting_value FROM app_settings WHERE setting_key = :key LIMIT 1');
-        $stmt->execute([':key' => $key]);
-        $row = $stmt->fetch();
+        try {
+            $stmt = $this->pdo->prepare('SELECT setting_value FROM app_settings WHERE setting_key = :key LIMIT 1');
+            $stmt->execute([':key' => $key]);
+            $row = $stmt->fetch();
+        } catch (Throwable) {
+            return $default;
+        }
         if ($row === false) {
             return $default;
         }
@@ -3653,14 +4794,18 @@ SQL;
 
     private function setAppSetting(string $key, string $value): void
     {
-        $stmt = $this->pdo->prepare(
-            'INSERT INTO app_settings (setting_key, setting_value) VALUES (:key, :value)
-             ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)'
-        );
-        $stmt->execute([
-            ':key' => $key,
-            ':value' => $value,
-        ]);
+        try {
+            $stmt = $this->pdo->prepare(
+                'INSERT INTO app_settings (setting_key, setting_value) VALUES (:key, :value)
+                 ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)'
+            );
+            $stmt->execute([
+                ':key' => $key,
+                ':value' => $value,
+            ]);
+        } catch (Throwable) {
+            return;
+        }
     }
 
     public function getRollRequestLinearPlanningConfig(): array
@@ -7871,6 +9016,2716 @@ SQL;
         return $stmt->fetchAll();
     }
 
+    // =========================================================================
+    // Informe personal por máquina (Maquinarias)
+    // =========================================================================
+
+    /**
+     * Obtiene las plantas disponibles en el ERP.
+     *
+     * @return list<array{id: int, planta_name: string}>
+     */
+    public function getPlantasList(): array
+    {
+        $table = $this->erpTableExists('plantas') ? 'plantas' : ($this->erpTableExists('planta') ? 'planta' : null);
+        if ($table === null) {
+            return [];
+        }
+        try {
+            $nameCol = $this->erpColumnExists($table, 'planta_name') ? 'planta_name' : ($this->erpColumnExists($table, 'name') ? 'name' : null);
+            if ($nameCol === null) {
+                $stmt = $this->erpPdo->query('SELECT id, id AS planta_name FROM ' . $table . ' WHERE id > 0 ORDER BY id');
+            } else {
+                $stmt = $this->erpPdo->query('SELECT id, ' . $nameCol . ' AS planta_name FROM ' . $table . ' ORDER BY ' . $nameCol);
+            }
+            return $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Obtiene los tipos de equipo activos en el ERP.
+     *
+     * @return list<array{id: int, type_ant_title: string}>
+     */
+    public function getEquipoTypesList(): array
+    {
+        if (!$this->erpTableExists('equipo_type')) {
+            return [];
+        }
+        try {
+            $titleCol = $this->erpColumnExists('equipo_type', 'type_ant_title') ? 'type_ant_title' : ($this->erpColumnExists('equipo_type', 'type_name') ? 'type_name' : null);
+            if ($titleCol === null) {
+                return [];
+            }
+            $statusCol = $this->erpColumnExists('equipo_type', 'type_ant_status') ? 'type_ant_status' : null;
+            $where = $statusCol !== null ? ('WHERE ' . $statusCol . ' > 0') : '';
+            $stmt = $this->erpPdo->query('SELECT id, ' . $titleCol . ' AS type_ant_title FROM equipo_type ' . $where . ' ORDER BY ' . $titleCol);
+            return $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Obtiene equipos filtrados por planta y opcionalmente por tipo.
+     *
+     * @return list<array{id: int, equipo_name: string}>
+     */
+    public function getEquiposByPlantaAndType(int $plantaId, ?int $equipoTypeId = null): array
+    {
+        if (!$this->erpTableExists('equipo')) {
+            return [];
+        }
+        $nameCol = $this->erpColumnExists('equipo', 'equipo_name') ? 'equipo_name' : ($this->erpColumnExists('equipo', 'name') ? 'name' : null);
+        if ($nameCol === null) {
+            return [];
+        }
+        try {
+            $sql = 'SELECT id, ' . $nameCol . ' AS equipo_name FROM equipo WHERE equipo_status > 0 AND equipo_planta_id = :planta_id';
+            $params = [':planta_id' => $plantaId];
+            if ($equipoTypeId !== null && $equipoTypeId > 0) {
+                $sql .= ' AND equipo_type_id = :type_id';
+                $params[':type_id'] = $equipoTypeId;
+            }
+            $sql .= ' ORDER BY ' . $nameCol;
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            return $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Genera el informe de personal por máquina.
+     *
+     * Consulta turnos_config_assign para obtener asignaciones de trabajadores a equipos
+     * en un rango de fechas, agrupado por equipo. Incluye incidencias de personal.
+     *
+     * Adaptado del backup: libs/modules/stats/workers/maquina.php
+     *
+     * @return array{
+     *   equipos: list<array{id: int, equipo_name: string}>,
+     *   assignments: array<int, list<array<string, mixed>>>,
+     *   incidents: array<int, array<string, array<string, mixed>>>,
+     *   plantas: list<array>,
+     *   equipo_types: list<array>,
+     *   equipo_list: list<array>
+     * }
+     */
+    public function getMachineStaffReport(
+        string $startAt,
+        string $endAt,
+        ?int $plantaId = null,
+        ?int $equipoTypeId = null,
+        ?int $equipoId = null
+    ): array {
+        $result = [
+            'equipos' => [],
+            'assignments' => [],
+            'incidents' => [],
+            'plantas' => $this->getPlantasList(),
+            'equipo_types' => $this->getEquipoTypesList(),
+            'equipo_list' => [],
+        ];
+
+        if (!$this->erpTableExists('equipo') || !$this->erpTableExists('turnos_config_assign')) {
+            return $result;
+        }
+
+        // Determinar planta por defecto
+        if ($plantaId === null || $plantaId <= 0) {
+            if (!empty($result['plantas'])) {
+                $plantaId = (int)$result['plantas'][0]['id'];
+            } else {
+                return $result;
+            }
+        }
+
+        // Obtener equipos disponibles para los filtros
+        $result['equipo_list'] = $this->getEquiposByPlantaAndType($plantaId, $equipoTypeId);
+
+        // Convertir fechas a timestamps UNIX (el ERP usa timestamps UNIX)
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            return $result;
+        }
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return $result;
+        }
+
+        // Obtener equipos para el informe
+        $equipoNameCol = $this->erpColumnExists('equipo', 'equipo_name') ? 'equipo_name' : ($this->erpColumnExists('equipo', 'name') ? 'name' : null);
+        if ($equipoNameCol === null) {
+            return $result;
+        }
+
+        $equipoSql = 'SELECT id, ' . $equipoNameCol . ' AS equipo_name FROM equipo WHERE equipo_status > 0 AND equipo_planta_id = :planta_id';
+        $equipoParams = [':planta_id' => $plantaId];
+        if ($equipoTypeId !== null && $equipoTypeId > 0) {
+            $equipoSql .= ' AND equipo_type_id = :type_id';
+            $equipoParams[':type_id'] = $equipoTypeId;
+        }
+        if ($equipoId !== null && $equipoId > 0) {
+            $equipoSql .= ' AND id = :equipo_id';
+            $equipoParams[':equipo_id'] = $equipoId;
+        }
+        $equipoSql .= ' ORDER BY equipo_name';
+
+        try {
+            $stmt = $this->erpPdo->prepare($equipoSql);
+            $stmt->execute($equipoParams);
+            $equipos = $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            return $result;
+        }
+        $result['equipos'] = $equipos;
+
+        if (empty($equipos)) {
+            return $result;
+        }
+
+        // Consultar asignaciones de personal por máquina
+        $hasWorkersTable = $this->erpTableExists('workers');
+        $hasWorkersTypes = $this->erpTableExists('workers_types');
+        $hasTurnos = $this->erpTableExists('turnos');
+        $hasTurnosTypes = $this->erpTableExists('turnos_types');
+
+        $selectParts = [
+            't1.*',
+        ];
+        $joinParts = [];
+
+        if ($hasTurnos) {
+            $selectParts[] = 't3.turn_name';
+            $joinParts[] = 'LEFT JOIN turnos t3 ON t1.assign_turno_id = t3.id';
+        }
+        if ($hasTurnosTypes) {
+            $selectParts[] = 't6.type_name_short AS turno_type_short';
+            $selectParts[] = 't6.type_color';
+            $joinParts[] = 'LEFT JOIN turnos_types t6 ON t1.assign_turno_type_id = t6.id';
+        }
+        if ($hasWorkersTable) {
+            $selectParts[] = 't8.wrk_firstname';
+            $selectParts[] = 't8.wrk_lastname';
+            $selectParts[] = 't8.wrk_rut';
+            $joinParts[] = 'LEFT JOIN workers t8 ON t1.assign_worker_id = t8.id';
+            if ($hasWorkersTypes && $this->erpColumnExists('workers', 'wrk_cargoid')) {
+                $selectParts[] = 't9.type_name AS cargo';
+                $joinParts[] = 'LEFT JOIN workers_types t9 ON t8.wrk_cargoid = t9.id';
+            }
+        }
+
+        $selectSql = implode(', ', $selectParts);
+        $joinSql = implode(' ', $joinParts);
+
+        // Verificar el nombre de la columna de equipo en la asignación
+        $assignEquipoCol = 'assign_equipoaid';
+        if (!$this->erpColumnExists('turnos_config_assign', 'assign_equipoaid')) {
+            if ($this->erpColumnExists('turnos_config_assign', 'assign_equipo_id')) {
+                $assignEquipoCol = 'assign_equipo_id';
+            } else {
+                return $result;
+            }
+        }
+
+        $hasPlantaCol = $this->erpColumnExists('turnos_config_assign', 'assign_planta_id');
+
+        $sql = 'SELECT ' . $selectSql . '
+                FROM turnos_config_assign t1
+                ' . $joinSql . '
+                WHERE t1.assign_stamp BETWEEN :start_ts AND :end_ts';
+        $queryParams = [':start_ts' => $startTs, ':end_ts' => $endTs];
+
+        if ($hasPlantaCol) {
+            $sql .= ' AND t1.assign_planta_id = :planta_id';
+            $queryParams[':planta_id'] = $plantaId;
+        }
+
+        $sql .= ' ORDER BY t1.assign_stamp, t1.ass_init_hour, t1.ass_init_min, t1.ass_end_hour, t1.ass_end_min';
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($queryParams);
+            $allAssignments = $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            return $result;
+        }
+
+        // Agrupar por equipo
+        $assignments = [];
+        foreach ($allAssignments as $row) {
+            $eqId = (int)($row[$assignEquipoCol] ?? 0);
+            if ($eqId > 0) {
+                $assignments[$eqId][] = $row;
+            }
+        }
+        $result['assignments'] = $assignments;
+
+        // Consultar incidencias de personal
+        if ($this->erpTableExists('turnos_config_incidencias') && $this->erpTableExists('incidencias')) {
+            try {
+                $stmt = $this->erpPdo->query(
+                    'SELECT t1.id, t1.cfi_startdate, t1.cfi_enddate, t1.cfi_workerid,
+                            t3.inc_name_short, t3.inc_name, t3.inc_color
+                     FROM turnos_config_incidencias t1
+                     INNER JOIN incidencias t3 ON t1.cfi_inc_id = t3.id
+                     WHERE t1.cfi_status = 2 AND t3.inc_type = 0'
+                );
+                $allIncidents = $stmt->fetchAll() ?: [];
+            } catch (Throwable) {
+                $allIncidents = [];
+            }
+
+            $incidents = [];
+            foreach ($allIncidents as $inc) {
+                $cfiStart = (int)($inc['cfi_startdate'] ?? 0);
+                $cfiEnd = (int)($inc['cfi_enddate'] ?? 0);
+                for ($x = $cfiStart + 3600; $x <= $cfiEnd; $x += 86400) {
+                    if ($x >= $startTs && $x <= $endTs) {
+                        $workerId = (int)($inc['cfi_workerid'] ?? 0);
+                        $dateKey = date('d.m.Y', $x);
+                        $incidents[$workerId][$dateKey] = $inc;
+                    }
+                }
+            }
+            $result['incidents'] = $incidents;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Genera el informe de producción por máquina.
+     *
+     * Consulta órdenes de trabajo producidas en el rango de fechas con desglose
+     * por tipo de equipo/proceso (Flexografía, Corte y Sellado, Serigrafía, Pulpo,
+     * Embalaje, Rebobinado, etc.) y todas las máquinas correspondientes a cada proceso.
+     *
+     * Adaptado y unificado de libs/modules/stats/prod/ (corteysellado.php,
+     * flexo.php, serigrafia.php, pulpo-seri.php, embalaje.php).
+     *
+     * @return array{
+     *   plantas: list<array>,
+     *   equipo_types: list<array>,
+     *   equipos: list<array>,
+     *   processes: array<string, array{title: string, count: int, produced: float}>,
+     *   active_process: string,
+     *   rows: list<array<string, mixed>>,
+     *   summary: array<string, mixed>
+     * }
+     */
+    public function getMachineProductionReport(
+        string $startAt,
+        string $endAt,
+        ?int $plantaId = null,
+        ?int $equipoTypeId = null,
+        ?int $equipoId = null,
+        ?string $search = null,
+        ?string $process = null
+    ): array {
+        $process = strtolower(trim((string)($process ?? 'sellado')));
+        if ($process === '' || $process === 'all') {
+            $process = 'sellado';
+        }
+
+        $result = [
+            'plantas' => $this->getPlantasList(),
+            'equipo_types' => $this->getEquipoTypesList(),
+            'equipos' => [],
+            'processes' => [
+                'sellado' => ['title' => 'Corte y Sellado', 'count' => 0, 'produced' => 0.0],
+                'flexo' => ['title' => 'Flexografía', 'count' => 0, 'produced' => 0.0],
+                'seri' => ['title' => 'Serigrafía', 'count' => 0, 'produced' => 0.0],
+                'pulpo' => ['title' => 'Pulpo Serigráfico', 'count' => 0, 'produced' => 0.0],
+                'embalaje' => ['title' => 'Embalaje', 'count' => 0, 'produced' => 0.0],
+                'rebo' => ['title' => 'Rebobinado', 'count' => 0, 'produced' => 0.0],
+            ],
+            'active_process' => $process,
+            'is_historical_search' => false,
+            'search_query' => $search,
+            'rows' => [],
+            'summary' => [
+                'total_ots' => 0,
+                'total_produced_units' => 0.0,
+                'total_requested_units' => 0.0,
+                'total_pending_units' => 0.0,
+                'total_waste_units' => 0.0,
+                'total_waste_kg' => 0.0,
+                'waste_percent' => null,
+                'total_hours' => 0.0,
+            ],
+        ];
+
+        if (!$this->erpTableExists('prod_worker_ot') || !$this->erpTableExists('prod_agenda')) {
+            return $result;
+        }
+
+        // Determinar planta por defecto si aplica
+        if (($plantaId === null || $plantaId <= 0) && !empty($result['plantas'])) {
+            $plantaId = (int)$result['plantas'][0]['id'];
+        }
+
+        $result['equipos'] = $plantaId !== null ? $this->getEquiposByPlantaAndType($plantaId, $equipoTypeId) : [];
+
+        // Convertir fechas a timestamps UNIX
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            return $result;
+        }
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return $result;
+        }
+
+        // Helper para construir cláusulas de búsqueda inteligente con nombres únicos de parámetros
+        // para prevenir errores SQLSTATE[HY093] por placeholders duplicados en PDO nativo.
+        $buildSearchCondition = static function (string $raw, array &$params): string {
+            $raw = trim($raw);
+            if ($raw === '') {
+                return '';
+            }
+
+            $clauses = [];
+            $idx = 0;
+
+            // 1. Búsqueda directa sobre campos de texto estándar
+            $idx++;
+            $clauses[] = "t4.prd_number LIKE :s_ot_raw_{$idx}";
+            $params[":s_ot_raw_{$idx}"] = '%' . $raw . '%';
+
+            $clauses[] = "t9.req_number LIKE :s_cc_raw_{$idx}";
+            $params[":s_cc_raw_{$idx}"] = '%' . $raw . '%';
+
+            $clauses[] = "t12.cust_name LIKE :s_cust_raw_{$idx}";
+            $params[":s_cust_raw_{$idx}"] = '%' . $raw . '%';
+
+            $clauses[] = "t11.item_title LIKE :s_item_raw_{$idx}";
+            $params[":s_item_raw_{$idx}"] = '%' . $raw . '%';
+
+            $clauses[] = "t11.item_number_prod LIKE :s_prod_raw_{$idx}";
+            $params[":s_prod_raw_{$idx}"] = '%' . $raw . '%';
+
+            // 2. Si el usuario prefijó OT (ej. "OT 3837", "OT-3837", "OT#3837", "OT: 3837")
+            $otClean = trim((string)preg_replace('/^ot[:\s\-_#]*/i', '', $raw));
+            if ($otClean !== '' && $otClean !== $raw) {
+                $idx++;
+                $clauses[] = "t4.prd_number LIKE :s_ot_cl_{$idx}";
+                $params[":s_ot_cl_{$idx}"] = '%' . $otClean . '%';
+            }
+
+            // 3. Si el usuario prefijó CC (ej. "CC 26-00808-1", "CC-808", "CC 808")
+            $ccClean = trim((string)preg_replace('/^cc[:\s\-_#]*/i', '', $raw));
+            if ($ccClean !== '' && $ccClean !== $raw) {
+                $idx++;
+                $clauses[] = "t9.req_number LIKE :s_cc_cl_{$idx}";
+                $params[":s_cc_cl_{$idx}"] = '%' . $ccClean . '%';
+            }
+
+            // 4. Búsqueda numérica exacta o zero-padded para OT (003837) y CC (00808)
+            if (preg_match('/^\d+$/', $raw)) {
+                $num = (int)$raw;
+                $idx++;
+                $clauses[] = "t4.prd_number = :s_padot_{$idx}";
+                $params[":s_padot_{$idx}"] = sprintf('%06d', $num);
+
+                $idx++;
+                $clauses[] = "t9.req_number LIKE :s_padcc_{$idx}";
+                $params[":s_padcc_{$idx}"] = '%' . sprintf('%05d', $num) . '%';
+            }
+
+            // 5. Si viene texto mixto como "OT 3837" o "CC 808", extraer también el número puro
+            $cleanNum = trim((string)preg_replace('/[^0-9]/', '', $raw));
+            if ($cleanNum !== '' && $cleanNum !== $raw && strlen($cleanNum) <= 6) {
+                $num2 = (int)$cleanNum;
+                $idx++;
+                $clauses[] = "t4.prd_number = :s_padot2_{$idx}";
+                $params[":s_padot2_{$idx}"] = sprintf('%06d', $num2);
+
+                $idx++;
+                $clauses[] = "t9.req_number LIKE :s_padcc2_{$idx}";
+                $params[":s_padcc2_{$idx}"] = '%' . sprintf('%05d', $num2) . '%';
+            }
+
+            return '(' . implode(' OR ', array_unique($clauses)) . ')';
+        };
+
+        $baseWhereClauses = [
+            't1.wok_status > 0',
+            't1.wok_crtdat BETWEEN :start_ts AND :end_ts',
+        ];
+        $baseParams = [
+            ':start_ts' => $startTs,
+            ':end_ts' => $endTs,
+        ];
+
+        if ($plantaId !== null && $plantaId > 0 && $this->erpColumnExists('prod_header', 'prd_plantaid')) {
+            $baseWhereClauses[] = 't4.prd_plantaid = :planta_id';
+            $baseParams[':planta_id'] = $plantaId;
+        }
+
+        $search = trim((string)$search);
+        if ($search !== '') {
+            $searchCond = $buildSearchCondition($search, $baseParams);
+            if ($searchCond !== '') {
+                $baseWhereClauses[] = $searchCond;
+            }
+        }
+
+        // Primero calculamos conteos y totales por proceso para los tabs acotados a la Fecha de Proceso
+        $whereProcessCounts = implode(' AND ', $baseWhereClauses);
+        $countsParams = $baseParams;
+
+        $countsSql = "
+            SELECT 
+                CASE 
+                    WHEN t7.equipo_type_id = 7 THEN 'flexo'
+                    WHEN t7.equipo_type_id = 8 THEN 'sellado'
+                    WHEN t7.equipo_type_id = 11 AND t7.id != 36 THEN 'seri'
+                    WHEN t7.equipo_type_id = 22 OR t7.id = 36 THEN 'pulpo'
+                    WHEN t7.equipo_type_id = 15 THEN 'embalaje'
+                    WHEN t7.equipo_type_id = 12 THEN 'rebo'
+                    ELSE 'otros'
+                END AS process_code,
+                COUNT(DISTINCT t1.id) AS ot_count,
+                COALESCE(SUM(pe.produced_units), 0) AS total_prod
+            FROM prod_worker_ot t1
+            INNER JOIN prod_agenda t2 ON t1.wok_ag_id = t2.id
+            INNER JOIN prod_worker_init t3 ON t1.wok_init_id = t3.id
+            INNER JOIN prod_header t4 ON t2.ag_prdid = t4.id
+            LEFT JOIN equipo t7 ON t3.win_equipoid = t7.id
+            LEFT JOIN (
+                SELECT evt_prod_worker_otid, 
+                       SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') THEN evt_amount ELSE 0 END) AS produced_units
+                FROM prod_worker_ot_events
+                GROUP BY evt_prod_worker_otid
+            ) pe ON pe.evt_prod_worker_otid = t1.id
+            WHERE {$whereProcessCounts}
+            GROUP BY process_code
+        ";
+
+        $totalAllCount = 0;
+        $totalAllProduced = 0.0;
+        try {
+            $stmtCounts = $this->erpPdo->prepare($countsSql);
+            $stmtCounts->execute($countsParams);
+            $countRows = $stmtCounts->fetchAll() ?: [];
+            foreach ($countRows as $cr) {
+                $pcode = (string)($cr['process_code'] ?? '');
+                $pCount = (int)($cr['ot_count'] ?? 0);
+                $pProd = (float)($cr['total_prod'] ?? 0);
+                $totalAllCount += $pCount;
+                $totalAllProduced += $pProd;
+                if (isset($result['processes'][$pcode])) {
+                    $result['processes'][$pcode]['count'] = $pCount;
+                    $result['processes'][$pcode]['produced'] = $pProd;
+                }
+            }
+            if (isset($result['processes']['all'])) {
+                $result['processes']['all']['count'] = $totalAllCount;
+                $result['processes']['all']['produced'] = $totalAllProduced;
+            }
+        } catch (Throwable) {
+            // fallback: continue
+        }
+
+        // Si se buscó una OT/CC/Cliente y no arrojó resultados en el período actual (ej. OT de un mes anterior),
+        // fallback automático a búsqueda histórica en toda la base de datos para no obligar a adivinar el mes
+        if ($totalAllCount === 0 && $search !== '') {
+            $histWhereClauses = ['t1.wok_status > 0'];
+            $histParams = [];
+            if ($plantaId !== null && $plantaId > 0 && $this->erpColumnExists('prod_header', 'prd_plantaid')) {
+                $histWhereClauses[] = 't4.prd_plantaid = :planta_id';
+                $histParams[':planta_id'] = $plantaId;
+            }
+            $histSearchCond = $buildSearchCondition($search, $histParams);
+            if ($histSearchCond !== '') {
+                $histWhereClauses[] = $histSearchCond;
+            }
+
+            $histCountsSql = "
+                SELECT 
+                    CASE 
+                        WHEN t7.equipo_type_id = 7 THEN 'flexo'
+                        WHEN t7.equipo_type_id = 8 THEN 'sellado'
+                        WHEN t7.equipo_type_id = 11 AND t7.id != 36 THEN 'seri'
+                        WHEN t7.equipo_type_id = 22 OR t7.id = 36 THEN 'pulpo'
+                        WHEN t7.equipo_type_id = 15 THEN 'embalaje'
+                        WHEN t7.equipo_type_id = 12 THEN 'rebo'
+                        ELSE 'otros'
+                    END AS process_code,
+                    COUNT(DISTINCT t1.id) AS ot_count,
+                    COALESCE(SUM(pe.produced_units), 0) AS total_prod
+                FROM prod_worker_ot t1
+                INNER JOIN prod_agenda t2 ON t1.wok_ag_id = t2.id
+                INNER JOIN prod_worker_init t3 ON t1.wok_init_id = t3.id
+                INNER JOIN prod_header t4 ON t2.ag_prdid = t4.id
+                LEFT JOIN equipo t7 ON t3.win_equipoid = t7.id
+                LEFT JOIN orders t9 ON t2.ag_reqid = t9.id
+                LEFT JOIN orders_items t10 ON t9.id = t10.req_id
+                LEFT JOIN item t11 ON t10.item_id = t11.id
+                LEFT JOIN customer t12 ON t9.req_cust_id = t12.id
+                INNER JOIN (
+                    SELECT evt_prod_worker_otid, 
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') OR evt_status > 0 THEN evt_amount ELSE 0 END) AS produced_units,
+                           SUM(evt_amount_metros_lineales) AS produced_meters,
+                           SUM(prod_bobina_kg) AS produced_kg
+                    FROM prod_worker_ot_events
+                    GROUP BY evt_prod_worker_otid
+                    HAVING (
+                        SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') OR evt_status > 0 THEN evt_amount ELSE 0 END) > 0
+                        OR SUM(evt_amount_metros_lineales) > 0
+                        OR SUM(prod_bobina_kg) > 0
+                    )
+                ) pe ON pe.evt_prod_worker_otid = t1.id
+                WHERE " . implode(' AND ', $histWhereClauses) . "
+                GROUP BY process_code
+            ";
+
+            try {
+                $stmtHist = $this->erpPdo->prepare($histCountsSql);
+                $stmtHist->execute($histParams);
+                $histRows = $stmtHist->fetchAll() ?: [];
+                $histAllCount = 0;
+                $histAllProduced = 0.0;
+                foreach ($histRows as $hr) {
+                    $pcode = (string)($hr['process_code'] ?? '');
+                    $pCount = (int)($hr['ot_count'] ?? 0);
+                    $pProd = (float)($hr['total_prod'] ?? 0);
+                    $histAllCount += $pCount;
+                    $histAllProduced += $pProd;
+                    if (isset($result['processes'][$pcode])) {
+                        $result['processes'][$pcode]['count'] = $pCount;
+                        $result['processes'][$pcode]['produced'] = $pProd;
+                    }
+                }
+                if ($histAllCount > 0) {
+                    $result['is_historical_search'] = true;
+                    $baseWhereClauses = $histWhereClauses;
+                    $baseParams = $histParams;
+                }
+            } catch (Throwable) {
+                // ignore
+            }
+        }
+
+        // Filtros específicos para la consulta principal
+        $whereClauses = $baseWhereClauses;
+        $params = $baseParams;
+
+        // Filtro por proceso (agrupa todas las máquinas de ese proceso)
+        if ($process !== 'all') {
+            switch ($process) {
+                case 'flexo':
+                    $whereClauses[] = 't7.equipo_type_id = 7';
+                    break;
+                case 'sellado':
+                    $whereClauses[] = 't7.equipo_type_id = 8';
+                    break;
+                case 'seri':
+                    $whereClauses[] = 't7.equipo_type_id = 11 AND t7.id != 36';
+                    break;
+                case 'pulpo':
+                    $whereClauses[] = '(t7.equipo_type_id = 22 OR t7.id = 36)';
+                    break;
+                case 'embalaje':
+                    $whereClauses[] = 't7.equipo_type_id = 15';
+                    break;
+                case 'rebo':
+                    $whereClauses[] = 't7.equipo_type_id = 12';
+                    break;
+            }
+        } elseif ($equipoTypeId !== null && $equipoTypeId > 0) {
+            $whereClauses[] = 't7.equipo_type_id = :equipo_type_id';
+            $params[':equipo_type_id'] = $equipoTypeId;
+        }
+
+        if ($equipoId !== null && $equipoId > 0) {
+            $whereClauses[] = 't7.id = :equipo_id';
+            $params[':equipo_id'] = $equipoId;
+        }
+
+        $whereSql = implode(' AND ', $whereClauses);
+
+        $sql = "SELECT 
+            t1.id AS ot_id,
+            t1.wok_crtdat,
+            t1.wok_enddat,
+            t1.wok_status,
+            t3.win_wrkid AS operator_id,
+            pe.ayudante_id AS helper_id,
+            t4.prd_number AS ot_number,
+            t9.req_number AS cc_number,
+            t9.req_production_initdate AS cc_init_date,
+            t12.cust_name AS customer_name,
+            t11.item_number_prod AS item_code,
+            t11.item_title AS item_title,
+            t11.item_weight AS item_weight,
+            p1.cat_title AS bag_type,
+            t10.fab_med_width,
+            t10.fab_med_height,
+            t10.fab_med_fuelle,
+            t10.fab_mat_gramms,
+            t10.fab_type,
+            v1.add_name AS fabric_color,
+            v1.add_name_eng AS fabric_color_code,
+            v2.add_name AS manilla_color,
+            v2.add_name_eng AS manilla_color_code,
+            t10.fab_manilla_length,
+            t10.fab_mat_dispositivo,
+            t10.item_sellprice_barcodenumber,
+            t9.req_pie_imprenta,
+            t7.id AS machine_id,
+            t7.equipo_name AS machine_name,
+            t7.equipo_type_id AS machine_type_id,
+            t8.type_ant_title AS machine_type_title,
+            CASE 
+                WHEN t7.equipo_type_id = 7 THEN 'flexo'
+                WHEN t7.equipo_type_id = 8 THEN 'sellado'
+                WHEN t7.equipo_type_id = 11 AND t7.id != 36 THEN 'seri'
+                WHEN t7.equipo_type_id = 22 OR t7.id = 36 THEN 'pulpo'
+                WHEN t7.equipo_type_id = 15 THEN 'embalaje'
+                WHEN t7.equipo_type_id = 12 THEN 'rebo'
+                ELSE 'otros'
+            END AS process_code,
+            CASE 
+                WHEN t7.equipo_type_id = 7 THEN 'Flexografía'
+                WHEN t7.equipo_type_id = 8 THEN 'Corte y Sellado'
+                WHEN t7.equipo_type_id = 11 AND t7.id != 36 THEN 'Serigrafía'
+                WHEN t7.equipo_type_id = 22 OR t7.id = 36 THEN 'Pulpo Serigráfico'
+                WHEN t7.equipo_type_id = 15 THEN 'Embalaje'
+                WHEN t7.equipo_type_id = 12 THEN 'Rebobinado'
+                ELSE COALESCE(t8.type_ant_title, 'Otros')
+            END AS process_category,
+            w_op.wrk_firstname AS op_first,
+            w_op.wrk_lastname AS op_last,
+            w_op.wrk_rut AS op_rut,
+            ctrl.supervisor_name,
+            ctrl.supervisor_rut,
+            w_ay.wrk_firstname AS ay_first,
+            w_ay.wrk_lastname AS ay_last,
+            w_ay.wrk_rut AS ay_rut,
+            tt.type_name AS shift_name,
+            tca.ass_init_hour,
+            tca.ass_init_min,
+            tca.ass_end_hour,
+            tca.ass_end_min,
+            COALESCE(t10.item_amount, t2.ag_amount, 0) AS requested_units,
+            COALESCE(pe.produced_units, 0) AS produced_units,
+            COALESCE(pe.produced_meters, 0) AS produced_meters,
+            COALESCE(pe.produced_meters_maquina, 0) AS produced_meters_maquina,
+            COALESCE(pe.produced_kg, 0) AS produced_kg,
+            COALESCE(pe.speed_m_min, 0) AS speed_m_min,
+            COALESCE(pe.setup_seconds, 0) AS setup_seconds,
+            COALESCE(pe.pause_seconds, 0) AS pause_seconds,
+            COALESCE(dw.waste_units_raw, 0) AS waste_units_raw,
+            COALESCE(dw.waste_kg, 0) AS waste_kg,
+            COALESCE(dw.waste_setup_units_raw, 0) AS waste_setup_units_raw,
+            COALESCE(dw.waste_setup_kg, 0) AS waste_setup_kg,
+            COALESCE(dw.waste_print_units_raw, 0) AS waste_print_units_raw,
+            COALESCE(dw.waste_print_kg, 0) AS waste_print_kg,
+            COALESCE(dw.waste_coil_units_raw, 0) AS waste_coil_units_raw,
+            COALESCE(dw.waste_coil_kg, 0) AS waste_coil_kg,
+            COALESCE(dw.waste_repair_units_raw, 0) AS waste_repair_units_raw,
+            COALESCE(dw.waste_repair_kg, 0) AS waste_repair_kg,
+            t10.fab_print_colors_front_1,
+            t10.fab_print_colors_front_2,
+            t10.fab_print_colors_front_3,
+            t10.fab_print_colors_front_4,
+            t10.fab_print_colors_front_5,
+            t10.fab_print_colors_front_6,
+            t10.fab_print_colors_back_1,
+            t10.fab_print_colors_back_2,
+            t10.fab_print_colors_back_3,
+            t10.fab_print_colors_back_4,
+            t10.fab_print_colors_back_5,
+            t10.fab_print_colors_back_6,
+            t10.fab_print_colordesc_1,
+            t10.fab_print_colordesc_2,
+            t10.fab_print_colordesc_3,
+            t10.fab_print_colordesc_4
+        FROM prod_worker_ot t1
+        INNER JOIN prod_agenda t2 ON t1.wok_ag_id = t2.id
+        INNER JOIN prod_worker_init t3 ON t1.wok_init_id = t3.id
+        INNER JOIN prod_header t4 ON t2.ag_prdid = t4.id
+        LEFT JOIN equipo t7 ON t3.win_equipoid = t7.id
+        LEFT JOIN equipo_type t8 ON t7.equipo_type_id = t8.id
+        LEFT JOIN orders t9 ON t2.ag_reqid = t9.id
+        LEFT JOIN orders_items t10 ON t9.id = t10.req_id
+        LEFT JOIN item t11 ON t10.item_id = t11.id
+        LEFT JOIN customer t12 ON t9.req_cust_id = t12.id
+        LEFT JOIN item_productcats ip1 ON ip1.item_id = t11.id
+        LEFT JOIN productcats p1 ON ip1.cat_id = p1.id
+        LEFT JOIN tran_comments_vals v1 ON t10.fab_mat_fabric_color = v1.id
+        LEFT JOIN tran_comments_vals v2 ON t10.fab_mat_manilla_color = v2.id
+        LEFT JOIN workers w_op ON t3.win_wrkid = w_op.id
+        LEFT JOIN (
+            SELECT
+                ac.ctr_init_id,
+                MAX(TRIM(CONCAT(COALESCE(u.user_firstname, ''), ' ', COALESCE(u.user_lastname, '')))) AS supervisor_name,
+                MAX(u.user_rut) AS supervisor_rut
+            FROM prod_worker_ot_autocontrol ac
+            INNER JOIN user u ON u.id = ac.ctr_ctrusr
+            INNER JOIN prod_worker_ot pw_sub ON pw_sub.id = ac.ctr_init_id
+            WHERE ac.ctr_type = 'supervisor'
+              AND pw_sub.wok_status > 0
+            GROUP BY ac.ctr_init_id
+        ) ctrl ON ctrl.ctr_init_id = t1.id
+        LEFT JOIN turnos_config_assign tca ON t3.win_ass_id = tca.id
+        LEFT JOIN turnos_types tt ON tca.assign_turno_type_id = tt.id
+        LEFT JOIN (
+            SELECT 
+                e.evt_prod_worker_otid,
+                SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor') THEN e.evt_amount ELSE 0 END) AS produced_units,
+                SUM(e.evt_amount_metros_lineales) AS produced_meters,
+                SUM(e.evt_amount_metros_maquina) AS produced_meters_maquina,
+                SUM(e.prod_bobina_kg) AS produced_kg,
+                AVG(CASE WHEN e.evt_amount_metros_lineales > 0 AND (e.evt_enddat - e.evt_crtdat) > 0 
+                    THEN (e.evt_amount_metros_lineales / ((e.evt_enddat - e.evt_crtdat) / 60.0)) 
+                    ELSE NULL END) AS speed_m_min,
+                SUM(CASE WHEN LOWER(e.evt_type) = 'setup' AND e.evt_enddat > e.evt_crtdat THEN (e.evt_enddat - e.evt_crtdat) ELSE 0 END) AS setup_seconds,
+                SUM(CASE WHEN LOWER(e.evt_type) = 'pause' AND e.evt_enddat > e.evt_crtdat THEN (e.evt_enddat - e.evt_crtdat) ELSE 0 END) AS pause_seconds,
+                MAX(CASE WHEN e.evt_idayudante > 0 THEN e.evt_idayudante ELSE NULL END) AS ayudante_id
+            FROM prod_worker_ot_events e
+            GROUP BY e.evt_prod_worker_otid
+        ) pe ON pe.evt_prod_worker_otid = t1.id
+        LEFT JOIN workers w_ay ON pe.ayudante_id = w_ay.id
+        LEFT JOIN (
+            SELECT 
+                e.evt_prod_worker_otid AS wok_id,
+                -- Total Merma Kgs (Suma de merma Kgs excluyendo repair)
+                SUM(CASE WHEN LOWER(d.evt_type) = 'merma' THEN d.evt_kgstounits ELSE 0 END) AS waste_kg,
+                SUM(CASE WHEN LOWER(d.evt_type) = 'merma' THEN d.evt_amount ELSE 0 END) AS waste_units_raw,
+
+                -- Merma Setup / Proceso / Alistamiento (ID 6 y 9 de prod_mermatypes)
+                SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid IN (6, 9) THEN d.evt_kgstounits ELSE 0 END) AS waste_setup_kg,
+                SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid IN (6, 9) THEN d.evt_amount ELSE 0 END) AS waste_setup_units_raw,
+
+                -- Merma Impresión (ID 7 de prod_mermatypes)
+                SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid = 7 THEN d.evt_kgstounits ELSE 0 END) AS waste_print_kg,
+                SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid = 7 THEN d.evt_amount ELSE 0 END) AS waste_print_units_raw,
+
+                -- Merma Bobina / Otros (ID 8 y cualquier otro tipo de merma)
+                SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid NOT IN (6, 7, 9) THEN d.evt_kgstounits ELSE 0 END) AS waste_coil_kg,
+                SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid NOT IN (6, 7, 9) THEN d.evt_amount ELSE 0 END) AS waste_coil_units_raw,
+
+                -- Reparación (evt_type = 'repair' o evt_repair_typeid > 0)
+                SUM(CASE WHEN LOWER(d.evt_type) = 'repair' OR d.evt_repair_typeid > 0 THEN d.evt_kgstounits ELSE 0 END) AS waste_repair_kg,
+                SUM(CASE WHEN LOWER(d.evt_type) = 'repair' OR d.evt_repair_typeid > 0 THEN d.evt_amount ELSE 0 END) AS waste_repair_units_raw
+            FROM prod_worker_ot_defectunits d
+            INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+            WHERE d.evt_status > 0
+            GROUP BY e.evt_prod_worker_otid
+        ) dw ON dw.wok_id = t1.id
+        WHERE {$whereSql}
+        ORDER BY process_category, t7.equipo_name, t1.wok_crtdat DESC, t1.id DESC";
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            $rawRows = $stmt->fetchAll() ?: [];
+        } catch (Throwable $e) {
+            return $result;
+        }
+
+        $formattedRows = [];
+        $totalProduced = 0.0;
+        $totalProducedKg = 0.0;
+        $totalRequested = 0.0;
+        $requestedByOrder = [];
+        $totalWaste = 0.0;
+        $totalWasteKg = 0.0;
+        $totalSeconds = 0;
+
+        foreach ($rawRows as $row) {
+            $startTsRow = (int)($row['wok_crtdat'] ?? 0);
+            $endTsRow = (int)($row['wok_enddat'] ?? 0);
+            $durationSeconds = 0;
+            $durationStr = '-';
+            if ($startTsRow > 0 && $endTsRow > $startTsRow) {
+                $durationSeconds = $endTsRow - $startTsRow;
+                $hrs = (int)floor($durationSeconds / 3600);
+                $mins = (int)floor(($durationSeconds % 3600) / 60);
+                $durationStr = sprintf('%02d:%02d h', $hrs, $mins);
+            }
+
+            $status = (int)($row['wok_status'] ?? 0);
+            $statusLabel = 'Abierta';
+            if ($endTsRow > 0) {
+                $statusLabel = 'Terminada';
+            } elseif ($status > 0) {
+                $statusLabel = 'En Curso';
+            }
+
+            $w = (float)($row['fab_med_width'] ?? 0);
+            $h = (float)($row['fab_med_height'] ?? 0);
+            $f = (float)($row['fab_med_fuelle'] ?? 0);
+            $gramms = (float)($row['fab_mat_gramms'] ?? 0);
+            $manLen = (float)($row['fab_manilla_length'] ?? 0);
+            $itemWeight = (float)($row['item_weight'] ?? 0);
+
+            $formatCm = '';
+            if ($w > 0 && $h > 0) {
+                $formatCm = ((int)$w) . 'x' . ((int)$h) . ($f > 0 ? ('x' . ((int)$f)) : '') . ' cm';
+            }
+
+            $reqUnits = (float)($row['requested_units'] ?? 0.0);
+            $prodUnits = (float)($row['produced_units'] ?? 0.0);
+            $prodKg = (float)($row['produced_kg'] ?? 0.0);
+
+            // Peso unitario teórico en Kg por bolsa
+            $unitWeightKg = 0.0;
+            if ($itemWeight > 0) {
+                $unitWeightKg = $itemWeight / 1000.0;
+            } elseif ($w > 0 && $h > 0 && $gramms > 0) {
+                $areaM2 = (2.0 * ($w + $f) * $h) / 10000.0;
+                $bodyKg = $areaM2 * ($gramms / 1000.0);
+                $manillaKg = ($manLen > 0) ? (2.0 * ($manLen / 100.0) * 0.025 * ($gramms / 1000.0)) : 0.0;
+                $unitWeightKg = $bodyKg + $manillaKg;
+            } elseif ($prodUnits > 0 && $prodKg > 0) {
+                $unitWeightKg = $prodKg / $prodUnits;
+            }
+
+            // Kilos de merma desglosados
+            $wasteKg = (float)($row['waste_kg'] ?? 0.0);
+            $wasteSetupKg = (float)($row['waste_setup_kg'] ?? 0.0);
+            $wastePrintKg = (float)($row['waste_print_kg'] ?? 0.0);
+            $wasteCoilKg = (float)($row['waste_coil_kg'] ?? 0.0);
+            $wasteRepairKg = (float)($row['waste_repair_kg'] ?? 0.0);
+
+            // Unidades de merma calculadas según peso unitario (estándar ERP / legacy)
+            if ($unitWeightKg > 0) {
+                $wasteSetupUnits = (float)round($wasteSetupKg / $unitWeightKg);
+                $wastePrintUnits = (float)round($wastePrintKg / $unitWeightKg);
+                $wasteCoilUnits = (float)round($wasteCoilKg / $unitWeightKg);
+                $wasteRepairUnits = (float)round($wasteRepairKg / $unitWeightKg);
+                $wasteUnits = $wasteSetupUnits + $wastePrintUnits + $wasteCoilUnits;
+            } else {
+                $wasteSetupUnits = (float)($row['waste_setup_units_raw'] ?? 0.0);
+                $wastePrintUnits = (float)($row['waste_print_units_raw'] ?? 0.0);
+                $wasteCoilUnits = (float)($row['waste_coil_units_raw'] ?? 0.0);
+                $wasteRepairUnits = (float)($row['waste_repair_units_raw'] ?? 0.0);
+                $wasteUnits = (float)($row['waste_units_raw'] ?? 0.0);
+            }
+
+            $wastePct = null;
+            if ($prodUnits > 0 && $wasteUnits > 0) {
+                $wastePct = round(($wasteUnits / $prodUnits) * 100.0, 2);
+            } elseif ($prodKg > 0 && $wasteKg > 0) {
+                $wastePct = round(($wasteKg / $prodKg) * 100.0, 2);
+            }
+
+            $totalProduced += $prodUnits;
+            $totalProducedKg += $prodKg;
+            
+            // Las unidades solicitadas corresponden al pedido (OT / CC). Para no multiplicar
+            // las cantidades cuando una OT es trabajada en múltiples turnos o máquinas,
+            // agrupamos el valor máximo solicitado por cada OT / CC único.
+            $otKey = trim((string)($row['ot_number'] ?? ''));
+            $ccKey = trim((string)($row['cc_number'] ?? ''));
+            $itemKey = trim((string)($row['item_code'] ?? ''));
+            $orderGroupKey = ($otKey !== '' ? $otKey : '') . '|' . ($ccKey !== '' ? $ccKey : '') . '|' . $itemKey;
+            if ($orderGroupKey === '||') {
+                $orderGroupKey = 'row_' . (int)($row['ot_id'] ?? 0);
+            }
+            if (!isset($requestedByOrder[$orderGroupKey]) || $reqUnits > $requestedByOrder[$orderGroupKey]) {
+                $requestedByOrder[$orderGroupKey] = $reqUnits;
+            }
+
+            $totalWaste += $wasteUnits;
+            $totalWasteKg += $wasteKg;
+            $totalSeconds += $durationSeconds;
+
+            // Operador, Supervisor y Ayudante
+            $opFirst = trim((string)($row['op_first'] ?? ''));
+            $opLast = trim((string)($row['op_last'] ?? ''));
+            $operatorName = trim($opFirst . ' ' . $opLast);
+            if ($operatorName === '') {
+                $operatorName = 'Sin operador';
+            }
+            $operatorRut = trim((string)($row['op_rut'] ?? ''));
+
+            $supName = trim((string)($row['supervisor_name'] ?? ''));
+            $supRut = trim((string)($row['supervisor_rut'] ?? ''));
+
+            $ayFirst = trim((string)($row['ay_first'] ?? ''));
+            $ayLast = trim((string)($row['ay_last'] ?? ''));
+            $ayudanteName = trim($ayFirst . ' ' . $ayLast);
+            $ayudanteRut = trim((string)($row['ay_rut'] ?? ''));
+
+            // Turno
+            $shiftName = trim((string)($row['shift_name'] ?? ''));
+            $shiftHours = '';
+            if (isset($row['ass_init_hour']) && $row['ass_init_hour'] !== null && $row['ass_init_hour'] !== '') {
+                $shiftHours = sprintf('%02d:%02d', (int)$row['ass_init_hour'], (int)($row['ass_init_min'] ?? 0)) .
+                    ' - ' . sprintf('%02d:%02d', (int)($row['ass_end_hour'] ?? 0), (int)($row['ass_end_min'] ?? 0));
+            }
+
+            // Colores frente y dorso
+            $colorsFront = [];
+            for ($ci = 1; $ci <= 6; $ci++) {
+                $cf = trim((string)($row['fab_print_colors_front_' . $ci] ?? ''));
+                if ($cf !== '' && $cf !== '0') {
+                    $colorsFront[] = $cf;
+                }
+            }
+            $colorsBack = [];
+            for ($ci = 1; $ci <= 6; $ci++) {
+                $cb = trim((string)($row['fab_print_colors_back_' . $ci] ?? ''));
+                if ($cb !== '' && $cb !== '0') {
+                    $colorsBack[] = $cb;
+                }
+            }
+
+            $formattedRows[] = [
+                'ot_id' => (int)($row['ot_id'] ?? 0),
+                'ot_number' => trim((string)($row['ot_number'] ?? '')),
+                'cc_number' => trim((string)($row['cc_number'] ?? '')),
+                'cc_init_date' => !empty($row['cc_init_date']) ? date('d/m/Y', (int)$row['cc_init_date']) : '',
+                'customer_name' => trim((string)($row['customer_name'] ?? 'Sin cliente')),
+                'item_code' => trim((string)($row['item_code'] ?? '')),
+                'item_title' => trim((string)($row['item_title'] ?? '')),
+                'bag_type' => trim((string)($row['bag_type'] ?? 'Bolsas')),
+                'format_cm' => $formatCm,
+                'width' => $w,
+                'height' => $h,
+                'fuelle' => $f,
+                'fabric_type' => trim((string)($row['fabric_type'] ?? '')),
+                'fabric_color' => trim((string)($row['fabric_color'] ?? '')),
+                'fabric_color_code' => trim((string)($row['fabric_color_code'] ?? '')),
+                'grammage' => (float)($row['fab_mat_gramms'] ?? 0.0),
+                'manilla_color' => trim((string)($row['manilla_color'] ?? '')),
+                'manilla_color_code' => trim((string)($row['manilla_color_code'] ?? '')),
+                'manilla_length' => (float)($row['fab_manilla_length'] ?? 0.0),
+                'barcode_number' => trim((string)($row['item_sellprice_barcodenumber'] ?? '')),
+                'dispositivo' => trim((string)($row['fab_mat_dispositivo'] ?? '')),
+                'pie_imprenta' => trim((string)($row['req_pie_imprenta'] ?? '')),
+                'process_code' => trim((string)($row['process_code'] ?? 'otros')),
+                'process_category' => trim((string)($row['process_category'] ?? 'General')),
+                'machine_id' => (int)($row['machine_id'] ?? 0),
+                'machine_name' => trim((string)($row['machine_name'] ?? 'Sin asignar')),
+                'machine_type_id' => (int)($row['machine_type_id'] ?? 0),
+                'machine_type_title' => trim((string)($row['machine_type_title'] ?? 'General')),
+                'operator_name' => $operatorName,
+                'operator_rut' => $operatorRut,
+                'supervisor_name' => $supName,
+                'supervisor_rut' => $supRut,
+                'helper_name' => $ayudanteName,
+                'helper_rut' => $ayudanteRut,
+                'shift_name' => $shiftName,
+                'shift_hours' => $shiftHours,
+                'started_at' => $startTsRow > 0 ? date('d/m/Y H:i', $startTsRow) : '-',
+                'ended_at' => $endTsRow > 0 ? date('d/m/Y H:i', $endTsRow) : '-',
+                'duration_str' => $durationStr,
+                'duration_seconds' => $durationSeconds,
+                'duration_hours' => round($durationSeconds / 3600, 2),
+                'setup_hours' => round((float)($row['setup_seconds'] ?? 0) / 3600, 2),
+                'pause_hours' => round((float)($row['pause_seconds'] ?? 0) / 3600, 2),
+                'speed_m_min' => round((float)($row['speed_m_min'] ?? 0), 1),
+                'status_label' => $statusLabel,
+                'requested_units' => $reqUnits,
+                'produced_units' => $prodUnits,
+                'produced_meters' => (float)($row['produced_meters'] ?? 0),
+                'produced_kg' => $prodKg,
+                'waste_units' => $wasteUnits,
+                'waste_kg' => $wasteKg,
+                'waste_percent' => $wastePct,
+                'waste_setup_units' => $wasteSetupUnits,
+                'waste_setup_kg' => $wasteSetupKg,
+                'waste_print_units' => $wastePrintUnits,
+                'waste_print_kg' => $wastePrintKg,
+                'waste_coil_units' => $wasteCoilUnits,
+                'waste_coil_kg' => $wasteCoilKg,
+                'waste_repair_units' => $wasteRepairUnits,
+                'waste_repair_kg' => $wasteRepairKg,
+                'unit_weight_grs' => round($unitWeightKg * 1000.0, 2),
+                'colors_front' => implode(', ', $colorsFront),
+                'colors_back' => implode(', ', $colorsBack),
+                'wok_status' => $status,
+                'wok_crtdat' => $startTsRow,
+                'wok_enddat' => $endTsRow,
+                'operator_id' => (int)($row['operator_id'] ?? 0),
+                'helper_id' => (int)($row['helper_id'] ?? 0),
+            ];
+        }
+
+        $totalRequested = (float)array_sum($requestedByOrder);
+        $totalPending = max(0.0, $totalRequested - $totalProduced);
+
+        $result['rows'] = $formattedRows;
+        $result['summary'] = [
+            'total_ots' => count($formattedRows),
+            'total_produced_units' => $totalProduced,
+            'total_requested_units' => $totalRequested,
+            'total_pending_units' => $totalPending,
+            'total_waste_units' => $totalWaste,
+            'total_waste_kg' => $totalWasteKg,
+            'waste_percent' => ($totalProduced > 0 && $totalWaste > 0)
+                ? round(($totalWaste / $totalProduced) * 100.0, 2)
+                : (($totalProducedKg > 0 && $totalWasteKg > 0) ? round(($totalWasteKg / $totalProducedKg) * 100.0, 2) : null),
+            'total_hours' => round($totalSeconds / 3600, 1),
+        ];
+
+        return $result;
+    }
+
+    /**
+     * Obtiene la lista de máquinas activas para selección en formularios de edición.
+     *
+     * @return list<array{id: int, equipo_name: string, equipo_type_id: int}>
+     */
+    public function getAllActiveMachines(): array
+    {
+        if (!$this->erpTableExists('equipo')) {
+            return [];
+        }
+        try {
+            $stmt = $this->erpPdo->query("SELECT id, equipo_name, equipo_type_id FROM equipo WHERE equipo_status > 0 ORDER BY equipo_name ASC");
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Obtiene la lista de trabajadores/operadores activos para selección en formularios de edición.
+     *
+     * @return list<array{id: int, wrk_firstname: string, wrk_lastname: string, wrk_rut: string}>
+     */
+    public function getAllActiveWorkers(): array
+    {
+        if (!$this->erpTableExists('workers')) {
+            return [];
+        }
+        try {
+            $stmt = $this->erpPdo->query("SELECT id, wrk_firstname, wrk_lastname, wrk_rut FROM workers WHERE wrk_status > 0 ORDER BY wrk_firstname ASC, wrk_lastname ASC");
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Modifica de manera profesional y segura un registro de producción por máquina en la base de datos ERP.
+     *
+     * Permite corregir errores de tipeo o mal ingreso en unidades, kilos, metros, fechas, máquina,
+     * operador y mermas con respaldo en una transacción ACID y registro de auditoría.
+     *
+     * @param int $otId ID de prod_worker_ot (ot_id)
+     * @param array<string, mixed> $data Datos modificados desde el formulario modal
+     * @param string|null $userName Nombre del usuario que realiza el ajuste para registro de auditoría
+     * @return array{ok: bool, message?: string, error?: string}
+     */
+    public function updateProductionRecord(int $otId, array $data, ?string $userName = null): array
+    {
+        if ($otId <= 0) {
+            return ['ok' => false, 'error' => 'Identificador de registro no válido.'];
+        }
+
+        try {
+            // 1. Obtener registro base de prod_worker_ot y prod_worker_init
+            $stmtBase = $this->erpPdo->prepare("
+                SELECT t1.id, t1.wok_ag_id, t1.wok_init_id, t1.wok_status, t1.wok_crtdat, t1.wok_enddat,
+                       t3.win_wrkid, t3.win_equipoid
+                FROM prod_worker_ot t1
+                INNER JOIN prod_worker_init t3 ON t1.wok_init_id = t3.id
+                WHERE t1.id = :ot_id
+            ");
+            $stmtBase->execute([':ot_id' => $otId]);
+            $baseRec = $stmtBase->fetch(PDO::FETCH_ASSOC);
+            if (!$baseRec) {
+                return ['ok' => false, 'error' => 'No se encontró el registro de producción especificado.'];
+            }
+
+            $initId = (int)$baseRec['wok_init_id'];
+
+            // 2. Parsear parámetros y valores
+            $producedUnits = isset($data['produced_units']) ? max(0.0, (float)$data['produced_units']) : 0.0;
+            $producedKg = isset($data['produced_kg']) ? max(0.0, (float)$data['produced_kg']) : 0.0;
+            $producedMeters = isset($data['produced_meters']) ? max(0.0, (float)$data['produced_meters']) : 0.0;
+            $producedMetersMaquina = isset($data['produced_meters_maquina']) ? max(0.0, (float)$data['produced_meters_maquina']) : 0.0;
+
+            $status = isset($data['wok_status']) ? (int)$data['wok_status'] : (int)$baseRec['wok_status'];
+            if ($status < 1 || $status > 2) {
+                $status = 2; // Por defecto Terminada
+            }
+
+            // Fechas y marcas de tiempo
+            $startTs = (int)$baseRec['wok_crtdat'];
+            if (!empty($data['started_at'])) {
+                try {
+                    $dtStart = new DateTimeImmutable((string)$data['started_at']);
+                    $startTs = $dtStart->getTimestamp();
+                } catch (Throwable) {}
+            }
+
+            $endTs = (int)$baseRec['wok_enddat'];
+            if (!empty($data['ended_at'])) {
+                try {
+                    $dtEnd = new DateTimeImmutable((string)$data['ended_at']);
+                    $endTs = $dtEnd->getTimestamp();
+                } catch (Throwable) {}
+            } elseif ($status === 1) {
+                // En curso
+                $endTs = 0;
+            } elseif ($endTs <= 0) {
+                $endTs = $startTs > 0 ? $startTs : time();
+            }
+
+            // Recursos asignados
+            $machineId = isset($data['machine_id']) && (int)$data['machine_id'] > 0 ? (int)$data['machine_id'] : (int)$baseRec['win_equipoid'];
+            $operatorId = isset($data['operator_id']) && (int)$data['operator_id'] > 0 ? (int)$data['operator_id'] : (int)$baseRec['win_wrkid'];
+            $helperId = isset($data['helper_id']) && (int)$data['helper_id'] > 0 ? (int)$data['helper_id'] : 0;
+
+            // Mermas y desperdicios
+            $wasteTotalKg = isset($data['waste_kg']) ? max(0.0, (float)$data['waste_kg']) : 0.0;
+            $wasteTotalUnits = isset($data['waste_units']) ? max(0.0, (float)$data['waste_units']) : 0.0;
+
+            $wasteSetupKg = isset($data['waste_setup_kg']) && is_numeric($data['waste_setup_kg']) ? max(0.0, (float)$data['waste_setup_kg']) : null;
+            $wasteSetupUnits = isset($data['waste_setup_units']) && is_numeric($data['waste_setup_units']) ? max(0.0, (float)$data['waste_setup_units']) : null;
+            $wastePrintKg = isset($data['waste_print_kg']) && is_numeric($data['waste_print_kg']) ? max(0.0, (float)$data['waste_print_kg']) : null;
+            $wastePrintUnits = isset($data['waste_print_units']) && is_numeric($data['waste_print_units']) ? max(0.0, (float)$data['waste_print_units']) : null;
+            $wasteCoilKg = isset($data['waste_coil_kg']) && is_numeric($data['waste_coil_kg']) ? max(0.0, (float)$data['waste_coil_kg']) : null;
+            $wasteCoilUnits = isset($data['waste_coil_units']) && is_numeric($data['waste_coil_units']) ? max(0.0, (float)$data['waste_coil_units']) : null;
+            $wasteRepairKg = isset($data['waste_repair_kg']) && is_numeric($data['waste_repair_kg']) ? max(0.0, (float)$data['waste_repair_kg']) : null;
+            $wasteRepairUnits = isset($data['waste_repair_units']) && is_numeric($data['waste_repair_units']) ? max(0.0, (float)$data['waste_repair_units']) : null;
+
+            // Comentario / auditoría
+            $userComment = trim((string)($data['comments'] ?? ''));
+            $editor = trim((string)($userName ?? 'Usuario'));
+            $auditStamp = '[' . date('Y-m-d H:i') . ' Modificado por ' . $editor . ($userComment !== '' ? ': ' . $userComment : '') . ']';
+
+            // 3. Iniciar Transacción ACID
+            if (!$this->erpPdo->inTransaction()) {
+                $this->erpPdo->beginTransaction();
+            }
+
+            // Actualizar prod_worker_ot
+            $stUpdOt = $this->erpPdo->prepare("
+                UPDATE prod_worker_ot 
+                SET wok_status = :status, wok_crtdat = :crtdat, wok_enddat = :enddat 
+                WHERE id = :ot_id
+            ");
+            $stUpdOt->execute([
+                ':status' => $status,
+                ':crtdat' => $startTs,
+                ':enddat' => $endTs,
+                ':ot_id' => $otId,
+            ]);
+
+            // Actualizar prod_worker_init (máquina y operador)
+            $stUpdInit = $this->erpPdo->prepare("
+                UPDATE prod_worker_init 
+                SET win_equipoid = :machine_id, win_wrkid = :operator_id 
+                WHERE id = :init_id
+            ");
+            $stUpdInit->execute([
+                ':machine_id' => $machineId,
+                ':operator_id' => $operatorId,
+                ':init_id' => $initId,
+            ]);
+
+            // Buscar evento de producción principal (estrictamente prod, nunca pause/colacion)
+            $stEvt = $this->erpPdo->prepare("
+                SELECT id, evt_comments FROM prod_worker_ot_events 
+                WHERE evt_prod_worker_otid = :ot_id 
+                  AND LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                ORDER BY id DESC LIMIT 1
+            ");
+            $stEvt->execute([':ot_id' => $otId]);
+            $evtRow = $stEvt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$evtRow) {
+                // Fallback: cualquier evento que NO sea pausa ni colación
+                $stEvtFallback = $this->erpPdo->prepare("
+                    SELECT id, evt_comments FROM prod_worker_ot_events 
+                    WHERE evt_prod_worker_otid = :ot_id 
+                      AND LOWER(evt_type) NOT IN ('pause', 'colacion', 'mantencion')
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stEvtFallback->execute([':ot_id' => $otId]);
+                $evtRow = $stEvtFallback->fetch(PDO::FETCH_ASSOC);
+            }
+
+            if ($evtRow) {
+                $evtId = (int)$evtRow['id'];
+                $existingComments = trim((string)($evtRow['evt_comments'] ?? ''));
+                $newComments = $existingComments !== '' ? ($existingComments . ' | ' . $auditStamp) : $auditStamp;
+
+                $stUpdEvt = $this->erpPdo->prepare("
+                    UPDATE prod_worker_ot_events 
+                    SET evt_amount = :amount,
+                        prod_bobina_kg = :kg,
+                        evt_amount_metros_lineales = :metros_lineales,
+                        evt_amount_metros_maquina = :metros_maquina,
+                        evt_crtdat = :start_ts,
+                        evt_enddat = :end_ts,
+                        evt_idayudante = :helper_id,
+                        evt_comments = :comments
+                    WHERE id = :evt_id
+                ");
+                $stUpdEvt->execute([
+                    ':amount' => $producedUnits,
+                    ':kg' => $producedKg,
+                    ':metros_lineales' => $producedMeters,
+                    ':metros_maquina' => $producedMetersMaquina,
+                    ':start_ts' => $startTs,
+                    ':end_ts' => $endTs,
+                    ':helper_id' => $helperId,
+                    ':comments' => $newComments,
+                    ':evt_id' => $evtId,
+                ]);
+            } else {
+                // Crear evento prod si no existía
+                $stInsEvt = $this->erpPdo->prepare("
+                    INSERT INTO prod_worker_ot_events (
+                        evt_prod_worker_otid, evt_amount, prod_bobina_kg,
+                        evt_amount_metros_lineales, evt_amount_metros_maquina,
+                        evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments, evt_idayudante
+                    ) VALUES (
+                        :ot_id, :amount, :kg,
+                        :metros_lineales, :metros_maquina,
+                        :start_ts, :end_ts, 1, 'prod', :comments, :helper_id
+                    )
+                ");
+                $stInsEvt->execute([
+                    ':ot_id' => $otId,
+                    ':amount' => $producedUnits,
+                    ':kg' => $producedKg,
+                    ':metros_lineales' => $producedMeters,
+                    ':metros_maquina' => $producedMetersMaquina,
+                    ':start_ts' => $startTs,
+                    ':end_ts' => $endTs,
+                    ':comments' => $auditStamp,
+                    ':helper_id' => $helperId,
+                ]);
+                $evtId = (int)$this->erpPdo->lastInsertId();
+            }
+
+            // Gestionar defectos/merma en prod_worker_ot_defectunits vinculados a esta orden
+            if ($evtId > 0) {
+                $stDef = $this->erpPdo->prepare("
+                    SELECT d.id, d.evt_refid, d.evt_type, d.evt_merma_typeid, d.evt_repair_typeid, d.evt_amount, d.evt_kgstounits 
+                    FROM prod_worker_ot_defectunits d
+                    INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                    WHERE e.evt_prod_worker_otid = :ot_id AND d.evt_status > 0
+                ");
+                $stDef->execute([':ot_id' => $otId]);
+                $defRows = $stDef->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+                $hasDetailedWaste = ($wasteSetupKg !== null || $wastePrintKg !== null || $wasteCoilKg !== null || $wasteRepairKg !== null);
+
+                if ($hasDetailedWaste) {
+                    $targets = [
+                        'setup' => ['type' => 'merma', 'merma_typeid' => 6, 'kg' => $wasteSetupKg ?? 0.0, 'units' => $wasteSetupUnits ?? 0.0],
+                        'print' => ['type' => 'merma', 'merma_typeid' => 7, 'kg' => $wastePrintKg ?? 0.0, 'units' => $wastePrintUnits ?? 0.0],
+                        'coil' => ['type' => 'merma', 'merma_typeid' => 8, 'kg' => $wasteCoilKg ?? 0.0, 'units' => $wasteCoilUnits ?? 0.0],
+                        'repair' => ['type' => 'repair', 'merma_typeid' => 0, 'repair_typeid' => 1, 'kg' => $wasteRepairKg ?? 0.0, 'units' => $wasteRepairUnits ?? 0.0],
+                    ];
+
+                    foreach ($targets as $k => $t) {
+                        $found = null;
+                        foreach ($defRows as $dr) {
+                            if ($t['type'] === 'repair' && (strtolower((string)$dr['evt_type']) === 'repair' || (int)$dr['evt_repair_typeid'] > 0)) {
+                                $found = $dr;
+                                break;
+                            }
+                            if ($t['type'] === 'merma' && (int)$dr['evt_merma_typeid'] === $t['merma_typeid']) {
+                                $found = $dr;
+                                break;
+                            }
+                            if ($k === 'setup' && in_array((int)$dr['evt_merma_typeid'], [6, 9], true)) {
+                                $found = $dr;
+                                break;
+                            }
+                        }
+
+                        if ($found) {
+                            $stUpdDef = $this->erpPdo->prepare("
+                                UPDATE prod_worker_ot_defectunits 
+                                SET evt_refid = :ref_id, evt_kgstounits = :kg, evt_amount = :amt 
+                                WHERE id = :def_id
+                            ");
+                            $stUpdDef->execute([
+                                ':ref_id' => $evtId,
+                                ':kg' => $t['kg'],
+                                ':amt' => $t['units'],
+                                ':def_id' => (int)$found['id'],
+                            ]);
+                        } elseif ($t['kg'] > 0 || $t['units'] > 0) {
+                            $stInsDef = $this->erpPdo->prepare("
+                                INSERT INTO prod_worker_ot_defectunits (
+                                    evt_refid, evt_type, evt_merma_typeid, evt_repair_typeid,
+                                    evt_amount, evt_kgstounits, evt_mtstounits, evt_status, evt_crtdat, evt_comments
+                                ) VALUES (
+                                    :refid, :type, :mtype, :rtype,
+                                    :amt, :kg, 0, 1, :crtdat, 'Modificado via ERP Web'
+                                )
+                            ");
+                            $stInsDef->execute([
+                                ':refid' => $evtId,
+                                ':type' => $t['type'],
+                                ':mtype' => $t['merma_typeid'],
+                                ':rtype' => $t['repair_typeid'] ?? 0,
+                                ':amt' => $t['units'],
+                                ':kg' => $t['kg'],
+                                ':crtdat' => $endTs > 0 ? $endTs : time(),
+                            ]);
+                        }
+                    }
+                } else {
+                    // Merma total directa: actualizar el registro existente garantizando que no se duplique
+                    if (!empty($defRows)) {
+                        $first = true;
+                        foreach ($defRows as $dr) {
+                            if ($first) {
+                                $stUpdDef = $this->erpPdo->prepare("
+                                    UPDATE prod_worker_ot_defectunits 
+                                    SET evt_refid = :ref_id, evt_kgstounits = :kg, evt_amount = :amt 
+                                    WHERE id = :def_id
+                                ");
+                                $stUpdDef->execute([
+                                    ':ref_id' => $evtId,
+                                    ':kg' => $wasteTotalKg,
+                                    ':amt' => $wasteTotalUnits,
+                                    ':def_id' => (int)$dr['id'],
+                                ]);
+                                $first = false;
+                            } else {
+                                $stDeact = $this->erpPdo->prepare("UPDATE prod_worker_ot_defectunits SET evt_status = 0 WHERE id = :def_id");
+                                $stDeact->execute([':def_id' => (int)$dr['id']]);
+                            }
+                        }
+                    } elseif ($wasteTotalKg > 0 || $wasteTotalUnits > 0) {
+                        $stInsDef = $this->erpPdo->prepare("
+                            INSERT INTO prod_worker_ot_defectunits (
+                                evt_refid, evt_type, evt_merma_typeid, evt_repair_typeid,
+                                evt_amount, evt_kgstounits, evt_mtstounits, evt_status, evt_crtdat, evt_comments
+                            ) VALUES (
+                                :refid, 'merma', 6, 0,
+                                :amt, :kg, 0, 1, :crtdat, 'Ingreso corrección ERP Web'
+                            )
+                        ");
+                        $stInsDef->execute([
+                            ':refid' => $evtId,
+                            ':amt' => $wasteTotalUnits,
+                            ':kg' => $wasteTotalKg,
+                            ':crtdat' => $endTs > 0 ? $endTs : time(),
+                        ]);
+                    }
+                }
+            }
+
+            $this->erpPdo->commit();
+            return ['ok' => true, 'message' => 'Producción actualizada correctamente en la base de datos.'];
+        } catch (Throwable $e) {
+            if ($this->erpPdo->inTransaction()) {
+                $this->erpPdo->rollBack();
+            }
+            return ['ok' => false, 'error' => 'Error al actualizar producción: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Informe de Colación: pausas operativas tipo colación (pause_id = 1 o código 2200).
+     * Corrige el bug del legacy que forzaba worker_id = 19 y cruzaba con ag_crtusr.
+     */
+    public function getMachineBreaksReport(
+        string $startAt,
+        string $endAt,
+        ?int $plantaId = null,
+        ?int $equipoTypeId = null,
+        ?int $equipoId = null,
+        ?string $search = null
+    ): array {
+        $result = [
+            'plantas' => $this->getPlantasList(),
+            'equipo_types' => $this->getEquipoTypesList(),
+            'equipos' => [],
+            'rows' => [],
+            'summary' => [
+                'total_records' => 0,
+                'completed_records' => 0,
+                'in_progress_records' => 0,
+                'total_minutes' => 0,
+                'total_hours' => 0.0,
+                'avg_minutes' => 0.0,
+            ],
+        ];
+
+        if (!$this->erpTableExists('prod_worker_ot_events') || !$this->erpTableExists('prod_worker_ot')) {
+            return $result;
+        }
+
+        if (($plantaId === null || $plantaId <= 0) && !empty($result['plantas'])) {
+            $plantaId = (int)$result['plantas'][0]['id'];
+        }
+        $result['equipos'] = $plantaId !== null ? $this->getEquiposByPlantaAndType($plantaId, $equipoTypeId) : [];
+
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = strtotime($startAt) ?: 0;
+            $endTs = strtotime($endAt) ?: 0;
+        }
+
+        $where = [
+            "pwoe.evt_type = 'pause'",
+            "(pwoe.evt_pause_id = 1 OR pwoe.evt_pause_id = '1' OR LOWER(ppt.pause_name) LIKE '%colaci%')",
+            "pwoe.evt_crtdat BETWEEN :start_ts AND :end_ts",
+            "pwoe.evt_status > 0",
+        ];
+        $params = [
+            ':start_ts' => $startTs,
+            ':end_ts' => $endTs,
+        ];
+
+        if ($plantaId !== null && $plantaId > 0 && $this->erpColumnExists('prod_worker_init', 'win_plantaid')) {
+            $where[] = "pwi.win_plantaid = :planta_id";
+            $params[':planta_id'] = $plantaId;
+        }
+
+        if ($equipoTypeId !== null && $equipoTypeId > 0) {
+            $where[] = "e.equipo_type_id = :equipo_type_id";
+            $params[':equipo_type_id'] = $equipoTypeId;
+        }
+
+        if ($equipoId !== null && $equipoId > 0) {
+            $where[] = "e.id = :equipo_id";
+            $params[':equipo_id'] = $equipoId;
+        }
+
+        if ($search !== null && trim($search) !== '') {
+            $s = '%' . trim($search) . '%';
+            $where[] = "(h.prd_number LIKE :s1 OR o.req_number LIKE :s2 OR c.cust_name LIKE :s3 OR w.wrk_firstname LIKE :s4 OR w.wrk_lastname LIKE :s5 OR e.equipo_name LIKE :s6 OR w.wrk_rut LIKE :s7)";
+            $params[':s1'] = $s;
+            $params[':s2'] = $s;
+            $params[':s3'] = $s;
+            $params[':s4'] = $s;
+            $params[':s5'] = $s;
+            $params[':s6'] = $s;
+            $params[':s7'] = $s;
+        }
+
+        $sql = "
+            SELECT 
+                pwoe.id AS event_id,
+                pwot.id AS pwo_id,
+                pwot.wok_crtdat AS shift_start,
+                pwot.wok_enddat AS shift_end,
+                pwoe.evt_crtdat AS break_start,
+                pwoe.evt_enddat AS break_end,
+                pwoe.evt_comments AS break_comments,
+                e.id AS machine_id,
+                e.equipo_name AS machine_name,
+                et.id AS machine_type_id,
+                et.type_ant_title AS process_name,
+                w.id AS worker_id,
+                w.wrk_rut,
+                CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, '')) AS worker_name,
+                h.prd_number AS ot_number,
+                o.req_number AS cc_number,
+                c.cust_name AS customer_name
+            FROM prod_worker_ot_events pwoe
+            LEFT JOIN prod_pause_types ppt ON ppt.id = pwoe.evt_pause_id
+            INNER JOIN prod_worker_ot pwot ON pwot.id = pwoe.evt_prod_worker_otid
+            INNER JOIN prod_worker_init pwi ON pwi.id = pwot.wok_init_id
+            LEFT JOIN workers w ON w.id = pwi.win_wrkid
+            LEFT JOIN equipo e ON e.id = pwi.win_equipoid
+            LEFT JOIN equipo_type et ON et.id = e.equipo_type_id
+            LEFT JOIN prod_agenda pa ON pa.id = pwot.wok_ag_id
+            LEFT JOIN prod_header h ON h.id = pa.ag_prdid
+            LEFT JOIN orders o ON o.id = pa.ag_reqid
+            LEFT JOIN customer c ON c.id = o.req_cust_id
+            WHERE " . implode(" AND ", $where) . "
+            ORDER BY pwoe.evt_crtdat DESC
+        ";
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            $rawRows = $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            $rawRows = [];
+        }
+
+        $totalMinutes = 0;
+        $completedCount = 0;
+        $inProgressCount = 0;
+        $rows = [];
+
+        // Carga batch de turnos para evitar N+1 queries y acelerar la respuesta
+        $turnoCache = [];
+        $workerIds = array_values(array_unique(array_filter(array_map(static fn($r) => (int)($r['worker_id'] ?? 0), $rawRows))));
+        if (!empty($workerIds)) {
+            $years = [];
+            foreach ($rawRows as $r) {
+                $bs = (int)($r['break_start'] ?? 0);
+                if ($bs > 0) {
+                    $years[] = (int)date('Y', $bs);
+                }
+            }
+            $years = array_unique($years);
+            if (empty($years)) {
+                $years = [(int)date('Y')];
+            }
+            $minY = min($years);
+            $maxY = max($years);
+
+            $inPlaceholders = implode(',', array_fill(0, count($workerIds), '?'));
+            $batchSql = "
+                SELECT tca.assign_worker_id, tca.assign_year, tca.assign_month, tca.assign_day,
+                       tt.type_name_short, tt.type_name
+                FROM turnos_config_assign tca
+                INNER JOIN turnos_types tt ON tt.id = tca.assign_turno_type_id
+                WHERE tca.assign_worker_id IN ($inPlaceholders)
+                  AND tca.assign_year BETWEEN ? AND ?
+            ";
+            try {
+                $bStmt = $this->erpPdo->prepare($batchSql);
+                $bParams = array_merge($workerIds, [$minY, $maxY]);
+                $bStmt->execute($bParams);
+                while ($tRow = $bStmt->fetch()) {
+                    $w = (int)$tRow['assign_worker_id'];
+                    $y = (int)$tRow['assign_year'];
+                    $m = (int)$tRow['assign_month'];
+                    $d = (int)$tRow['assign_day'];
+                    $key = "{$w}_{$y}_{$m}_{$d}";
+                    $code = trim((string)($tRow['type_name_short'] ?? $tRow['type_name'] ?? 'N/D'));
+                    $turnoCache[$key] = $code;
+                }
+            } catch (Throwable) {
+                // Silencioso si falla la tabla de turnos
+            }
+        }
+
+        foreach ($rawRows as $row) {
+            $bStart = (int)($row['break_start'] ?? 0);
+            $bEnd = (int)($row['break_end'] ?? 0);
+            $wId = (int)($row['worker_id'] ?? 0);
+
+            $diffSeconds = ($bEnd > 0 && $bEnd >= $bStart) ? ($bEnd - $bStart) : 0;
+            $durationMinutes = (int)round($diffSeconds / 60);
+            $hours = (int)floor($durationMinutes / 60);
+            $mins = $durationMinutes % 60;
+            $durationStr = $bEnd > 0 ? sprintf('%02d:%02d h', $hours, $mins) : 'En curso';
+            $statusLabel = $bEnd > 0 ? 'Terminado' : 'En curso';
+
+            if ($bEnd > 0) {
+                $completedCount++;
+                $totalMinutes += $durationMinutes;
+            } else {
+                $inProgressCount++;
+            }
+
+            // Buscar código de turno real del trabajador para ese día desde el mapa batch
+            $shiftCode = 'N/D';
+            if ($wId > 0 && $bStart > 0) {
+                $y = (int)date('Y', $bStart);
+                $m = (int)date('m', $bStart);
+                $d = (int)date('d', $bStart);
+                $cacheKey = "{$wId}_{$y}_{$m}_{$d}";
+                if (isset($turnoCache[$cacheKey])) {
+                    $shiftCode = $turnoCache[$cacheKey];
+                }
+            }
+
+            $sStart = (int)($row['shift_start'] ?? 0);
+            $sEnd = (int)($row['shift_end'] ?? 0);
+
+            $rows[] = [
+                'event_id' => (int)$row['event_id'],
+                'shift_start' => $sStart > 0 ? date('d/m/Y H:i', $sStart) : '-',
+                'shift_end' => $sEnd > 0 ? date('d/m/Y H:i', $sEnd) : '-',
+                'shift_code' => $shiftCode !== '' ? $shiftCode : 'General',
+                'machine_name' => trim((string)($row['machine_name'] ?? 'Sin asignar')),
+                'process_name' => trim((string)($row['process_name'] ?? 'General')),
+                'worker_rut' => trim((string)($row['wrk_rut'] ?? '')),
+                'worker_name' => trim((string)($row['worker_name'] ?? 'Sin asignar')),
+                'ot_number' => trim((string)($row['ot_number'] ?? '')),
+                'cc_number' => trim((string)($row['cc_number'] ?? '')),
+                'customer_name' => trim((string)($row['customer_name'] ?? '')),
+                'break_start' => $bStart > 0 ? date('d/m/Y H:i', $bStart) : '-',
+                'break_end' => $bEnd > 0 ? date('d/m/Y H:i', $bEnd) : '-',
+                'duration_minutes' => $durationMinutes,
+                'duration_str' => $durationStr,
+                'status' => $statusLabel,
+                'comments' => trim((string)($row['break_comments'] ?? '')),
+            ];
+        }
+
+        $result['rows'] = $rows;
+        $totalRecords = count($rows);
+        $result['summary'] = [
+            'total_records' => $totalRecords,
+            'completed_records' => $completedCount,
+            'in_progress_records' => $inProgressCount,
+            'total_minutes' => $totalMinutes,
+            'total_hours' => round($totalMinutes / 60, 1),
+            'avg_minutes' => $completedCount > 0 ? round($totalMinutes / $completedCount, 1) : 0.0,
+        ];
+
+        return $result;
+    }
+
+    /**
+     * Informe de Detenciones: paradas de máquina distintas de colación.
+     * Muestra motivo de parada, clasificación, máquina, tiempos, operario y observaciones.
+     */
+    public function getMachineStopsReport(
+        string $startAt,
+        string $endAt,
+        ?int $plantaId = null,
+        ?int $equipoTypeId = null,
+        ?int $equipoId = null,
+        ?int $pauseId = null,
+        ?string $search = null
+    ): array {
+        $result = [
+            'plantas' => $this->getPlantasList(),
+            'equipo_types' => $this->getEquipoTypesList(),
+            'equipos' => [],
+            'pause_types' => [],
+            'rows' => [],
+            'summary' => [
+                'total_stops' => 0,
+                'total_minutes' => 0,
+                'total_hours' => 0.0,
+                'avg_minutes' => 0.0,
+                'by_reason' => [],
+            ],
+        ];
+
+        if (!$this->erpTableExists('prod_worker_ot_events') || !$this->erpTableExists('prod_worker_ot')) {
+            return $result;
+        }
+
+        if (($plantaId === null || $plantaId <= 0) && !empty($result['plantas'])) {
+            $plantaId = (int)$result['plantas'][0]['id'];
+        }
+        $result['equipos'] = $plantaId !== null ? $this->getEquiposByPlantaAndType($plantaId, $equipoTypeId) : [];
+
+        // Obtener lista de motivos de parada para filtro
+        try {
+            $result['pause_types'] = $this->erpPdo->query("
+                SELECT id, pause_code, pause_name 
+                FROM prod_pause_types 
+                WHERE pause_status > 0 AND (id != 1 AND pause_code != '2200')
+                ORDER BY pause_name ASC
+            ")->fetchAll() ?: [];
+        } catch (Throwable) {
+            $result['pause_types'] = [];
+        }
+
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = strtotime($startAt) ?: 0;
+            $endTs = strtotime($endAt) ?: 0;
+        }
+
+        $where = [
+            "pwoe.evt_type = 'pause'",
+            "(pwoe.evt_pause_id != 1 AND pwoe.evt_pause_id != '1' AND (ppt.pause_code IS NULL OR ppt.pause_code != '2200'))",
+            "pwoe.evt_crtdat BETWEEN :start_ts AND :end_ts",
+            "pwoe.evt_status > 0",
+        ];
+        $params = [
+            ':start_ts' => $startTs,
+            ':end_ts' => $endTs,
+        ];
+
+        if ($plantaId !== null && $plantaId > 0 && $this->erpColumnExists('prod_worker_init', 'win_plantaid')) {
+            $where[] = "pwi.win_plantaid = :planta_id";
+            $params[':planta_id'] = $plantaId;
+        }
+
+        if ($equipoTypeId !== null && $equipoTypeId > 0) {
+            $where[] = "e.equipo_type_id = :equipo_type_id";
+            $params[':equipo_type_id'] = $equipoTypeId;
+        }
+
+        if ($equipoId !== null && $equipoId > 0) {
+            $where[] = "e.id = :equipo_id";
+            $params[':equipo_id'] = $equipoId;
+        }
+
+        if ($pauseId !== null && $pauseId > 0) {
+            $where[] = "pwoe.evt_pause_id = :pause_id";
+            $params[':pause_id'] = $pauseId;
+        }
+
+        if ($search !== null && trim($search) !== '') {
+            $s = '%' . trim($search) . '%';
+            $where[] = "(ppt.pause_name LIKE :s1 OR pwoe.evt_comments LIKE :s2 OR e.equipo_name LIKE :s3 OR w.wrk_firstname LIKE :s4 OR w.wrk_lastname LIKE :s5 OR h.prd_number LIKE :s6 OR o.req_number LIKE :s7)";
+            $params[':s1'] = $s;
+            $params[':s2'] = $s;
+            $params[':s3'] = $s;
+            $params[':s4'] = $s;
+            $params[':s5'] = $s;
+            $params[':s6'] = $s;
+            $params[':s7'] = $s;
+        }
+
+        $sql = "
+            SELECT 
+                pwoe.id AS event_id,
+                pwot.id AS pwo_id,
+                pwoe.evt_crtdat AS stop_start,
+                pwoe.evt_enddat AS stop_end,
+                pwoe.evt_comments AS stop_comments,
+                pwoe.evt_pause_id AS pause_id,
+                COALESCE(ppt.pause_code, '') AS pause_code,
+                COALESCE(ppt.pause_name, 'Detención sin motivo') AS stop_reason,
+                COALESCE(p.descripcion, '') AS stop_classification,
+                e.id AS machine_id,
+                e.equipo_name AS machine_name,
+                et.id AS machine_type_id,
+                et.type_ant_title AS process_name,
+                w.id AS worker_id,
+                w.wrk_rut,
+                CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, '')) AS worker_name,
+                h.prd_number AS ot_number,
+                o.req_number AS cc_number,
+                c.cust_name AS customer_name
+            FROM prod_worker_ot_events pwoe
+            LEFT JOIN prod_pause_types ppt ON ppt.id = pwoe.evt_pause_id
+            LEFT JOIN parametros p ON (p.tabla = 'CLASIFICA' AND p.codigo = ppt.pause_clasifica)
+            INNER JOIN prod_worker_ot pwot ON pwot.id = pwoe.evt_prod_worker_otid
+            INNER JOIN prod_worker_init pwi ON pwi.id = pwot.wok_init_id
+            LEFT JOIN workers w ON w.id = pwi.win_wrkid
+            LEFT JOIN equipo e ON e.id = pwi.win_equipoid
+            LEFT JOIN equipo_type et ON et.id = e.equipo_type_id
+            LEFT JOIN prod_agenda pa ON pa.id = pwot.wok_ag_id
+            LEFT JOIN prod_header h ON h.id = pa.ag_prdid
+            LEFT JOIN orders o ON o.id = pa.ag_reqid
+            LEFT JOIN customer c ON c.id = o.req_cust_id
+            WHERE " . implode(" AND ", $where) . "
+            ORDER BY pwoe.evt_crtdat DESC
+        ";
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            $rawRows = $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            $rawRows = [];
+        }
+
+        $totalMinutes = 0;
+        $reasonCounts = [];
+        $rows = [];
+
+        foreach ($rawRows as $row) {
+            $sStart = (int)($row['stop_start'] ?? 0);
+            $sEnd = (int)($row['stop_end'] ?? 0);
+            $diffSeconds = ($sEnd > 0 && $sEnd >= $sStart) ? ($sEnd - $sStart) : 0;
+            $durationMinutes = (int)round($diffSeconds / 60);
+            $hours = (int)floor($durationMinutes / 60);
+            $mins = $durationMinutes % 60;
+            $durationStr = $sEnd > 0 ? sprintf('%02d:%02d h', $hours, $mins) : 'En curso';
+
+            $totalMinutes += $durationMinutes;
+            $reason = trim((string)$row['stop_reason']);
+            if (!isset($reasonCounts[$reason])) {
+                $reasonCounts[$reason] = ['count' => 0, 'minutes' => 0];
+            }
+            $reasonCounts[$reason]['count']++;
+            $reasonCounts[$reason]['minutes'] += $durationMinutes;
+
+            $rows[] = [
+                'event_id' => (int)$row['event_id'],
+                'worker_name' => trim((string)($row['worker_name'] ?? 'Sin asignar')),
+                'worker_rut' => trim((string)($row['wrk_rut'] ?? '')),
+                'process_name' => trim((string)($row['process_name'] ?? 'General')),
+                'machine_id' => (int)($row['machine_id'] ?? 0),
+                'machine_name' => trim((string)($row['machine_name'] ?? 'Sin asignar')),
+                'pause_code' => trim((string)$row['pause_code']),
+                'stop_reason' => $reason,
+                'comments' => trim((string)($row['stop_comments'] ?? '')),
+                'classification' => trim((string)$row['stop_classification']),
+                'date' => $sStart > 0 ? date('d/m/Y', $sStart) : '-',
+                'start_time' => $sStart > 0 ? date('H:i', $sStart) : '-',
+                'end_date' => $sEnd > 0 ? date('d/m/Y', $sEnd) : '-',
+                'end_time' => $sEnd > 0 ? date('H:i', $sEnd) : '-',
+                'duration_minutes' => $durationMinutes,
+                'duration_str' => $durationStr,
+                'status' => $sEnd > 0 ? 'Terminada' : 'En curso',
+                'ot_number' => trim((string)($row['ot_number'] ?? '')),
+                'cc_number' => trim((string)($row['cc_number'] ?? '')),
+                'customer_name' => trim((string)($row['customer_name'] ?? '')),
+            ];
+        }
+
+        $result['rows'] = $rows;
+        $totalStops = count($rows);
+        $result['summary'] = [
+            'total_stops' => $totalStops,
+            'total_minutes' => $totalMinutes,
+            'total_hours' => round($totalMinutes / 60, 1),
+            'avg_minutes' => $totalStops > 0 ? round($totalMinutes / $totalStops, 1) : 0.0,
+            'by_reason' => $reasonCounts,
+        ];
+
+        return $result;
+    }
+
+    /**
+     * Informe de Cambio de Configuración: eventos tipo 'apertura' (setup de máquinas / cambio de medida).
+     */
+    public function getMachineSetupReport(
+        string $startAt,
+        string $endAt,
+        ?int $plantaId = null,
+        ?int $equipoTypeId = null,
+        ?int $equipoId = null,
+        ?string $search = null
+    ): array {
+        $result = [
+            'plantas' => $this->getPlantasList(),
+            'equipo_types' => $this->getEquipoTypesList(),
+            'equipos' => [],
+            'rows' => [],
+            'summary' => [
+                'total_setups' => 0,
+                'total_minutes' => 0,
+                'total_hours' => 0.0,
+                'avg_minutes' => 0.0,
+            ],
+        ];
+
+        if (!$this->erpTableExists('prod_worker_ot_events') || !$this->erpTableExists('prod_worker_ot')) {
+            return $result;
+        }
+
+        if (($plantaId === null || $plantaId <= 0) && !empty($result['plantas'])) {
+            $plantaId = (int)$result['plantas'][0]['id'];
+        }
+        $result['equipos'] = $plantaId !== null ? $this->getEquiposByPlantaAndType($plantaId, $equipoTypeId) : [];
+
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = strtotime($startAt) ?: 0;
+            $endTs = strtotime($endAt) ?: 0;
+        }
+
+        $where = [
+            "pwoe.evt_type = 'apertura'",
+            "pwoe.evt_medida_fromid != pwoe.evt_medida_toid",
+            "pwoe.evt_crtdat BETWEEN :start_ts AND :end_ts",
+            "pwoe.evt_status > 0",
+        ];
+        $params = [
+            ':start_ts' => $startTs,
+            ':end_ts' => $endTs,
+        ];
+
+        if ($plantaId !== null && $plantaId > 0 && $this->erpColumnExists('prod_worker_init', 'win_plantaid')) {
+            $where[] = "pwi.win_plantaid = :planta_id";
+            $params[':planta_id'] = $plantaId;
+        }
+
+        if ($equipoTypeId !== null && $equipoTypeId > 0) {
+            $where[] = "e.equipo_type_id = :equipo_type_id";
+            $params[':equipo_type_id'] = $equipoTypeId;
+        }
+
+        if ($equipoId !== null && $equipoId > 0) {
+            $where[] = "e.id = :equipo_id";
+            $params[':equipo_id'] = $equipoId;
+        }
+
+        if ($search !== null && trim($search) !== '') {
+            $s = '%' . trim($search) . '%';
+            $where[] = "(h.prd_number LIKE :s1 OR o.req_number LIKE :s2 OR c.cust_name LIKE :s3 OR w.wrk_firstname LIKE :s4 OR w.wrk_lastname LIKE :s5 OR e.equipo_name LIKE :s6)";
+            $params[':s1'] = $s;
+            $params[':s2'] = $s;
+            $params[':s3'] = $s;
+            $params[':s4'] = $s;
+            $params[':s5'] = $s;
+            $params[':s6'] = $s;
+        }
+
+        $sql = "
+            SELECT 
+                pwoe.id AS event_id,
+                pwot.id AS pwo_id,
+                pwoe.evt_crtdat AS setup_start,
+                pwoe.evt_enddat AS setup_end,
+                pwoe.evt_comments AS setup_comments,
+                pwoe.evt_medida_fromid,
+                pwoe.evt_medida_toid,
+                pm_from.med_name AS from_size,
+                pm_from.med_tipoproducto AS from_tipo,
+                pm_to.med_name AS to_size,
+                pm_to.med_tipoproducto AS to_tipo,
+                e.id AS machine_id,
+                e.equipo_name AS machine_name,
+                et.id AS machine_type_id,
+                et.type_ant_title AS process_name,
+                w.id AS worker_id,
+                w.wrk_rut,
+                CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, '')) AS worker_name,
+                h.prd_number AS ot_number,
+                o.req_number AS cc_number,
+                c.cust_name AS customer_name
+            FROM prod_worker_ot_events pwoe
+            INNER JOIN prod_worker_ot pwot ON pwot.id = pwoe.evt_prod_worker_otid
+            INNER JOIN prod_worker_init pwi ON pwi.id = pwot.wok_init_id
+            LEFT JOIN workers w ON w.id = pwi.win_wrkid
+            LEFT JOIN equipo e ON e.id = pwi.win_equipoid
+            LEFT JOIN equipo_type et ON et.id = e.equipo_type_id
+            LEFT JOIN prod_agenda pa ON pa.id = pwot.wok_ag_id
+            LEFT JOIN prod_header h ON h.id = pa.ag_prdid
+            LEFT JOIN orders o ON o.id = pa.ag_reqid
+            LEFT JOIN customer c ON c.id = o.req_cust_id
+            LEFT JOIN prod_medidas pm_from ON pm_from.id = pwoe.evt_medida_fromid
+            LEFT JOIN prod_medidas pm_to ON pm_to.id = pwoe.evt_medida_toid
+            WHERE " . implode(" AND ", $where) . "
+            ORDER BY pwoe.evt_crtdat DESC
+        ";
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            $rawRows = $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            $rawRows = [];
+        }
+
+        $totalMinutes = 0;
+        $rows = [];
+
+        foreach ($rawRows as $row) {
+            $sStart = (int)($row['setup_start'] ?? 0);
+            $sEnd = (int)($row['setup_end'] ?? 0);
+            $diffSeconds = ($sEnd > 0 && $sEnd >= $sStart) ? ($sEnd - $sStart) : 0;
+            $durationMinutes = (int)round($diffSeconds / 60);
+            $hours = (int)floor($durationMinutes / 60);
+            $mins = $durationMinutes % 60;
+            $durationStr = $sEnd > 0 ? sprintf('%02d:%02d h', $hours, $mins) : 'En curso';
+
+            $totalMinutes += $durationMinutes;
+
+            $formatFrom = trim((string)($row['from_size'] ?? ''));
+            $formatTo = trim((string)($row['to_size'] ?? ''));
+
+            $ft = (int)($row['from_tipo'] ?? 0);
+            $tt = (int)($row['to_tipo'] ?? 0);
+            $aplica = 'NO';
+            if ($ft === 3 && $tt === 3) {
+                $aplica = 'SI';
+            } elseif ($ft > 0 && $tt > 0 && $ft !== $tt) {
+                $aplica = 'SI';
+            }
+
+            $rows[] = [
+                'event_id' => (int)$row['event_id'],
+                'ot_number' => trim((string)($row['ot_number'] ?? '')),
+                'cc_number' => trim((string)($row['cc_number'] ?? '')),
+                'customer_name' => trim((string)($row['customer_name'] ?? '')),
+                'machine_name' => trim((string)($row['machine_name'] ?? 'Sin asignar')),
+                'process_name' => trim((string)($row['process_name'] ?? 'General')),
+                'worker_name' => trim((string)($row['worker_name'] ?? 'Sin asignar')),
+                'worker_rut' => trim((string)($row['wrk_rut'] ?? '')),
+                'setup_start' => $sStart > 0 ? date('d/m/Y H:i', $sStart) : '-',
+                'setup_end' => $sEnd > 0 ? date('d/m/Y H:i', $sEnd) : '-',
+                'duration_minutes' => $durationMinutes,
+                'duration_str' => $durationStr,
+                'format_from' => $formatFrom !== '' ? $formatFrom : 'Sin especif.',
+                'format_to' => $formatTo !== '' ? $formatTo : 'Sin especif.',
+                'is_format_change' => ((int)$row['evt_medida_fromid'] !== (int)$row['evt_medida_toid']),
+                'aplica' => $aplica,
+                'status' => $sEnd > 0 ? 'Terminada' : 'En curso',
+                'comments' => trim((string)($row['setup_comments'] ?? '')),
+            ];
+        }
+
+        $result['rows'] = $rows;
+        $totalSetups = count($rows);
+        $result['summary'] = [
+            'total_setups' => $totalSetups,
+            'total_minutes' => $totalMinutes,
+            'total_hours' => round($totalMinutes / 60, 1),
+            'avg_minutes' => $totalSetups > 0 ? round($totalMinutes / $totalSetups, 1) : 0.0,
+        ];
+
+        return $result;
+    }
+
+    /**
+     * Obtiene las órdenes de trabajo (OTs) cuya tasa de merma supere el umbral especificado (por defecto > 5.0%)
+     * en el período indicado, para generar alertas proactivas en el Dashboard ERP.
+     */
+    public function getCriticalWasteWorkOrders(string $startAt, string $endAt, float $threshold = 5.0): array
+    {
+        if (!$this->erpTableExists('prod_worker_ot_defectunits') || !$this->erpTableExists('prod_header')) {
+            return [];
+        }
+
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = strtotime($startAt) ?: 0;
+            $endTs = strtotime($endAt) ?: 0;
+        }
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return [];
+        }
+
+        try {
+            $sqlDefects = "
+                SELECT 
+                    d.id AS defect_id,
+                    d.evt_amount,
+                    d.evt_kgstounits,
+                    COALESCE(pa.ag_equipo_id, pwi.win_equipoid, 0) AS machine_id,
+                    eq.equipo_name,
+                    et.type_ant_title AS process_name,
+                    ph.prd_number AS work_order_number,
+                    COALESCE(ord.req_number, ph.prd_reqid) AS cost_center,
+                    COALESCE(c.cust_name, 'Cliente no asignado') AS customer_name,
+                    pa.ag_amount AS requested_units,
+                    t11.item_weight,
+                    t10.fab_med_width,
+                    t10.fab_med_height,
+                    t10.fab_med_fuelle,
+                    t10.fab_mat_gramms,
+                    t10.fab_manilla_length
+                FROM prod_worker_ot_defectunits d
+                INNER JOIN prod_worker_ot_events e ON e.id = d.evt_refid
+                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+                LEFT JOIN orders ord ON ord.id = pa.ag_reqid
+                LEFT JOIN customer c ON c.id = ord.req_cust_id
+                LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+                LEFT JOIN equipo eq ON eq.id = COALESCE(pa.ag_equipo_id, pwi.win_equipoid)
+                LEFT JOIN equipo_type et ON et.id = eq.equipo_type_id
+                LEFT JOIN orders_items t10 ON t10.req_id = pa.ag_reqid
+                LEFT JOIN item t11 ON t11.id = t10.item_id
+                WHERE d.evt_crtdat BETWEEN :start_ts AND :end_ts
+                  AND LOWER(d.evt_type) = 'merma'
+                ORDER BY d.id ASC
+            ";
+
+            $stmt = $this->erpPdo->prepare($sqlDefects);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $defects = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            $byOtMap = [];
+            foreach ($defects as $r) {
+                $itemWeight = (float)($r['item_weight'] ?? 0);
+                $w = (float)($r['fab_med_width'] ?? 0);
+                $h = (float)($r['fab_med_height'] ?? 0);
+                $f = (float)($r['fab_med_fuelle'] ?? 0);
+                $gramms = (float)($r['fab_mat_gramms'] ?? 0);
+                $manLen = (float)($r['fab_manilla_length'] ?? 0);
+
+                $unitWeightKg = 0.0;
+                if ($itemWeight > 0) {
+                    $unitWeightKg = $itemWeight / 1000.0;
+                } elseif ($w > 0 && $h > 0 && $gramms > 0) {
+                    $areaM2 = (2.0 * ($w + $f) * $h) / 10000.0;
+                    $bodyKg = $areaM2 * ($gramms / 1000.0);
+                    $manillaKg = ($manLen > 0) ? (2.0 * ($manLen / 100.0) * 0.025 * ($gramms / 1000.0)) : 0.0;
+                    $unitWeightKg = $bodyKg + $manillaKg;
+                }
+
+                $kg = (float)($r['evt_kgstounits'] ?? 0);
+                $rawUnits = (float)($r['evt_amount'] ?? 0);
+
+                if ($unitWeightKg > 0 && $kg > 0) {
+                    $units = (float)round($kg / $unitWeightKg);
+                } else {
+                    $units = $rawUnits;
+                }
+
+                $ot = trim((string)($r['work_order_number'] ?? ''));
+                if ($ot === '') {
+                    continue;
+                }
+
+                if (!isset($byOtMap[$ot])) {
+                    $byOtMap[$ot] = [
+                        'ot_number' => $ot,
+                        'cost_center' => trim((string)($r['cost_center'] ?? '')),
+                        'customer_name' => trim((string)($r['customer_name'] ?? '')),
+                        'process_name' => trim((string)($r['process_name'] ?? 'General')),
+                        'machine_name' => trim((string)($r['equipo_name'] ?? 'Máquina')),
+                        'requested_units' => (float)($r['requested_units'] ?? 0.0),
+                        'good_units' => 0,
+                        'waste_units' => 0,
+                        'total_units' => 0,
+                        'waste_rate' => 0.0,
+                    ];
+                }
+                $byOtMap[$ot]['waste_units'] += (int)round($units);
+            }
+
+            if (empty($byOtMap)) {
+                return [];
+            }
+
+            $otNumbers = array_keys($byOtMap);
+            $otPlaceholders = [];
+            $otParams = [':start_ts' => $startTs, ':end_ts' => $endTs];
+            foreach (array_values($otNumbers) as $idx => $otNum) {
+                $ph = ':ot_num_' . $idx;
+                $otPlaceholders[] = $ph;
+                $otParams[$ph] = $otNum;
+            }
+            $stmtOtProd = $this->erpPdo->prepare("
+                SELECT
+                    ph.prd_number,
+                    COALESCE(SUM(t.produced_units), 0) AS produced_units
+                FROM (
+                    SELECT
+                        ph2.prd_number,
+                        event_date,
+                        MAX(sum_units) AS produced_units
+                    FROM (
+                        SELECT
+                            ph3.prd_number,
+                            DATE(FROM_UNIXTIME(e.evt_crtdat)) AS event_date,
+                            LOWER(e.evt_type) AS evt_type,
+                            SUM(e.evt_amount) AS sum_units
+                        FROM prod_worker_ot_events e
+                        INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                        INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                        INNER JOIN prod_header ph3 ON ph3.id = pa.ag_prdid
+                        WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                          AND ph3.prd_number IN (" . implode(',', $otPlaceholders) . ")
+                          AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                        GROUP BY ph3.prd_number, DATE(FROM_UNIXTIME(e.evt_crtdat)), LOWER(e.evt_type)
+                    ) x
+                    INNER JOIN prod_header ph2 ON ph2.prd_number = x.prd_number
+                    GROUP BY ph2.prd_number, event_date
+                ) t
+                INNER JOIN prod_header ph ON ph.prd_number = t.prd_number
+                GROUP BY ph.prd_number
+            ");
+            $stmtOtProd->execute($otParams);
+            $prodByOt = [];
+            foreach ($stmtOtProd->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $prodByOt[$row['prd_number']] = (float)($row['produced_units'] ?? 0.0);
+            }
+
+            $critical = [];
+            foreach ($byOtMap as $ot => $data) {
+                $prod = (float)($prodByOt[$ot] ?? 0.0);
+                $waste = (float)$data['waste_units'];
+                $base = $prod > 0 ? $prod : (float)$data['requested_units'];
+                $rate = $base > 0 ? round(($waste / $base) * 100.0, 2) : 0.0;
+                
+                $data['good_units'] = (int)max(0.0, $prod - $waste);
+                $data['total_units'] = (int)$prod;
+                $data['waste_rate'] = $rate;
+
+                if ($rate > $threshold && $waste > 0) {
+                    $critical[] = $data;
+                }
+            }
+
+            usort($critical, static fn($a, $b) => $b['waste_rate'] <=> $a['waste_rate']);
+            return $critical;
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Informe de Nivel de Servicio / Despachos (OTIF):
+     * Basado en despacho, detalle_despacho y orders_delivery.
+     */
+    public function getServiceLevelReport(
+        string $startAt,
+        string $endAt,
+        ?int $plantaId = null,
+        ?string $search = null,
+        ?string $delayStatus = 'all',
+        ?string $delayDays = null
+    ): array {
+        $result = [
+            'plantas' => $this->getPlantasList(),
+            'rows' => [],
+            'summary' => [
+                'total_dispatches' => 0,
+                'on_time_dispatches' => 0,
+                'delayed_dispatches' => 0,
+                'service_level_percent' => 0.0,
+                'total_dispatched_units' => 0.0,
+                'filtered_count' => 0,
+                'filtered_units' => 0.0,
+                'filtered_on_time' => 0,
+                'filtered_delayed' => 0,
+                'filtered_service_level_percent' => 0.0,
+                'has_delay_filter' => false,
+            ],
+        ];
+
+        if (!$this->erpTableExists('despacho') || !$this->erpTableExists('detalle_despacho')) {
+            return $result;
+        }
+
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = strtotime($startAt) ?: 0;
+            $endTs = strtotime($endAt) ?: 0;
+        }
+
+        $where = [
+            "d.fecha_ingreso BETWEEN :start_ts AND :end_ts",
+        ];
+        $params = [
+            ':start_ts' => $startTs,
+            ':end_ts' => $endTs,
+        ];
+
+        if ($search !== null && trim($search) !== '') {
+            $s = '%' . trim($search) . '%';
+            $where[] = "(c.cust_name LIKE :s1 OR c.cust_company LIKE :s2 OR o1.req_number LIKE :s3 OR d.numero_documento LIKE :s4 OR od1.dlv_docnum LIKE :s5 OR i.item_number_prod LIKE :s6)";
+            $params[':s1'] = $s;
+            $params[':s2'] = $s;
+            $params[':s3'] = $s;
+            $params[':s4'] = $s;
+            $params[':s5'] = $s;
+            $params[':s6'] = $s;
+        }
+
+        $sql = "
+            SELECT 
+                d.id AS despacho_id,
+                d.mes,
+                d.año,
+                d.fecha_ingreso,
+                d.hora_ingreso,
+                d.hora_salida,
+                d.numero_documento,
+                d.tipo_documento,
+                d.estado,
+                d.observacion,
+                d.sello,
+                d.cantidad_pallet,
+                d.cantidad_cajas,
+                COALESCE(c.cust_company, c.cust_name, 'Cliente N/D') AS customer_name,
+                p.descripcion AS sales_channel,
+                o1.id AS order_id,
+                o1.req_number AS cc_number,
+                o1.req_crtdat AS order_date,
+                od1.id AS orders_delivery_id,
+                od1.dlv_delivery_date AS committed_date,
+                od1.dlv_docnum AS guia_factura,
+                i.item_number_prod AS product_code,
+                dd.salida AS dispatched_qty,
+                t1.trans_name AS transport_company,
+                tv.transports_vh_patente AS vehicle_plate,
+                CONCAT(COALESCE(tc.transports_chofer_nombre, ''), ' ', COALESCE(tc.transports_chofer_paterno, '')) AS driver_name,
+                tc.transports_chofer_rut AS driver_rut
+            FROM despacho d
+            INNER JOIN detalle_despacho dd ON d.id = dd.id_despacho
+            INNER JOIN customer c ON c.id = d.id_cliente
+            LEFT OUTER JOIN transports_chofer tc ON tc.id = d.id_chofer
+            LEFT OUTER JOIN transports_vehiculo tv ON tv.id = d.id_patente
+            LEFT OUTER JOIN transports t1 ON t1.id = d.id_transporte
+            LEFT OUTER JOIN parametros p ON p.tabla = 'CANAL' AND p.codigo = c.cust_canal
+            LEFT OUTER JOIN item i ON i.id = dd.id_item
+            LEFT OUTER JOIN orders_delivery od1 ON d.numero_documento = od1.id
+            LEFT OUTER JOIN orders o1 ON o1.id = od1.dlv_order_id
+            WHERE " . implode(" AND ", $where) . "
+            ORDER BY d.fecha_ingreso DESC
+        ";
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            $rawRows = $stmt->fetchAll() ?: [];
+        } catch (Throwable) {
+            $rawRows = [];
+        }
+
+        // Cargar ajustes manuales registrados (acuerdos con clientes, falta de pago, etc.)
+        $adjustments = [];
+        try {
+            $adjStmt = $this->pdo->query("SELECT * FROM service_level_adjustments");
+            while ($adjRow = $adjStmt->fetch(PDO::FETCH_ASSOC)) {
+                $adjustments[(int)$adjRow['despacho_id']] = $adjRow;
+            }
+        } catch (Throwable) {
+            $adjustments = [];
+        }
+
+        $totalDispatches = 0;
+        $onTimeCount = 0;
+        $delayedCount = 0;
+        $totalDisp = 0.0;
+        $allRows = [];
+
+        foreach ($rawRows as $row) {
+            $despachoId = (int)$row['despacho_id'];
+            $ordersDeliveryId = !empty($row['orders_delivery_id']) ? (int)$row['orders_delivery_id'] : null;
+            $fIngreso = (int)($row['fecha_ingreso'] ?? 0);
+            $committed = (int)($row['committed_date'] ?? 0);
+            $dispUnits = (float)($row['dispatched_qty'] ?? 0);
+
+            $hasAdj = isset($adjustments[$despachoId]);
+            $adj = $hasAdj ? $adjustments[$despachoId] : null;
+
+            $origCommitted = $committed;
+            $isJustified = false;
+            $reasonCategory = '';
+            $reasonDetails = '';
+            $updatedBy = '';
+            $updatedAt = '';
+            $adjCommittedTs = null;
+
+            if ($hasAdj) {
+                $isJustified = !empty($adj['is_justified']);
+                $reasonCategory = trim((string)($adj['reason_category'] ?? ''));
+                $reasonDetails = trim((string)($adj['reason_details'] ?? ''));
+                $updatedBy = trim((string)($adj['updated_by'] ?? ''));
+                $updatedAt = trim((string)($adj['updated_at'] ?? ''));
+                if (!empty($adj['adjusted_committed_date'])) {
+                    $adjCommittedTs = (int)$adj['adjusted_committed_date'];
+                    $committed = $adjCommittedTs;
+                }
+            }
+
+            $isOnTime = true;
+            $rowDelayDays = 0;
+            if ($isJustified) {
+                $isOnTime = true;
+                $rowDelayDays = 0;
+            } elseif ($committed > 0 && $fIngreso > 0) {
+                // Si la fecha de despacho fue posterior a la fecha comprometida (fin de día)
+                if ($fIngreso > ($committed + 86399)) {
+                    $isOnTime = false;
+                    $rowDelayDays = (int)ceil(($fIngreso - $committed) / 86400);
+                }
+            }
+
+            if ($isOnTime) {
+                $onTimeCount++;
+            } else {
+                $delayedCount++;
+            }
+
+            $totalDispatches++;
+            $totalDisp += $dispUnits;
+
+            $statusLabel = $isOnTime 
+                ? ($hasAdj && $isJustified ? 'A tiempo (Justificado)' : ($hasAdj ? 'A tiempo (Acuerdo)' : 'A tiempo'))
+                : ($hasAdj ? "Atraso {$rowDelayDays}d (Reprog.)" : "Atraso {$rowDelayDays}d");
+
+            $allRows[] = [
+                'despacho_id' => $despachoId,
+                'orders_delivery_id' => $ordersDeliveryId,
+                'date' => $fIngreso > 0 ? date('d/m/Y', $fIngreso) : '-',
+                'raw_date' => $fIngreso > 0 ? date('Y-m-d', $fIngreso) : '',
+                'entry_time' => trim((string)($row['hora_ingreso'] ?? '')),
+                'exit_time' => trim((string)($row['hora_salida'] ?? '')),
+                'doc_type' => trim((string)($row['tipo_documento'] ?? 'Despacho')),
+                'doc_number' => trim((string)($row['guia_factura'] ?? $row['numero_documento'] ?? '')),
+                'customer_name' => trim((string)$row['customer_name']),
+                'sales_channel' => trim((string)($row['sales_channel'] ?? 'General')),
+                'cc_number' => trim((string)($row['cc_number'] ?? '')),
+                'product_code' => trim((string)($row['product_code'] ?? '')),
+                'committed_date' => $committed > 0 ? date('d/m/Y', $committed) : 'Sin fecha',
+                'raw_committed_date' => $committed > 0 ? date('Y-m-d', $committed) : '',
+                'original_committed_date' => $origCommitted > 0 ? date('d/m/Y', $origCommitted) : 'Sin fecha',
+                'raw_orig_committed_date' => $origCommitted > 0 ? date('Y-m-d', $origCommitted) : '',
+                'is_on_time' => $isOnTime,
+                'delay_days' => $rowDelayDays,
+                'status_label' => $statusLabel,
+                'has_adjustment' => $hasAdj,
+                'is_justified' => $isJustified,
+                'reason_category' => $reasonCategory,
+                'reason_details' => $reasonDetails,
+                'adjusted_committed_date' => $adjCommittedTs ? date('d/m/Y', $adjCommittedTs) : null,
+                'raw_adjusted_date' => $adjCommittedTs ? date('Y-m-d', $adjCommittedTs) : null,
+                'updated_by' => $updatedBy,
+                'updated_at' => $updatedAt,
+                'dispatched_units' => $dispUnits,
+                'pallets' => (int)($row['cantidad_pallet'] ?? 0),
+                'boxes' => (int)($row['cantidad_cajas'] ?? 0),
+                'transport_company' => trim((string)($row['transport_company'] ?? '')),
+                'vehicle_plate' => trim((string)($row['vehicle_plate'] ?? '')),
+                'driver_name' => trim((string)($row['driver_name'] ?? '')),
+                'driver_rut' => trim((string)($row['driver_rut'] ?? '')),
+                'seal_number' => trim((string)($row['sello'] ?? '')),
+                'observation' => trim((string)($row['observacion'] ?? '')),
+            ];
+        }
+
+        // Filtro por Estado de Atraso y Cantidad de Días de Atraso
+        $normalizedDelayStatus = strtolower(trim((string)($delayStatus ?? 'all')));
+        if ($normalizedDelayStatus === '') {
+            $normalizedDelayStatus = 'all';
+        }
+        $normalizedDelayDays = trim((string)($delayDays ?? ''));
+
+        $hasDelayFilter = ($normalizedDelayStatus !== 'all' || ($normalizedDelayDays !== '' && $normalizedDelayDays !== 'all'));
+
+        $filteredRows = [];
+        $filteredUnits = 0.0;
+        $filteredOnTime = 0;
+        $filteredDelayed = 0;
+
+        foreach ($allRows as $r) {
+            $isOnTime = (bool)$r['is_on_time'];
+            $days = (int)$r['delay_days'];
+
+            // Filtro por Estado de Entrega (a tiempo vs con atraso)
+            if ($normalizedDelayStatus === 'on_time' && !$isOnTime) {
+                continue;
+            }
+            if ($normalizedDelayStatus === 'delayed' && $isOnTime) {
+                continue;
+            }
+
+            // Filtro por Cantidad de Días de Atraso
+            if ($normalizedDelayDays !== '' && $normalizedDelayDays !== 'all') {
+                if ($isOnTime) {
+                    continue;
+                }
+                if ($normalizedDelayDays === '1-3' && !($days >= 1 && $days <= 3)) {
+                    continue;
+                }
+                if ($normalizedDelayDays === '4-7' && !($days >= 4 && $days <= 7)) {
+                    continue;
+                }
+                if ($normalizedDelayDays === '8-14' && !($days >= 8 && $days <= 14)) {
+                    continue;
+                }
+                if ($normalizedDelayDays === '15+' && !($days >= 15)) {
+                    continue;
+                }
+                if (str_starts_with($normalizedDelayDays, 'min_')) {
+                    $minVal = (int)substr($normalizedDelayDays, 4);
+                    if ($days < $minVal) {
+                        continue;
+                    }
+                } elseif (is_numeric($normalizedDelayDays)) {
+                    if ($days < (int)$normalizedDelayDays) {
+                        continue;
+                    }
+                }
+            }
+
+            $filteredRows[] = $r;
+            $filteredUnits += (float)$r['dispatched_units'];
+            if ($isOnTime) {
+                $filteredOnTime++;
+            } else {
+                $filteredDelayed++;
+            }
+        }
+
+        $filteredCount = count($filteredRows);
+        $result['rows'] = $filteredRows;
+        $result['summary'] = [
+            'total_dispatches' => $totalDispatches,
+            'on_time_dispatches' => $onTimeCount,
+            'delayed_dispatches' => $delayedCount,
+            'service_level_percent' => $totalDispatches > 0 ? round(($onTimeCount / $totalDispatches) * 100.0, 2) : 100.0,
+            'total_dispatched_units' => $totalDisp,
+            'filtered_count' => $filteredCount,
+            'filtered_units' => $filteredUnits,
+            'filtered_on_time' => $filteredOnTime,
+            'filtered_delayed' => $filteredDelayed,
+            'filtered_service_level_percent' => $filteredCount > 0 ? round(($filteredOnTime / $filteredCount) * 100.0, 2) : 100.0,
+            'has_delay_filter' => $hasDelayFilter,
+        ];
+
+        return $result;
+    }
+
+    /**
+     * Guarda o actualiza un ajuste / justificación de fecha en el Informe de Nivel de Servicio.
+     * Permite justificar entregas que por acuerdo con el cliente (falta de pago, espera de confirmación, etc.)
+     * se reprogramaron o no deben imputarse como atraso de planta.
+     *
+     * @param array<string, mixed> $data
+     * @return array{ok: bool, message?: string, error?: string, despacho_id?: int, is_justified?: bool, reason_category?: string, adjusted_date?: string}
+     */
+    public function saveServiceLevelAdjustment(array $data, string $userName = 'Usuario'): array
+    {
+        $despachoId = isset($data['despacho_id']) ? (int)$data['despacho_id'] : 0;
+        if ($despachoId <= 0) {
+            return ['ok' => false, 'error' => 'ID de despacho inválido.'];
+        }
+
+        $ordersDeliveryId = !empty($data['orders_delivery_id']) ? (int)$data['orders_delivery_id'] : null;
+        $docNumber = trim((string)($data['doc_number'] ?? ''));
+        $ccNumber = trim((string)($data['cc_number'] ?? ''));
+        $adjustedDateStr = trim((string)($data['adjusted_date'] ?? ''));
+        $isJustified = !empty($data['is_justified']) ? 1 : 0;
+        $reasonCategory = trim((string)($data['reason_category'] ?? 'Acuerdo con cliente'));
+        $reasonDetails = trim((string)($data['reason_details'] ?? ''));
+
+        if ($reasonCategory === '') {
+            return ['ok' => false, 'error' => 'Debe indicar el motivo o justificación de la modificación.'];
+        }
+
+        // Calcular timestamp ajustado si se ingresó fecha
+        $adjustedTs = null;
+        if ($adjustedDateStr !== '') {
+            try {
+                $tz = new DateTimeZone('America/Santiago');
+                $adjustedTs = (new DateTimeImmutable($adjustedDateStr . ' 12:00:00', $tz))->getTimestamp();
+            } catch (Throwable) {
+                $adjustedTs = null;
+            }
+        }
+
+        // Obtener fecha original previa si ya existía ajuste o desde ERP orders_delivery
+        $origCommittedTs = null;
+        try {
+            $s = $this->pdo->prepare("SELECT * FROM service_level_adjustments WHERE despacho_id = :did LIMIT 1");
+            $s->execute([':did' => $despachoId]);
+            $existingAdj = $s->fetch(PDO::FETCH_ASSOC);
+            if ($existingAdj && !empty($existingAdj['original_committed_date'])) {
+                $origCommittedTs = (int)$existingAdj['original_committed_date'];
+            }
+        } catch (Throwable) {}
+
+        if (!$origCommittedTs && $ordersDeliveryId) {
+            try {
+                $odStmt = $this->erpPdo->prepare("SELECT dlv_delivery_date FROM orders_delivery WHERE id = :odid LIMIT 1");
+                $odStmt->execute([':odid' => $ordersDeliveryId]);
+                $odRow = $odStmt->fetch(PDO::FETCH_ASSOC);
+                if ($odRow && !empty($odRow['dlv_delivery_date'])) {
+                    $origCommittedTs = (int)$odRow['dlv_delivery_date'];
+                }
+            } catch (Throwable) {}
+        }
+
+        // Upsert en service_level_adjustments
+        try {
+            $sql = "INSERT INTO service_level_adjustments 
+                (despacho_id, orders_delivery_id, doc_number, cc_number, original_committed_date, adjusted_committed_date, is_justified, reason_category, reason_details, updated_by, created_at, updated_at)
+                VALUES 
+                (:despacho_id, :orders_delivery_id, :doc_number, :cc_number, :orig_date, :adj_date, :is_justified, :reason_category, :reason_details, :updated_by, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE
+                orders_delivery_id = VALUES(orders_delivery_id),
+                doc_number = VALUES(doc_number),
+                cc_number = VALUES(cc_number),
+                adjusted_committed_date = VALUES(adjusted_committed_date),
+                is_justified = VALUES(is_justified),
+                reason_category = VALUES(reason_category),
+                reason_details = VALUES(reason_details),
+                updated_by = VALUES(updated_by),
+                updated_at = NOW()";
+
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->execute([
+                ':despacho_id' => $despachoId,
+                ':orders_delivery_id' => $ordersDeliveryId,
+                ':doc_number' => $docNumber,
+                ':cc_number' => $ccNumber,
+                ':orig_date' => $origCommittedTs,
+                ':adj_date' => $adjustedTs,
+                ':is_justified' => $isJustified,
+                ':reason_category' => $reasonCategory,
+                ':reason_details' => $reasonDetails,
+                ':updated_by' => $userName,
+            ]);
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al guardar ajuste: ' . $e->getMessage()];
+        }
+
+        // Sincronizar fecha en ERP orders_delivery si se especificó nueva fecha
+        if ($ordersDeliveryId && $adjustedTs) {
+            try {
+                $erpUpd = $this->erpPdo->prepare("UPDATE orders_delivery SET dlv_delivery_date = :new_ts WHERE id = :odid");
+                $erpUpd->execute([
+                    ':new_ts' => $adjustedTs,
+                    ':odid' => $ordersDeliveryId,
+                ]);
+            } catch (Throwable) {}
+        }
+
+        return [
+            'ok' => true,
+            'message' => 'Registro de entrega modificado y sincronizado con éxito.',
+            'despacho_id' => $despachoId,
+            'is_justified' => (bool)$isJustified,
+            'reason_category' => $reasonCategory,
+            'adjusted_date' => $adjustedDateStr,
+        ];
+    }
+
+    /**
+     * Revierte el ajuste de una entrega, restaurando la fecha y estado original.
+     *
+     * @return array{ok: bool, message?: string, error?: string}
+     */
+    public function revertServiceLevelAdjustment(int $despachoId, string $userName = 'Usuario'): array
+    {
+        if ($despachoId <= 0) {
+            return ['ok' => false, 'error' => 'ID de despacho inválido.'];
+        }
+
+        try {
+            $s = $this->pdo->prepare("SELECT * FROM service_level_adjustments WHERE despacho_id = :did LIMIT 1");
+            $s->execute([':did' => $despachoId]);
+            $adj = $s->fetch(PDO::FETCH_ASSOC);
+
+            if ($adj) {
+                // Restaurar fecha en ERP si teníamos la original
+                if (!empty($adj['orders_delivery_id']) && !empty($adj['original_committed_date'])) {
+                    try {
+                        $erpUpd = $this->erpPdo->prepare("UPDATE orders_delivery SET dlv_delivery_date = :orig_ts WHERE id = :odid");
+                        $erpUpd->execute([
+                            ':orig_ts' => (int)$adj['original_committed_date'],
+                            ':odid' => (int)$adj['orders_delivery_id'],
+                        ]);
+                    } catch (Throwable) {}
+                }
+
+                $del = $this->pdo->prepare("DELETE FROM service_level_adjustments WHERE despacho_id = :did");
+                $del->execute([':did' => $despachoId]);
+            }
+
+            return ['ok' => true, 'message' => 'Ajuste revertido y valores originales restaurados.'];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al revertir: ' . $e->getMessage()];
+        }
+    }
+
     public function getErpDashboardSummary(): array
     {
         $workOrders = [
@@ -7963,6 +11818,1149 @@ SQL;
         ];
     }
 
+    public function getLegacyErpHomeDashboard(int $userId): array
+    {
+        $dashboardUrl = '';
+        $userPic = '';
+        $salesByYear = [];
+
+        if ($this->erpTableExists('user')) {
+            try {
+                $stmt = $this->erpPdo->prepare('SELECT user_pic, user_dashboard FROM user WHERE id = :id LIMIT 1');
+                $stmt->execute([':id' => $userId]);
+                $row = $stmt->fetch();
+                if (is_array($row)) {
+                    $userPic = (string)($row['user_pic'] ?? '');
+                    $dashboardUrl = (string)($row['user_dashboard'] ?? '');
+                }
+            } catch (Throwable) {
+                $userPic = '';
+                $dashboardUrl = '';
+            }
+        }
+
+        if ($this->erpTableExists('invoices_sell')) {
+            try {
+                $stmt = $this->erpPdo->query(
+                    "SELECT
+                        DATE_FORMAT(DATE_ADD('1970-01-01', INTERVAL invc_date SECOND), '%Y') AS year,
+                        ROUND(SUM(invc_total_netto), 0) AS total
+                     FROM invoices_sell
+                     GROUP BY DATE_FORMAT(DATE_ADD('1970-01-01', INTERVAL invc_date SECOND), '%Y')
+                     ORDER BY year ASC"
+                );
+                $salesByYear = $stmt->fetchAll();
+            } catch (Throwable) {
+                $salesByYear = [];
+            }
+        }
+
+        return [
+            'user_pic' => $userPic,
+            'dashboard_url' => $dashboardUrl,
+            'sales_by_year' => $salesByYear,
+        ];
+    }
+
+    private function erpTableExists(string $table): bool
+    {
+        try {
+            $stmt = $this->erpPdo->prepare(
+                'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name'
+            );
+            $stmt->execute([
+                ':table_name' => $table,
+            ]);
+            return (int)$stmt->fetchColumn() > 0;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    private function erpColumnExists(string $table, string $column): bool
+    {
+        if (isset($this->erpColumnExistsCache[$table]) && array_key_exists($column, $this->erpColumnExistsCache[$table])) {
+            return (bool)$this->erpColumnExistsCache[$table][$column];
+        }
+        try {
+            $stmt = $this->erpPdo->prepare(
+                'SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name AND COLUMN_NAME = :column_name'
+            );
+            $stmt->execute([
+                ':table_name' => $table,
+                ':column_name' => $column,
+            ]);
+            $exists = (int)$stmt->fetchColumn() > 0;
+            if (!isset($this->erpColumnExistsCache[$table])) {
+                $this->erpColumnExistsCache[$table] = [];
+            }
+            $this->erpColumnExistsCache[$table][$column] = $exists;
+            return $exists;
+        } catch (Throwable) {
+            if (!isset($this->erpColumnExistsCache[$table])) {
+                $this->erpColumnExistsCache[$table] = [];
+            }
+            $this->erpColumnExistsCache[$table][$column] = false;
+            return false;
+        }
+    }
+
+    public function getErpOnlyProductionDashboardKpis(string $startAt, string $endAt): array
+    {
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = 0;
+            $endTs = 0;
+        }
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return [
+                'produced_units' => 0.0,
+                'pending_units' => 0.0,
+                'dispatched_units' => null,
+                'waste' => ['percent' => null, 'waste_kg' => null, 'processed_kg' => null],
+                'semi_rolls' => ['count' => null, 'rows' => []],
+                'work_orders' => [],
+                'warehouses' => [],
+            ];
+        }
+
+        if (!$this->erpTableExists('prod_worker_ot_events') || !$this->erpTableExists('prod_worker_ot') || !$this->erpTableExists('prod_agenda') || !$this->erpTableExists('prod_header')) {
+            return [
+                'produced_units' => 0.0,
+                'pending_units' => 0.0,
+                'dispatched_units' => null,
+                'waste' => ['percent' => null, 'waste_kg' => null, 'processed_kg' => null],
+                'semi_rolls' => ['count' => null, 'rows' => []],
+                'work_orders' => [],
+                'warehouses' => [],
+            ];
+        }
+
+        $producedUnits = 0.0;
+        try {
+            $stmt = $this->erpPdo->prepare(
+                "SELECT COALESCE(SUM(e.evt_amount), 0) AS produced_units
+                 FROM prod_worker_ot_events e
+                 INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                 INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                 INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                 WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                   AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                   AND eq.equipo_type_id = 8"
+            );
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $producedUnits = (float)($stmt->fetchColumn() ?: 0);
+        } catch (Throwable) {
+            $producedUnits = 0.0;
+        }
+
+        $wastePercent = null;
+        $wasteUnits = null;
+        $wasteRequestedUnits = null;
+        $wasteBaseUnits = null;
+        $wasteDeclaredUnits = null;
+        $wasteDeclaredBaseUnits = null;
+        $wasteDeclaredPercent = null;
+        $wasteSource = null;
+
+        $wasteKg = null;
+
+        if ($this->erpTableExists('prod_worker_ot_defectunits')) {
+            $wasteKg = 0.0;
+            $wasteUnits = 0.0;
+            try {
+                $stmt = $this->erpPdo->prepare(
+                    'SELECT 
+                        d.evt_type,
+                        d.evt_amount,
+                        d.evt_kgstounits,
+                        t11.item_weight,
+                        t10.fab_med_width,
+                        t10.fab_med_height,
+                        t10.fab_med_fuelle,
+                        t10.fab_mat_gramms,
+                        t10.fab_manilla_length
+                     FROM prod_worker_ot_defectunits d
+                     INNER JOIN prod_worker_ot_events e ON e.id = d.evt_refid
+                     INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                     INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                     LEFT JOIN orders_items t10 ON t10.req_id = pa.ag_reqid
+                     LEFT JOIN item t11 ON t11.id = t10.item_id
+                     WHERE d.evt_crtdat BETWEEN :start_ts AND :end_ts
+                       AND LOWER(d.evt_type) = "merma"'
+                );
+                $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $itemWeight = (float)($r['item_weight'] ?? 0);
+                    $w = (float)($r['fab_med_width'] ?? 0);
+                    $h = (float)($r['fab_med_height'] ?? 0);
+                    $f = (float)($r['fab_med_fuelle'] ?? 0);
+                    $gramms = (float)($r['fab_mat_gramms'] ?? 0);
+                    $manLen = (float)($r['fab_manilla_length'] ?? 0);
+
+                    $unitWeightKg = 0.0;
+                    if ($itemWeight > 0) {
+                        $unitWeightKg = $itemWeight / 1000.0;
+                    } elseif ($w > 0 && $h > 0 && $gramms > 0) {
+                        $areaM2 = (2.0 * ($w + $f) * $h) / 10000.0;
+                        $bodyKg = $areaM2 * ($gramms / 1000.0);
+                        $manillaKg = ($manLen > 0) ? (2.0 * ($manLen / 100.0) * 0.025 * ($gramms / 1000.0)) : 0.0;
+                        $unitWeightKg = $bodyKg + $manillaKg;
+                    }
+
+                    $kg = (float)($r['evt_kgstounits'] ?? 0);
+                    $rawUnits = (float)($r['evt_amount'] ?? 0);
+
+                    if ($unitWeightKg > 0 && $kg > 0) {
+                        $units = (float)round($kg / $unitWeightKg);
+                    } else {
+                        $units = $rawUnits;
+                    }
+
+                    $wasteKg += $kg;
+                    $wasteUnits += $units;
+                }
+            } catch (Throwable) {
+                $wasteUnits = null;
+                $wasteKg = null;
+            }
+
+            try {
+                $stmt = $this->erpPdo->prepare(
+                    'SELECT COALESCE(SUM(t.requested_units), 0) AS requested_units
+                     FROM (
+                        SELECT ph.prd_number AS work_order_number, MAX(pa.ag_amount) AS requested_units
+                        FROM prod_worker_ot_events e
+                        INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                        INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                        INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+                        WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                          AND LOWER(e.evt_type) IN ("production","prod","prodsericolor")
+                        GROUP BY ph.prd_number
+                     ) t'
+                );
+                $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+                $wasteRequestedUnits = (float)($stmt->fetchColumn() ?: 0.0);
+            } catch (Throwable) {
+                $wasteRequestedUnits = null;
+            }
+
+            if (is_numeric($wasteUnits)) {
+                $wasteBaseUnits = $producedUnits;
+                if ($wasteBaseUnits > 0) {
+                    $wastePercent = ($wasteUnits / $wasteBaseUnits) * 100.0;
+                } else {
+                    $wastePercent = 0.0;
+                }
+                $wasteSource = 'prod_worker_ot_defectunits';
+            }
+        }
+
+        $sqlLegacy = <<<SQL
+SELECT
+    ph.prd_number AS work_order_number,
+    ph.prd_reqid AS cost_center,
+    MIN(DATE(FROM_UNIXTIME(e.evt_crtdat))) AS first_date,
+    MAX(DATE(FROM_UNIXTIME(e.evt_crtdat))) AS last_date,
+    ph.prd_desc AS erp_desc,
+    MAX(TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, "")))) AS operator_name,
+    MAX(eq.equipo_name) AS machine_name,
+    MAX(pa.ag_amount) AS requested_units,
+    COALESCE(SUM(e.evt_amount), 0) AS produced_units
+FROM prod_worker_ot_events e
+INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+LEFT JOIN workers w ON w.id = pwi.win_wrkid
+WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+  AND LOWER(e.evt_type) IN ("production","prod","prodsericolor")
+  AND eq.equipo_type_id = 8
+GROUP BY ph.prd_number, ph.prd_reqid, ph.prd_desc
+HAVING produced_units > 0
+ORDER BY produced_units DESC, work_order_number ASC
+LIMIT 40
+SQL;
+
+        $sqlExtended = <<<SQL
+SELECT
+    ph.prd_number AS work_order_number,
+    COALESCE(o.req_number, ph.prd_reqid) AS cost_center,
+    MIN(DATE(FROM_UNIXTIME(e.evt_crtdat))) AS first_date,
+    MAX(DATE(FROM_UNIXTIME(e.evt_crtdat))) AS last_date,
+    ph.prd_desc AS erp_desc,
+    MAX(TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, "")))) AS operator_name,
+    MAX(eq.equipo_name) AS machine_name,
+    MAX(COALESCE(oi.item_amount, pa.ag_amount)) AS requested_units,
+    COALESCE(SUM(e.evt_amount), 0) AS produced_units,
+    MAX(c.cust_name) AS client_label,
+    MAX(UPPER(cat.cat_prefix)) AS product_type,
+    MAX(
+        CASE
+            WHEN oi.fab_med_width IS NULL OR oi.fab_med_height IS NULL THEN ''
+            WHEN oi.fab_med_fuelle IS NULL OR oi.fab_med_fuelle = 0 THEN CONCAT(CAST(oi.fab_med_width AS UNSIGNED), 'X', CAST(oi.fab_med_height AS UNSIGNED))
+            ELSE CONCAT(CAST(oi.fab_med_width AS UNSIGNED), 'X', CAST(oi.fab_med_height AS UNSIGNED), 'X', CAST(oi.fab_med_fuelle AS UNSIGNED))
+        END
+    ) AS measure_cm
+FROM prod_worker_ot_events e
+INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+LEFT JOIN workers w ON w.id = pwi.win_wrkid
+LEFT JOIN orders o ON o.id = pa.ag_reqid
+LEFT JOIN customer c ON c.id = o.req_cust_id
+LEFT JOIN (
+    SELECT
+        req_id,
+        MAX(item_amount) AS item_amount,
+        MAX(fab_med_width) AS fab_med_width,
+        MAX(fab_med_height) AS fab_med_height,
+        MAX(fab_med_fuelle) AS fab_med_fuelle,
+        MAX(item_id) AS item_id
+    FROM orders_items
+    GROUP BY req_id
+) oi ON oi.req_id = o.id
+LEFT JOIN item it ON it.id = oi.item_id
+LEFT JOIN (
+    SELECT ip.item_id, MIN(pc.cat_prefix) AS cat_prefix
+    FROM item_productcats ip
+    INNER JOIN productcats pc ON pc.id = ip.cat_id
+    GROUP BY ip.item_id
+) cat ON cat.item_id = it.id
+WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+  AND LOWER(e.evt_type) IN ("production","prod","prodsericolor")
+  AND eq.equipo_type_id = 8
+GROUP BY ph.prd_number, cost_center, ph.prd_desc
+HAVING produced_units > 0
+ORDER BY produced_units DESC, work_order_number ASC
+LIMIT 40
+SQL;
+
+        $rawRows = [];
+        $queryMode = 'extended';
+        try {
+            $stmt = $this->erpPdo->prepare($sqlExtended);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $rawRows = $stmt->fetchAll();
+        } catch (Throwable) {
+            $queryMode = 'legacy';
+            try {
+                $stmt = $this->erpPdo->prepare($sqlLegacy);
+                $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+                $rawRows = $stmt->fetchAll();
+            } catch (Throwable) {
+                $rawRows = [];
+            }
+        }
+
+        $rows = [];
+        $pendingUnits = 0.0;
+        try {
+            $pendingStmt = $this->erpPdo->prepare(
+                "SELECT COALESCE(SUM(GREATEST(t.requested_units - t.produced_units, 0)), 0) AS pending_units
+                 FROM (
+                    SELECT
+                        ph.prd_number,
+                        MAX(pa.ag_amount) AS requested_units,
+                        SUM(e.evt_amount) AS produced_units
+                    FROM prod_worker_ot_events e
+                    INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                    INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                    INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+                    INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                    WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                      AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                      AND eq.equipo_type_id = 8
+                    GROUP BY ph.prd_number
+                 ) t"
+            );
+            $pendingStmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $pendingUnits = (float)($pendingStmt->fetchColumn() ?: 0.0);
+        } catch (Throwable) {
+            $pendingUnits = 0.0;
+        }
+
+        foreach ($rawRows as $r) {
+            if (!is_array($r)) {
+                continue;
+            }
+            $desc = trim((string)($r['erp_desc'] ?? ''));
+            $requested = (float)($r['requested_units'] ?? 0.0);
+            $produced = (float)($r['produced_units'] ?? 0.0);
+
+            $rows[] = [
+                'work_order_number' => (string)($r['work_order_number'] ?? ''),
+                'cost_center' => (string)($r['cost_center'] ?? ''),
+                'first_date' => (string)($r['first_date'] ?? ''),
+                'last_date' => (string)($r['last_date'] ?? ''),
+                'operator_name' => trim((string)($r['operator_name'] ?? '')),
+                'machine_name' => trim((string)($r['machine_name'] ?? '')),
+                'client_label' => trim((string)($r['client_label'] ?? '')) !== '' ? (string)$r['client_label'] : $this->parseClientLabelFromErpDesc($desc),
+                'product_type' => trim((string)($r['product_type'] ?? '')) !== '' ? (string)$r['product_type'] : $this->parseProductTypeFromErpDesc($desc),
+                'measure_cm' => trim((string)($r['measure_cm'] ?? '')) !== '' ? (string)$r['measure_cm'] : $this->parseMeasureCmFromErpDesc($desc),
+                'requested_units' => $requested,
+                'produced_units' => $produced,
+                'erp_desc' => $desc,
+                'source' => $queryMode,
+            ];
+        }
+
+        return [
+            'produced_units' => $producedUnits,
+            'pending_units' => $pendingUnits,
+            'dispatched_units' => null,
+            'waste' => [
+                'percent' => $wastePercent,
+                'waste_units' => $wasteUnits,
+                'waste_kg' => $wasteKg,
+                'base_units' => $wasteBaseUnits,
+                'requested_units' => $wasteRequestedUnits,
+                'declared_waste_units' => null,
+                'declared_base_units' => null,
+                'source' => $wasteSource,
+                'processed_kg' => null,
+            ],
+            'semi_rolls' => ['count' => null, 'rows' => []],
+            'work_orders' => $rows,
+            'warehouses' => [],
+        ];
+    }
+
+    public function getErpWasteDashboardDetails(string $startAt, string $endAt): array
+    {
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = 0;
+            $endTs = 0;
+        }
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return [
+                'by_machine' => [],
+                'by_type' => [],
+                'by_production_type' => [],
+                'top10' => [],
+                'sources' => ['by_machine' => null, 'by_type' => null, 'by_production_type' => null, 'top10' => null],
+            ];
+        }
+
+        $equipoNameCol = null;
+        if ($this->erpTableExists('equipo')) {
+            if ($this->erpColumnExists('equipo', 'equipo_name')) {
+                $equipoNameCol = 'equipo_name';
+            } elseif ($this->erpColumnExists('equipo', 'name')) {
+                $equipoNameCol = 'name';
+            }
+        }
+
+        $mermaTitleCol = null;
+        if ($this->erpTableExists('prod_mermatypes')) {
+            if ($this->erpColumnExists('prod_mermatypes', 'merma_title')) {
+                $mermaTitleCol = 'merma_title';
+            }
+        }
+
+        $classifyMachine = static function (int $machineId, int $typeId, string $machineName): array {
+            if ($typeId === 22 || $machineId === 36 || stripos($machineName, 'pulpo') !== false) {
+                return ['code' => 'pulpo', 'title' => 'Pulpo Serigráfico', 'icon' => '🐙'];
+            }
+            if ($typeId === 8 || $typeId === 14 || stripos($machineName, 'sellad') !== false) {
+                return ['code' => 'corte_sellado', 'title' => 'Corte y Sellado', 'icon' => '✂️'];
+            }
+            if ($typeId === 15 || stripos($machineName, 'embalaje') !== false) {
+                return ['code' => 'embalaje', 'title' => 'Embalaje', 'icon' => '📦'];
+            }
+            if ($typeId === 7 || $typeId === 11 || stripos($machineName, 'flexo') !== false || stripos($machineName, 'seri') !== false || stripos($machineName, 'impresora') !== false) {
+                return ['code' => 'impresion', 'title' => 'Impresión', 'icon' => '🖨️'];
+            }
+            return ['code' => 'otros', 'title' => 'Otros Procesos', 'icon' => '⚙️'];
+        };
+
+        $byMachine = [];
+        $byType = [];
+        $byProductionType = [];
+        $top10 = [];
+        $sources = ['by_machine' => null, 'by_type' => null, 'by_production_type' => null, 'top10' => null];
+
+        if ($this->erpTableExists('prod_worker_ot_defectunits')) {
+            $machineNameCol = $equipoNameCol !== null ? 'eq.' . $equipoNameCol : '""';
+            $typeTitleCol = $mermaTitleCol !== null ? 'mt.' . $mermaTitleCol : '""';
+
+            try {
+                $sqlDefects = "
+                    SELECT 
+                        d.id AS defect_id,
+                        d.evt_type,
+                        d.evt_merma_typeid,
+                        {$typeTitleCol} AS merma_title,
+                        d.evt_amount,
+                        d.evt_kgstounits,
+                        COALESCE(pa.ag_equipo_id, pwi.win_equipoid, 0) AS machine_id,
+                        {$machineNameCol} AS equipo_name,
+                        COALESCE(eq.equipo_type_id, 0) AS equipo_type_id,
+                        ph.prd_number AS work_order_number,
+                        ph.prd_reqid AS cost_center,
+                        pa.ag_amount AS requested_units,
+                        TRIM(CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, ''))) AS operator_name,
+                        t11.item_weight,
+                        t10.fab_med_width,
+                        t10.fab_med_height,
+                        t10.fab_med_fuelle,
+                        t10.fab_mat_gramms,
+                        t10.fab_manilla_length
+                    FROM prod_worker_ot_defectunits d
+                    INNER JOIN prod_worker_ot_events e ON e.id = d.evt_refid
+                    INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                    INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                    INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+                    LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+                    LEFT JOIN workers w ON w.id = pwi.win_wrkid
+                    LEFT JOIN orders_items t10 ON t10.req_id = pa.ag_reqid
+                    LEFT JOIN item t11 ON t11.id = t10.item_id
+                    " . ($equipoNameCol !== null ? 'LEFT JOIN equipo eq ON eq.id = COALESCE(pa.ag_equipo_id, pwi.win_equipoid)' : '') . "
+                    " . ($mermaTitleCol !== null ? 'LEFT JOIN prod_mermatypes mt ON mt.id = d.evt_merma_typeid' : '') . "
+                    WHERE d.evt_crtdat BETWEEN :start_ts AND :end_ts
+                      AND LOWER(d.evt_type) = 'merma'
+                    ORDER BY d.id ASC
+                ";
+                $stmt = $this->erpPdo->prepare($sqlDefects);
+                $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+                $defects = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+                $byMachineMap = [];
+                $byTypeMap = [];
+                $byOtMap = [];
+
+                $byProdTypeMap = [
+                    'impresion' => [
+                        'code' => 'impresion',
+                        'title' => 'Impresión',
+                        'icon' => '🖨️',
+                        'waste_units' => 0.0,
+                        'waste_kg' => 0.0,
+                        'produced_units' => 0.0,
+                        'waste_percent' => null,
+                        'share_percent' => 0.0,
+                        'machines_count' => 0,
+                    ],
+                    'corte_sellado' => [
+                        'code' => 'corte_sellado',
+                        'title' => 'Corte y Sellado',
+                        'icon' => '✂️',
+                        'waste_units' => 0.0,
+                        'waste_kg' => 0.0,
+                        'produced_units' => 0.0,
+                        'waste_percent' => null,
+                        'share_percent' => 0.0,
+                        'machines_count' => 0,
+                    ],
+                    'embalaje' => [
+                        'code' => 'embalaje',
+                        'title' => 'Embalaje',
+                        'icon' => '📦',
+                        'waste_units' => 0.0,
+                        'waste_kg' => 0.0,
+                        'produced_units' => 0.0,
+                        'waste_percent' => null,
+                        'share_percent' => 0.0,
+                        'machines_count' => 0,
+                    ],
+                    'pulpo' => [
+                        'code' => 'pulpo',
+                        'title' => 'Pulpo Serigráfico',
+                        'icon' => '🐙',
+                        'waste_units' => 0.0,
+                        'waste_kg' => 0.0,
+                        'produced_units' => 0.0,
+                        'waste_percent' => null,
+                        'share_percent' => 0.0,
+                        'machines_count' => 0,
+                    ],
+                ];
+
+                $totalWasteUnitsAll = 0.0;
+
+                foreach ($defects as $r) {
+                    $itemWeight = (float)($r['item_weight'] ?? 0);
+                    $w = (float)($r['fab_med_width'] ?? 0);
+                    $h = (float)($r['fab_med_height'] ?? 0);
+                    $f = (float)($r['fab_med_fuelle'] ?? 0);
+                    $gramms = (float)($r['fab_mat_gramms'] ?? 0);
+                    $manLen = (float)($r['fab_manilla_length'] ?? 0);
+
+                    $unitWeightKg = 0.0;
+                    if ($itemWeight > 0) {
+                        $unitWeightKg = $itemWeight / 1000.0;
+                    } elseif ($w > 0 && $h > 0 && $gramms > 0) {
+                        $areaM2 = (2.0 * ($w + $f) * $h) / 10000.0;
+                        $bodyKg = $areaM2 * ($gramms / 1000.0);
+                        $manillaKg = ($manLen > 0) ? (2.0 * ($manLen / 100.0) * 0.025 * ($gramms / 1000.0)) : 0.0;
+                        $unitWeightKg = $bodyKg + $manillaKg;
+                    }
+
+                    $kg = (float)($r['evt_kgstounits'] ?? 0);
+                    $rawUnits = (float)($r['evt_amount'] ?? 0);
+
+                    if ($unitWeightKg > 0 && $kg > 0) {
+                        $units = (float)round($kg / $unitWeightKg);
+                    } else {
+                        $units = $rawUnits;
+                    }
+
+                    $totalWasteUnitsAll += $units;
+
+                    // Classify machine & production type
+                    $mId = (int)($r['machine_id'] ?? 0);
+                    $typeId = (int)($r['equipo_type_id'] ?? 0);
+                    $mName = trim((string)($r['equipo_name'] ?? ''));
+                    $pClass = $classifyMachine($mId, $typeId, $mName);
+                    $pCode = $pClass['code'];
+
+                    // Production Type Accumulator
+                    if (!isset($byProdTypeMap[$pCode])) {
+                        $byProdTypeMap[$pCode] = [
+                            'code' => $pCode,
+                            'title' => $pClass['title'],
+                            'icon' => $pClass['icon'],
+                            'waste_units' => 0.0,
+                            'waste_kg' => 0.0,
+                            'produced_units' => 0.0,
+                            'waste_percent' => null,
+                            'share_percent' => 0.0,
+                            'machines_count' => 0,
+                        ];
+                    }
+                    $byProdTypeMap[$pCode]['waste_units'] += $units;
+                    $byProdTypeMap[$pCode]['waste_kg'] += $kg;
+
+                    // Machine
+                    $mLabel = $mId > 0 ? ($mName !== '' ? "Equipo {$mId} · {$mName}" : "Equipo {$mId}") : 'Sin máquina';
+                    if (!isset($byMachineMap[$mId])) {
+                        $byMachineMap[$mId] = [
+                            'machine_id' => $mId,
+                            'machine_name' => $mName,
+                            'machine_label' => $mLabel,
+                            'production_type_code' => $pCode,
+                            'production_type_title' => $pClass['title'],
+                            'production_type_icon' => $pClass['icon'],
+                            'waste_units' => 0.0,
+                            'waste_kg' => 0.0,
+                            'requested_units' => 0.0,
+                        ];
+                    }
+                    $byMachineMap[$mId]['waste_units'] += $units;
+                    $byMachineMap[$mId]['waste_kg'] += $kg;
+
+                    // Type
+                    $tId = (int)($r['evt_merma_typeid'] ?? 0);
+                    $tTitle = trim((string)($r['merma_title'] ?? ''));
+                    $tLabel = $tTitle !== '' ? $tTitle : ($tId > 0 ? "Tipo {$tId}" : 'Sin tipo');
+                    if (!isset($byTypeMap[$tId])) {
+                        $byTypeMap[$tId] = [
+                            'type_id' => $tId,
+                            'type_label' => $tLabel,
+                            'waste_units' => 0.0,
+                            'waste_kg' => 0.0,
+                        ];
+                    }
+                    $byTypeMap[$tId]['waste_units'] += $units;
+                    $byTypeMap[$tId]['waste_kg'] += $kg;
+
+                    // OT
+                    $ot = trim((string)($r['work_order_number'] ?? ''));
+                    if ($ot !== '') {
+                        if (!isset($byOtMap[$ot])) {
+                            $byOtMap[$ot] = [
+                                'work_order_number' => $ot,
+                                'cost_center' => trim((string)($r['cost_center'] ?? '')),
+                                'operator_name' => trim((string)($r['operator_name'] ?? '')) ?: 'N/D',
+                                'machine_label' => $mLabel,
+                                'production_type_title' => $pClass['title'],
+                                'requested_units' => (float)($r['requested_units'] ?? 0.0),
+                                'produced_units' => 0.0,
+                                'waste_units' => 0.0,
+                                'waste_kg' => 0.0,
+                                'waste_percent' => null,
+                            ];
+                        }
+                        $byOtMap[$ot]['waste_units'] += $units;
+                        $byOtMap[$ot]['waste_kg'] += $kg;
+                    }
+                }
+
+                // Fetch produced units per machine in period
+                if ($byMachineMap !== []) {
+                    $mIds = array_keys($byMachineMap);
+                    $mPlaceholders = [];
+                    $mParams = [':start_ts' => $startTs, ':end_ts' => $endTs];
+                    foreach (array_values($mIds) as $idx => $id) {
+                        $ph = ':m_id_' . $idx;
+                        $mPlaceholders[] = $ph;
+                        $mParams[$ph] = $id;
+                    }
+                    $stmtProd = $this->erpPdo->prepare("
+                        SELECT
+                            t.machine_id,
+                            COALESCE(SUM(t.produced_units), 0) AS produced_units
+                        FROM (
+                            SELECT
+                                machine_id,
+                                work_order_number,
+                                event_date,
+                                MAX(sum_units) AS produced_units
+                            FROM (
+                                SELECT
+                                    COALESCE(pa.ag_equipo_id, 0) AS machine_id,
+                                    ph.prd_number AS work_order_number,
+                                    DATE(FROM_UNIXTIME(e.evt_crtdat)) AS event_date,
+                                    LOWER(e.evt_type) AS evt_type,
+                                    SUM(e.evt_amount) AS sum_units
+                                FROM prod_worker_ot_events e
+                                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                                INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+                                WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                                  AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                                  AND pa.ag_equipo_id IN (" . implode(',', $mPlaceholders) . ")
+                                GROUP BY pa.ag_equipo_id, ph.prd_number, DATE(FROM_UNIXTIME(e.evt_crtdat)), LOWER(e.evt_type)
+                            ) x
+                            GROUP BY machine_id, work_order_number, event_date
+                        ) t
+                        GROUP BY t.machine_id
+                    ");
+                    $stmtProd->execute($mParams);
+                    foreach ($stmtProd->fetchAll(PDO::FETCH_ASSOC) as $mp) {
+                        $mid = (int)($mp['machine_id'] ?? 0);
+                        if (isset($byMachineMap[$mid])) {
+                            $prodVal = (float)($mp['produced_units'] ?? 0.0);
+                            $byMachineMap[$mid]['requested_units'] = $prodVal;
+                            $mCode = $byMachineMap[$mid]['production_type_code'];
+                            if (isset($byProdTypeMap[$mCode])) {
+                                $byProdTypeMap[$mCode]['produced_units'] += $prodVal;
+                            }
+                        }
+                    }
+                }
+
+                // Compute counts and rates for production types
+                foreach ($byMachineMap as $mInfo) {
+                    $mCode = $mInfo['production_type_code'];
+                    if (isset($byProdTypeMap[$mCode])) {
+                        $byProdTypeMap[$mCode]['machines_count']++;
+                    }
+                }
+                foreach ($byProdTypeMap as $k => $pt) {
+                    $pProd = (float)$pt['produced_units'];
+                    $pWaste = (float)$pt['waste_units'];
+                    $byProdTypeMap[$k]['waste_percent'] = $pProd > 0 ? round(($pWaste / $pProd) * 100.0, 2) : null;
+                    $byProdTypeMap[$k]['share_percent'] = $totalWasteUnitsAll > 0 ? round(($pWaste / $totalWasteUnitsAll) * 100.0, 1) : 0.0;
+                }
+
+                $byMachine = array_values($byMachineMap);
+                usort($byMachine, fn($a, $b) => ($b['waste_units'] <=> $a['waste_units']) ?: ($b['waste_kg'] <=> $a['waste_kg']));
+
+                $byType = array_values($byTypeMap);
+                usort($byType, fn($a, $b) => ($b['waste_units'] <=> $a['waste_units']) ?: ($b['waste_kg'] <=> $a['waste_kg']));
+
+                uasort($byOtMap, fn($a, $b) => ($b['waste_units'] <=> $a['waste_units']) ?: ($b['waste_kg'] <=> $a['waste_kg']));
+                $top10 = array_slice(array_values($byOtMap), 0, 10);
+
+                if ($top10 !== []) {
+                    $otNumbers = array_column($top10, 'work_order_number');
+                    $otPlaceholders = [];
+                    $otParams = [':start_ts' => $startTs, ':end_ts' => $endTs];
+                    foreach (array_values($otNumbers) as $idx => $otNum) {
+                        $ph = ':ot_num_' . $idx;
+                        $otPlaceholders[] = $ph;
+                        $otParams[$ph] = $otNum;
+                    }
+                    $stmtOtProd = $this->erpPdo->prepare("
+                        SELECT
+                            ph.prd_number,
+                            COALESCE(SUM(t.produced_units), 0) AS produced_units
+                        FROM (
+                            SELECT
+                                ph2.prd_number,
+                                event_date,
+                                MAX(sum_units) AS produced_units
+                            FROM (
+                                SELECT
+                                    ph3.prd_number,
+                                    DATE(FROM_UNIXTIME(e.evt_crtdat)) AS event_date,
+                                    LOWER(e.evt_type) AS evt_type,
+                                    SUM(e.evt_amount) AS sum_units
+                                FROM prod_worker_ot_events e
+                                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                                INNER JOIN prod_header ph3 ON ph3.id = pa.ag_prdid
+                                WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                                  AND ph3.prd_number IN (" . implode(',', $otPlaceholders) . ")
+                                  AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                                GROUP BY ph3.prd_number, DATE(FROM_UNIXTIME(e.evt_crtdat)), LOWER(e.evt_type)
+                            ) x
+                            INNER JOIN prod_header ph2 ON ph2.prd_number = x.prd_number
+                            GROUP BY ph2.prd_number, event_date
+                        ) t
+                        INNER JOIN prod_header ph ON ph.prd_number = t.prd_number
+                        GROUP BY ph.prd_number
+                    ");
+                    $stmtOtProd->execute($otParams);
+                    $prodByOt = [];
+                    foreach ($stmtOtProd->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                        $prodByOt[$row['prd_number']] = (float)($row['produced_units'] ?? 0.0);
+                    }
+
+                    foreach ($top10 as &$otItem) {
+                        $otNum = $otItem['work_order_number'];
+                        $prod = (float)($prodByOt[$otNum] ?? 0.0);
+                        $otItem['produced_units'] = $prod;
+                        $otItem['waste_percent'] = $prod > 0 
+                            ? round(($otItem['waste_units'] / $prod) * 100.0, 2)
+                            : ($otItem['requested_units'] > 0 ? round(($otItem['waste_units'] / $otItem['requested_units']) * 100.0, 2) : 0.0);
+                    }
+                    unset($otItem);
+                }
+
+                $sources = [
+                    'by_machine' => 'prod_worker_ot_defectunits',
+                    'by_type' => 'prod_worker_ot_defectunits',
+                    'by_production_type' => 'prod_worker_ot_defectunits',
+                    'top10' => 'prod_worker_ot_defectunits',
+                ];
+            } catch (Throwable) {
+                $byMachine = [];
+                $byType = [];
+                $byProdTypeMap = [];
+                $top10 = [];
+                $sources = ['by_machine' => null, 'by_type' => null, 'by_production_type' => null, 'top10' => null];
+            }
+        }
+
+        return [
+            'by_machine' => $byMachine,
+            'by_type' => $byType,
+            'by_production_type' => array_values($byProdTypeMap),
+            'top10' => $top10,
+            'sources' => $sources,
+        ];
+    }
+
+    /**
+     * Obtiene el informe consolidado y analítico de mermas por operador.
+     * Permite filtrar por un operador específico o por tipo de producción.
+     *
+     * @param string $startAt Fecha inicio 'Y-m-d H:i:s'
+     * @param string $endAt   Fecha término 'Y-m-d H:i:s'
+     * @param int|null $filterOperatorId ID opcional del operador
+     * @param string|null $filterProcess Código opcional de proceso ('impresion', 'corte_sellado', 'embalaje', 'pulpo')
+     * @return array Resumen, listado de operadores, catálogo y métricas globales
+     */
+    public function getErpOperatorWasteReport(string $startAt, string $endAt, ?int $filterOperatorId = null, ?string $filterProcess = null): array
+    {
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = 0;
+            $endTs = 0;
+        }
+
+        $emptyResponse = [
+            'summary' => [
+                'total_operators' => 0,
+                'total_waste_units' => 0.0,
+                'total_waste_kg' => 0.0,
+                'total_produced_units' => 0.0,
+                'global_waste_percent' => 0.0,
+                'top_operator' => null,
+            ],
+            'operators' => [],
+            'catalog' => [],
+            'processes' => [
+                'impresion' => 'Impresión',
+                'corte_sellado' => 'Corte y Sellado',
+                'embalaje' => 'Embalaje',
+                'pulpo' => 'Pulpo Serigráfico',
+            ],
+        ];
+
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return $emptyResponse;
+        }
+
+        $classifyMachine = static function (int $machineId, int $typeId, string $machineName): array {
+            if ($typeId === 22 || $machineId === 36 || stripos($machineName, 'pulpo') !== false) {
+                return ['code' => 'pulpo', 'title' => 'Pulpo Serigráfico', 'icon' => '🐙'];
+            }
+            if ($typeId === 8 || $typeId === 14 || stripos($machineName, 'sellad') !== false) {
+                return ['code' => 'corte_sellado', 'title' => 'Corte y Sellado', 'icon' => '✂️'];
+            }
+            if ($typeId === 15 || stripos($machineName, 'embalaje') !== false) {
+                return ['code' => 'embalaje', 'title' => 'Embalaje', 'icon' => '📦'];
+            }
+            if ($typeId === 7 || $typeId === 11 || stripos($machineName, 'flexo') !== false || stripos($machineName, 'seri') !== false || stripos($machineName, 'impresora') !== false) {
+                return ['code' => 'impresion', 'title' => 'Impresión', 'icon' => '🖨️'];
+            }
+            return ['code' => 'otros', 'title' => 'Otros Procesos', 'icon' => '⚙️'];
+        };
+
+        try {
+            $equipoNameCol = $this->erpColumnExists('equipo', 'equipo_name') ? 'eq.equipo_name' : ($this->erpColumnExists('equipo', 'name') ? 'eq.name' : '""');
+            $mermaTitleCol = $this->erpColumnExists('prod_mermatypes', 'merma_title') ? 'mt.merma_title' : '""';
+
+            $sqlDefects = "
+                SELECT 
+                    d.id AS defect_id,
+                    d.evt_type,
+                    d.evt_merma_typeid,
+                    {$mermaTitleCol} AS merma_title,
+                    d.evt_amount,
+                    d.evt_kgstounits,
+                    d.evt_crtdat,
+                    COALESCE(pa.ag_equipo_id, pwi.win_equipoid, 0) AS machine_id,
+                    {$equipoNameCol} AS equipo_name,
+                    COALESCE(eq.equipo_type_id, 0) AS equipo_type_id,
+                    ph.prd_number AS work_order_number,
+                    ph.prd_reqid AS cost_center,
+                    COALESCE(w.id, pwi.win_wrkid, 0) AS operator_id,
+                    TRIM(CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, ''))) AS operator_name,
+                    COALESCE(w.wrk_rut, '') AS operator_rut,
+                    t11.item_weight,
+                    t10.fab_med_width,
+                    t10.fab_med_height,
+                    t10.fab_med_fuelle,
+                    t10.fab_mat_gramms,
+                    t10.fab_manilla_length
+                FROM prod_worker_ot_defectunits d
+                INNER JOIN prod_worker_ot_events e ON e.id = d.evt_refid
+                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+                LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+                LEFT JOIN workers w ON w.id = pwi.win_wrkid
+                LEFT JOIN orders_items t10 ON t10.req_id = pa.ag_reqid
+                LEFT JOIN item t11 ON t11.id = t10.item_id
+                LEFT JOIN equipo eq ON eq.id = COALESCE(pa.ag_equipo_id, pwi.win_equipoid)
+                LEFT JOIN prod_mermatypes mt ON mt.id = d.evt_merma_typeid
+                WHERE d.evt_crtdat BETWEEN :start_ts AND :end_ts
+                  AND LOWER(d.evt_type) = 'merma'
+                ORDER BY d.evt_crtdat DESC
+            ";
+            $stmt = $this->erpPdo->prepare($sqlDefects);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $rawDefects = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            // Produced units per worker in the same period
+            $sqlProd = "
+                SELECT 
+                    pwi.win_wrkid AS operator_id,
+                    COALESCE(SUM(e.evt_amount), 0) AS produced_units
+                FROM prod_worker_ot_events e
+                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                INNER JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+                WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                  AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                  AND pwi.win_wrkid > 0
+                GROUP BY pwi.win_wrkid
+            ";
+            $stmtProd = $this->erpPdo->prepare($sqlProd);
+            $stmtProd->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $prodMap = $stmtProd->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+
+            $operatorsMap = [];
+            $totalPlantWasteUnits = 0.0;
+            $totalPlantWasteKg = 0.0;
+
+            foreach ($rawDefects as $r) {
+                $itemWeight = (float)($r['item_weight'] ?? 0);
+                $w = (float)($r['fab_med_width'] ?? 0);
+                $h = (float)($r['fab_med_height'] ?? 0);
+                $f = (float)($r['fab_med_fuelle'] ?? 0);
+                $gramms = (float)($r['fab_mat_gramms'] ?? 0);
+                $manLen = (float)($r['fab_manilla_length'] ?? 0);
+
+                $unitWeightKg = 0.0;
+                if ($itemWeight > 0) {
+                    $unitWeightKg = $itemWeight / 1000.0;
+                } elseif ($w > 0 && $h > 0 && $gramms > 0) {
+                    $areaM2 = (2.0 * ($w + $f) * $h) / 10000.0;
+                    $bodyKg = $areaM2 * ($gramms / 1000.0);
+                    $manillaKg = ($manLen > 0) ? (2.0 * ($manLen / 100.0) * 0.025 * ($gramms / 1000.0)) : 0.0;
+                    $unitWeightKg = $bodyKg + $manillaKg;
+                }
+
+                $kg = (float)($r['evt_kgstounits'] ?? 0);
+                $rawUnits = (float)($r['evt_amount'] ?? 0);
+                $units = ($unitWeightKg > 0 && $kg > 0) ? (float)round($kg / $unitWeightKg) : $rawUnits;
+
+                $mId = (int)($r['machine_id'] ?? 0);
+                $typeId = (int)($r['equipo_type_id'] ?? 0);
+                $mName = trim((string)($r['equipo_name'] ?? ''));
+                $pClass = $classifyMachine($mId, $typeId, $mName);
+                $pCode = $pClass['code'];
+
+                // Filter by process if active
+                if ($filterProcess !== null && $filterProcess !== '' && $pCode !== $filterProcess) {
+                    continue;
+                }
+
+                $opId = (int)($r['operator_id'] ?? 0);
+                // Filter by operator if active
+                if ($filterOperatorId !== null && $filterOperatorId > 0 && $opId !== $filterOperatorId) {
+                    continue;
+                }
+
+                $totalPlantWasteUnits += $units;
+                $totalPlantWasteKg += $kg;
+
+                $opName = trim((string)($r['operator_name'] ?? ''));
+                if ($opName === '') {
+                    $opName = $opId > 0 ? "Operador #{$opId}" : 'Sin Operador Asignado';
+                }
+                $opRut = trim((string)($r['operator_rut'] ?? ''));
+
+                if (!isset($operatorsMap[$opId])) {
+                    $operatorsMap[$opId] = [
+                        'operator_id' => $opId,
+                        'operator_name' => $opName,
+                        'operator_rut' => $opRut,
+                        'produced_units' => (float)($prodMap[$opId] ?? 0.0),
+                        'waste_units' => 0.0,
+                        'waste_kg' => 0.0,
+                        'waste_percent' => 0.0,
+                        'share_percent' => 0.0,
+                        'ot_count' => 0,
+                        'defect_count' => 0,
+                        'main_process' => $pClass['title'],
+                        'main_process_code' => $pCode,
+                        'process_weights' => [],
+                        'defect_types_map' => [],
+                        'top_defect_type' => 'N/D',
+                        'ots_map' => [],
+                        'ots' => [],
+                    ];
+                }
+
+                $operatorsMap[$opId]['waste_units'] += $units;
+                $operatorsMap[$opId]['waste_kg'] += $kg;
+                $operatorsMap[$opId]['defect_count']++;
+
+                // Track processes
+                if (!isset($operatorsMap[$opId]['process_weights'][$pClass['title']])) {
+                    $operatorsMap[$opId]['process_weights'][$pClass['title']] = 0.0;
+                }
+                $operatorsMap[$opId]['process_weights'][$pClass['title']] += ($kg > 0 ? $kg : $units);
+
+                // Track defect types
+                $dTitle = trim((string)($r['merma_title'] ?? '')) ?: 'Merma General';
+                if (!isset($operatorsMap[$opId]['defect_types_map'][$dTitle])) {
+                    $operatorsMap[$opId]['defect_types_map'][$dTitle] = 0.0;
+                }
+                $operatorsMap[$opId]['defect_types_map'][$dTitle] += ($kg > 0 ? $kg : $units);
+
+                // Track OTs
+                $otNumber = trim((string)($r['work_order_number'] ?? ''));
+                if ($otNumber !== '') {
+                    $operatorsMap[$opId]['ots_map'][$otNumber] = true;
+                }
+
+                $mLabel = $mId > 0 ? ($mName !== '' ? "Equipo {$mId} · {$mName}" : "Equipo {$mId}") : 'Sin máquina';
+                $operatorsMap[$opId]['ots'][] = [
+                    'defect_id' => (int)$r['defect_id'],
+                    'ot_number' => $otNumber ?: 'N/D',
+                    'cost_center' => trim((string)($r['cost_center'] ?? '')),
+                    'machine_label' => $mLabel,
+                    'process_title' => $pClass['title'],
+                    'process_code' => $pCode,
+                    'merma_title' => $dTitle,
+                    'units' => $units,
+                    'kg' => $kg,
+                    'datetime' => date('d/m/Y H:i', (int)$r['evt_crtdat']),
+                ];
+            }
+
+            // Post-process operators (main process, top defect, % rates)
+            $totalProducedAll = 0.0;
+            foreach ($operatorsMap as $opId => &$opData) {
+                $opData['ot_count'] = count($opData['ots_map']);
+                unset($opData['ots_map']);
+
+                // Find main process
+                if (!empty($opData['process_weights'])) {
+                    arsort($opData['process_weights']);
+                    $opData['main_process'] = (string)array_key_first($opData['process_weights']);
+                }
+                unset($opData['process_weights']);
+
+                // Find top defect
+                if (!empty($opData['defect_types_map'])) {
+                    arsort($opData['defect_types_map']);
+                    $opData['top_defect_type'] = (string)array_key_first($opData['defect_types_map']);
+                }
+                unset($opData['defect_types_map']);
+
+                $prodU = (float)$opData['produced_units'];
+                $totalProducedAll += $prodU;
+                $wUnits = (float)$opData['waste_units'];
+
+                $opData['waste_percent'] = $prodU > 0 ? round(($wUnits / $prodU) * 100.0, 2) : ($wUnits > 0 ? 100.0 : 0.0);
+                $opData['share_percent'] = $totalPlantWasteUnits > 0 ? round(($wUnits / $totalPlantWasteUnits) * 100.0, 1) : 0.0;
+            }
+            unset($opData);
+
+            $operatorsList = array_values($operatorsMap);
+            usort($operatorsList, static fn($a, $b) => ($b['waste_kg'] <=> $a['waste_kg']) ?: ($b['waste_units'] <=> $a['waste_units']));
+
+            // Catalog of workers for filter
+            $stmtCat = $this->erpPdo->query("
+                SELECT id, TRIM(CONCAT(COALESCE(wrk_firstname, ''), ' ', COALESCE(wrk_lastname, ''))) AS name, COALESCE(wrk_rut, '') AS rut
+                FROM workers
+                WHERE wrk_status = 1
+                ORDER BY wrk_firstname, wrk_lastname
+            ");
+            $catalog = $stmtCat->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            $globalWastePct = $totalProducedAll > 0 ? round(($totalPlantWasteUnits / $totalProducedAll) * 100.0, 2) : 0.0;
+            $topOp = !empty($operatorsList) ? $operatorsList[0]['operator_name'] . ' (' . number_format($operatorsList[0]['waste_kg'], 1, ',', '.') . ' kg)' : 'N/D';
+
+            return [
+                'summary' => [
+                    'total_operators' => count($operatorsList),
+                    'total_waste_units' => $totalPlantWasteUnits,
+                    'total_waste_kg' => $totalPlantWasteKg,
+                    'total_produced_units' => $totalProducedAll,
+                    'global_waste_percent' => $globalWastePct,
+                    'top_operator' => $topOp,
+                ],
+                'operators' => $operatorsList,
+                'catalog' => $catalog,
+                'processes' => [
+                    'impresion' => 'Impresión',
+                    'corte_sellado' => 'Corte y Sellado',
+                    'embalaje' => 'Embalaje',
+                    'pulpo' => 'Pulpo Serigráfico',
+                ],
+            ];
+        } catch (Throwable) {
+            return $emptyResponse;
+        }
+    }
+
     public function getProductionDashboardKpis(string $startAt, string $endAt): array
     {
         $stmt = $this->pdo->prepare('SELECT COALESCE(SUM(units_qty), 0) AS produced_units FROM boxes WHERE created_at BETWEEN :start AND :end');
@@ -7984,7 +12982,7 @@ SQL;
              LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
              WHERE wo.status IN ("OPEN","ACTIVE","CUTTING")
                AND COALESCE(
-                   CASE WHEN sync.erp_plan_timestamp IS NOT NULL THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
+                   CASE WHEN sync.erp_plan_timestamp IS NOT NULL AND sync.erp_plan_timestamp > 0 THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
                    wo.created_at
                ) BETWEEN :start AND :end'
         );
@@ -8036,9 +13034,10 @@ SQL;
                     wo.sku_final,
                     wo.status,
                     wo.created_at,
+                    sync.erp_machine_label AS machine_name,
                     COALESCE(wo.target_qty, 0) AS target_qty,
                     COALESCE(
-                        CASE WHEN sync.erp_plan_timestamp IS NOT NULL THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
+                        CASE WHEN sync.erp_plan_timestamp IS NOT NULL AND sync.erp_plan_timestamp > 0 THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
                         wo.created_at
                     ) AS planned_at,
                     COALESCE(box_stats.produced_units, 0) AS produced_units,
@@ -8094,7 +13093,7 @@ SQL;
              ) semi_stats ON semi_stats.work_order_id = wo.id
              WHERE (
                 COALESCE(
-                    CASE WHEN sync.erp_plan_timestamp IS NOT NULL THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
+                    CASE WHEN sync.erp_plan_timestamp IS NOT NULL AND sync.erp_plan_timestamp > 0 THEN FROM_UNIXTIME(sync.erp_plan_timestamp) ELSE NULL END,
                     wo.created_at
                 ) BETWEEN :plan_start AND :plan_end
                 OR box_stats.work_order_id IS NOT NULL
@@ -8187,27 +13186,130 @@ SQL;
             ];
         }
 
+        // Consultar descripciones, clasificaciones y capacidades del maestro ERP
+        $erpStorehouses = [];
+        if ($this->erpPdo !== null) {
+            try {
+                $stmtErp = $this->erpPdo->query('SELECT id, st_desc, st_clasificacion, st_capacidad FROM company_shops_storehouses WHERE st_status = 1');
+                foreach ($stmtErp->fetchAll(PDO::FETCH_ASSOC) as $erow) {
+                    $erpStorehouses[(int)$erow['id']] = [
+                        'capacidad_erp' => (int)($erow['st_capacidad'] ?? 0),
+                        'clasificacion' => trim((string)($erow['st_clasificacion'] ?? '')),
+                        'desc' => trim((string)($erow['st_desc'] ?? '')),
+                    ];
+                }
+            } catch (Throwable) {}
+        }
+
+        // Consultar el stock real y desglose por categorías (Pallets, Bobinas, Cajas, Unidades) en el ERP
+        $erpStockByStorehouse = [];
+        if ($this->erpPdo !== null) {
+            try {
+                $stmtStock = $this->erpPdo->query(
+                    "SELECT 
+                        iss.st_id,
+                        SUM(CASE 
+                            WHEN (u.unit_name IN ('PALLET', 'PAL') OR it.item_title LIKE '%PALLET%' OR it.item_number_prod LIKE 'PAL%')
+                            THEN iss.iss_inventory ELSE 0 END) AS qty_pallets,
+                        SUM(CASE 
+                            WHEN (u.unit_name IN ('BOB', 'ROL') OR it.item_number_prod LIKE 'TEL%' OR it.item_title LIKE 'BOBINA%' OR it.item_title LIKE '% BOBINA%')
+                                 AND NOT (it.item_title LIKE '%CUCHILLA%')
+                                 AND NOT (u.unit_name IN ('PALLET', 'PAL') OR it.item_title LIKE '%PALLET%' OR it.item_number_prod LIKE 'PAL%')
+                            THEN iss.iss_inventory ELSE 0 END) AS qty_bobinas,
+                        SUM(CASE 
+                            WHEN (u.unit_name IN ('CAJA', 'CAJ', 'caj', 'CAJ.600') OR it.item_title LIKE 'CAJA %' OR it.item_title LIKE '% CAJA %' OR it.item_title LIKE 'CAJAS %')
+                                 AND NOT (it.item_title LIKE 'BOLSA %' OR it.item_title LIKE 'BOL %')
+                                 AND NOT (u.unit_name IN ('PALLET', 'PAL') OR it.item_title LIKE '%PALLET%' OR it.item_number_prod LIKE 'PAL%')
+                                 AND NOT (u.unit_name IN ('BOB', 'ROL') OR it.item_number_prod LIKE 'TEL%' OR it.item_title LIKE 'BOBINA%' OR it.item_title LIKE '% BOBINA%')
+                            THEN iss.iss_inventory ELSE 0 END) AS qty_cajas,
+                        SUM(CASE 
+                            WHEN NOT (
+                                (u.unit_name IN ('PALLET', 'PAL') OR it.item_title LIKE '%PALLET%' OR it.item_number_prod LIKE 'PAL%')
+                                OR ((u.unit_name IN ('BOB', 'ROL') OR it.item_number_prod LIKE 'TEL%' OR it.item_title LIKE 'BOBINA%' OR it.item_title LIKE '% BOBINA%') AND NOT (it.item_title LIKE '%CUCHILLA%'))
+                                OR ((u.unit_name IN ('CAJA', 'CAJ', 'caj', 'CAJ.600') OR it.item_title LIKE 'CAJA %' OR it.item_title LIKE '% CAJA %' OR it.item_title LIKE 'CAJAS %') AND NOT (it.item_title LIKE 'BOLSA %' OR it.item_title LIKE 'BOL %'))
+                            )
+                            THEN iss.iss_inventory ELSE 0 END) AS qty_unidades,
+                        SUM(iss.iss_inventory) AS stock_pos,
+                        SUM(CASE WHEN iss.iss_inventory > 0 THEN (iss.iss_inventory - iss.iss_inventory_reserved) ELSE 0 END) AS stock_disp,
+                        COUNT(DISTINCT it.id) AS items_count
+                    FROM item_shops_storehouses iss
+                    JOIN item it ON it.id = iss.item_id AND it.item_status = 1
+                    LEFT JOIN item_units u ON u.id = it.item_unit
+                    WHERE iss.iss_inventory > 0
+                    GROUP BY iss.st_id"
+                );
+                foreach ($stmtStock->fetchAll(PDO::FETCH_ASSOC) as $srow) {
+                    $erpStockByStorehouse[(int)$srow['st_id']] = [
+                        'qty_pallets' => (float)($srow['qty_pallets'] ?? 0),
+                        'qty_bobinas' => (float)($srow['qty_bobinas'] ?? 0),
+                        'qty_cajas' => (float)($srow['qty_cajas'] ?? 0),
+                        'qty_unidades' => (float)($srow['qty_unidades'] ?? 0),
+                        'stock_units' => (float)($srow['stock_pos'] ?? 0),
+                        'available_units' => (float)($srow['stock_disp'] ?? 0),
+                        'items_count' => (int)($srow['items_count'] ?? 0),
+                    ];
+                }
+            } catch (Throwable) {}
+        }
+
         $rows = $this->stockSummary();
         foreach ($rows as &$row) {
             $warehouseId = (int)($row['warehouse_id'] ?? 0);
+            $erpId = (int)($row['erp_storehouse_id'] ?? 0);
+
             $cap = $capacities[$warehouseId] ?? ['capacity_units_total' => 0.0, 'capacity_pallets' => 0];
-            $row['capacity_units_total'] = (float)$cap['capacity_units_total'];
-            $row['capacity_pallets'] = (int)$cap['capacity_pallets'];
+            $capUnits = (float)$cap['capacity_units_total'];
+            $capPallets = (int)$cap['capacity_pallets'];
+            $capErp = isset($erpStorehouses[$erpId]) ? (float)$erpStorehouses[$erpId]['capacidad_erp'] : 0.0;
+
+            // Si no se configuró capacidad explícita en TRZ, considerar la capacidad del maestro ERP
+            if ($capUnits <= 0 && $capErp >= 1000) {
+                $capUnits = $capErp;
+            }
+            if ($capPallets <= 0 && $capErp > 0 && $capErp < 1000) {
+                $capPallets = (int)$capErp;
+            }
+
+            $row['capacity_units_total'] = $capUnits;
+            $row['capacity_pallets'] = $capPallets;
+            $row['capacidad_erp'] = $capErp;
+
+            // Obtener stock real y desglose de inventario ERP
+            $erpStockInfo = $erpStockByStorehouse[$erpId] ?? null;
+            $erpUnits = $erpStockInfo !== null ? (float)$erpStockInfo['stock_units'] : 0.0;
+            $erpAvailable = $erpStockInfo !== null ? (float)$erpStockInfo['available_units'] : 0.0;
+            $erpItemsCount = $erpStockInfo !== null ? (int)$erpStockInfo['items_count'] : 0;
+            $trzUnits = (float)($row['stock_units_total'] ?? 0);
+
+            $row['stock_units_erp'] = $erpUnits;
+            $row['stock_available_erp'] = $erpAvailable;
+            $row['erp_items_count'] = $erpItemsCount;
+            $row['stock_units_trz'] = $trzUnits;
+
+            // Cantidades obtenidas directamente de la base de datos ERP (Pallets, Bobinas, Cajas, Unidades)
+            if ($erpStockInfo !== null) {
+                $row['pallets_count'] = (float)$erpStockInfo['qty_pallets'];
+                $row['rolls_count'] = (float)$erpStockInfo['qty_bobinas'];
+                $row['boxes_count'] = (float)$erpStockInfo['qty_cajas'];
+                $row['units_other_count'] = (float)$erpStockInfo['qty_unidades'];
+                $row['stock_units_total'] = $erpUnits;
+            } else {
+                $row['units_other_count'] = 0.0;
+            }
+
             $row['occupancy_percent'] = null;
-            $palletsCount = (int)($row['pallets_count'] ?? 0);
-            $stockUnits = (float)($row['stock_units_total'] ?? 0);
-            $capPallets = (int)$row['capacity_pallets'];
-            $capUnits = (float)$row['capacity_units_total'];
-            if ($capPallets > 0) {
-                if ($palletsCount > 0) {
-                    $row['occupancy_percent'] = round(($palletsCount / $capPallets) * 100, 2);
-                } elseif ($capUnits > 0 && $stockUnits > 0) {
-                    $row['occupancy_percent'] = round(($stockUnits / $capUnits) * 100, 2);
-                } else {
-                    $row['occupancy_percent'] = 0.0;
-                }
-            } elseif ($capUnits > 0) {
+            $palletsCount = (float)($row['pallets_count'] ?? 0);
+            $stockUnits = (float)$row['stock_units_total'];
+
+            // Calcular ocupación:
+            if ($capPallets > 0 && $palletsCount > 0) {
+                $row['occupancy_percent'] = round(($palletsCount / $capPallets) * 100, 2);
+            } elseif ($capUnits > 0 && $stockUnits > 0) {
                 $row['occupancy_percent'] = round(($stockUnits / $capUnits) * 100, 2);
+            } elseif ($capPallets > 0 && $palletsCount == 0 && $stockUnits == 0.0) {
+                $row['occupancy_percent'] = 0.0;
+            } elseif ($capUnits > 0 && $stockUnits == 0.0) {
+                $row['occupancy_percent'] = 0.0;
             }
         }
         unset($row);
@@ -8346,7 +13448,7 @@ SQL;
     public function getWarehouseById(int $id): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT w.id, w.code, w.name,
+            'SELECT w.id, w.code, w.name, w.erp_storehouse_id,
                     COALESCE(wc.capacity_units_total, 0) AS capacity_units_total,
                     COALESCE(wc.capacity_pallets, 0) AS capacity_pallets
              FROM warehouses w
@@ -8359,17 +13461,120 @@ SQL;
         if ($row === false) {
             return null;
         }
+
+        $erpId = (int)($row['erp_storehouse_id'] ?? 0);
+        $desc = '';
+        $clasificacion = '';
+        $capacidadErp = 0;
+        $crtdat = null;
+        $flags = [
+            'reserva' => 0,
+            'repuestos' => 0,
+            'unibagreserva' => 0,
+            'flexo' => 0,
+            'seri' => 0,
+            'selladora' => 0,
+        ];
+        if ($erpId > 0) {
+            try {
+                $sErp = $this->erpPdo->prepare(
+                    'SELECT st_desc, st_clasificacion, st_capacidad, st_crtdat,
+                            st_reserva, st_repuestos_act, st_unibagreserva_act, st_unibagflexo_act, st_unibagseri_act, st_unibagsellador_act
+                     FROM company_shops_storehouses WHERE id = :id LIMIT 1'
+                );
+                $sErp->execute([':id' => $erpId]);
+                $eRow = $sErp->fetch(PDO::FETCH_ASSOC);
+                if ($eRow) {
+                    $desc = trim((string)($eRow['st_desc'] ?? ''));
+                    $clasificacion = trim((string)($eRow['st_clasificacion'] ?? ''));
+                    $capacidadErp = (int)($eRow['st_capacidad'] ?? 0);
+                    $crtdat = !empty($eRow['st_crtdat']) ? (int)$eRow['st_crtdat'] : null;
+                    $flags['reserva'] = (int)($eRow['st_reserva'] ?? 0);
+                    $flags['repuestos'] = (int)($eRow['st_repuestos_act'] ?? 0);
+                    $flags['unibagreserva'] = (int)($eRow['st_unibagreserva_act'] ?? 0);
+                    $flags['flexo'] = (int)($eRow['st_unibagflexo_act'] ?? 0);
+                    $flags['seri'] = (int)($eRow['st_unibagseri_act'] ?? 0);
+                    $flags['selladora'] = (int)($eRow['st_unibagsellador_act'] ?? 0);
+                }
+            } catch (Throwable) {}
+        }
+
+        $stockUnitsErp = 0.0;
+        $itemsCountErp = 0;
+        $qtyPallets = 0.0;
+        $qtyBobinas = 0.0;
+        $qtyCajas = 0.0;
+        $qtyUnidades = 0.0;
+        if ($erpId > 0 && $this->erpPdo !== null) {
+            try {
+                $sStock = $this->erpPdo->prepare(
+                    "SELECT 
+                        SUM(CASE 
+                            WHEN (u.unit_name IN ('PALLET', 'PAL') OR it.item_title LIKE '%PALLET%' OR it.item_number_prod LIKE 'PAL%')
+                            THEN iss.iss_inventory ELSE 0 END) AS qty_pallets,
+                        SUM(CASE 
+                            WHEN (u.unit_name IN ('BOB', 'ROL') OR it.item_number_prod LIKE 'TEL%' OR it.item_title LIKE 'BOBINA%' OR it.item_title LIKE '% BOBINA%')
+                                 AND NOT (it.item_title LIKE '%CUCHILLA%')
+                                 AND NOT (u.unit_name IN ('PALLET', 'PAL') OR it.item_title LIKE '%PALLET%' OR it.item_number_prod LIKE 'PAL%')
+                            THEN iss.iss_inventory ELSE 0 END) AS qty_bobinas,
+                        SUM(CASE 
+                            WHEN (u.unit_name IN ('CAJA', 'CAJ', 'caj', 'CAJ.600') OR it.item_title LIKE 'CAJA %' OR it.item_title LIKE '% CAJA %' OR it.item_title LIKE 'CAJAS %')
+                                 AND NOT (it.item_title LIKE 'BOLSA %' OR it.item_title LIKE 'BOL %')
+                                 AND NOT (u.unit_name IN ('PALLET', 'PAL') OR it.item_title LIKE '%PALLET%' OR it.item_number_prod LIKE 'PAL%')
+                                 AND NOT (u.unit_name IN ('BOB', 'ROL') OR it.item_number_prod LIKE 'TEL%' OR it.item_title LIKE 'BOBINA%' OR it.item_title LIKE '% BOBINA%')
+                            THEN iss.iss_inventory ELSE 0 END) AS qty_cajas,
+                        SUM(CASE 
+                            WHEN NOT (
+                                (u.unit_name IN ('PALLET', 'PAL') OR it.item_title LIKE '%PALLET%' OR it.item_number_prod LIKE 'PAL%')
+                                OR ((u.unit_name IN ('BOB', 'ROL') OR it.item_number_prod LIKE 'TEL%' OR it.item_title LIKE 'BOBINA%' OR it.item_title LIKE '% BOBINA%') AND NOT (it.item_title LIKE '%CUCHILLA%'))
+                                OR ((u.unit_name IN ('CAJA', 'CAJ', 'caj', 'CAJ.600') OR it.item_title LIKE 'CAJA %' OR it.item_title LIKE '% CAJA %' OR it.item_title LIKE 'CAJAS %') AND NOT (it.item_title LIKE 'BOLSA %' OR it.item_title LIKE 'BOL %'))
+                            )
+                            THEN iss.iss_inventory ELSE 0 END) AS qty_unidades,
+                        SUM(iss.iss_inventory) AS stock_pos,
+                        COUNT(DISTINCT it.id) AS items_count
+                    FROM item_shops_storehouses iss
+                    JOIN item it ON it.id = iss.item_id AND it.item_status = 1
+                    LEFT JOIN item_units u ON u.id = it.item_unit
+                    WHERE iss.st_id = :st_id AND iss.iss_inventory > 0"
+                );
+                $sStock->execute([':st_id' => $erpId]);
+                $stRow = $sStock->fetch(PDO::FETCH_ASSOC);
+                if ($stRow) {
+                    $stockUnitsErp = (float)($stRow['stock_pos'] ?? 0);
+                    $itemsCountErp = (int)($stRow['items_count'] ?? 0);
+                    $qtyPallets = (float)($stRow['qty_pallets'] ?? 0);
+                    $qtyBobinas = (float)($stRow['qty_bobinas'] ?? 0);
+                    $qtyCajas = (float)($stRow['qty_cajas'] ?? 0);
+                    $qtyUnidades = (float)($stRow['qty_unidades'] ?? 0);
+                }
+            } catch (Throwable) {}
+        }
+
         return [
             'id' => (int)$row['id'],
             'code' => (int)$row['code'],
             'name' => (string)$row['name'],
+            'erp_storehouse_id' => $erpId,
+            'description' => $desc,
+            'clasificacion' => $clasificacion,
+            'capacidad_erp' => $capacidadErp,
+            'crtdat' => $crtdat,
+            'flags' => $flags,
             'capacity_units_total' => (float)($row['capacity_units_total'] ?? 0),
             'capacity_pallets' => (int)($row['capacity_pallets'] ?? 0),
+            'stock_units_erp' => $stockUnitsErp,
+            'items_count_erp' => $itemsCountErp,
+            'qty_pallets' => $qtyPallets,
+            'qty_bobinas' => $qtyBobinas,
+            'qty_cajas' => $qtyCajas,
+            'qty_unidades' => $qtyUnidades,
         ];
     }
 
     public function listWarehousesWithCapacities(): array
     {
+        $this->syncWarehousesFromErp(true);
+
         $summaryRows = $this->stockSummaryWithCapacities();
         $summaryByWarehouseId = [];
         foreach ($summaryRows as $row) {
@@ -8379,8 +13584,21 @@ SQL;
             }
         }
 
+        $erpDescs = [];
+        try {
+            $stmtErp = $this->erpPdo->query('SELECT id, st_desc, st_clasificacion, st_capacidad, st_crtdat FROM company_shops_storehouses WHERE st_status = 1');
+            foreach ($stmtErp->fetchAll(PDO::FETCH_ASSOC) as $erow) {
+                $erpDescs[(int)$erow['id']] = [
+                    'desc' => trim((string)($erow['st_desc'] ?? '')),
+                    'clasificacion' => trim((string)($erow['st_clasificacion'] ?? '')),
+                    'capacidad_erp' => (int)($erow['st_capacidad'] ?? 0),
+                    'crtdat' => !empty($erow['st_crtdat']) ? (int)$erow['st_crtdat'] : null,
+                ];
+            }
+        } catch (Throwable) {}
+
         $stmt = $this->pdo->prepare(
-            'SELECT w.id, w.code, w.name,
+            'SELECT w.id, w.code, w.name, w.erp_storehouse_id,
                     COALESCE(wc.capacity_units_total, 0) AS capacity_units_total,
                     COALESCE(wc.capacity_pallets, 0) AS capacity_pallets
              FROM warehouses w
@@ -8393,18 +13611,34 @@ SQL;
         $result = [];
         foreach ($warehouses as $w) {
             $id = (int)($w['id'] ?? 0);
+            $erpId = (int)($w['erp_storehouse_id'] ?? 0);
+            $erpData = $erpDescs[$erpId] ?? [];
+            $desc = (string)($erpData['desc'] ?? '');
+            $clasificacion = (string)($erpData['clasificacion'] ?? '');
+            $capacidadErp = (int)($erpData['capacidad_erp'] ?? 0);
+            $crtdat = $erpData['crtdat'] ?? null;
+
             $summary = $summaryByWarehouseId[$id] ?? null;
             if ($summary !== null) {
                 $result[] = [
                     'id' => $id,
                     'code' => (int)($summary['warehouse_code'] ?? $w['code'] ?? 0),
                     'name' => (string)($summary['warehouse_name'] ?? $w['name'] ?? ''),
+                    'erp_storehouse_id' => $erpId,
+                    'description' => $desc,
+                    'clasificacion' => $clasificacion,
+                    'capacidad_erp' => $capacidadErp,
+                    'crtdat' => $crtdat,
                     'capacity_units_total' => (float)($summary['capacity_units_total'] ?? $w['capacity_units_total'] ?? 0),
                     'capacity_pallets' => (int)($summary['capacity_pallets'] ?? $w['capacity_pallets'] ?? 0),
-                    'rolls_count' => (int)($summary['rolls_count'] ?? 0),
-                    'boxes_count' => (int)($summary['boxes_count'] ?? 0),
-                    'pallets_count' => (int)($summary['pallets_count'] ?? 0),
+                    'rolls_count' => (float)($summary['rolls_count'] ?? 0),
+                    'boxes_count' => (float)($summary['boxes_count'] ?? 0),
+                    'pallets_count' => (float)($summary['pallets_count'] ?? 0),
+                    'units_other_count' => (float)($summary['units_other_count'] ?? 0),
                     'stock_units_total' => (float)($summary['stock_units_total'] ?? 0),
+                    'stock_units_erp' => (float)($summary['stock_units_erp'] ?? 0),
+                    'stock_units_trz' => (float)($summary['stock_units_trz'] ?? 0),
+                    'erp_items_count' => (int)($summary['erp_items_count'] ?? 0),
                     'occupancy_percent' => isset($summary['occupancy_percent'])
                         ? (is_numeric($summary['occupancy_percent']) ? round((float)$summary['occupancy_percent'], 2) : null)
                         : null,
@@ -8412,6 +13646,12 @@ SQL;
             } else {
                 $capacityPallets = (int)($w['capacity_pallets'] ?? 0);
                 $capacityUnits = (float)($w['capacity_units_total'] ?? 0);
+                if ($capacityUnits <= 0 && $capacidadErp >= 1000) {
+                    $capacityUnits = (float)$capacidadErp;
+                }
+                if ($capacityPallets <= 0 && $capacidadErp > 0 && $capacidadErp < 1000) {
+                    $capacityPallets = $capacidadErp;
+                }
                 $occupancy = null;
                 if ($capacityPallets > 0) {
                     $occupancy = 0.0;
@@ -8422,12 +13662,21 @@ SQL;
                     'id' => $id,
                     'code' => (int)($w['code'] ?? 0),
                     'name' => (string)($w['name'] ?? ''),
+                    'erp_storehouse_id' => $erpId,
+                    'description' => $desc,
+                    'clasificacion' => $clasificacion,
+                    'capacidad_erp' => $capacidadErp,
+                    'crtdat' => $crtdat,
                     'capacity_units_total' => $capacityUnits,
                     'capacity_pallets' => $capacityPallets,
-                    'rolls_count' => 0,
-                    'boxes_count' => 0,
-                    'pallets_count' => 0,
+                    'rolls_count' => 0.0,
+                    'boxes_count' => 0.0,
+                    'pallets_count' => 0.0,
+                    'units_other_count' => 0.0,
                     'stock_units_total' => 0.0,
+                    'stock_units_erp' => 0.0,
+                    'stock_units_trz' => 0.0,
+                    'erp_items_count' => 0,
                     'occupancy_percent' => $occupancy === null ? null : round((float)$occupancy, 2),
                 ];
             }
@@ -8439,11 +13688,12 @@ SQL;
     /**
      * @return array{ok:bool, errors?:string[], id?:int}
      */
-    public function createWarehouse(int $code, string $name, float $capacityUnitsTotal, int $capacityPallets): array
+    public function createWarehouse(int $code, string $name, float $capacityUnitsTotal, int $capacityPallets, string $desc = '', array $extraErp = []): array
     {
         $errors = [];
         $code = max(0, $code);
         $name = trim($name);
+        $desc = trim($desc);
         $capacityUnitsTotal = (int)round(max(0.0, $capacityUnitsTotal));
         $capacityPallets = max(0, $capacityPallets);
 
@@ -8464,10 +13714,52 @@ SQL;
             return ['ok' => false, 'errors' => $errors];
         }
 
+        $clasificacion = trim((string)($extraErp['clasificacion'] ?? ''));
+        $capacidadErp = (int)($extraErp['capacidad_erp'] ?? 0);
+        $reserva = !empty($extraErp['reserva']) ? 1 : 0;
+        $repuestos = !empty($extraErp['repuestos']) ? 1 : 0;
+        $unibagreserva = !empty($extraErp['unibagreserva']) ? 1 : 0;
+        $flexo = !empty($extraErp['flexo']) ? 1 : 0;
+        $seri = !empty($extraErp['seri']) ? 1 : 0;
+        $selladora = !empty($extraErp['selladora']) ? 1 : 0;
+
+        $erpStorehouseId = null;
+        try {
+            $currtme = time();
+            $userId = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 1);
+            $erpInsert = $this->erpPdo->prepare(
+                'INSERT INTO company_shops_storehouses (
+                    st_name, st_desc, st_shop_id, st_status, st_crtdat, st_crtusr,
+                    st_clasificacion, st_capacidad, st_reserva, st_repuestos_act,
+                    st_unibagreserva_act, st_unibagflexo_act, st_unibagseri_act, st_unibagsellador_act
+                 ) VALUES (
+                    :name, :desc, :shop_id, 1, :crtdat, :crtusr,
+                    :clasif, :cap_erp, :reserva, :repuestos,
+                    :ub_reserva, :ub_flexo, :ub_seri, :ub_sella
+                 )'
+            );
+            $erpInsert->execute([
+                ':name' => $name,
+                ':desc' => $desc,
+                ':shop_id' => 30010,
+                ':crtdat' => $currtme,
+                ':crtusr' => $userId,
+                ':clasif' => $clasificacion,
+                ':cap_erp' => $capacidadErp,
+                ':reserva' => $reserva,
+                ':repuestos' => $repuestos,
+                ':ub_reserva' => $unibagreserva,
+                ':ub_flexo' => $flexo,
+                ':ub_seri' => $seri,
+                ':ub_sella' => $selladora,
+            ]);
+            $erpStorehouseId = (int)$this->erpPdo->lastInsertId();
+        } catch (Throwable) {}
+
         $this->pdo->beginTransaction();
         try {
-            $insert = $this->pdo->prepare('INSERT INTO warehouses (code, name) VALUES (:code, :name)');
-            $insert->execute([':code' => $code, ':name' => $name]);
+            $insert = $this->pdo->prepare('INSERT INTO warehouses (code, name, erp_storehouse_id) VALUES (:code, :name, :erp_id)');
+            $insert->execute([':code' => $code, ':name' => $name, ':erp_id' => $erpStorehouseId]);
             $id = (int)$this->pdo->lastInsertId();
 
             $cap = $this->pdo->prepare(
@@ -8492,15 +13784,16 @@ SQL;
     /**
      * @return array{ok:bool, errors?:string[]}
      */
-    public function updateWarehouse(int $id, int $code, string $name, float $capacityUnitsTotal, int $capacityPallets): array
+    public function updateWarehouse(int $id, int $code, string $name, float $capacityUnitsTotal, int $capacityPallets, string $desc = '', array $extraErp = []): array
     {
         $errors = [];
         $code = max(0, $code);
         $name = trim($name);
+        $desc = trim($desc);
         $capacityUnitsTotal = (int)round(max(0.0, $capacityUnitsTotal));
         $capacityPallets = max(0, $capacityPallets);
 
-        $current = $this->pdo->prepare('SELECT id, code FROM warehouses WHERE id = :id LIMIT 1');
+        $current = $this->pdo->prepare('SELECT id, code, erp_storehouse_id FROM warehouses WHERE id = :id LIMIT 1');
         $current->execute([':id' => $id]);
         $currentRow = $current->fetch();
         if ($currentRow === false) {
@@ -8524,6 +13817,47 @@ SQL;
 
         if ($errors !== []) {
             return ['ok' => false, 'errors' => $errors];
+        }
+
+        $erpStorehouseId = (int)($currentRow['erp_storehouse_id'] ?? 0);
+        if ($erpStorehouseId > 0) {
+            try {
+                $currtme = time();
+                $userId = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 1);
+                $clasificacion = trim((string)($extraErp['clasificacion'] ?? ''));
+                $capacidadErp = (int)($extraErp['capacidad_erp'] ?? 0);
+                $reserva = !empty($extraErp['reserva']) ? 1 : 0;
+                $repuestos = !empty($extraErp['repuestos']) ? 1 : 0;
+                $unibagreserva = !empty($extraErp['unibagreserva']) ? 1 : 0;
+                $flexo = !empty($extraErp['flexo']) ? 1 : 0;
+                $seri = !empty($extraErp['seri']) ? 1 : 0;
+                $selladora = !empty($extraErp['selladora']) ? 1 : 0;
+
+                $erpUpd = $this->erpPdo->prepare(
+                    'UPDATE company_shops_storehouses
+                     SET st_name = :name, st_desc = :desc, st_upddat = :upddat, st_updusr = :updusr,
+                         st_clasificacion = :clasif, st_capacidad = :cap_erp, st_reserva = :reserva,
+                         st_repuestos_act = :repuestos, st_unibagreserva_act = :ub_reserva,
+                         st_unibagflexo_act = :ub_flexo, st_unibagseri_act = :ub_seri,
+                         st_unibagsellador_act = :ub_sella
+                     WHERE id = :id'
+                );
+                $erpUpd->execute([
+                    ':name' => $name,
+                    ':desc' => $desc,
+                    ':upddat' => $currtme,
+                    ':updusr' => $userId,
+                    ':clasif' => $clasificacion,
+                    ':cap_erp' => $capacidadErp,
+                    ':reserva' => $reserva,
+                    ':repuestos' => $repuestos,
+                    ':ub_reserva' => $unibagreserva,
+                    ':ub_flexo' => $flexo,
+                    ':ub_seri' => $seri,
+                    ':ub_sella' => $selladora,
+                    ':id' => $erpStorehouseId,
+                ]);
+            } catch (Throwable) {}
         }
 
         $this->pdo->beginTransaction();
@@ -8574,8 +13908,30 @@ SQL;
             if ($boxesCount > 0) $parts[] = $boxesCount . ' caja(s)';
             return [
                 'ok' => false,
-                'errors' => ['No se puede eliminar la bodega: tiene ' . implode(', ', $parts) . ' asociadas.'],
+                'errors' => ['No se puede eliminar la bodega: tiene ' . implode(', ', $parts) . ' asociadas en trazabilidad.'],
             ];
+        }
+
+        $current = $this->pdo->prepare('SELECT id, erp_storehouse_id FROM warehouses WHERE id = :id LIMIT 1');
+        $current->execute([':id' => $id]);
+        $currentRow = $current->fetch();
+        $erpStorehouseId = (int)($currentRow['erp_storehouse_id'] ?? 0);
+
+        if ($erpStorehouseId > 0) {
+            try {
+                $currtme = time();
+                $userId = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 1);
+                $erpDel = $this->erpPdo->prepare(
+                    'UPDATE company_shops_storehouses
+                     SET st_status = 0, st_upddat = :upddat, st_updusr = :updusr
+                     WHERE id = :id'
+                );
+                $erpDel->execute([
+                    ':upddat' => $currtme,
+                    ':updusr' => $userId,
+                    ':id' => $erpStorehouseId,
+                ]);
+            } catch (Throwable) {}
         }
 
         try {
@@ -8683,6 +14039,76 @@ SQL;
         $result = array_values(array_keys($names));
         natcasesort($result);
         return array_values($result);
+    }
+
+    public function listErpWorkerNames(): array
+    {
+        if (!$this->erpTableExists('workers')) {
+            return [];
+        }
+
+        $firstCol = null;
+        if ($this->erpColumnExists('workers', 'wrk_firstname')) {
+            $firstCol = 'wrk_firstname';
+        } elseif ($this->erpColumnExists('workers', 'firstname')) {
+            $firstCol = 'firstname';
+        } elseif ($this->erpColumnExists('workers', 'first_name')) {
+            $firstCol = 'first_name';
+        }
+
+        $lastCol = null;
+        if ($this->erpColumnExists('workers', 'wrk_lastname')) {
+            $lastCol = 'wrk_lastname';
+        } elseif ($this->erpColumnExists('workers', 'lastname')) {
+            $lastCol = 'lastname';
+        } elseif ($this->erpColumnExists('workers', 'last_name')) {
+            $lastCol = 'last_name';
+        }
+
+        $nameCol = null;
+        if ($this->erpColumnExists('workers', 'name')) {
+            $nameCol = 'name';
+        }
+
+        $sql = '';
+        if ($firstCol !== null || $lastCol !== null) {
+            $sql = 'SELECT DISTINCT TRIM(CONCAT(COALESCE('
+                . ($firstCol !== null ? $firstCol : '""')
+                . ', ""), " ", COALESCE('
+                . ($lastCol !== null ? $lastCol : '""')
+                . ', ""))) AS display_name
+                FROM workers
+                WHERE TRIM(CONCAT(COALESCE('
+                . ($firstCol !== null ? $firstCol : '""')
+                . ', ""), " ", COALESCE('
+                . ($lastCol !== null ? $lastCol : '""')
+                . ', ""))) <> ""
+                ORDER BY display_name ASC';
+        } elseif ($nameCol !== null) {
+            $sql = 'SELECT DISTINCT TRIM(COALESCE(' . $nameCol . ', "")) AS display_name
+                    FROM workers
+                    WHERE TRIM(COALESCE(' . $nameCol . ', "")) <> ""
+                    ORDER BY display_name ASC';
+        } else {
+            return [];
+        }
+
+        try {
+            $stmt = $this->erpPdo->query($sql);
+            $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            $names = [];
+            foreach (is_array($rows) ? $rows : [] as $v) {
+                $name = trim((string)$v);
+                if ($name !== '') {
+                    $names[] = $name;
+                }
+            }
+            $names = array_values(array_unique($names));
+            sort($names, SORT_NATURAL | SORT_FLAG_CASE);
+            return $names;
+        } catch (Throwable) {
+            return [];
+        }
     }
 
     public function getActiveShiftSessionByOperator(string $operatorName): ?array
@@ -8945,7 +14371,7 @@ SQL;
     public function stockSummary(): array
     {
         $stmt = $this->pdo->prepare(
-            "SELECT w.id AS warehouse_id, w.code AS warehouse_code, w.name AS warehouse_name,
+            "SELECT w.id AS warehouse_id, w.code AS warehouse_code, w.name AS warehouse_name, w.erp_storehouse_id,
                     COALESCE(roll_stats.rolls_count, 0) AS rolls_count,
                     COALESCE(roll_stats.roll_units_total, 0) AS roll_units_total,
                     COALESCE(roll_stats.available_rolls_count, 0) AS available_rolls_count,
@@ -9023,6 +14449,41 @@ SQL;
     public function listInventoryCountItems(int $inventoryCountId): array
     {
         return $this->inventoryCountService->listInventoryCountItems($inventoryCountId);
+    }
+
+    public function listErpStorehouses(bool $onlyWithStock = false): array
+    {
+        return $this->inventoryCountService->listErpStorehouses($onlyWithStock);
+    }
+
+    public function getErpStockByStorehouse(int $storehouseId, ?string $search = null, bool $onlyWithStock = false): array
+    {
+        return $this->inventoryCountService->getErpStockByStorehouse($storehouseId, $search, $onlyWithStock);
+    }
+
+    public function getErpInventoryCountDraft(int $storehouseId): array
+    {
+        return $this->inventoryCountService->getErpInventoryCountDraft($storehouseId);
+    }
+
+    public function createErpInventoryCount(int $storehouseId, string $storehouseName, string $annotation, string $operatorName, array $items): array
+    {
+        return $this->inventoryCountService->createErpInventoryCount($storehouseId, $storehouseName, $annotation, $operatorName, $items);
+    }
+
+    public function listErpStockcounts(int $limit = 100): array
+    {
+        return $this->inventoryCountService->listErpStockcounts($limit);
+    }
+
+    public function getErpStockcount(int $id): ?array
+    {
+        return $this->inventoryCountService->getErpStockcount($id);
+    }
+
+    public function listErpStockcountItems(int $id): array
+    {
+        return $this->inventoryCountService->listErpStockcountItems($id);
     }
 
     public function listRollsByWarehouseCode(int $warehouseCode, int $limit = 200): array
@@ -11021,29 +16482,877 @@ SQL;
         }
     }
 
-    public function getBonusPeriodByMonthFinal(string $monthKey): array
-    {
-        $monthKey = trim($monthKey);
-        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
-            $monthKey = date('Y-m');
+    /**
+     * Calcula el período estándar de bonificaciones (26 de un mes al 25 del mes siguiente).
+     *
+     * $monthKey se interpreta como “mes final” del período en formato YYYY-MM.
+     * Ejemplo: monthKey=2026-08 => período 2026-07-26 00:00:00 a 2026-08-25 23:59:59.
+    /**
+     * Resuelve el período o rango de tiempo para bonificaciones:
+     * - Si $filterType === 'range' y se proveen $startDate y $endDate válidos (Y-m-d),
+     *   calcula el rango personalizado con sus timestamps exactos.
+     * - Si es 'period' (o no viene rango), calcula el período 26–25 del mes indicado.
+     *
+     * @return array{filter_type:string,month_key:string,start_date:string,end_date:string,start_ts:int,end_ts:int,label:string}
+     */
+    public function resolveBonusFilterPeriod(
+        string $filterType = 'period',
+        ?string $monthKey = null,
+        ?string $startDate = null,
+        ?string $endDate = null
+    ): array {
+        $tz = new DateTimeZone(date_default_timezone_get());
+        $filterType = strtolower(trim($filterType));
+        if ($filterType !== 'range') {
+            $filterType = 'period';
         }
 
-        $tz = new DateTimeZone(date_default_timezone_get());
+        if ($filterType === 'range' && $startDate !== null && $endDate !== null) {
+            $startDate = trim($startDate);
+            $endDate = trim($endDate);
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $endDate)) {
+                $startObj = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $startDate . ' 00:00:00', $tz);
+                $endObj = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $endDate . ' 23:59:59', $tz);
+                if ($startObj instanceof DateTimeImmutable && $endObj instanceof DateTimeImmutable && $endObj >= $startObj) {
+                    $derivedMonth = $endObj->format('Y-m');
+                    return [
+                        'filter_type' => 'range',
+                        'month_key' => ($monthKey && preg_match('/^\d{4}-\d{2}$/', $monthKey)) ? $monthKey : $derivedMonth,
+                        'start_date' => $startObj->format('Y-m-d'),
+                        'end_date' => $endObj->format('Y-m-d'),
+                        'start_ts' => $startObj->getTimestamp(),
+                        'end_ts' => $endObj->getTimestamp(),
+                        'label' => 'Rango: ' . $startObj->format('d/m/Y') . ' a ' . $endObj->format('d/m/Y'),
+                    ];
+                }
+            }
+        }
+
+        // Modo Período (26 al 25)
+        $monthKey = trim((string)$monthKey);
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            $today = new DateTimeImmutable('now', $tz);
+            $monthKey = ((int)$today->format('j') >= 26)
+                ? $today->modify('+1 month')->format('Y-m')
+                : $today->format('Y-m');
+        }
+
         $monthStart = new DateTimeImmutable($monthKey . '-01 00:00:00', $tz);
         $previousMonth = $monthStart->modify('-1 month');
         $periodStart = $previousMonth->setDate((int)$previousMonth->format('Y'), (int)$previousMonth->format('m'), 26)->setTime(0, 0, 0);
         $periodEnd = $monthStart->setDate((int)$monthStart->format('Y'), (int)$monthStart->format('m'), 25)->setTime(23, 59, 59);
 
         return [
+            'filter_type' => 'period',
             'month_key' => $monthKey,
             'start_date' => $periodStart->format('Y-m-d'),
             'end_date' => $periodEnd->format('Y-m-d'),
             'start_ts' => $periodStart->getTimestamp(),
             'end_ts' => $periodEnd->getTimestamp(),
+            'label' => 'Período 26–25: ' . $periodStart->format('d/m/Y') . ' a ' . $periodEnd->format('d/m/Y'),
         ];
     }
 
-    public function listErpFlexoProductionForBonusPeriod(string $monthKey, ?string $operatorName = null): array
+    /**
+     * Retorna fechas (Y-m-d) y timestamps (epoch) para usar en consultas ERP/DB local.
+     * Soporta tanto string con mes ($monthKey) como array ya resuelto por resolveBonusFilterPeriod.
+     *
+     * @return array{month_key:string,start_date:string,end_date:string,start_ts:int,end_ts:int,filter_type?:string,label?:string}
+     */
+    public function getBonusPeriodByMonthFinal(string|array $monthKeyOrPeriod): array
+    {
+        if (is_array($monthKeyOrPeriod) && isset($monthKeyOrPeriod['start_ts'], $monthKeyOrPeriod['end_ts'])) {
+            return $monthKeyOrPeriod;
+        }
+        return $this->resolveBonusFilterPeriod('period', (string)$monthKeyOrPeriod);
+    }
+
+    /**
+     * Lista producción de Flexografía desde el ERP para el período 26–25 o rango personalizado.
+     *
+     * @return array{ok:bool, errors:string[], period:array{month_key:string,start_date:string,end_date:string,start_ts:int,end_ts:int}, rows:list<array<string,mixed>>}
+     */
+    public function listErpFlexoProductionForBonusPeriod(string|array $monthKey, ?string $operatorName = null, ?string $costCenter = null): array
+    {
+        $equipotypeIds = $this->resolveErpEquipotypeIdsForBonus('bonoflexo');
+        $equipoIds = $equipotypeIds === null ? $this->resolveErpEquipoIdsForBonus('bonoflexo') : null;
+        return $this->listErpProductionForBonusPeriod(
+            $monthKey,
+            $operatorName,
+            $costCenter,
+            $equipotypeIds,
+            $equipoIds,
+            null,
+            false,
+            null
+        );
+    }
+
+    public function listErpFlexoProductionPreviewForBonusPeriod(string|array $monthKey, ?string $operatorName = null, ?string $costCenter = null, int $limit = 12): array
+    {
+        $limit = max(1, min(200, $limit));
+        $equipotypeIds = $this->resolveErpEquipotypeIdsForBonus('bonoflexo');
+        $equipoIds = $equipotypeIds === null ? $this->resolveErpEquipoIdsForBonus('bonoflexo') : null;
+        return $this->listErpProductionForBonusPeriod(
+            $monthKey,
+            $operatorName,
+            $costCenter,
+            $equipotypeIds,
+            $equipoIds,
+            $limit,
+            false,
+            null
+        );
+    }
+
+    /**
+     * Lista producción de Serigrafía desde el ERP para el período 26–25 o rango personalizado.
+     *
+     * @return array{ok:bool, errors:string[], period:array{month_key:string,start_date:string,end_date:string,start_ts:int,end_ts:int}, rows:list<array<string,mixed>>}
+     */
+    public function listErpSeriProductionForBonusPeriod(string|array $monthKey, ?string $operatorName = null): array
+    {
+        $equipotypeIds = $this->resolveErpEquipotypeIdsForBonus('bonoseri');
+        $equipoIds = $this->resolveErpEquipoIdsForBonus('bonoseri');
+        return $this->listErpProductionForBonusPeriod(
+            $monthKey,
+            $operatorName,
+            null,
+            $equipotypeIds,
+            $equipoIds,
+            null,
+            true,
+            ['%PULPO%']
+        );
+    }
+
+    public function listErpSeriProductionPreviewForBonusPeriod(string|array $monthKey, ?string $operatorName = null, int $limit = 12): array
+    {
+        $limit = max(1, min(200, $limit));
+        $equipotypeIds = $this->resolveErpEquipotypeIdsForBonus('bonoseri');
+        $equipoIds = $this->resolveErpEquipoIdsForBonus('bonoseri');
+        return $this->listErpProductionForBonusPeriod(
+            $monthKey,
+            $operatorName,
+            null,
+            $equipotypeIds,
+            $equipoIds,
+            $limit,
+            true,
+            ['%PULPO%']
+        );
+    }
+
+    /**
+     * @return list<array{param_equipo_id:int,param_medida:int,param_corte:float,equipo_type_id:int}>
+     */
+    public function listErpEquipoParams(): array
+    {
+        if ($this->erpPdo === null) {
+            return [];
+        }
+        try {
+            $stmt = $this->erpPdo->query(
+                'SELECT ep.param_equipo_id, ep.param_medida, ep.param_corte, eq.equipo_type_id
+                 FROM equipo_params ep
+                 LEFT JOIN equipo eq ON eq.id = ep.param_equipo_id
+                 ORDER BY ep.param_equipo_id ASC, ep.param_medida ASC'
+            );
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            if (!is_array($rows)) {
+                return [];
+            }
+            $out = [];
+            foreach ($rows as $r) {
+                if (!is_array($r)) {
+                    continue;
+                }
+                $out[] = [
+                    'param_equipo_id' => (int)($r['param_equipo_id'] ?? 0),
+                    'param_medida' => (int)($r['param_medida'] ?? 0),
+                    'param_corte' => (float)($r['param_corte'] ?? 0.0),
+                    'equipo_type_id' => (int)($r['equipo_type_id'] ?? 0),
+                ];
+            }
+            return $out;
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+
+    public function listErpCysProductionForBonusPeriod(string|array $monthKey, ?string $operatorName = null): array
+    {
+        $equipotypeIds = $this->resolveErpEquipotypeIdsForBonus('bonocys');
+        $equipoIds = $equipotypeIds === null ? $this->resolveErpEquipoIdsForBonus('bonocys') : null;
+        return $this->listErpProductionForBonusPeriod(
+            $monthKey,
+            $operatorName,
+            null,
+            $equipotypeIds,
+            $equipoIds,
+            null,
+            false,
+            null
+        );
+    }
+
+    public function listErpCysProductionPreviewForBonusPeriod(string|array $monthKey, ?string $operatorName = null, int $limit = 12): array
+    {
+        $limit = max(1, min(200, $limit));
+        $equipotypeIds = $this->resolveErpEquipotypeIdsForBonus('bonocys');
+        $equipoIds = $equipotypeIds === null ? $this->resolveErpEquipoIdsForBonus('bonocys') : null;
+        return $this->listErpProductionForBonusPeriod(
+            $monthKey,
+            $operatorName,
+            null,
+            $equipotypeIds,
+            $equipoIds,
+            $limit,
+            false,
+            null
+        );
+    }
+
+    public function listErpCysConfigChangeCountsForBonusPeriod(string|array $monthKey, ?string $operatorName = null): array
+    {
+        $period = $this->getBonusPeriodByMonthFinal($monthKey);
+        $startTs = (int)($period['start_ts'] ?? 0);
+        $endTs = (int)($period['end_ts'] ?? 0);
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return ['ok' => false, 'errors' => ['Período inválido.'], 'period' => $period, 'counts' => []];
+        }
+
+        if (
+            !$this->erpTableExists('prod_worker_ot_events')
+            || !$this->erpTableExists('prod_worker_ot')
+            || !$this->erpTableExists('prod_agenda')
+            || !$this->erpTableExists('prod_worker_init')
+            || !$this->erpTableExists('workers')
+        ) {
+            return ['ok' => true, 'errors' => [], 'period' => $period, 'counts' => []];
+        }
+        if (
+            !$this->erpColumnExists('prod_worker_ot_events', 'evt_prod_worker_otid')
+            || !$this->erpColumnExists('prod_worker_ot_events', 'evt_type')
+            || !$this->erpColumnExists('prod_worker_ot_events', 'evt_crtdat')
+            || !$this->erpColumnExists('prod_worker_ot_events', 'evt_medida_fromid')
+            || !$this->erpColumnExists('prod_worker_ot_events', 'evt_medida_toid')
+        ) {
+            return ['ok' => true, 'errors' => [], 'period' => $period, 'counts' => []];
+        }
+
+        $equipotypeIds = $this->resolveErpEquipotypeIdsForBonus('bonocys');
+        $equipoIds = $equipotypeIds === null ? $this->resolveErpEquipoIdsForBonus('bonocys') : null;
+
+        $equipotypeFilterSql = '';
+        $equipotypeParams = [];
+        if (is_array($equipotypeIds) && $equipotypeIds !== []) {
+            $equipotypePlaceholders = [];
+            foreach (array_values(array_unique(array_map('intval', $equipotypeIds))) as $idx => $id) {
+                if ($id <= 0) {
+                    continue;
+                }
+                $ph = ':equipotype_id_' . $idx;
+                $equipotypePlaceholders[] = $ph;
+                $equipotypeParams[$ph] = $id;
+            }
+            if ($equipotypePlaceholders !== []) {
+                $equipotypeFilterSql = ' AND pa.ag_equipotype_id IN (' . implode(',', $equipotypePlaceholders) . ')';
+            }
+        }
+
+        $equipoFilterSql = '';
+        $equipoParams = [];
+        if (is_array($equipoIds) && $equipoIds !== []) {
+            $equipoPlaceholders = [];
+            foreach (array_values(array_unique(array_map('intval', $equipoIds))) as $idx => $id) {
+                if ($id <= 0) {
+                    continue;
+                }
+                $ph = ':equipo_id_' . $idx;
+                $equipoPlaceholders[] = $ph;
+                $equipoParams[$ph] = $id;
+            }
+            if ($equipoPlaceholders !== []) {
+                $equipoFilterSql = ' AND pa.ag_equipo_id IN (' . implode(',', $equipoPlaceholders) . ')';
+            }
+        }
+
+        $operatorName = $operatorName !== null ? trim($operatorName) : '';
+        $canApplyRule = $this->erpTableExists('prod_medidas')
+            && $this->erpTableExists('parametros')
+            && $this->erpColumnExists('prod_medidas', 'id')
+            && $this->erpColumnExists('prod_medidas', 'med_tipoproducto')
+            && $this->erpColumnExists('parametros', 'tabla')
+            && $this->erpColumnExists('parametros', 'codigo')
+            && $this->erpColumnExists('parametros', 'valor1')
+            && $this->erpColumnExists('parametros', 'valor2');
+        $countExpr = $this->erpColumnExists('prod_worker_ot_events', 'id') ? 'COUNT(DISTINCT e.id)' : 'COUNT(*)';
+        $aplicaJoinSql = '';
+        if ($canApplyRule) {
+            $countExpr = <<<SQL
+SUM(
+    CASE
+        WHEN COALESCE(p_from.valor2, 0) = 1 AND COALESCE(p_to.valor2, 0) = 1 THEN 1
+        WHEN (COALESCE(p_from.valor2, 0) = 0 OR COALESCE(p_to.valor2, 0) = 0) AND COALESCE(p_from.valor1, '') <> COALESCE(p_to.valor1, '') THEN 1
+        ELSE 0
+    END
+)
+SQL;
+            $aplicaJoinSql = <<<SQL
+LEFT JOIN prod_medidas m_from ON m_from.id = e.evt_medida_fromid
+LEFT JOIN prod_medidas m_to ON m_to.id = e.evt_medida_toid
+LEFT JOIN parametros p_from ON p_from.tabla = 'TIPOPRODUCTO' AND p_from.codigo = CAST(m_from.med_tipoproducto AS CHAR)
+LEFT JOIN parametros p_to ON p_to.tabla = 'TIPOPRODUCTO' AND p_to.codigo = CAST(m_to.med_tipoproducto AS CHAR)
+SQL;
+        }
+        $operatorExpr = 'TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, "")))';
+
+        $sql = <<<SQL
+SELECT
+    {$operatorExpr} AS operator_name,
+    {$countExpr} AS cnt
+FROM prod_worker_ot_events e
+INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+LEFT JOIN workers w ON w.id = pwi.win_wrkid
+{$aplicaJoinSql}
+WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+  AND LOWER(e.evt_type) = 'apertura'
+  AND e.evt_medida_fromid IS NOT NULL
+  AND e.evt_medida_toid IS NOT NULL
+  AND e.evt_medida_fromid <> e.evt_medida_toid
+{$equipotypeFilterSql}
+{$equipoFilterSql}
+  AND (:operator_name = '' OR {$operatorExpr} = :operator_name_exact)
+GROUP BY {$operatorExpr}
+ORDER BY operator_name ASC
+SQL;
+
+        $counts = [];
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute(array_merge([
+                ':start_ts' => $startTs,
+                ':end_ts' => $endTs,
+                ':operator_name' => $operatorName,
+                ':operator_name_exact' => $operatorName,
+            ], $equipotypeParams, $equipoParams));
+            foreach ($stmt->fetchAll() as $r) {
+                if (!is_array($r)) {
+                    continue;
+                }
+                $name = trim((string)($r['operator_name'] ?? ''));
+                if ($name === '') {
+                    continue;
+                }
+                $counts[$name] = (int)($r['cnt'] ?? 0);
+            }
+        } catch (Throwable $e) {
+            return ['ok' => false, 'errors' => ['No se pudo consultar cambios de configuración.'], 'period' => $period, 'counts' => []];
+        }
+
+        return ['ok' => true, 'errors' => [], 'period' => $period, 'counts' => $counts];
+    }
+
+    public function listErpCysPackagingUnitsForBonusPeriod(string|array $monthKey, ?string $operatorName = null): array
+    {
+        $rowsRes = $this->listErpCysPackagingRowsForBonusPeriod($monthKey, $operatorName);
+        if (($rowsRes['ok'] ?? false) !== true) {
+            return ['ok' => false, 'errors' => $rowsRes['errors'] ?? ['No se pudo consultar embalaje.'], 'period' => $rowsRes['period'] ?? [], 'units' => []];
+        }
+
+        $units = [];
+        foreach ((array)($rowsRes['rows'] ?? []) as $r) {
+            if (!is_array($r)) {
+                continue;
+            }
+            $name = trim((string)($r['operator_name'] ?? ''));
+            if ($name === '') {
+                continue;
+            }
+            $u = (float)($r['produced_units'] ?? 0.0);
+            if ($u <= 0) {
+                continue;
+            }
+            $units[$name] = (float)($units[$name] ?? 0.0) + $u;
+        }
+
+        return ['ok' => true, 'errors' => [], 'period' => $rowsRes['period'] ?? [], 'units' => $units, 'rows' => $rowsRes['rows'] ?? []];
+    }
+
+    /**
+     * Lista filas detalladas de producción de Embalaje desde el ERP para el período de bono.
+     *
+     * @return array{ok:bool, errors:string[], period:array<string,mixed>, rows:list<array<string,mixed>>}
+     */
+    public function listErpCysPackagingRowsForBonusPeriod(string|array $monthKey, ?string $operatorName = null): array
+    {
+        $period = $this->getBonusPeriodByMonthFinal($monthKey);
+        $startTs = (int)($period['start_ts'] ?? 0);
+        $endTs = (int)($period['end_ts'] ?? 0);
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return ['ok' => false, 'errors' => ['Período inválido.'], 'period' => $period, 'rows' => []];
+        }
+
+        $equipotypeIds = $this->resolveErpPackagingEquipotypeIds();
+        if ($equipotypeIds === null || $equipotypeIds === []) {
+            return ['ok' => true, 'errors' => [], 'period' => $period, 'rows' => []];
+        }
+
+        $result = $this->listErpProductionForBonusPeriod($monthKey, $operatorName, null, $equipotypeIds, null, null, false, null);
+        if (($result['ok'] ?? false) !== true) {
+            return ['ok' => false, 'errors' => $result['errors'] ?? ['No se pudo consultar embalaje.'], 'period' => $period, 'rows' => []];
+        }
+
+        return ['ok' => true, 'errors' => [], 'period' => $period, 'rows' => (array)($result['rows'] ?? [])];
+    }
+
+    private function resolveErpPackagingEquipotypeIds(): ?array
+    {
+        if (array_key_exists('packaging', $this->erpEquipotypeIdsByFeatureCache)) {
+            return $this->erpEquipotypeIdsByFeatureCache['packaging'];
+        }
+
+        $ids = [];
+        try {
+            if ($this->erpTableExists('equipo_type')) {
+                $titleCol = null;
+                if ($this->erpColumnExists('equipo_type', 'type_ant_title')) {
+                    $titleCol = 'type_ant_title';
+                } elseif ($this->erpColumnExists('equipo_type', 'title')) {
+                    $titleCol = 'title';
+                }
+                if ($titleCol !== null) {
+                    $sql = 'SELECT id FROM equipo_type WHERE UPPER(' . $titleCol . ') LIKE :p1 OR UPPER(' . $titleCol . ') LIKE :p2 OR UPPER(' . $titleCol . ') LIKE :p3 ORDER BY id';
+                    $stmt = $this->erpPdo->prepare($sql);
+                    $stmt->execute([
+                        ':p1' => '%EMBAL%',
+                        ':p2' => '%EMBALA%',
+                        ':p3' => '%PACK%',
+                    ]);
+                    foreach ($stmt->fetchAll() as $r) {
+                        if (!is_array($r)) {
+                            continue;
+                        }
+                        $id = (int)($r['id'] ?? 0);
+                        if ($id > 0) {
+                            $ids[] = $id;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable) {
+            $ids = [];
+        }
+
+        $ids = array_values(array_unique(array_values(array_filter($ids, static fn ($v) => (int)$v > 0))));
+        sort($ids);
+        if ($ids === []) {
+            try {
+                if ($this->erpTableExists('equipo_type')) {
+                    $stmt = $this->erpPdo->prepare('SELECT COUNT(*) FROM equipo_type WHERE id = 15');
+                    $stmt->execute();
+                    $exists = (int)($stmt->fetchColumn() ?: 0) > 0;
+                    if ($exists) {
+                        $ids = [15];
+                    }
+                }
+            } catch (Throwable) {
+                $ids = [];
+            }
+        }
+
+        $this->erpEquipotypeIdsByFeatureCache['packaging'] = $ids !== [] ? $ids : null;
+        return $this->erpEquipotypeIdsByFeatureCache['packaging'];
+    }
+
+
+    public function getErpEquipotypeIdsForBonusCode(string $bonusCode): ?array
+    {
+        return $this->resolveErpEquipotypeIdsForBonus($bonusCode);
+    }
+
+    public function getErpEquipoIdsForBonusCode(string $bonusCode): ?array
+    {
+        return $this->resolveErpEquipoIdsForBonus($bonusCode);
+    }
+
+    private function resolveErpEquipoIdsForBonus(string $bonusCode): ?array
+    {
+        $bonusCode = strtolower(trim($bonusCode));
+        if ($bonusCode === '') {
+            return null;
+        }
+        if (array_key_exists($bonusCode, $this->erpEquipoIdsByBonusCache)) {
+            return $this->erpEquipoIdsByBonusCache[$bonusCode];
+        }
+        if (!$this->erpTableExists('equipo')) {
+            $this->erpEquipoIdsByBonusCache[$bonusCode] = null;
+            return null;
+        }
+
+        $patterns = [];
+        if ($bonusCode === 'bonoflexo') {
+            $patterns = ['%FLEXO%'];
+        } elseif ($bonusCode === 'bonoseri') {
+            $patterns = ['%SERIG%','%SERI%'];
+        } elseif ($bonusCode === 'bonocys') {
+            $patterns = ['%SELLAD%'];
+        } else {
+            $this->erpEquipoIdsByBonusCache[$bonusCode] = null;
+            return null;
+        }
+
+        $ids = [];
+        try {
+            $hasEquipoType = $this->erpTableExists('equipo_type');
+            $equipoNameCol = null;
+            if ($this->erpColumnExists('equipo', 'equipo_name')) {
+                $equipoNameCol = 'equipo_name';
+            } elseif ($this->erpColumnExists('equipo', 'name')) {
+                $equipoNameCol = 'name';
+            }
+            $equipoTypeTitleCol = null;
+            if ($hasEquipoType) {
+                if ($this->erpColumnExists('equipo_type', 'type_ant_title')) {
+                    $equipoTypeTitleCol = 'type_ant_title';
+                } elseif ($this->erpColumnExists('equipo_type', 'title')) {
+                    $equipoTypeTitleCol = 'title';
+                }
+            }
+
+            $whereParts = [];
+            $params = [];
+            foreach ($patterns as $idx => $p) {
+                if ($equipoNameCol !== null) {
+                    $ph = ':p' . $idx . '_e';
+                    $whereParts[] = 'UPPER(e.' . $equipoNameCol . ') LIKE ' . $ph;
+                    $params[$ph] = $p;
+                }
+                if ($equipoTypeTitleCol !== null) {
+                    $ph = ':p' . $idx . '_t';
+                    $whereParts[] = 'UPPER(et.' . $equipoTypeTitleCol . ') LIKE ' . $ph;
+                    $params[$ph] = $p;
+                }
+            }
+            $where = $whereParts !== [] ? ('(' . implode(' OR ', $whereParts) . ')') : '1=0';
+
+            $sql = 'SELECT e.id FROM equipo e';
+            if ($hasEquipoType) {
+                $sql .= ' LEFT JOIN equipo_type et ON et.id = e.equipo_type_id';
+            }
+            $sql .= ' WHERE ' . $where;
+            if ($bonusCode === 'bonoseri') {
+                $excludeParts = [];
+                if ($equipoNameCol !== null) {
+                    $excludeParts[] = 'UPPER(e.' . $equipoNameCol . ') LIKE :exclude_pulpo_e';
+                    $params[':exclude_pulpo_e'] = '%PULPO%';
+                }
+                if ($equipoTypeTitleCol !== null) {
+                    $excludeParts[] = 'UPPER(et.' . $equipoTypeTitleCol . ') LIKE :exclude_pulpo_t';
+                    $params[':exclude_pulpo_t'] = '%PULPO%';
+                }
+                if ($excludeParts !== []) {
+                    $sql .= ' AND NOT (' . implode(' OR ', $excludeParts) . ')';
+                }
+            }
+            $sql .= ' ORDER BY e.id';
+
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            foreach ($stmt->fetchAll() as $r) {
+                if (!is_array($r)) {
+                    continue;
+                }
+                $id = (int)($r['id'] ?? 0);
+                if ($id > 0) {
+                    $ids[] = $id;
+                }
+            }
+        } catch (Throwable) {
+            $ids = [];
+        }
+
+        $ids = array_values(array_unique(array_values(array_filter($ids, static fn ($v) => (int)$v > 0))));
+        sort($ids);
+        $this->erpEquipoIdsByBonusCache[$bonusCode] = $ids !== [] ? $ids : null;
+        return $this->erpEquipoIdsByBonusCache[$bonusCode];
+    }
+
+    private function resolveErpEquipotypeIdsForBonus(string $bonusCode): ?array
+    {
+        $bonusCode = strtolower(trim($bonusCode));
+        if ($bonusCode === '') {
+            return null;
+        }
+        if (array_key_exists($bonusCode, $this->erpEquipotypeIdsByBonusCache)) {
+            return $this->erpEquipotypeIdsByBonusCache[$bonusCode];
+        }
+
+        $ids = [];
+        try {
+            if (!$this->erpTableExists('equipo_type')) {
+                $this->erpEquipotypeIdsByBonusCache[$bonusCode] = null;
+                return null;
+            }
+
+            $titleCol = null;
+            if ($this->erpColumnExists('equipo_type', 'type_ant_title')) {
+                $titleCol = 'type_ant_title';
+            } elseif ($this->erpColumnExists('equipo_type', 'title')) {
+                $titleCol = 'title';
+            }
+
+            $hasFlexoAct = $this->erpColumnExists('equipo_type', 'type_ant_flexo_act');
+            $hasSeriAct = $this->erpColumnExists('equipo_type', 'type_ant_seri_act');
+
+            $whereParts = [];
+            $params = [];
+            if ($bonusCode === 'bonoflexo') {
+                if ($titleCol !== null) {
+                    $whereParts[] = 'UPPER(' . $titleCol . ') LIKE :title_like_1';
+                    $whereParts[] = 'UPPER(' . $titleCol . ') LIKE :title_like_2';
+                    $params[':title_like_1'] = '%FLEXO%';
+                    $params[':title_like_2'] = '%FLEXOG%';
+                } elseif ($hasFlexoAct) {
+                    $whereParts[] = 'type_ant_flexo_act = 1';
+                }
+            } elseif ($bonusCode === 'bonoseri') {
+                if ($titleCol !== null) {
+                    $whereParts[] = 'UPPER(' . $titleCol . ') LIKE :title_like_1';
+                    $whereParts[] = 'UPPER(' . $titleCol . ') LIKE :title_like_2';
+                    $params[':title_like_1'] = '%SERIG%';
+                    $params[':title_like_2'] = '%SERI%';
+                } elseif ($hasSeriAct) {
+                    $whereParts[] = 'type_ant_seri_act = 1';
+                }
+            } elseif ($bonusCode === 'bonocys') {
+                if ($titleCol !== null) {
+                    $whereParts[] = 'UPPER(' . $titleCol . ') LIKE :title_like_1';
+                    $params[':title_like_1'] = '%SELLAD%';
+                }
+            } else {
+                $this->erpEquipotypeIdsByBonusCache[$bonusCode] = null;
+                return null;
+            }
+
+            if ($whereParts === []) {
+                $this->erpEquipotypeIdsByBonusCache[$bonusCode] = null;
+                return null;
+            }
+
+            $sql = 'SELECT id FROM equipo_type WHERE (' . implode(' OR ', $whereParts) . ')';
+            if ($bonusCode === 'bonoseri' && $titleCol !== null) {
+                $sql .= ' AND UPPER(' . $titleCol . ') NOT LIKE :exclude_pulpo_1';
+                $params[':exclude_pulpo_1'] = '%PULPO%';
+            }
+            $sql .= ' ORDER BY id';
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            foreach ($stmt->fetchAll() as $r) {
+                if (!is_array($r)) {
+                    continue;
+                }
+                $id = (int)($r['id'] ?? 0);
+                if ($id > 0) {
+                    $ids[] = $id;
+                }
+            }
+        } catch (Throwable) {
+            $ids = [];
+        }
+
+        $ids = array_values(array_unique(array_values(array_filter($ids, static fn ($v) => (int)$v > 0))));
+        sort($ids);
+        $this->erpEquipotypeIdsByBonusCache[$bonusCode] = $ids !== [] ? $ids : null;
+        return $this->erpEquipotypeIdsByBonusCache[$bonusCode];
+    }
+
+    public function listErpBonusOperatorNamesForPeriod(string|array $monthKey, ?array $equipotypeIds, ?array $equipoIds = null): array
+    {
+        $period = $this->getBonusPeriodByMonthFinal($monthKey);
+        $startTs = (int)($period['start_ts'] ?? 0);
+        $endTs = (int)($period['end_ts'] ?? 0);
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs) {
+            return ['ok' => false, 'errors' => ['Período inválido.'], 'period' => $period, 'names' => []];
+        }
+
+        $equipotypeIds = is_array($equipotypeIds) ? array_values(array_filter(array_map('intval', $equipotypeIds), static fn ($v) => $v > 0)) : null;
+        $equipotypeIds = $equipotypeIds !== null ? array_values(array_unique($equipotypeIds)) : null;
+        $equipotypeFilterSql = '';
+        $equipotypeParams = [];
+        if ($equipotypeIds !== null && $equipotypeIds !== []) {
+            $equipotypePlaceholders = [];
+            foreach ($equipotypeIds as $idx => $id) {
+                $ph = ':equipotype_id_' . $idx;
+                $equipotypePlaceholders[] = $ph;
+                $equipotypeParams[$ph] = $id;
+            }
+            $equipotypeFilterSql = ' AND pa.ag_equipotype_id IN (' . implode(',', $equipotypePlaceholders) . ')';
+        }
+
+        $equipoIds = is_array($equipoIds) ? array_values(array_filter(array_map('intval', $equipoIds), static fn ($v) => $v > 0)) : null;
+        $equipoIds = $equipoIds !== null ? array_values(array_unique($equipoIds)) : null;
+        $equipoFilterSql = '';
+        $equipoParams = [];
+        if ($equipoIds !== null && $equipoIds !== []) {
+            $equipoPlaceholders = [];
+            foreach ($equipoIds as $idx => $id) {
+                $ph = ':equipo_id_' . $idx;
+                $equipoPlaceholders[] = $ph;
+                $equipoParams[$ph] = $id;
+            }
+            $equipoFilterSql = ' AND pa.ag_equipo_id IN (' . implode(',', $equipoPlaceholders) . ')';
+        }
+
+        #region debug-point bonus-query-empty-operators
+        $debugEnvPath = __DIR__ . '/../.dbg/bonus-query-empty.env';
+        $debugUrl = '';
+        if (is_file($debugEnvPath)) {
+            $envRaw = (string)@file_get_contents($debugEnvPath);
+            if ($envRaw !== '') {
+                foreach (preg_split('/\r?\n/', $envRaw) ?: [] as $line) {
+                    $line = trim((string)$line);
+                    if ($line === '' || !str_contains($line, '=')) {
+                        continue;
+                    }
+                    [$k, $v] = array_map('trim', explode('=', $line, 2));
+                    if ($k === 'DEBUG_SERVER_URL') {
+                        $debugUrl = $v;
+                        break;
+                    }
+                }
+            }
+        }
+        $dbgPost = static function (string $url, array $payload): void {
+            $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
+            if (!is_string($body)) {
+                return;
+            }
+            $ctx = stream_context_create([
+                'http' => [
+                    'method' => 'POST',
+                    'header' => "Content-Type: application/json\r\n",
+                    'content' => $body,
+                    'timeout' => 2,
+                ],
+            ]);
+            @file_get_contents($url, false, $ctx);
+        };
+        if ($debugUrl !== '') {
+            $dbName = '';
+            try {
+                $dbName = (string)($this->erpPdo->query('SELECT DATABASE()')->fetchColumn() ?: '');
+            } catch (Throwable) {
+                $dbName = '';
+            }
+            $dbgPost($debugUrl, [
+                'ts' => date('c'),
+                'sessionId' => 'bonus-query-empty',
+                'runId' => 'pre',
+                'event' => 'bonus_operators_query_start',
+                'monthKey' => $monthKey,
+                'db' => $dbName,
+                'startTs' => $startTs,
+                'endTs' => $endTs,
+                'equipotypeIds' => $equipotypeIds,
+            ]);
+        }
+        #endregion debug-point bonus-query-empty-operators
+
+        $sql = <<<SQL
+SELECT DISTINCT
+    TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))) AS operator_name
+FROM prod_worker_ot_events e
+INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+LEFT JOIN workers w ON w.id = pwi.win_wrkid
+WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+{$equipotypeFilterSql}
+{$equipoFilterSql}
+  AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+ORDER BY operator_name ASC
+SQL;
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute(array_merge([
+                ':start_ts' => $startTs,
+                ':end_ts' => $endTs,
+            ], $equipotypeParams, $equipoParams));
+            $names = [];
+            foreach ($stmt->fetchAll() as $r) {
+                $name = is_array($r) ? trim((string)($r['operator_name'] ?? '')) : '';
+                if ($name !== '') {
+                    $names[] = $name;
+                }
+            }
+            $names = array_values(array_unique($names));
+            sort($names, SORT_NATURAL | SORT_FLAG_CASE);
+            #region debug-point bonus-query-empty-operators
+            if ($debugUrl !== '') {
+                $dbgPost($debugUrl, [
+                    'ts' => date('c'),
+                    'sessionId' => 'bonus-query-empty',
+                    'runId' => 'pre',
+                    'event' => 'bonus_operators_query_done',
+                    'monthKey' => $monthKey,
+                    'startTs' => $startTs,
+                    'endTs' => $endTs,
+                    'equipotypeIds' => $equipotypeIds,
+                    'namesCount' => count($names),
+                    'namesSample' => array_slice($names, 0, 12),
+                ]);
+            }
+            #endregion debug-point bonus-query-empty-operators
+
+            return ['ok' => true, 'errors' => [], 'period' => $period, 'names' => $names];
+        } catch (PDOException $e) {
+            $sqlState = (string)($e->errorInfo[0] ?? $e->getCode() ?? '');
+            if ($sqlState === '42S02' || str_contains($e->getMessage(), 'Base table or view not found')) {
+                #region debug-point bonus-query-empty-operators
+                if ($debugUrl !== '') {
+                    $dbgPost($debugUrl, [
+                        'ts' => date('c'),
+                        'sessionId' => 'bonus-query-empty',
+                        'runId' => 'pre',
+                        'event' => 'bonus_operators_query_error',
+                        'monthKey' => $monthKey,
+                        'sqlState' => $sqlState,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+                #endregion debug-point bonus-query-empty-operators
+                return ['ok' => false, 'errors' => ['No se encuentran las tablas de producción del ERP (prod_*).'], 'period' => $period, 'names' => []];
+            }
+            #region debug-point bonus-query-empty-operators
+            if ($debugUrl !== '') {
+                $dbgPost($debugUrl, [
+                    'ts' => date('c'),
+                    'sessionId' => 'bonus-query-empty',
+                    'runId' => 'pre',
+                    'event' => 'bonus_operators_query_error',
+                    'monthKey' => $monthKey,
+                    'sqlState' => $sqlState,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+            #endregion debug-point bonus-query-empty-operators
+            return ['ok' => false, 'errors' => ['No se pudo consultar operadores del ERP.'], 'period' => $period, 'names' => []];
+        }
+    }
+
+    /**
+     * Implementación genérica de consulta ERP para producción en el período 26–25.
+     *
+     * @param int|null $equipotypeId Si viene, filtra por prod_agenda.ag_equipotype_id
+     * @return array{ok:bool, errors:string[], period:array{month_key:string,start_date:string,end_date:string,start_ts:int,end_ts:int}, rows:list<array<string,mixed>>}
+     */
+    private function listErpProductionForBonusPeriod(string|array $monthKey, ?string $operatorName, ?string $costCenter, ?array $equipotypeIds, ?array $equipoIds, ?int $limit, bool $filterEquipoOnWorker = false, ?array $excludeWorkerEquipoNameLike = null): array
     {
         $period = $this->getBonusPeriodByMonthFinal($monthKey);
         $startTs = (int)($period['start_ts'] ?? 0);
@@ -11053,45 +17362,394 @@ SQL;
         }
 
         $operatorName = $operatorName !== null ? trim($operatorName) : '';
+        $costCenter = $costCenter !== null ? trim($costCenter) : '';
+        $equipotypeIds = is_array($equipotypeIds) ? array_values(array_filter(array_map('intval', $equipotypeIds), static fn ($v) => $v > 0)) : null;
+        $equipotypeIds = $equipotypeIds !== null ? array_values(array_unique($equipotypeIds)) : null;
+        $equipoIds = is_array($equipoIds) ? array_values(array_filter(array_map('intval', $equipoIds), static fn ($v) => $v > 0)) : null;
+        $equipoIds = $equipoIds !== null ? array_values(array_unique($equipoIds)) : null;
+        $limit = $limit !== null ? max(1, min(20000, (int)$limit)) : null;
+        $limitSql = $limit !== null ? (' LIMIT ' . $limit) : '';
 
-        $sql = <<<SQL
+        $equipotypeFilterSql = '';
+        $equipotypeParams = [];
+        if ($equipotypeIds !== null && $equipotypeIds !== []) {
+            $equipotypePlaceholders = [];
+            foreach ($equipotypeIds as $idx => $id) {
+                $ph = ':equipotype_id_' . $idx;
+                $equipotypePlaceholders[] = $ph;
+                $equipotypeParams[$ph] = $id;
+            }
+            $equipotypeFilterSql = $filterEquipoOnWorker
+                ? (' AND eq.equipo_type_id IN (' . implode(',', $equipotypePlaceholders) . ')')
+                : (' AND pa.ag_equipotype_id IN (' . implode(',', $equipotypePlaceholders) . ')');
+        }
+
+        $equipoFilterSql = '';
+        $equipoParams = [];
+        if ($equipoIds !== null && $equipoIds !== []) {
+            $equipoPlaceholders = [];
+            foreach ($equipoIds as $idx => $id) {
+                $ph = ':equipo_id_' . $idx;
+                $equipoPlaceholders[] = $ph;
+                $equipoParams[$ph] = $id;
+            }
+            $equipoFilterSql = $filterEquipoOnWorker
+                ? (' AND pwi.win_equipoid IN (' . implode(',', $equipoPlaceholders) . ')')
+                : (' AND pa.ag_equipo_id IN (' . implode(',', $equipoPlaceholders) . ')');
+        }
+
+        $agendaEquipoJoinSql = '';
+        $agendaEquipoExcludeSql = '';
+        $agendaEquipoExcludeParams = [];
+        $excludeWorkerEquipoNameLike = is_array($excludeWorkerEquipoNameLike)
+            ? array_values(array_filter(array_map('strval', $excludeWorkerEquipoNameLike), static fn ($v) => trim($v) !== ''))
+            : null;
+        if ($excludeWorkerEquipoNameLike !== null && $excludeWorkerEquipoNameLike !== [] && $this->erpTableExists('equipo')) {
+            $agendaEquipoNameCol = null;
+            if ($this->erpColumnExists('equipo', 'equipo_name')) {
+                $agendaEquipoNameCol = 'equipo_name';
+            } elseif ($this->erpColumnExists('equipo', 'name')) {
+                $agendaEquipoNameCol = 'name';
+            }
+            if ($agendaEquipoNameCol !== null) {
+                $agendaEquipoJoinSql = 'LEFT JOIN equipo ag_eq ON ag_eq.id = pwi.win_equipoid';
+                $excludeParts = [];
+                foreach ($excludeWorkerEquipoNameLike as $idx => $pat) {
+                    $ph = ':agenda_equipo_excl_' . $idx;
+                    $excludeParts[] = 'UPPER(ag_eq.' . $agendaEquipoNameCol . ') LIKE ' . $ph;
+                    $agendaEquipoExcludeParams[$ph] = strtoupper($pat);
+                }
+                if ($excludeParts !== []) {
+                    $agendaEquipoExcludeSql = ' AND NOT (' . implode(' OR ', $excludeParts) . ')';
+                }
+            }
+        }
+
+        $defectJoinSql = '';
+        $defectSelectSqlLegacy = '0 AS declared_waste_units, 0 AS declared_waste_kg, 0 AS waste_print_units, 0 AS waste_print_kg';
+        $defectSelectSqlExtended = '0 AS declared_waste_units, 0 AS declared_waste_kg, 0 AS waste_print_units, 0 AS waste_print_kg';
+        if ($this->erpTableExists('prod_worker_ot_defectunits')) {
+            $mTypeJoin = $this->erpTableExists('prod_mermatypes') ? 'LEFT JOIN prod_mermatypes mt ON mt.id = d.evt_merma_typeid' : '';
+            $defectSelectSqlLegacy = 'SUM(COALESCE(dw.waste_units, 0)) AS declared_waste_units, SUM(COALESCE(dw.waste_kg, 0)) AS declared_waste_kg, SUM(COALESCE(dw.waste_print_units, 0)) AS waste_print_units, SUM(COALESCE(dw.waste_print_kg, 0)) AS waste_print_kg';
+            $defectSelectSqlExtended = 'SUM(COALESCE(dw.waste_units, 0)) AS declared_waste_units, SUM(COALESCE(dw.waste_kg, 0)) AS declared_waste_kg, SUM(COALESCE(dw.waste_print_units, 0)) AS waste_print_units, SUM(COALESCE(dw.waste_print_kg, 0)) AS waste_print_kg';
+            $defectJoinSql = <<<SQL
+LEFT JOIN (
+    SELECT 
+        e2.evt_prod_worker_otid AS wok_id,
+        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' THEN d.evt_kgstounits ELSE 0 END) AS waste_kg,
+        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' THEN d.evt_amount ELSE 0 END) AS waste_units,
+        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND (d.evt_merma_typeid = 7 OR LOWER(COALESCE(mt.merma_title, '')) LIKE '%impresi%') THEN d.evt_kgstounits ELSE 0 END) AS waste_print_kg,
+        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND (d.evt_merma_typeid = 7 OR LOWER(COALESCE(mt.merma_title, '')) LIKE '%impresi%') THEN d.evt_amount ELSE 0 END) AS waste_print_units
+    FROM prod_worker_ot_defectunits d
+    INNER JOIN prod_worker_ot_events e2 ON d.evt_refid = e2.id
+    {$mTypeJoin}
+    WHERE d.evt_status > 0
+    GROUP BY e2.evt_prod_worker_otid
+) dw ON dw.wok_id = pwo.id
+SQL;
+        }
+
+        $bagTypeSelectSqlLegacy = "'' AS bag_type";
+        $bagTypeSelectSqlExtended = "'' AS bag_type";
+        $bagTypeJoinSql = '';
+        if (
+            $this->erpTableExists('tran_comments_item_vals')
+            && $this->erpTableExists('tran_comments')
+            && $this->erpTableExists('tran_comments_vals')
+            && $this->erpColumnExists('tran_comments_item_vals', 'item_id')
+            && $this->erpColumnExists('tran_comments_item_vals', 'com_id')
+            && $this->erpColumnExists('tran_comments_item_vals', 'val_id')
+            && $this->erpColumnExists('tran_comments', 'id')
+            && $this->erpColumnExists('tran_comments_vals', 'id')
+            && $this->erpColumnExists('tran_comments_vals', 'add_name')
+        ) {
+            $bagTypeSelectSqlExtended = 'MAX(tb.bag_type) AS bag_type';
+            $bagTypeJoinSql = <<<SQL
+LEFT JOIN (
+    SELECT
+        tciv.item_id,
+        MAX(TRIM(tcv.add_name)) AS bag_type
+    FROM tran_comments_item_vals tciv
+    INNER JOIN tran_comments tc ON tc.id = tciv.com_id AND tc.id = 20
+    INNER JOIN tran_comments_vals tcv ON tcv.id = tciv.val_id
+    GROUP BY tciv.item_id
+) tb ON tb.item_id = it.id
+SQL;
+        }
+
+        #region debug-point bonus-query-empty-main
+        $debugEnvPath = __DIR__ . '/../.dbg/bonus-query-empty.env';
+        $debugUrl = '';
+        if (is_file($debugEnvPath)) {
+            $envRaw = (string)@file_get_contents($debugEnvPath);
+            if ($envRaw !== '') {
+                foreach (preg_split('/\r?\n/', $envRaw) ?: [] as $line) {
+                    $line = trim((string)$line);
+                    if ($line === '' || !str_contains($line, '=')) {
+                        continue;
+                    }
+                    [$k, $v] = array_map('trim', explode('=', $line, 2));
+                    if ($k === 'DEBUG_SERVER_URL') {
+                        $debugUrl = $v;
+                        break;
+                    }
+                }
+            }
+        }
+        $dbgPost = static function (string $url, array $payload): void {
+            $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
+            if (!is_string($body)) {
+                return;
+            }
+            $ctx = stream_context_create([
+                'http' => [
+                    'method' => 'POST',
+                    'header' => "Content-Type: application/json\r\n",
+                    'content' => $body,
+                    'timeout' => 2,
+                ],
+            ]);
+            @file_get_contents($url, false, $ctx);
+        };
+        if ($debugUrl !== '') {
+            $dbName = '';
+            try {
+                $dbName = (string)($this->erpPdo->query('SELECT DATABASE()')->fetchColumn() ?: '');
+            } catch (Throwable) {
+                $dbName = '';
+            }
+            $dbgPost($debugUrl, [
+                'ts' => date('c'),
+                'sessionId' => 'bonus-query-empty',
+                'runId' => 'pre',
+                'event' => 'bonus_rows_query_start',
+                'monthKey' => $monthKey,
+                'db' => $dbName,
+                'startTs' => $startTs,
+                'endTs' => $endTs,
+                'equipotypeIds' => $equipotypeIds,
+                'operatorName' => $operatorName,
+                'costCenter' => $costCenter,
+                'limit' => $limit,
+            ]);
+        }
+        #endregion debug-point bonus-query-empty-main
+
+        $sqlLegacy = <<<SQL
 SELECT
     pa.ag_equipo_id AS printer_no,
     ph.prd_reqid AS cost_center,
     ph.prd_number AS work_order_number,
-    DATE(FROM_UNIXTIME(e.evt_crtdat)) AS event_date,
+    e.event_date AS event_date,
     ph.prd_desc AS erp_desc,
+    '' AS item_title,
+    {$bagTypeSelectSqlLegacy},
     TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))) AS operator_name,
     MAX(pa.ag_amount) AS requested_units,
-    SUM(e.evt_amount) AS produced_units,
-    SUM(e.evt_amount_metros_lineales) AS produced_linear_meters,
-    SUM(e.evt_amount_metros_maquina) AS produced_machine_meters
-FROM prod_worker_ot_events e
+    MAX(pa.ag_amount) AS requested_units_pa,
+    0 AS requested_units_item,
+    MAX(e.produced_units) AS produced_units,
+    MAX(e.produced_linear_meters) AS produced_linear_meters,
+    MAX(e.produced_machine_meters) AS produced_machine_meters,
+    0 AS item_prodcalc_fuelle_act,
+    MAX(COALESCE(pwi.win_equipoid, pa.ag_equipo_id, 0)) AS win_equipoid,
+    {$defectSelectSqlLegacy}
+FROM (
+    SELECT
+        x.evt_prod_worker_otid,
+        x.event_date,
+        MAX(x.sum_units) AS produced_units,
+        MAX(x.sum_linear) AS produced_linear_meters,
+        MAX(x.sum_machine) AS produced_machine_meters
+    FROM (
+        SELECT
+            evt_prod_worker_otid,
+            DATE(FROM_UNIXTIME(evt_crtdat)) AS event_date,
+            LOWER(evt_type) AS evt_type,
+            SUM(evt_amount) AS sum_units,
+            SUM(evt_amount_metros_lineales) AS sum_linear,
+            SUM(evt_amount_metros_maquina) AS sum_machine
+        FROM prod_worker_ot_events
+        WHERE evt_crtdat BETWEEN :start_ts AND :end_ts
+          AND LOWER(evt_type) IN ('production','prod','prodsericolor')
+        GROUP BY evt_prod_worker_otid, DATE(FROM_UNIXTIME(evt_crtdat)), LOWER(evt_type)
+    ) x
+    GROUP BY x.evt_prod_worker_otid, x.event_date
+) e
 INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
 INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
 INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
-INNER JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
-INNER JOIN workers w ON w.id = pwi.win_wrkid
-WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
-  AND pa.ag_equipotype_id = 1
-  AND e.evt_type = 'PRODUCTION'
+LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+{$agendaEquipoJoinSql}
+LEFT JOIN workers w ON w.id = pwi.win_wrkid
+{$defectJoinSql}
+WHERE 1=1
+{$equipotypeFilterSql}
+{$equipoFilterSql}
+{$agendaEquipoExcludeSql}
   AND (:operator_name = '' OR TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))) = :operator_name_exact)
-GROUP BY pa.ag_equipo_id, ph.prd_reqid, ph.prd_number, DATE(FROM_UNIXTIME(e.evt_crtdat)), operator_name, ph.prd_desc
-ORDER BY event_date ASC, printer_no ASC, cost_center ASC, work_order_number ASC
+  AND (:cost_center = '' OR ph.prd_reqid = :cost_center_exact)
+GROUP BY
+    pa.ag_equipo_id,
+    ph.prd_reqid,
+    ph.prd_number,
+    e.event_date,
+    TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))),
+    ph.prd_desc
+ORDER BY event_date ASC, printer_no ASC, cost_center ASC, work_order_number ASC{$limitSql}
 SQL;
 
+        $sqlExtended = <<<SQL
+SELECT
+    pa.ag_equipo_id AS printer_no,
+    COALESCE(o.req_number, ph.prd_reqid) AS cost_center,
+    ph.prd_number AS work_order_number,
+    e.event_date AS event_date,
+    ph.prd_desc AS erp_desc,
+    TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))) AS operator_name,
+    MAX(CASE WHEN pa.ag_amount IS NOT NULL AND pa.ag_amount > 0 THEN pa.ag_amount ELSE oi.item_amount END) AS requested_units,
+    MAX(pa.ag_amount) AS requested_units_pa,
+    MAX(oi.item_amount) AS requested_units_item,
+    MAX(e.produced_units) AS produced_units,
+    MAX(e.produced_linear_meters) AS produced_linear_meters,
+    MAX(e.produced_machine_meters) AS produced_machine_meters,
+    {$defectSelectSqlExtended},
+    MAX(c.cust_name) AS client_label,
+    MAX(UPPER(cat.cat_prefix)) AS product_type,
+    MAX(it.item_title) AS item_title,
+    {$bagTypeSelectSqlExtended},
+    MAX(
+        CASE
+            WHEN oi.fab_med_width IS NULL OR oi.fab_med_height IS NULL THEN ''
+            WHEN oi.fab_med_fuelle IS NULL OR oi.fab_med_fuelle = 0 THEN CONCAT(CAST(oi.fab_med_width AS UNSIGNED), 'X', CAST(oi.fab_med_height AS UNSIGNED))
+            ELSE CONCAT(CAST(oi.fab_med_width AS UNSIGNED), 'X', CAST(oi.fab_med_height AS UNSIGNED), 'X', CAST(oi.fab_med_fuelle AS UNSIGNED))
+        END
+    ) AS measure_cm,
+    MAX(oi.fab_mat_gramms)      AS grammage_g,
+    MAX(oi.fab_med_width)       AS dim_width_cm,
+    MAX(oi.fab_med_height)      AS dim_height_cm,
+    MAX(oi.fab_med_fuelle)      AS dim_fuelle_cm,
+    MAX(oi.fab_manilla_length)  AS dim_manilla_length,
+    MAX(it.item_weight)         AS item_weight,
+    MAX(it.item_prodcalc_fuelle_act) AS item_prodcalc_fuelle_act,
+    MAX(COALESCE(pwi.win_equipoid, pa.ag_equipo_id, 0)) AS win_equipoid
+FROM (
+    SELECT
+        x.evt_prod_worker_otid,
+        x.event_date,
+        MAX(x.sum_units) AS produced_units,
+        MAX(x.sum_linear) AS produced_linear_meters,
+        MAX(x.sum_machine) AS produced_machine_meters
+    FROM (
+        SELECT
+            evt_prod_worker_otid,
+            DATE(FROM_UNIXTIME(evt_crtdat)) AS event_date,
+            LOWER(evt_type) AS evt_type,
+            SUM(evt_amount) AS sum_units,
+            SUM(evt_amount_metros_lineales) AS sum_linear,
+            SUM(evt_amount_metros_maquina) AS sum_machine
+        FROM prod_worker_ot_events
+        WHERE evt_crtdat BETWEEN :start_ts AND :end_ts
+          AND LOWER(evt_type) IN ('production','prod','prodsericolor')
+        GROUP BY evt_prod_worker_otid, DATE(FROM_UNIXTIME(evt_crtdat)), LOWER(evt_type)
+    ) x
+    GROUP BY x.evt_prod_worker_otid, x.event_date
+) e
+INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
+LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
+{$agendaEquipoJoinSql}
+LEFT JOIN workers w ON w.id = pwi.win_wrkid
+{$defectJoinSql}
+LEFT JOIN equipo eq ON eq.id = pwi.win_equipoid
+LEFT JOIN orders o ON o.id = pa.ag_reqid
+LEFT JOIN customer c ON c.id = o.req_cust_id
+LEFT JOIN (
+    SELECT
+        req_id,
+        MAX(item_amount)        AS item_amount,
+        MAX(fab_med_width)      AS fab_med_width,
+        MAX(fab_med_height)     AS fab_med_height,
+        MAX(fab_med_fuelle)     AS fab_med_fuelle,
+        MAX(item_id)            AS item_id,
+        MAX(fab_mat_gramms)     AS fab_mat_gramms,
+        MAX(fab_manilla_length) AS fab_manilla_length
+    FROM orders_items
+    GROUP BY req_id
+) oi ON oi.req_id = o.id
+LEFT JOIN item it ON it.id = oi.item_id
+{$bagTypeJoinSql}
+LEFT JOIN (
+    SELECT ip.item_id, MIN(pc.cat_prefix) AS cat_prefix
+    FROM item_productcats ip
+    INNER JOIN productcats pc ON pc.id = ip.cat_id
+    GROUP BY ip.item_id
+) cat ON cat.item_id = it.id
+WHERE 1=1
+{$equipotypeFilterSql}
+{$equipoFilterSql}
+{$agendaEquipoExcludeSql}
+  AND (:operator_name = '' OR TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))) = :operator_name_exact)
+  AND (:cost_center = '' OR COALESCE(o.req_number, ph.prd_reqid) = :cost_center_exact)
+GROUP BY
+    pa.ag_equipo_id,
+    COALESCE(o.req_number, ph.prd_reqid),
+    ph.prd_number,
+    e.event_date,
+    TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, ""))),
+    ph.prd_desc
+ORDER BY event_date ASC, printer_no ASC, cost_center ASC, work_order_number ASC{$limitSql}
+SQL;
+
+        $queryMode = 'extended';
+        $queryFallbackReason = '';
         try {
-            $stmt = $this->erpPdo->prepare($sql);
-            $stmt->execute([
+            $params = [
                 ':start_ts' => $startTs,
                 ':end_ts' => $endTs,
                 ':operator_name' => $operatorName,
                 ':operator_name_exact' => $operatorName,
-            ]);
-            $rawRows = $stmt->fetchAll();
+                ':cost_center' => $costCenter,
+                ':cost_center_exact' => $costCenter,
+            ];
+            $params = array_merge($params, $equipotypeParams, $equipoParams, $agendaEquipoExcludeParams);
+
+            try {
+                $stmt = $this->erpPdo->prepare($sqlExtended);
+                $stmt->execute($params);
+                $rawRows = $stmt->fetchAll();
+            } catch (PDOException $eExtended) {
+                $sqlState = (string)($eExtended->errorInfo[0] ?? $eExtended->getCode() ?? '');
+                $message = $eExtended->getMessage();
+                if ($sqlState === '42S02' || str_contains($message, 'Base table or view not found')) {
+                    $queryMode = 'legacy';
+                    $queryFallbackReason = $sqlState !== '' ? ('SQLSTATE ' . $sqlState) : 'missing table';
+                    $stmt = $this->erpPdo->prepare($sqlLegacy);
+                    $stmt->execute($params);
+                    $rawRows = $stmt->fetchAll();
+                } else {
+                    throw $eExtended;
+                }
+            }
         } catch (PDOException $e) {
             $sqlState = (string)($e->errorInfo[0] ?? $e->getCode() ?? '');
             $message = $e->getMessage();
+            #region debug-point bonus-query-empty-main
+            if ($debugUrl !== '') {
+                $dbgPost($debugUrl, [
+                    'ts' => date('c'),
+                    'sessionId' => 'bonus-query-empty',
+                    'runId' => 'pre',
+                    'event' => 'bonus_rows_query_error',
+                    'monthKey' => $monthKey,
+                    'sqlState' => $sqlState,
+                    'error' => $message,
+                    'queryMode' => $queryMode,
+                    'fallbackReason' => $queryFallbackReason,
+                ]);
+            }
+            #endregion debug-point bonus-query-empty-main
             if ($sqlState === '42S02' || str_contains($message, 'Base table or view not found')) {
                 return ['ok' => false, 'errors' => ['No se encuentran las tablas de producción del ERP (prod_*).'], 'period' => $period, 'rows' => []];
             }
@@ -11109,19 +17767,179 @@ SQL;
                 'cost_center' => (string)($r['cost_center'] ?? ''),
                 'work_order_number' => (string)($r['work_order_number'] ?? ''),
                 'event_date' => (string)($r['event_date'] ?? ''),
-                'client_label' => $this->parseClientLabelFromErpDesc($desc),
-                'product_type' => $this->parseProductTypeFromErpDesc($desc),
-                'measure_cm' => $this->parseMeasureCmFromErpDesc($desc),
+                'client_label' => trim((string)($r['client_label'] ?? '')) !== '' ? (string)$r['client_label'] : $this->parseClientLabelFromErpDesc($desc),
+                'product_type' => trim((string)($r['product_type'] ?? '')) !== '' ? (string)$r['product_type'] : $this->parseProductTypeFromErpDesc($desc),
+                'item_title' => trim((string)($r['item_title'] ?? '')),
+                'bag_type' => trim((string)($r['bag_type'] ?? '')),
+                'measure_cm' => trim((string)($r['measure_cm'] ?? '')) !== '' ? (string)$r['measure_cm'] : $this->parseMeasureCmFromErpDesc($desc),
                 'helper_label' => '',
                 'bonification_label' => '',
                 'operator_name' => trim((string)($r['operator_name'] ?? '')),
                 'requested_units' => (float)($r['requested_units'] ?? 0),
+                'requested_units_pa' => (float)($r['requested_units_pa'] ?? 0),
+                'requested_units_item' => (float)($r['requested_units_item'] ?? 0),
                 'produced_units' => (float)($r['produced_units'] ?? 0),
                 'produced_linear_meters' => (float)($r['produced_linear_meters'] ?? 0),
                 'produced_machine_meters' => (float)($r['produced_machine_meters'] ?? 0),
+                'declared_waste_units'  => (float)($r['declared_waste_units'] ?? 0),
+                'declared_waste_kg'    => (float)($r['declared_waste_kg']    ?? 0),
+                'waste_print_units'    => (float)($r['waste_print_units']    ?? 0),
+                'waste_print_kg'       => (float)($r['waste_print_kg']       ?? 0),
+                'grammage_g'           => (float)($r['grammage_g']           ?? 0),
+                'dim_width_cm'         => (float)($r['dim_width_cm']         ?? 0),
+                'dim_height_cm'        => (float)($r['dim_height_cm']        ?? 0),
+                'dim_fuelle_cm'        => (float)($r['dim_fuelle_cm']        ?? 0),
+                'dim_manilla_length'   => (float)($r['dim_manilla_length']   ?? 0),
+                'item_weight'          => (float)($r['item_weight']          ?? 0),
+                'item_prodcalc_fuelle_act' => (int)($r['item_prodcalc_fuelle_act'] ?? 0),
+                'win_equipoid'         => (int)($r['win_equipoid']         ?? 0),
                 'erp_desc' => $desc,
             ];
         }
+
+        #region debug-point bonus-query-empty-main
+        if ($debugUrl !== '') {
+            $evtTypeCounts = [];
+            try {
+                $stmt = $this->erpPdo->prepare(
+                    'SELECT evt_type, COUNT(*) AS cnt
+                     FROM prod_worker_ot_events
+                     WHERE evt_crtdat BETWEEN :start_ts AND :end_ts
+                     GROUP BY evt_type
+                     ORDER BY cnt DESC
+                     LIMIT 10'
+                );
+                $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+                foreach ($stmt->fetchAll() as $r) {
+                    if (!is_array($r)) {
+                        continue;
+                    }
+                    $evtTypeCounts[(string)($r['evt_type'] ?? '')] = (int)($r['cnt'] ?? 0);
+                }
+            } catch (Throwable) {
+                $evtTypeCounts = [];
+            }
+
+            $sample = [];
+            foreach ($rows as $r) {
+                if (!is_array($r)) {
+                    continue;
+                }
+                $sample[] = [
+                    'event_date' => (string)($r['event_date'] ?? ''),
+                    'cc' => (string)($r['cost_center'] ?? ''),
+                    'ot' => (string)($r['work_order_number'] ?? ''),
+                    'operator' => (string)($r['operator_name'] ?? ''),
+                    'produced_units' => (float)($r['produced_units'] ?? 0.0),
+                    'requested_units' => (float)($r['requested_units'] ?? 0.0),
+                ];
+                if (count($sample) >= 5) {
+                    break;
+                }
+            }
+
+            $dbgPost($debugUrl, [
+                'ts' => date('c'),
+                'sessionId' => 'bonus-query-empty',
+                'runId' => 'pre',
+                'event' => 'bonus_rows_query_done',
+                'monthKey' => $monthKey,
+                'startTs' => $startTs,
+                'endTs' => $endTs,
+                'equipotypeIds' => $equipotypeIds,
+                'operatorName' => $operatorName,
+                'limit' => $limit,
+                'queryMode' => $queryMode,
+                'fallbackReason' => $queryFallbackReason,
+                'rawRowCount' => is_array($rawRows) ? count($rawRows) : null,
+                'rowCount' => count($rows),
+                'evtTypeCounts' => $evtTypeCounts,
+                'sample' => $sample,
+            ]);
+        }
+        #endregion debug-point bonus-query-empty-main
+
+        #region debug-point flexo-bonus-empty-query
+        $debugEnvPath = __DIR__ . '/../.dbg/flexo-bonus-empty.env';
+        $debugUrl = '';
+        if (is_file($debugEnvPath)) {
+            $envRaw = (string)@file_get_contents($debugEnvPath);
+            if ($envRaw !== '') {
+                foreach (preg_split('/\r?\n/', $envRaw) ?: [] as $line) {
+                    $line = trim((string)$line);
+                    if ($line === '' || !str_contains($line, '=')) {
+                        continue;
+                    }
+                    [$k, $v] = array_map('trim', explode('=', $line, 2));
+                    if ($k === 'DEBUG_SERVER_URL') {
+                        $debugUrl = $v;
+                        break;
+                    }
+                }
+            }
+        }
+        if ($debugUrl !== '') {
+            $dbgPost = static function (string $url, array $payload): void {
+                $body = json_encode($payload, JSON_UNESCAPED_UNICODE);
+                if (!is_string($body)) {
+                    return;
+                }
+                $ctx = stream_context_create([
+                    'http' => [
+                        'method' => 'POST',
+                        'header' => "Content-Type: application/json\r\n",
+                        'content' => $body,
+                        'timeout' => 1,
+                    ],
+                ]);
+                @file_get_contents($url, false, $ctx);
+            };
+
+            $sample = [];
+            foreach ($rows as $r) {
+                if (!is_array($r)) {
+                    continue;
+                }
+                $sample[] = [
+                    'event_date' => (string)($r['event_date'] ?? ''),
+                    'cc' => (string)($r['cost_center'] ?? ''),
+                    'ot' => (string)($r['work_order_number'] ?? ''),
+                    'operator' => (string)($r['operator_name'] ?? ''),
+                    'produced_units' => (float)($r['produced_units'] ?? 0.0),
+                    'requested_units' => (float)($r['requested_units'] ?? 0.0),
+                ];
+                if (count($sample) >= 5) {
+                    break;
+                }
+            }
+
+            $dbName = '';
+            try {
+                $dbName = (string)($this->erpPdo->query('SELECT DATABASE()')->fetchColumn() ?: '');
+            } catch (Throwable) {
+                $dbName = '';
+            }
+
+            $dbgPost($debugUrl, [
+                'sessionId' => 'flexo-bonus-empty',
+                'hypothesisId' => 'probe',
+                'runId' => trim((string)($_GET['debug_run'] ?? 'pre')) !== '' ? trim((string)($_GET['debug_run'] ?? 'pre')) : 'pre',
+                'event' => 'erp_bonus_query_snapshot',
+                'ts' => time(),
+                'bonus' => 'flexo',
+                'db' => $dbName,
+                'monthKey' => $monthKey,
+                'startTs' => $startTs,
+                'endTs' => $endTs,
+                'equipotypeIds' => $equipotypeIds ?? null,
+                'operatorFilter' => $operatorName,
+                'queryMode' => $queryMode,
+                'fallbackReason' => $queryFallbackReason,
+                'rowCount' => count($rows),
+                'sample' => $sample,
+            ]);
+        }
+        #endregion debug-point flexo-bonus-empty-query
 
         return ['ok' => true, 'errors' => [], 'period' => $period, 'rows' => $rows];
     }
@@ -11142,7 +17960,7 @@ SQL;
     private function parseProductTypeFromErpDesc(string $desc): string
     {
         $desc = strtoupper($desc);
-        if (preg_match('/\b(BOU|PRO|TRO|IND)\b/', $desc, $m) === 1) {
+        if (preg_match('/\b(BOU|PRO|TRO|IND|SAC|VAR|OTRO)\b/', $desc, $m) === 1) {
             return (string)$m[1];
         }
         return '';
@@ -11164,6 +17982,10 @@ SQL;
     }
 
     /**
+     * Obtiene la tabla de tramos (Desde/Hasta/Monto) configurada para un bono.
+     *
+     * En Bonoflexo, estos tramos determinan el bono base según “Total UNID. IMPRESAS”.
+     *
      * @return list<array{id:int,bonus_code:string,range_from:int,range_to:int|null,amount_clp:string}>
      */
     public function listBonusBrackets(string $bonusCode): array
@@ -11184,21 +18006,30 @@ SQL;
     }
 
     /**
+     * Obtiene el factor “Compartido” por operador.
+     *
+     * - Solo se guardan factores distintos de 1.0.
+     * - Si un operador no está en el mapa, se asume 1.0.
+     *
      * @return array<string,float>
      */
-    public function listBonusOperatorFactors(string $bonusCode): array
+    public function listBonusOperatorFactors(string $bonusCode, string $monthKey = ''): array
     {
         $bonusCode = strtolower(trim($bonusCode));
         if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
             return [];
         }
+        $monthKey = trim($monthKey);
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            $monthKey = '';
+        }
         $stmt = $this->pdo->prepare(
             'SELECT operator_name, factor
              FROM bonus_operator_factors
-             WHERE bonus_code = :bonus_code
+             WHERE bonus_code = :bonus_code AND month_key = :month_key
              ORDER BY operator_name ASC'
         );
-        $stmt->execute([':bonus_code' => $bonusCode]);
+        $stmt->execute([':bonus_code' => $bonusCode, ':month_key' => $monthKey]);
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         $out = [];
         foreach ($rows !== false ? $rows : [] as $row) {
@@ -11212,15 +18043,24 @@ SQL;
     }
 
     /**
+     * Reemplaza completamente los factores “Compartido” por operador para un bono.
+     *
+     * - Valida que factor ∈ {1.0, 0.9, 0.8}.
+     * - Omite (no persiste) los operadores con 1.0 para mantener la tabla liviana.
+     *
      * @param array<string,float|int|string> $factorsByOperator
      * @return array{ok:bool, errors?:string[]}
      */
-    public function replaceBonusOperatorFactors(string $bonusCode, array $factorsByOperator): array
+    public function replaceBonusOperatorFactors(string $bonusCode, string $monthKey, array $factorsByOperator): array
     {
         $errors = [];
         $bonusCode = strtolower(trim($bonusCode));
         if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
             $errors[] = 'Bono inválido.';
+        }
+        $monthKey = trim($monthKey);
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            $errors[] = 'Mes inválido.';
         }
 
         $normalized = [];
@@ -11259,17 +18099,18 @@ SQL;
 
         $this->pdo->beginTransaction();
         try {
-            $del = $this->pdo->prepare('DELETE FROM bonus_operator_factors WHERE bonus_code = :bonus_code');
-            $del->execute([':bonus_code' => $bonusCode]);
+            $del = $this->pdo->prepare('DELETE FROM bonus_operator_factors WHERE bonus_code = :bonus_code AND month_key = :month_key');
+            $del->execute([':bonus_code' => $bonusCode, ':month_key' => $monthKey]);
 
             if ($normalized !== []) {
                 $ins = $this->pdo->prepare(
-                    'INSERT INTO bonus_operator_factors (bonus_code, operator_name, factor)
-                     VALUES (:bonus_code, :operator_name, :factor)'
+                    'INSERT INTO bonus_operator_factors (bonus_code, month_key, operator_name, factor)
+                     VALUES (:bonus_code, :month_key, :operator_name, :factor)'
                 );
                 foreach ($normalized as $operatorName => $factor) {
                     $ins->execute([
                         ':bonus_code' => $bonusCode,
+                        ':month_key' => $monthKey,
                         ':operator_name' => $operatorName,
                         ':factor' => $factor,
                     ]);
@@ -11284,6 +18125,149 @@ SQL;
         }
     }
 
+    public function getBonusCoachConfig(string $bonusCode, string $monthKey): array
+    {
+        $bonusCode = strtolower(trim($bonusCode));
+        $monthKey = trim($monthKey);
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            return [];
+        }
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            return [];
+        }
+
+        $cfg = [];
+        try {
+            $stmt = $this->pdo->prepare(
+                'SELECT coach_name, share_percent
+                 FROM bonus_operator_coach_configs
+                 WHERE bonus_code = :bonus_code AND month_key = :month_key
+                 LIMIT 1'
+            );
+            $stmt->execute([':bonus_code' => $bonusCode, ':month_key' => $monthKey]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (is_array($row)) {
+                $cfg = [
+                    'coach_name' => trim((string)($row['coach_name'] ?? '')),
+                    'share_percent' => (float)($row['share_percent'] ?? 0.0),
+                ];
+            }
+        } catch (Throwable) {
+            $cfg = [];
+        }
+
+        $trainees = [];
+        try {
+            $stmt = $this->pdo->prepare(
+                'SELECT trainee_name
+                 FROM bonus_operator_coach_trainees
+                 WHERE bonus_code = :bonus_code AND month_key = :month_key
+                 ORDER BY trainee_name ASC'
+            );
+            $stmt->execute([':bonus_code' => $bonusCode, ':month_key' => $monthKey]);
+            foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $v) {
+                $name = trim((string)$v);
+                if ($name !== '') {
+                    $trainees[] = $name;
+                }
+            }
+        } catch (Throwable) {
+            $trainees = [];
+        }
+
+        $cfg['trainees'] = $trainees;
+        return $cfg;
+    }
+
+    public function replaceBonusCoachConfig(string $bonusCode, string $monthKey, string $coachName, float $sharePercent, array $trainees): array
+    {
+        $errors = [];
+        $bonusCode = strtolower(trim($bonusCode));
+        $monthKey = trim($monthKey);
+        $coachName = trim($coachName);
+
+        if (!in_array($bonusCode, $this->listBonusCodes(), true)) {
+            $errors[] = 'Bono inválido.';
+        }
+        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+            $errors[] = 'Mes inválido.';
+        }
+
+        $allowed = [0.0, 0.5];
+        $ok = false;
+        foreach ($allowed as $a) {
+            if (abs($sharePercent - $a) < 0.0001) {
+                $sharePercent = $a;
+                $ok = true;
+                break;
+            }
+        }
+        if (!$ok) {
+            $errors[] = 'Porcentaje inválido.';
+        }
+
+        $traineeNames = [];
+        foreach ($trainees as $t) {
+            $t = trim((string)$t);
+            if ($t !== '') {
+                $traineeNames[$t] = true;
+            }
+        }
+        $traineeList = array_keys($traineeNames);
+        sort($traineeList, SORT_NATURAL | SORT_FLAG_CASE);
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $delT = $this->pdo->prepare('DELETE FROM bonus_operator_coach_trainees WHERE bonus_code = :bonus_code AND month_key = :month_key');
+            $delT->execute([':bonus_code' => $bonusCode, ':month_key' => $monthKey]);
+
+            $delC = $this->pdo->prepare('DELETE FROM bonus_operator_coach_configs WHERE bonus_code = :bonus_code AND month_key = :month_key');
+            $delC->execute([':bonus_code' => $bonusCode, ':month_key' => $monthKey]);
+
+            if ($coachName !== '' && $sharePercent > 0 && $traineeList !== []) {
+                $insC = $this->pdo->prepare(
+                    'INSERT INTO bonus_operator_coach_configs (bonus_code, month_key, coach_name, share_percent)
+                     VALUES (:bonus_code, :month_key, :coach_name, :share_percent)'
+                );
+                $insC->execute([
+                    ':bonus_code' => $bonusCode,
+                    ':month_key' => $monthKey,
+                    ':coach_name' => $coachName,
+                    ':share_percent' => $sharePercent,
+                ]);
+
+                $insT = $this->pdo->prepare(
+                    'INSERT INTO bonus_operator_coach_trainees (bonus_code, month_key, trainee_name)
+                     VALUES (:bonus_code, :month_key, :trainee_name)'
+                );
+                foreach ($traineeList as $t) {
+                    $insT->execute([
+                        ':bonus_code' => $bonusCode,
+                        ':month_key' => $monthKey,
+                        ':trainee_name' => $t,
+                    ]);
+                }
+            }
+
+            $this->pdo->commit();
+            return ['ok' => true];
+        } catch (Throwable) {
+            $this->pdo->rollBack();
+            return ['ok' => false, 'errors' => ['No se pudo guardar la configuración.']];
+        }
+    }
+
+    /**
+     * Resuelve el monto del bono base (sin “Compartido”) buscando el tramo correspondiente.
+     *
+     * - $units: normalmente corresponde a “Total UNID. IMPRESAS” (evt_amount sumado).
+     * - Se redondea a entero para calzar la tabla de tramos.
+     * - Los tramos se asumen ordenados por range_from ascendente.
+     */
     public function resolveBonusBracketAmount(array $brackets, float $units): float
     {
         $u = (int)round($units);
@@ -11380,6 +18364,11 @@ SQL;
     }
 
     /**
+     * Reemplaza completamente la tabla de tramos de un bono.
+     *
+     * En Bonoflexo se usa como acción administrativa para cargar una tabla base
+     * (o para dejar configurado el set de tramos completo por defecto).
+     *
      * @param list<array{range_from:int,range_to:int|null,amount_clp:float}> $brackets
      * @return array{ok:bool, errors?:string[]}
      */
@@ -11540,4 +18529,309 @@ SQL;
             return ['ok' => false, 'errors' => ['No se pudo guardar la configuración.']];
         }
     }
+
+    /**
+     * Analytics and dataset generator for ERP graphics dashboard (/reports/graphics).
+     *
+     * Connects directly to unibag_unibag (ERP DB) to aggregate:
+     * - Macro KPIs: Confection, Printing, Total Units, Active Machines, Waste (kg and %).
+     * - Monthly Trend: Past 6 months of historical production.
+     * - Period Evolution: Day-by-day (or weekly) production curve within the selected date range.
+     * - Process Distribution: Confection vs Printing breakdown.
+     * - Machine Ranking: Top producing machines.
+     * - Machine Waste: Defect kg per machine.
+     * - Warehouse Occupancy: Current capacity and utilization.
+     */
+    public function getErpGraphicsAnalytics(string $startAt, string $endAt): array
+    {
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = 0;
+            $endTs = 0;
+        }
+
+        $emptyResponse = [
+            'kpis' => [
+                'units_corte_sellado' => 0.0,
+                'units_embalaje' => 0.0,
+                'units_flexo' => 0.0,
+                'units_seri' => 0.0,
+                'units_pulpo' => 0.0,
+                'units_confeccion' => 0.0,
+                'units_impresion' => 0.0,
+                'total_units' => 0.0,
+                'total_events' => 0,
+                'active_machines' => 0,
+                'waste_kg' => 0.0,
+                'waste_units' => 0.0,
+                'waste_percent' => 0.0,
+            ],
+            'monthly_trend' => [],
+            'period_evolution' => [],
+            'process_distribution' => [],
+            'machine_ranking' => [],
+            'waste_by_machine' => [],
+            'warehouses' => [],
+        ];
+
+        if ($startTs <= 0 || $endTs <= 0 || $endTs < $startTs || !$this->erpPdo) {
+            return $emptyResponse;
+        }
+
+        try {
+            // 1. KPIs Generales de Producción
+            $kpiSql = "
+                SELECT 
+                    COALESCE(SUM(CASE WHEN eq.equipo_type_id = 8 THEN e.evt_amount ELSE 0 END), 0) AS units_corte_sellado,
+                    COALESCE(SUM(CASE WHEN eq.equipo_type_id = 15 THEN e.evt_amount ELSE 0 END), 0) AS units_embalaje,
+                    COALESCE(SUM(CASE WHEN eq.equipo_type_id = 7 THEN e.evt_amount ELSE 0 END), 0) AS units_flexo,
+                    COALESCE(SUM(CASE WHEN (eq.equipo_type_id = 11 AND eq.id != 36 AND LOWER(eq.equipo_name) NOT LIKE '%pulpo%') THEN e.evt_amount ELSE 0 END), 0) AS units_seri,
+                    COALESCE(SUM(CASE WHEN (eq.equipo_type_id = 22 OR eq.id = 36 OR LOWER(eq.equipo_name) LIKE '%pulpo%') THEN e.evt_amount ELSE 0 END), 0) AS units_pulpo,
+                    COALESCE(SUM(CASE WHEN eq.equipo_type_id IN (8, 15) THEN e.evt_amount ELSE 0 END), 0) AS units_confeccion,
+                    COALESCE(SUM(CASE WHEN eq.equipo_type_id IN (7, 11, 22) OR eq.id = 36 OR LOWER(eq.equipo_name) LIKE '%pulpo%' THEN e.evt_amount ELSE 0 END), 0) AS units_impresion,
+                    COALESCE(SUM(e.evt_amount), 0) AS total_units,
+                    COUNT(DISTINCT e.id) AS total_events,
+                    COUNT(DISTINCT eq.id) AS active_machines
+                FROM prod_worker_ot_events e
+                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                  AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+            ";
+            $stmt = $this->erpPdo->prepare($kpiSql);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $prodKpis = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+            // Merma KPIs
+            $wasteSql = "
+                SELECT 
+                    COUNT(d.id) AS waste_events,
+                    COALESCE(SUM(d.evt_amount), 0) AS waste_units,
+                    COALESCE(ROUND(SUM(d.evt_kgstounits), 2), 0) AS waste_kg
+                FROM prod_worker_ot_defectunits d
+                WHERE d.evt_crtdat BETWEEN :start_ts AND :end_ts
+                  AND LOWER(d.evt_type) = 'merma'
+            ";
+            $stmt = $this->erpPdo->prepare($wasteSql);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $wasteKpis = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+
+            // Merma % oficial del ERP Dashboard
+            $erpOnlyKpis = $this->getErpOnlyProductionDashboardKpis($startAt, $endAt);
+            $wastePercent = $erpOnlyKpis['waste']['percent'] ?? 0.0;
+            if ($wastePercent === null || !is_numeric($wastePercent)) {
+                $wastePercent = 0.0;
+            }
+
+            // 2. Tendencia Histórica Mensual (Últimos 6 meses)
+            $sixMonthsAgoTs = strtotime('-6 months', $endTs);
+            $monthlySql = "
+                SELECT 
+                    FROM_UNIXTIME(e.evt_crtdat, '%Y-%m') AS ym,
+                    COALESCE(SUM(CASE WHEN eq.equipo_type_id IN (8, 15) THEN e.evt_amount ELSE 0 END), 0) AS confeccion,
+                    COALESCE(SUM(CASE WHEN eq.equipo_type_id IN (7, 11, 22) THEN e.evt_amount ELSE 0 END), 0) AS impresion,
+                    COALESCE(SUM(e.evt_amount), 0) AS total
+                FROM prod_worker_ot_events e
+                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                WHERE e.evt_crtdat BETWEEN :six_ts AND :end_ts
+                  AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                GROUP BY ym
+                ORDER BY ym ASC
+            ";
+            $stmt = $this->erpPdo->prepare($monthlySql);
+            $stmt->execute([':six_ts' => $sixMonthsAgoTs, ':end_ts' => $endTs]);
+            $monthlyRows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            $monthlyTrend = [];
+            foreach ($monthlyRows as $mr) {
+                $time = strtotime($mr['ym'] . '-01');
+                $monthlyTrend[] = [
+                    'ym' => $mr['ym'],
+                    'label' => $time ? date('M/y', $time) : $mr['ym'],
+                    'confeccion' => round((float)$mr['confeccion'], 0),
+                    'impresion' => round((float)$mr['impresion'], 0),
+                    'total' => round((float)$mr['total'], 0),
+                ];
+            }
+
+            // 3. Evolución en el Período
+            $diffDays = ($endTs - $startTs) / 86400;
+            if ($diffDays <= 65) {
+                $periodSql = "
+                    SELECT 
+                        FROM_UNIXTIME(e.evt_crtdat, '%Y-%m-%d') AS date_key,
+                        FROM_UNIXTIME(e.evt_crtdat, '%d/%m') AS date_label,
+                        COALESCE(SUM(CASE WHEN eq.equipo_type_id IN (8, 15) THEN e.evt_amount ELSE 0 END), 0) AS confeccion,
+                        COALESCE(SUM(CASE WHEN eq.equipo_type_id IN (7, 11, 22) THEN e.evt_amount ELSE 0 END), 0) AS impresion,
+                        COALESCE(SUM(e.evt_amount), 0) AS total
+                    FROM prod_worker_ot_events e
+                    INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                    INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                    INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                    WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                      AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                    GROUP BY date_key, date_label
+                    ORDER BY date_key ASC
+                ";
+            } else {
+                $periodSql = "
+                    SELECT 
+                        FROM_UNIXTIME(e.evt_crtdat, '%Y-%u') AS date_key,
+                        CONCAT('Sem ', FROM_UNIXTIME(e.evt_crtdat, '%u')) AS date_label,
+                        COALESCE(SUM(CASE WHEN eq.equipo_type_id IN (8, 15) THEN e.evt_amount ELSE 0 END), 0) AS confeccion,
+                        COALESCE(SUM(CASE WHEN eq.equipo_type_id IN (7, 11, 22) THEN e.evt_amount ELSE 0 END), 0) AS impresion,
+                        COALESCE(SUM(e.evt_amount), 0) AS total
+                    FROM prod_worker_ot_events e
+                    INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                    INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                    INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                    WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                      AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                    GROUP BY date_key, date_label
+                    ORDER BY date_key ASC
+                ";
+            }
+            $stmt = $this->erpPdo->prepare($periodSql);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $periodEvolution = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $pe) {
+                $periodEvolution[] = [
+                    'key' => $pe['date_key'],
+                    'label' => $pe['date_label'],
+                    'confeccion' => round((float)$pe['confeccion'], 0),
+                    'impresion' => round((float)$pe['impresion'], 0),
+                    'total' => round((float)$pe['total'], 0),
+                ];
+            }
+
+            // 4. Distribución por Proceso
+            $processSql = "
+                SELECT 
+                    CASE 
+                        WHEN eq.equipo_type_id = 22 OR eq.id = 36 OR LOWER(eq.equipo_name) LIKE '%pulpo%' THEN 'Pulpo Serigráfico'
+                        WHEN eq.equipo_type_id = 11 THEN 'Serigrafía'
+                        WHEN eq.equipo_type_id = 7 THEN 'Flexografía'
+                        WHEN eq.equipo_type_id = 8 THEN 'Selladoras'
+                        WHEN eq.equipo_type_id = 15 THEN 'Embalaje'
+                        ELSE COALESCE(NULLIF(TRIM(eqt.type_ant_title), ''), 'Otro')
+                    END AS process_name,
+                    SUM(e.evt_amount) AS units
+                FROM prod_worker_ot_events e
+                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                LEFT JOIN equipo_type eqt ON eqt.id = eq.equipo_type_id
+                WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                  AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                GROUP BY process_name
+                ORDER BY units DESC
+            ";
+            $stmt = $this->erpPdo->prepare($processSql);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $processDistribution = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $pr) {
+                $processDistribution[] = [
+                    'process_name' => $pr['process_name'],
+                    'units' => round((float)$pr['units'], 0),
+                ];
+            }
+
+            // 5. Ranking de Máquinas
+            $machinesSql = "
+                SELECT 
+                    COALESCE(NULLIF(TRIM(eq.equipo_name), ''), 'Sin nombre') AS machine_name,
+                    CASE 
+                        WHEN eq.equipo_type_id = 22 OR eq.id = 36 OR LOWER(eq.equipo_name) LIKE '%pulpo%' THEN 'Pulpo Serigráfico'
+                        WHEN eq.equipo_type_id = 11 THEN 'Serigrafía'
+                        WHEN eq.equipo_type_id = 7 THEN 'Flexografía'
+                        WHEN eq.equipo_type_id = 8 THEN 'Selladoras'
+                        WHEN eq.equipo_type_id = 15 THEN 'Embalaje'
+                        ELSE 'Otro'
+                    END AS process_name,
+                    SUM(e.evt_amount) AS units
+                FROM prod_worker_ot_events e
+                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
+                  AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                GROUP BY machine_name, process_name
+                ORDER BY units DESC
+                LIMIT 12
+            ";
+            $stmt = $this->erpPdo->prepare($machinesSql);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $machineRanking = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $m) {
+                $machineRanking[] = [
+                    'machine_name' => $m['machine_name'],
+                    'process_name' => $m['process_name'],
+                    'units' => round((float)$m['units'], 0),
+                ];
+            }
+
+            // 6. Merma por Máquina
+            $wasteMachineSql = "
+                SELECT 
+                    COALESCE(NULLIF(TRIM(eq.equipo_name), ''), 'Sin máquina') AS machine_name,
+                    COUNT(d.id) AS defect_events,
+                    COALESCE(SUM(d.evt_amount), 0) AS defect_units,
+                    COALESCE(ROUND(SUM(d.evt_kgstounits), 2), 0) AS defect_kg
+                FROM prod_worker_ot_defectunits d
+                INNER JOIN prod_worker_ot_events e ON e.id = d.evt_refid
+                INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
+                INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
+                INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
+                WHERE d.evt_crtdat BETWEEN :start_ts AND :end_ts
+                  AND LOWER(d.evt_type) = 'merma'
+                GROUP BY machine_name
+                ORDER BY defect_kg DESC
+                LIMIT 10
+            ";
+            $stmt = $this->erpPdo->prepare($wasteMachineSql);
+            $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
+            $wasteByMachine = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: [] as $wm) {
+                $wasteByMachine[] = [
+                    'machine_name' => $wm['machine_name'],
+                    'defect_events' => (int)$wm['defect_events'],
+                    'defect_units' => round((float)$wm['defect_units'], 0),
+                    'defect_kg' => (float)$wm['defect_kg'],
+                ];
+            }
+
+            return [
+                'kpis' => [
+                    'units_corte_sellado' => round((float)($prodKpis['units_corte_sellado'] ?? 0), 0),
+                    'units_embalaje' => round((float)($prodKpis['units_embalaje'] ?? 0), 0),
+                    'units_flexo' => round((float)($prodKpis['units_flexo'] ?? 0), 0),
+                    'units_seri' => round((float)($prodKpis['units_seri'] ?? 0), 0),
+                    'units_pulpo' => round((float)($prodKpis['units_pulpo'] ?? 0), 0),
+                    'units_confeccion' => round((float)($prodKpis['units_confeccion'] ?? 0), 0),
+                    'units_impresion' => round((float)($prodKpis['units_impresion'] ?? 0), 0),
+                    'total_units' => round((float)($prodKpis['total_units'] ?? 0), 0),
+                    'total_events' => (int)($prodKpis['total_events'] ?? 0),
+                    'active_machines' => (int)($prodKpis['active_machines'] ?? 0),
+                    'waste_kg' => (float)($wasteKpis['waste_kg'] ?? 0),
+                    'waste_units' => round((float)($wasteKpis['waste_units'] ?? 0), 0),
+                    'waste_percent' => round((float)$wastePercent, 2),
+                ],
+                'monthly_trend' => $monthlyTrend,
+                'period_evolution' => $periodEvolution,
+                'process_distribution' => $processDistribution,
+                'machine_ranking' => $machineRanking,
+                'waste_by_machine' => $wasteByMachine,
+            ];
+        } catch (Throwable $e) {
+            return $emptyResponse;
+        }
+    }
 }
+

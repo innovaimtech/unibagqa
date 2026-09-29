@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<jnlp
+  spec="1.4.2+"
+  codebase="/libs/thirdparty/scannerplugin"
+  href="uk.co.mmscomputing.device.sane.applet.SaneAppletExample.jnlp">
+  <information>
+    <title>mmsc twain example application</title>
+    <vendor>mm's computing</vendor>
+    <homepage href="index.php"/>
+    <description>mmsc twain example application: description</description>
+    <description kind="short">mmsc twain example application: short description</description>
+    <offline-allowed/> 
+  </information>
+  <security>
+      <all-permissions/>
+  </security>
+  <resources>
+    <j2se version="1.4.2+" java-vm-args="-Xms128m -Xmx256m"/>
+    <jar href="uk.co.mmscomputing.device.twain.applet.jar"/>
+  </resources>
+  <application-desc main-class="uk.co.mmscomputing.device.sane.applet.SaneAppletExample.class"/>
+</jnlp> 

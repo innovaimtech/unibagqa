@@ -1,0 +1,205 @@
+/*----------------------------------------------------------------------------------
+// Datepicker
+//---------------------------------------------------------------------------------*/
+/* The wrapper div */
+.datePicker {
+  position:absolute;
+  min-width:21em;
+  width:21em;
+  z-index:9999;
+  font-size:0.8em;
+}
+/* IE7 Hack */
+*:first-child+html .datePicker {
+  min-width:23em;
+  width:23em;
+}
+
+
+/* Damit datePicker vor Auswahlboxen erscheint, für IE <= 6 */
+.iehack {
+  display:none;
+  position:absolute;
+  z-index:9998;
+  padding:0;
+  margin:0;
+  border:0;
+}
+
+
+/* Button zum Öffnen des datePickers */
+.date-picker-control {
+  position:relative;
+  border:0 none;
+  padding:0;
+  margin-left:4px;
+  background:transparent url(datepicker_cal.gif) no-repeat 0 0;
+  width:16px;
+  height:16px;
+  margin-top:0;
+  vertical-align:top;
+  cursor:pointer;
+}
+
+
+/* vor/zurück, Heute, Wochentage */
+.datePicker th button {
+  display:inline;
+  padding:1px 0 0 0 !important; 
+  padding:2px 0 0 0;
+  margin:0;
+  color:#000;
+  height:1em;
+  width:1em;
+  line-height:1em;
+  border-width:0;
+  background:#fff;
+  cursor:pointer;
+  font-size:1.0em;
+}
+.datePicker th button:active, .datePicker th button:focus, .date-picker-control:active, .date-picker-control:focus, .datePicker th button.disabled 
+{
+
+}
+
+
+/* Monatsname und Jahreszahl */
+span.month-display, span.year-display {
+
+}
+
+/* zurück (Monat und Name) */
+.datePicker th button.prev-but {
+  font-size:1.3em;
+  font-weight:bold;
+}
+
+
+/* weiter (Monat und Name) */
+.datePicker th button.next-but {
+  font-size:1.3em;
+  font-weight:bold;
+}
+
+
+/* Heute */
+.datePicker th button.today-but {
+  margin:0 auto;
+  height:auto;
+  width:auto;
+}
+
+
+/* deaktivierte Buttons */
+.datePicker th button.disabled {
+  color:#999;
+  cursor:default;
+}
+
+
+/* Wochentage */
+.datePicker th button.fd-day-header {
+  margin:0 auto;
+  height:auto;
+  width:auto;
+  font-weight:bold;
+  font-size:11px;
+}
+
+
+/* The table */
+.datePicker table {
+  position:relative;
+  margin:0;
+  padding:0;
+  border:1px solid #BFBAB0;
+  background-color:#fff;
+  text-align:center;
+  width:100%;
+  font-size:11px;
+}
+
+
+/* Common TD & TH styling */
+.datePicker table td {
+  border: 1px solid #BFBAB0;
+  padding:0.6em 0.5em 0.5em 0.5em;
+  vertical-align:middle;
+  /* Opera Fix */
+  line-height:1.2em;
+  cursor:default;
+  font-size:11px;
+}
+.datePicker table th {
+  border:0 none;
+  padding:0;
+  line-height:1em;
+  color:#222;
+  vertical-align:middle;
+}
+
+
+/* Tabellenkopf mit Monatsname und Jahreszahl */
+.datePicker table thead th.date-picker-title {
+  padding:0.4em 0;
+}
+
+
+/* Tabellenkopf mit Wochentagen */
+.datePicker table th.date-picker-day-header {
+  cursor:help;
+}
+
+
+/* Zelle mit heutigem Datum */
+.datePicker table td.date-picker-today {
+  background-color:#CCCCCC;
+  color:#000000;
+}
+
+
+/* Zelle mit ausgewähltem Datum */
+.datePicker table td.date-picker-selected-date {
+  color:#777777 !important;
+  border-color:#333 !important;
+}
+
+
+/* Zellen mit hervorgehobenen Daten, z.B. Wochenenden */
+td.date-picker-highlight {
+  color:#BBBBBB;
+  font-weight:bold;
+}
+
+
+/* Zellen mit deaktivierten Daten ("out of range"), z.B. für vergangene Daten */
+.datePicker table td.out-of-range {
+  color:#999 !important;
+  background:transparent !important;
+  cursor:default !important;
+}
+
+
+/* Zellen mit deaktivierten Daten ("disabled days") */
+.datePicker table td.day-disabled {
+  color:#A91116 !important;
+  background:transparent !important;
+  cursor:default !important;
+}
+
+
+/* Aktive Zelle (Hover) */
+.datePicker table td#date-picker-hover {
+  background-color:#333333;
+  cursor:pointer;
+  color:#EEEEEE;
+}
+
+
+/* Remove the images for Internet Explorer <= v6 using the "* html" hack */
+* html .datePicker table td.date-picker-selected,
+* html .datePicker table td.date-picker-hover,
+* html .datePicker table td
+{
+  background-image:none;
+}

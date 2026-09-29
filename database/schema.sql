@@ -160,13 +160,3 @@ INSERT IGNORE INTO chemicals (code, name, warehouse_code, is_active) VALUES
   ('B910', 'Tinta (B910)', 910, 1),
   ('B920', 'Tinta (B920)', 920, 1);
 
-INSERT IGNORE INTO auth_users (
-  username, password_hash, display_name, is_active,
-  can_erp, can_production, can_operator, can_warehouse, can_marketing
-) VALUES (
-  'demo',
-  '$2y$10$NEnibNryVcuH8MX2zxUaW.Inrqb0go6.jf3VMFXHERLyLuY0jOAny',
-  'Operador Demo',
-  1,
-  1, 1, 1, 1, 1
-);

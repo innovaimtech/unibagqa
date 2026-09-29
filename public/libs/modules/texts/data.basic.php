@@ -1,0 +1,224 @@
+<?php
+if($_REQUEST["subexec"] == "save")
+{
+   $currtme = time();
+   $_REQUEST["text_title"]    = trim(addslashes($_REQUEST["text_title"]));
+//    $_REQUEST["text_comment"]  = trim(addslashes($_REQUEST["text_comment"]));
+
+   //----------------------------------------------------------------------------------
+   $_REQUEST["text_comment"] = str_replace("\r", "", $_REQUEST["text_comment"]);
+   $_REQUEST["text_comment"] = str_replace("\n", "", $_REQUEST["text_comment"]);
+   $_REQUEST["text_comment"] = str_replace("<div>", "\n", $_REQUEST["text_comment"]);
+   $_REQUEST["text_comment"] = str_replace("<br>", "\n", $_REQUEST["text_comment"]);
+   $_REQUEST["text_comment"] = str_replace("<br/>", "\n", $_REQUEST["text_comment"]);
+   $_REQUEST["text_comment"] = str_replace("<br />", "\n", $_REQUEST["text_comment"]);
+   $_REQUEST["text_comment"] = str_replace("</div>", "", $_REQUEST["text_comment"]);
+   $_REQUEST["text_comment"] = str_replace("&nbsp;", " ", $_REQUEST["text_comment"]);
+   $_REQUEST["text_comment"] = strip_tags($_REQUEST["text_comment"],'<b><i></b></i>');
+   $_REQUEST["text_comment"] = trim(addslashes($_REQUEST["text_comment"]));
+   $_REQUEST["text_default_act"] = (int)$_REQUEST["text_default_act"];
+   $_REQUEST["text_materialidad"] = trim(addslashes($_REQUEST["text_materialidad"]));
+
+   if($_REQUEST["id"] == "")
+   {
+      $sql = " insert into texts
+               (text_title, text_comment, text_crtusr, text_crtdat, text_default_act,text_materialidad)
+               VALUES
+               ('{$_REQUEST["text_title"]}', '{$_REQUEST["text_comment"]}',
+                {$_SESSION["user_id"]}, {$currtme}, {$_REQUEST["text_default_act"]},'{$_REQUEST["text_materialidad"]}')";
+      $res = $CON->no_result($sql);
+
+      if($res)
+      {
+         $sql = " select MAX(id) 'id'
+                  from texts
+                  where
+                  text_crtusr = {$_SESSION["user_id"]}";
+         $thisid = $CON->select($sql);
+         $thisid = $thisid[0]["id"];
+         $_REQUEST["id"] = $thisid;
+         $redirect = true;
+      }
+   }
+   else
+   {
+      $sql = " update texts
+               set
+               text_title   = '{$_REQUEST["text_title"]}',
+               text_comment = '{$_REQUEST["text_comment"]}',
+               text_default_act = {$_REQUEST["text_default_act"]},
+               text_updusr  = {$_SESSION["user_id"]},
+               text_upddat  = {$currtme},
+               text_materialidad = '{$_REQUEST["text_materialidad"]}'
+               where
+               id = {$_REQUEST["id"]}";
+      $res = $CON->no_result($sql);
+   }
+
+   if((int)$_REQUEST["id"])
+   {
+      if((int)$_REQUEST["text_default_act"])
+      {
+         $sql = " update texts
+                  set
+                  text_default_act = 0
+                  where
+                  id != {$_REQUEST["id"]}";
+         $CON->no_result($sql);
+      }
+   }
+
+   if($redirect)
+   {  ?>
+      <script language="JavaScript">
+         location.href = 'index.php?mid=1100&exec=edit&id=<?=$_REQUEST["id"]?>';
+      </script>
+      <?php
+   }
+
+   $savemsg = getSaveMessage($res);
+}
+
+if($_REQUEST["id"] == "")
+{
+   $title = "Agregar texto";
+}
+else
+{
+   $title = "Cambiar texto";
+
+   $sql = " select t1.*, 
+            t2.user_firstname 'upd_firstname', t2.user_lastname 'upd_lastname',
+            t3.user_firstname 'crt_firstname', t3.user_lastname 'crt_lastname'
+            from texts t1
+            LEFT OUTER JOIN user t2 ON t1.text_updusr = t2.id
+            LEFT OUTER JOIN user t3 ON t1.text_crtusr = t3.id
+            where
+            t1.id = {$_REQUEST["id"]} ";
+   $text = $CON->select($sql);
+   $text = $text[0];
+}
+
+$sql = "select add_name from tran_comments_vals where add_com_id = 18";
+$materialidad = $CON->select($sql);
+
+?>
+<table border="0" cellpadding="0" cellspacing="0" width="980">
+<tr>
+   <td height="30"><b class="content_header"><?=$title?></b></td>
+   <td align="right"><?=$savemsg?></td>
+</tr>
+<tr>
+   <td class="content_headerline" colspan="2">&nbsp;</td>
+</tr>
+</table>
+<script src="./libs/jscripts/classyedit/jquery.classyedit.js"></script>
+<link rel="stylesheet" type="text/css" href="./libs/jscripts/classyedit/jquery.classyedit.css" />
+<form action="index.php" method="post" name="idx_text" class="fokusfirst" onsubmit="return checkform(new Array(this.text_title))">
+<input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+<input type="hidden" name="exec" value="<?=$_REQUEST["exec"]?>">
+<input type="hidden" name="subexec" value="save">
+<input type="hidden" name="id" value="<?=$_REQUEST["id"]?>">
+<?=Nifty_printH("box2", "980")?>
+<table cellpadding="3" cellspacing="0" width="100%">
+<colgroup>
+   <col width="130">
+   <col>
+</colgroup>
+<tr>
+   <td class="content_tbl_header" colspan="4">Datos del texto</td>
+</tr>
+<tr>
+   <td class="content_row">Nombre *</td>
+   <td class="content_row" colspan="3">
+      <input type="text" class="text" name="text_title" style="width:100%" value="<?=$text["text_title"]?>"
+      onfocus="markfield(this,0)" onblur="markfield(this,1)">
+   </td>
+</tr>
+<tr>
+   <td class="content_row">Materialidad </td>
+   <td>
+      <select class="text" name="text_materialidad" id="text_materialidad">
+         <option value="">Seleccione Materialidad...</option>
+               <?php
+                    foreach ($materialidad as $mate) 
+                    {
+                        $selected = ($mate["add_name"] == $text['text_materialidad']) ? "selected" : "";
+                        echo "<option value='{$mate["add_name"]}' {$selected}>{$mate["add_name"]}</option>";
+                    }
+               ?>
+      </select>
+   </td>
+</tr>
+<tr>
+   <td class="content_row" valign="top">Descripción *</td>
+   <td class="content_row" colspan="3">
+      <textarea class="text classy-editor" name="text_comment" style="width:506px; height:250px"
+      onfocus="markfield(this,0)" onblur="markfield(this,1)"><?=stripslashes(nl2br($text["text_comment"]))?></textarea>
+   </td>
+</tr>
+<tr>
+   <td class="content_row">Por defecto</td>
+   <td class="content_row" colspan="3">
+      <input type="checkbox" name="text_default_act" value="1" <?if((int)$text["text_default_act"]) echo "checked"?>>
+      Activado (se carga automaticamente a la cotización)
+   </td>
+</tr>
+<tr>
+   <td class="content_row"><?=$_LANG["MODULE"]["CUST"][14]?></td>
+   <td class="content_row"><?php if($text["text_crtusr"] != "") echo "{$text["crt_firstname"]} {$text["crt_lastname"]}"?>&nbsp;</td>
+</tr>
+<tr>
+   <td class="content_row"><?=$_LANG["MODULE"]["CUST"][15]?></td>
+   <td class="content_row"><?php if($text["text_crtusr"] != "") echo displayDate($text["text_crtdat"])?>&nbsp;</td>
+</tr>
+<tr>
+   <td class="content_row"><?=$_LANG["MODULE"]["CUST"][16]?></td>
+   <td class="content_row"><?php if($text["text_updusr"] != "") echo "{$text["upd_firstname"]} {$text["upd_lastname"]}"?>&nbsp;</td>
+</tr>
+<tr>
+   <td class="content_row"><?=$_LANG["MODULE"]["CUST"][17]?></td>
+   <td class="content_row"><?php if($text["text_updusr"] != "") echo displayDate($text["text_upddat"])?>&nbsp;</td>
+</tr>
+</table>
+<?=Nifty_printF(false)?>
+<br>
+<?=Nifty_printH("boxopt_b", "980")?>
+<table border="0" cellspacing="0" cellpadding="0" width="100%">
+<tr>
+   <td align="left" width="130" style="padding-right:5px">
+      <ul class="postnav">
+         <a href="index.php?mid=<?=$_REQUEST["mid"]?>"><?=$_LANG["FORM"]["BUTTON"][1]?></a>
+      </ul>
+   </td>
+   <td>&nbsp;</td>
+   <?php
+   if($_REQUEST["id"] != "")
+   {  ?>
+      <td align="right" width="130" style="padding-right:5px">
+         <ul class="postnav_del">
+            <a href="javascript: deactivateFormChange()" onclick="askDel('index.php?mid=<?=$_REQUEST["mid"]?>&exec=del&id=<?=$_REQUEST["id"]?>')"><?=$_LANG["FORM"]["BUTTON"][2]?></a>
+         </ul>
+      </td>
+      <?php
+   }
+   ?>
+   <td align="right" width="130">
+      <ul class="postnav_save">
+         <a href="javascript: deactivateFormChange()" onclick="submitForm(document.idx_text)"><?=$_LANG["FORM"]["BUTTON"][0]?></a>
+      </ul>
+   </td>
+</tr>
+</table>
+<?=Nifty_printF(false)?>
+</form>
+<script language="JavaScript">
+$(document).ready(function()
+{
+   $(".classy-editor").each(function()
+   {
+      $(this).ClassyEdit();
+   });
+});
+</script>
+<?php $_SESSION["JSEXEC"] .= "addFormListeners('idx_text');" ?>

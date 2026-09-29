@@ -1,0 +1,174 @@
+<?php
+//----------------------------------------------------------------------------------
+// Author:        1BIT LTDA
+// Copyright:     2011 by 1BIT LTDA. All Rights Reserved.
+// Any unauthorized redistribution, reselling, modifying or reproduction of part
+// or all of the contents in any form is strictly prohibited.
+//----------------------------------------------------------------------------------
+
+//----------------------------------------------------------------------------------
+require_once("../../../libs/classes/page.php");
+require_once("../../../libs/classes/mysql.php");
+require_once("../../../libs/config.php");
+
+//----------------------------------------------------------------------------------
+error_reporting($_CONFIG[$_CONFIG["_MODUS"]]["ERROR_REPORTING"]);
+
+//----------------------------------------------------------------------------------
+session_start();
+
+require_once("../../../libs/lang/{$_SESSION["_CONF"]["conf_lang_filename"]}");
+require_once("../../../libs/functions.php");
+
+//----------------------------------------------------------------------------------
+$CON = new CMYSQL($_CONFIG[$_CONFIG["_MODUS"]]["DATABASE"]["NAME"],
+                  $_CONFIG[$_CONFIG["_MODUS"]]["DATABASE"]["HOST"],
+                  $_CONFIG[$_CONFIG["_MODUS"]]["DATABASE"]["USER"],
+                  $_CONFIG[$_CONFIG["_MODUS"]]["DATABASE"]["PASS"]);
+$CON->connect();
+
+header ('Last-Modified: '.gmdate("D, d M Y H:i:s").' GMT');
+header ('Expires: '.gmdate("D, d M Y H:i:s").' GMT');
+header ('Cache-Control: no-cache, must-revalidate');
+header ('Pragma: no-cache');
+
+//----------------------------------------------------------------------------------
+?>
+<html>
+<head>
+   <title><?=$_SESSION["_CONF"]["conf_title"]?></title>
+   <style type="text/css">
+      <?php $_SESSION["_PAGE"]->printStyle() ?>
+   </style>
+   <script language="Javascript">
+      <?php
+      require_once("../../../libs/jscripts/sourcen.php");
+      ?>
+      function loginExec()
+      {
+         if(checkform(new Array(document.all.xuser_login, document.all.xuser_pass)))
+         {
+            document.all.user_login.value    = document.all.xuser_login.value;
+            document.all.user_pass.value     = document.all.xuser_pass.value;
+            document.all.xuser_login.value   = '';
+            document.all.xuser_pass.value    = '';
+            document.all.xuser_pass.type     ='text';
+            return true;
+         }
+         return false;
+      }
+   </script>
+   <script type="text/javascript" src="/libs/jscripts/jquery-1.4.2.js"></script>
+   <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+</head>
+<body class="page_content" onload="document.all.xuser_login.focus()">
+<input type="hidden" name="jschk_formchange" id="jschk_formchange" value="0">
+<input type="hidden" name="jschk_formchange_ignore" id="jschk_formchange_ignore" value="0">
+<?php
+//----------------------------------------------------------------------------------
+if($_REQUEST["exec"] == "login")
+{
+   $_REQUEST["user_pass"]  = md5($_REQUEST["user_pass"]);
+   $_REQUEST["user_login"] = trim(addslashes($_REQUEST["user_login"]));
+   
+   $sql = " select count(*) 'cc'
+            from user
+            where
+            user_status          > 0 and
+            user_docopen_perm    = 1 and
+            user_login           = '{$_REQUEST["user_login"]}' and
+            user_pass            = '{$_REQUEST["user_pass"]}'";
+   $auth = $CON->select($sql);
+   $auth = (int)$auth[0]["cc"];
+
+   if($auth)
+   {  ?>
+      <script language="JavaScript">
+         parent.document.<?=$_REQUEST["frmname"]?>.user_docopen_perm.value = '1';
+         parent.document.<?=$_REQUEST["frmname"]?>.onsubmit='';
+         <?php
+         if($_REQUEST["sStatus"] == "1")
+         {  ?>
+            parent.document.<?=$_REQUEST["frmname"]?>.invc_status.value='1';
+            <?php
+            if($_REQUEST["cancelDoc"] != "")
+            {  ?>
+               parent.document.<?=$_REQUEST["frmname"]?>.cancelDoc.value='<?=$_REQUEST["cancelDoc"]?>';
+               <?php
+            }
+         }
+         if($_REQUEST["nStatus"] == "1")
+         {  ?>
+            parent.document.<?=$_REQUEST["frmname"]?>.note_status.value='1';
+            <?php
+            if($_REQUEST["cancelDoc"] != "")
+            {  ?>
+               parent.document.<?=$_REQUEST["frmname"]?>.cancelDoc.value='<?=$_REQUEST["cancelDoc"]?>';
+               <?php
+            }
+         }
+         ?>
+         submitForm(parent.document.<?=$_REQUEST["frmname"]?>);
+      </script>
+      <?php
+   }
+   else
+   {  ?>
+      <script language="JavaScript">
+         alert('USUARIO NO VALIDO.');
+      </script>
+      <?php
+   }
+   
+}
+?>
+<table border="0" cellpadding="0" cellspacing="0" width="100%" height="100%">
+<tr>
+   <td align="center" valign="top" height="100%">
+      <form action="auth.docopen.fancy.php" method="post" class="fokusfirst" name="xform_log" autocomplete="off"
+      onsubmit="return loginExec()">
+      <input type="hidden" name="exec" value="login">
+      <input type="hidden" name="frmname" value="<?=$_REQUEST["frmname"]?>">
+      <input type="hidden" name="sStatus" value="<?=$_REQUEST["sStatus"]?>">
+      <input type="hidden" name="nStatus" value="<?=$_REQUEST["nStatus"]?>">
+      <input type="hidden" name="cancelDoc" value="<?=$_REQUEST["cancelDoc"]?>">
+      <input name="user_login" type="text" style="display:none" value="">
+      <input name="user_pass" type="text" style="display:none" value="">
+      <br>
+      <?=Nifty_printH("box1", "350")?>
+      <table border="0" cellpadding="3" cellspacing="0" width="100%">
+      <tr>
+         <td class="content_tbl_header" colspan="2">Credenciales administrativas</td>
+      </tr>
+      <tr>
+         <td class="content_rowl"><?=$_LANG["MODULE"]["LOGIN"][2]?></td>
+         <td class="content_row">
+            <input name="xuser_login" type="text" class="text" style="width:180px"
+            onfocus="markfield(this,0)" onblur="markfield(this,1)" value="">
+         </td>
+      </tr>
+      <tr>
+         <td class="content_rowl"><?=$_LANG["MODULE"]["LOGIN"][3]?></td>
+         <td class="content_row">
+            <input name="xuser_pass" type="text" class="text" style="width:180px"
+            onfocus="markfield(this,0);this.type='password'" onblur="markfield(this,1)" value="">
+         </td>
+      </tr>
+      </table>
+      <?=Nifty_printF()?>
+      <br>
+      <?=Nifty_printH("boxopt_b", "350")?>
+      <tr>
+         <td class="content_row_clear" align="right">
+            <?php
+            printButton("Editar", "postnav_save", "javascript: deactivateFormChange()", "submitForm(document.xform_log)", "tick-circle-frame", 200);
+            ?>
+         </td>
+      </tr>
+      <?=Nifty_printF(false)?>
+      </form>
+   </td>
+</tr>
+</table>
+</body>
+</html>

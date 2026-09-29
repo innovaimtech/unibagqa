@@ -1,0 +1,805 @@
+<?php
+//----------------------------------------------------------------------------------
+$_sesmodulename         = "stats_produccion";
+$_sesbasefilterstatus   = "0";
+$_sesbaseorderby        = "2";
+$_sesbaseordersort      = "asc";
+$_sortlinks             = Array("Nº CC" => "2", "Rut Cliente" => "4", "Cliente" => "8", "SKU" => "21", "Vendedor" => "6",
+                                "Fecha Creacion" => "3", "Fecha Envío de Pedido Confirmado" => "15",  "Fecha Ultima Factura" => "23");
+
+unset($_SESSION["STATS"][$_sesmodulename]);
+
+//----------------------------------------------------------------------------------
+resetOverviewSession($_sesmodulename);
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["subexec"] == "search")
+{
+   $_SESSION[$_sesmodulename]["sql_month1"]        = trim($_REQUEST["sql_month1"]);
+   $_SESSION[$_sesmodulename]["sql_month2"]        = trim($_REQUEST["sql_month2"]);
+   $_SESSION[$_sesmodulename]["sql_year1"]         = trim($_REQUEST["sql_year1"]);
+   $_SESSION[$_sesmodulename]["sql_year2"]         = trim($_REQUEST["sql_year2"]);
+   $_SESSION[$_sesmodulename]["sql_selmode"]       = (int)$_REQUEST["sql_selmode"];
+   $_SESSION[$_sesmodulename]["sql_date"]          = trim($_REQUEST["sql_date"]);
+   $_SESSION[$_sesmodulename]["sql_date_pfrom"]    = trim($_REQUEST["sql_date_pfrom"]);
+   $_SESSION[$_sesmodulename]["sql_date_pto"]      = trim($_REQUEST["sql_date_pto"]);
+   $_SESSION[$_sesmodulename]["sql_xstate"]        = (int)$_REQUEST["sql_xstate"];
+   $_SESSION[$_sesmodulename]["sql_plantaid"]      = (int)$_REQUEST["sql_plantaid"];
+   $_SESSION[$_sesmodulename]["sql_equipotypeid"]  = (int)$_REQUEST["sql_equipotypeid"];
+   $_SESSION[$_sesmodulename]["sql_equipoid"]      = (int)$_REQUEST["sql_equipoid"];
+   $_SESSION[$_sesmodulename]["sql_customer"]      = (int)$_REQUEST["sql_customer"];
+   $_SESSION[$_sesmodulename]["sql_number"]        = trim(addslashes($_REQUEST["sql_number"]));
+   $_SESSION[$_sesmodulename]["page"]              = 0;
+   $_SESSION[$_sesmodulename]["search_active"]     = 1;
+   $_SESSION[$_sesmodulename]["filtro_fecha"]      = trim(addslashes($_REQUEST["filtro_fecha"]));
+}
+
+//----------------------------------------------------------------------------------
+if(!(int)$_SESSION[$_sesmodulename]["sql_selmode"])
+   $_SESSION[$_sesmodulename]["sql_selmode"] = 1;
+
+//----------------------------------------------------------------------------------
+if($_SESSION[$_sesmodulename]["sql_month1"] == "")
+{
+   $_SESSION[$_sesmodulename]["sql_month1"]  = (int)date('m',time());
+   $_SESSION[$_sesmodulename]["sql_year1"]   = (int)date('Y',time());
+   $_SESSION[$_sesmodulename]["sql_month2"]  = (int)date('m',time());
+   $_SESSION[$_sesmodulename]["sql_year2"]   = (int)date('Y',time());
+}
+if($_SESSION[$_sesmodulename]["sql_date"] == "")
+   $_SESSION[$_sesmodulename]["sql_date"] = date('d.m.Y');
+if($_SESSION[$_sesmodulename]["sql_date_pfrom"] == "")
+{
+   $_SESSION[$_sesmodulename]["sql_date_pfrom"] = date('d.m.Y', time());
+   $_SESSION[$_sesmodulename]["sql_date_pto"]   = date('d.m.Y', time() + (86400 * 7));
+}
+
+//----------------------------------------------------------------------------------
+if($_SESSION[$_sesmodulename]["sql_selmode"] == 1)
+{
+   $datearr       = explode(".", $_SESSION[$_sesmodulename]["sql_date"]);
+   $sql_datefrom  = mktime(0, 0, 0, $datearr[1], $datearr[0], $datearr[2]);
+   $sql_dateto    = mktime(23, 59, 59, $datearr[1], $datearr[0], $datearr[2]);
+}
+elseif($_SESSION[$_sesmodulename]["sql_selmode"] == 2)
+{
+   $sql_datefrom  = mktime(0, 0, 0, $_SESSION[$_sesmodulename]["sql_month1"], 1, $_SESSION[$_sesmodulename]["sql_year1"]);
+   $sql_dateto    = mktime(23, 59, 59, $_SESSION[$_sesmodulename]["sql_month2"], 1, $_SESSION[$_sesmodulename]["sql_year2"]);
+   $datedays      = date('t', $sql_dateto);
+   $sql_dateto    = mktime(23, 59, 59, $_SESSION[$_sesmodulename]["sql_month2"], $datedays, $_SESSION[$_sesmodulename]["sql_year2"]);
+}
+elseif($_SESSION[$_sesmodulename]["sql_selmode"] == 3)
+{
+   $datearr       = explode(".", $_SESSION[$_sesmodulename]["sql_date_pfrom"]);
+   $sql_datefrom  = mktime(0, 0, 0, $datearr[1], $datearr[0], $datearr[2]);
+   $datearr       = explode(".", $_SESSION[$_sesmodulename]["sql_date_pto"]);
+   $sql_dateto    = mktime(23, 59, 59, $datearr[1], $datearr[0], $datearr[2]);
+}
+
+//----------------------------------------------------------------------------------
+prepareOverviewSession($_sesmodulename, $_sesbasefilterstatus, $_sesbaseorderby, $_sesbaseordersort, 200);
+
+//----------------------------------------------------------------------------------
+$plantas = getPlantas($CON);
+if(!(int)$_SESSION[$_sesmodulename]["sql_plantaid"])
+   $_SESSION[$_sesmodulename]["sql_plantaid"] = $plantas[0]["id"];
+
+$filtro = isset($_POST['filtro_fecha']) ? $_POST['filtro_fecha'] : 'req_crtdat';
+
+$sql = "select distinct o1.id,
+                        o1.req_number,
+                        o1.req_crtdat,
+                        o1.req_cust_id,
+                        o1.req_userid_seller,
+                        CONCAT(ven.user_firstname,' ',ven.user_lastname) AS vendedor,
+                        c1.cust_rut,
+                        c1.cust_company,
+                        od1.dlv_invoiced,
+                        od1.dlv_invoice_generated,
+                        od1.dlv_cod_despacho,
+                        o1.req_isfabricate,
+                        o1.req_production_initdate,
+                        o1.req_cliche_peli_solic_dat,
+                        o1.req_cliche_peli_recep_dat,
+                        ph1.prd_crtdat,
+                        oi.fab_printtype,
+                        ph1.id AS id_header,
+                        i1.item_number_prod,
+                        oi.item_amount,
+                        -- is1.invc_date,
+                        ph1.prd_fecha_number,
+                        (SELECT MAX(evt_crtdat) 
+                           FROM prod_worker_embalajes 
+                           WHERE evt_reqid = o1.id) AS cierre,
+                        odAgg.cantidad AS cantidad_entregas,
+                        odAgg.dlv_delivery_date AS dlv_delivery_date,
+                        invAgg.cantidad_facturas,
+                        invAgg.max_invc_date as invc_date,
+                        c1.cust_crtdat,
+                        c1.cust_presupuesto,
+                        o1.req_total_netto
+         FROM orders o1
+            INNER JOIN orders_items oi ON oi.req_id = o1.id
+            INNER JOIN item i1 ON oi.item_id = i1.id
+            INNER JOIN customer c1 ON c1.id = o1.req_cust_id
+            INNER JOIN user ven ON ven.id = o1.req_userid_seller
+            LEFT JOIN prod_header ph1 ON ph1.prd_reqid = o1.id AND ph1.prd_number != ''
+            LEFT JOIN orders_delivery od1 ON od1.dlv_order_id = o1.id AND od1.dlv_status = 2
+            LEFT JOIN (
+               SELECT 
+                     dlv_order_id,
+                     COUNT(*) AS cantidad,
+                     MAX(dlv_delivery_date) AS dlv_delivery_date
+               FROM orders_delivery
+               WHERE dlv_status = 2
+               GROUP BY dlv_order_id
+            ) odAgg ON odAgg.dlv_order_id = o1.id
+            LEFT JOIN orders_delivery_items odi1 ON odi1.dlv_id = od1.id
+            LEFT JOIN invoices_sell_parts isp1 ON isp1.part_req_id = o1.id
+            LEFT JOIN invoices_sell is1 ON is1.id = isp1.part_invc_id and is1.invc_status = 2
+            LEFT JOIN (
+               SELECT 
+                     isp1.part_req_id,
+                     COUNT(*) AS cantidad_facturas,
+                     MAX(is1.invc_date) AS max_invc_date
+               FROM invoices_sell_parts isp1 
+                 INNER JOIN invoices_sell is1 ON is1.id = isp1.part_invc_id AND is1.invc_status = 2
+               GROUP BY isp1.part_req_id
+            ) invAgg ON invAgg.part_req_id = o1.id
+            where {$filtro} between {$sql_datefrom} and {$sql_dateto} and o1.req_status > 0";
+
+
+if($_SESSION[$_sesmodulename]["sql_number"] != "")
+   $sql .= " and o1.req_number = '{$_SESSION[$_sesmodulename]["sql_number"]}' ";
+if((int)$_SESSION[$_sesmodulename]["sql_customer"])
+   $sql .= " and o1.req_cust_id = {$_SESSION[$_sesmodulename]["sql_customer"]} ";
+
+// $sql .=" order by o1.req_production_initdate, o1.req_number";
+$sql .= " order by {$_SESSION[$_sesmodulename]["orderBy"]} {$_SESSION[$_sesmodulename]["orderSort"]} ";
+
+$data = $CON->select($sql);
+//
+// echo($sql);
+//----------------------------------------------------------------------------------
+?>
+<style type="text/css"><!-- @import url(./libs/jscripts/datepicker/datepicker.css); //--></style>
+<script language="JavaScript" src="./libs/jscripts/datepicker/datepicker.js"></script>
+<table border="0" cellpadding="0" cellspacing="0" width="980">
+<tr>
+   <td height="30"><b class="content_header">Informe de Producción</b></td>
+   <td align="right" class="content_row_clear">&nbsp;</td>
+</tr>
+<tr>
+   <td class="content_headerline" colspan="2">&nbsp;</td>
+</tr>
+</table>
+<table border="0" cellpadding="0" cellspacing="0" width="100%">
+<tr>
+   <td>
+      <form action="index.php" method="post" name="xform_itemsearch" class="fokusfirst">
+      <input type="hidden" name="subexec" value="search">
+      <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+      <input type="hidden" name="subcatexec" value="<?=$_REQUEST["subcatexec"]?>">
+      <input type="hidden" name="id" value="<?=$_REQUEST["id"]?>">
+      <input type="hidden" name="exec" value="<?=$_REQUEST["exec"]?>">
+      <input type="hidden" name="printpdf" value="0">
+      <input type="hidden" name="printxls" value="0">
+      <?=Nifty_printH("box2", "980", 0)?>
+      <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+      <colgroup>
+         <col width="80">
+         <col>
+         <col width="80">
+         <col width="400">
+      </colgroup>
+      <tr>
+         <td class="content_tbl_header" colspan="4">Opciones de búsqueda</td>
+      </tr>
+      <tr>
+         <td class="content_rowl">Filtro de Periodo</td>
+         <td class="content_row"> 
+              <select class="text" id="filtro_fecha" name="filtro_fecha">
+                  <option value="">-- Seleccione un criterio de Periodo --</option>
+                  <option value="req_crtdat" <?= ($filtro === 'req_crtdat') ? 'selected' : '' ?>>Por Fecha de Creación C.C.</option>
+                  <option value="req_production_initdate" <?= ($filtro === 'req_production_initdate') ? 'selected' : '' ?>>Fecha Envío de Pedido Confirmado</option>
+                  <option value="invc_date" <?= ($filtro === 'invc_date') ? 'selected' : '' ?>>Fecha Facturación</option>
+                  <option value="dlv_delivery_date" <?= ($filtro === 'dlv_delivery_date') ? 'selected' : '' ?>>Fecha de Despacho</option>
+              </select>
+         </td>
+         <td class="content_rowl">Periodo</td>
+         <td class="content_row">
+            <table border="0" class="content_table" cellpadding="0" cellspacing="0">
+            <tr>
+               <td class="content_row_clear" width="70">
+                  <input type="radio" name="sql_selmode" value="2"
+                  onclick="document.getElementById('idx_selmode1').style.display='none';
+                           document.getElementById('idx_selmode2').style.display='';
+                           document.getElementById('idx_selmode3').style.display='none';"
+                  <?php if($_SESSION[$_sesmodulename]["sql_selmode"] == 2) echo "checked"?>> Meses
+               </td>
+               <td class="content_row_clear" width="205" id="idx_selmode2" <?php if($_SESSION[$_sesmodulename]["sql_selmode"] != 2) echo "style='display:none'"?>>
+                  <nobr>
+                  <select class="text" name="sql_month1" id="sql_month1"
+                  onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+                     <?php
+                     for($x = 1; $x <= 12; $x++)
+                     {
+                        $dsp_month = $x;
+                        if($dsp_month < 10)
+                           $dsp_month = "0{$dsp_month}";
+                        ?>
+                        <option value="<?=$x?>"
+                        <?php if($x == $_SESSION[$_sesmodulename]["sql_month1"]) echo "selected" ?>><?=$dsp_month?></option>
+                        <?php
+                     }
+                     ?>
+                  </select>
+                  <select class="text" name="sql_year1" id="sql_year1"
+                  onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+                     <?php
+                     $startyear  = date('Y') -20;
+                     $endyear    = date('Y');
+
+                     for($x = $startyear; $x <= $endyear; $x++)
+                     {
+                        ?>
+                        <option value="<?=$x?>"
+                        <?php if($x == $_SESSION[$_sesmodulename]["sql_year1"]) echo "selected" ?>><?=$x?></option>
+                        <?php
+                     }
+                     ?>
+                  </select>
+                  &nbsp;-&nbsp;
+                  <select class="text" name="sql_month2" id="sql_month2"
+                  onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+                     <?php
+                     for($x = 1; $x <= 12; $x++)
+                     {
+                        $dsp_month = $x;
+                        if($dsp_month < 10)
+                           $dsp_month = "0{$dsp_month}";
+                        ?>
+                        <option value="<?=$x?>"
+                        <?php if($x == $_SESSION[$_sesmodulename]["sql_month2"]) echo "selected" ?>><?=$dsp_month?></option>
+                        <?php
+                     }
+                     ?>
+                  </select>
+                  <select class="text" name="sql_year2" id="sql_year2"
+                  onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+                     <?php
+                     $startyear  = date('Y') -20;
+                     $endyear    = date('Y');
+
+                     for($x = $startyear; $x <= $endyear; $x++)
+                     {
+                        ?>
+                        <option value="<?=$x?>"
+                        <?php if($x == $_SESSION[$_sesmodulename]["sql_year2"]) echo "selected" ?>><?=$x?></option>
+                        <?php
+                     }
+                     ?>
+                  </select>
+                  </nobr>
+               </td>
+               <td class="content_row_clear" width="50">
+                  <input type="radio" name="sql_selmode" value="1"
+                  onclick="document.getElementById('idx_selmode1').style.display='';
+                           document.getElementById('idx_selmode2').style.display='none';
+                           document.getElementById('idx_selmode3').style.display='none';"
+                  <?php if($_SESSION[$_sesmodulename]["sql_selmode"] == 1) echo "checked"?>> Dia
+               </td>
+               <td class="content_row_clear" width="110" id="idx_selmode1" <?php if($_SESSION[$_sesmodulename]["sql_selmode"] != 1) echo "style='display:none'"?>>
+                  <nobr>
+                  <input type="text" style="width:80px" id="sql_date" name="sql_date"
+                  class="text format-d-m-y divider-dot highlight-days-67 no-locale no-transparency"
+                  onfocus="markfield(this,0)" onblur="markfield(this,1)"
+                  value="<?=$_SESSION[$_sesmodulename]["sql_date"]?>">
+                  </nobr>
+               </td>
+               <td class="content_row_clear" width="75">
+                  <input type="radio" name="sql_selmode" value="3"
+                  onclick="document.getElementById('idx_selmode1').style.display='none';
+                           document.getElementById('idx_selmode2').style.display='none';
+                           document.getElementById('idx_selmode3').style.display='';"
+                  <?php if($_SESSION[$_sesmodulename]["sql_selmode"] == 3) echo "checked"?>> Periodo
+               </td>
+               <td class="content_row_clear" width="180" id="idx_selmode3" <?php if($_SESSION[$_sesmodulename]["sql_selmode"] != 3) echo "style='display:none'"?>>
+                  <nobr>
+                  <input type="text" style="width:75px" id="sql_date_pfrom" name="sql_date_pfrom"
+                  class="text format-d-m-y divider-dot highlight-days-67 no-locale no-transparency"
+                  onfocus="markfield(this,0)" onblur="markfield(this,1)"
+                  value="<?=$_SESSION[$_sesmodulename]["sql_date_pfrom"]?>">
+                  -
+                  <input type="text" style="width:75px" id="sql_date_pto" name="sql_date_pto"
+                  class="text format-d-m-y divider-dot highlight-days-67 no-locale no-transparency"
+                  onfocus="markfield(this,0)" onblur="markfield(this,1)"
+                  value="<?=$_SESSION[$_sesmodulename]["sql_date_pto"]?>">
+                  </nobr>
+               </td>
+            </tr>
+            </table>
+         </td>
+      </tr>
+      <tr>
+         <td class="content_rowl">Cliente</td>
+         <td class="content_row"><?php printOverviewCustomerSelect($_sesmodulename) ?></td>
+         <td class="content_rowl">Nº CC</td>
+         <td class="content_row">
+            <input type="text" class="text" style="width:100%"
+            name="sql_number" value="<?=$_SESSION[$_sesmodulename]["sql_number"]?>"
+            onfocus="markfield(this,0)" onblur="markfield(this,1)">
+         </td>
+      </tr>
+      <tr>
+         <td class="content_row" align="right" colspan="4">
+            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+            <colgroup>
+               <col width='132'>
+               <col>
+               <col width="132">
+               <col width="132">
+            </colgroup>
+            <tr>
+               <td align="left">
+                  <?php
+                  if(count($data) > 0 && $data != false)
+                  {
+                     printButton("Generar XLS", "postnav", "javascript: deactivateFormChange()", "document.xform_itemsearch.printxls.value='1';submitForm(document.xform_itemsearch)", "document-excel", 130);
+                     $_SESSION["_SUBMITBTN"] = 1;
+                  }
+                  ?>               
+               </td>
+               <td align="left">
+               </td>
+               <td align="right" style="padding-right:5px" width="1">
+                  <?php
+                  if((int)$_SESSION[$_sesmodulename]["search_active"])
+                  {
+                     printButton("Resetear", "postnav", "index.php?mid={$_REQUEST["mid"]}&searchexec=reset", "", "arrow-circle-double-135", 130);
+                  }
+                  ?>
+               </td>
+               <td align="right" width="1">
+                  <?php
+                  printButton("Buscar", "postnav_save", "javascript: deactivateFormChange()", "submitForm(document.xform_itemsearch)", "magnifier", 130);
+                  $_SESSION["_SUBMITBTN"] = 1;
+                  ?>
+               </td>
+            </tr>
+            </table>
+         </td>
+      </tr>
+      </table>
+      <?=Nifty_printF(false)?>
+      </form>
+   </td>
+</tr>
+<tr>
+   <td>
+      <?=Nifty_printH("box1", "99%", 0)?>
+      <table border="0" cellpadding="3" cellspacing="0" width="100%">
+      <colgroup>
+      </colgroup>
+      <tr>
+         <td class="content_tbl_header content_row_os" colspan="9" align="center" style="border-right: 4px solid #000;">DATOS DE LA OPERACION</td>
+
+         <td class="content_tbl_header content_row_os" colspan="3" align="center" style="border-right: 4px solid #000;">CLASIFICACION C.C.</td>
+         <td class="content_tbl_header content_row_os" colspan="3" align="center" style="border-right: 4px solid #000;">RESUMEN EJECUTIVO</td>
+         <td class="content_tbl_header content_row_os" colspan="15" align="center" style="border-right: 4px solid #000;">FECHAS SEGUN ENTREGAS PLANIFICADAS</td>
+         <td class="content_tbl_header content_row_os" colspan="5" style="border-right: 4px solid #000;" align="center">DISEÑO</td>
+         <td class="content_tbl_header content_row_os" align="center" style="border-right: 4px solid #000;"></td>
+         <td class="content_tbl_header content_row_os" colspan="4" style="border-right: 4px solid #000;" align="center">IMPRESIÓN</td>
+         <td class="content_tbl_header content_row_os" colspan="3" align="center" style="border-right: 4px solid #000;">ROBOBINADORA</td>
+         <td class="content_tbl_header content_row_os" colspan="3" align="center" style="border-right: 4px solid #000;" >SELLADORA</td>
+         <td class="content_tbl_header content_row_os" colspan="3" align="center" style="border-right: 4px solid #000;" >EMBALAJE</td>
+         <td class="content_tbl_header content_row_os" colspan="7" ></td>
+      </tr>
+      <tr>
+         <td class="content_tbl_header content_row_os"><?=printSortLink($_sesmodulename, $_sortlinks, 0)?></td>
+         <td class="content_tbl_header content_row_os"><?=printSortLink($_sesmodulename, $_sortlinks, 1)?></td>         
+         <td class="content_tbl_header content_row_os"><?=printSortLink($_sesmodulename, $_sortlinks, 2)?></td>   
+         <td class="content_tbl_header content_row_os">Fecha Creacion</td>
+         <td class="content_tbl_header content_row_os">Presupuesto</td>
+         <td class="content_tbl_header content_row_os"><?=printSortLink($_sesmodulename, $_sortlinks, 3)?></td> 
+         <td class="content_tbl_header content_row_os">Cantidad</td>
+         <td class="content_tbl_header content_row_os"><nobr>Monto Neto</nobr></td>         
+         <td class="content_tbl_header content_row_os" style="border-right: 4px solid #000;"><?=printSortLink($_sesmodulename, $_sortlinks, 4)?></td>         
+         <td class="content_tbl_header content_row_os"><?=printSortLink($_sesmodulename, $_sortlinks, 5)?></td>         
+         <td class="content_tbl_header content_row_os"><nobr><?=printSortLink($_sesmodulename, $_sortlinks, 6)?></nobr></td>         
+         <td class="content_tbl_header content_row_os" style="border-right: 4px solid #000;"><nobr>Tiempo Transcurrido Hrs.</nobr></td>
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Fecha Inicio Produccion</nobr></td>
+         <td class="content_tbl_header content_row_os"><nobr>Total Hora(s) desde el Cierre C.C. hasta Inicio Producción</nobr></td>
+         <td class="content_tbl_header content_row_os" style="border-right: 4px solid #000;"><nobr>Total Dia(s) desde el Cierre C.C. hasta Inicio Producción</nobr></td>
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Fecha Entrega 1</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Cantidad Entrega 1</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Tiempo de Entrega Dias 1</nobr></td>
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Fecha Entrega 2</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Cantidad Entrega 2</nobr></td> 
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Tiempo de Entrega Dias 2</nobr></td>
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Fecha Entrega 3</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Cantidad Entrega 3</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Tiempo de Entrega Dias 3</nobr></td>
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Fecha Entrega 4</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Cantidad Entrega 4</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Tiempo de Entrega Dias 4</nobr></td>
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Fecha Entrega 5</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center"><nobr>Cantidad Entrega 5</nobr></td>         
+         <td class="content_tbl_header content_row_os" align="center" style="border-right: 4px solid #000;"><nobr>Tiempo de Entrega Dias 5</nobr></td>
+         <td class="content_tbl_header content_row_os"><nobr>Fecha de Cierre C.C.</nobr></td>
+         <td class="content_tbl_header content_row_os" align="center">Solicitud de Clisé/Pelicula</td>
+         <td class="content_tbl_header content_row_os" align="center" >Duración Dia(s)</td>
+         <td class="content_tbl_header content_row_os" align="center">Fecha recepción Montaje</td>
+         <td class="content_tbl_header content_row_os" align="center" style="border-right: 4px solid #000;">Duración Dia(s)</td>
+         <td class="content_tbl_header content_row_os" style="border-right: 4px solid #000;" align="center">Fecha Creacion OT</td>
+         <td class="content_tbl_header content_row_os">Impresora</td>
+         <td class="content_tbl_header content_row_os">Fecha Inicio</td>
+         <td class="content_tbl_header content_row_os">Fecha Termino</td>
+         <td class="content_tbl_header content_row_os" style="border-right: 4px solid #000;">Duración</td>
+         <td class="content_tbl_header content_row_os">Inicio</td>
+         <td class="content_tbl_header content_row_os">Terminio</td>
+         <td class="content_tbl_header content_row_os" style="border-right: 4px solid #000;">Duracion</td>
+         <td class="content_tbl_header content_row_os">Inicio</td>
+         <td class="content_tbl_header content_row_os">Termino</td>
+         <td class="content_tbl_header content_row_os" style="border-right: 4px solid #000;" >Duracion</td>
+         <td class="content_tbl_header content_row_os">Inicio</td>
+         <td class="content_tbl_header content_row_os">Termino</td>
+         <td class="content_tbl_header content_row_os" style="border-right: 4px solid #000;">Duracion</td>
+         <td class="content_tbl_header content_row_os">Cierre</td>
+         <td class="content_tbl_header content_row_os" align="center">Cantidad de Facturas</td>
+         <td class="content_tbl_header content_row_os" align="center"><?=printSortLink($_sesmodulename, $_sortlinks, 7)?></td>                  
+         <td class="content_tbl_header content_row_os">Duración</td>
+         <td class="content_tbl_header content_row_os" align="center">Cantidad de G/Despacho</td>
+         <td class="content_tbl_header content_row_os" align="center">Fecha Ultimo G/Despacho</td>
+         <td class="content_tbl_header content_row_os">Duración</td>
+      </tr>
+      <?php
+      for($x = 0; $x < count($data) && $data != false; $x++)
+      {
+        if($data[$x]["fab_printtype"] == "FLEX")
+            $fab_printtype = "Flexografia";
+        elseif($data[$x]["fab_printtype"] == "SERI")
+            $fab_printtype = "Serigrafia";
+
+        //----------------------------------------------------------------------------------
+        $sql            = " select * from prod_amtplan pap1 where {$data[$x]["id_header"]} = pap1.prodplan_prdid";
+        $pro_produccion = $CON->select($sql);
+
+        // echo($sql);
+
+        $produccion_data = [
+            'prodplan_amt'  => [],
+            'prodplan_date' => []
+        ];
+
+        // Recorrer resultados con control de máximo 5 registros
+        if (!empty($pro_produccion)) {
+            $count = 0;
+            foreach ($pro_produccion as $row) {
+                if ($count >= 5) break; // Limitar a 5 registros
+
+                $amt  = isset($row['prodplan_amt'])  ? $row['prodplan_amt']  : null;
+                $date = isset($row['prodplan_date']) ? $row['prodplan_date'] : null;
+
+                $produccion_data['prodplan_amt'][]  = $amt;
+                $produccion_data['prodplan_date'][] = $date;
+
+                $count++;
+            }
+        }
+                    $sql = "select pa.ag_equipotype_id,
+                           MIN(pwoe.evt_crtdat) AS fecha_inicio,
+                           MAX(pwoe.evt_enddat) AS fecha_termino
+                     FROM prod_agenda pa
+                        LEFT OUTER JOIN prod_worker_ot pwo ON pwo.wok_ag_id = pa.id
+                        LEFT OUTER JOIN prod_worker_init pwi ON pwi.win_equipoid = pa.ag_equipo_id AND pwi.id = pwo.wok_init_id
+                        LEFT OUTER JOIN prod_worker_ot_events pwoe ON pwo.id = pwoe.evt_prod_worker_otid
+                     WHERE pa.ag_reqid = {$data[$x]["id"]}
+                     GROUP BY pa.ag_equipotype_id;";
+            $produccion = $CON->select($sql);
+
+            $inicio_produccion = null;
+            $termino_produccion = null;
+
+            $inicio_selladora = null;
+            $termino_selladora = null;
+
+            $inicio_embalaje = null;
+            $termino_embalaje = null;
+
+            $inicio_rebobinadora = null;
+            $termino_rebobinadora = null;
+
+            foreach ($produccion as $row) {
+               if (in_array($row['ag_equipotype_id'], [7, 11]))
+               {
+                  $inicio_produccion = $row['fecha_inicio'];
+                  $termino_produccion = $row['fecha_termino'];
+               }
+
+               if ($row['ag_equipotype_id'] == 8) /* selladora */
+               {
+                  $inicio_selladora = $row['fecha_inicio'];
+                  $termino_selladora = $row['fecha_termino'];
+               }
+
+               if ($row['ag_equipotype_id'] == 12) /* rebobinadora */
+               {
+                  $inicio_rebobinadora = $row['fecha_inicio'];
+                  $termino_rebobinadora = $row['fecha_termino'];
+               }
+               
+               if ($row['ag_equipotype_id'] == 15) /* embalaje */
+               {
+                  $inicio_embalaje = $row['fecha_inicio'];
+                  $termino_embalaje = $row['fecha_termino'];
+               }
+            }
+
+        ?>
+        <tr bgcolor="<?=getRowColor($x)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+            <td class="content_row_os"><nobr><?=$data[$x]["req_number"]?></nobr></td>
+            <td class="content_row_os"><nobr><?=$data[$x]["cust_rut"]?></nobr></td>
+            <td class="content_row_os"><nobr><?=$data[$x]["cust_company"]?></nobr></td>
+
+            <td class="content_row_os"><nobr><?=date('d/m/Y',$data[$x]["cust_crtdat"])?></nobr></td>
+            <td class="content_row_os"><nobr><?=($data[$x]["cust_presupuesto"] == 1) ? 'SI' : 'NO'?>&nbsp;</nobr></td>
+            
+            <td class="content_row_os"><nobr><?=$data[$x]["item_number_prod"]?></nobr></td>
+            <td class="content_row_os"><?=printPrice($data[$x]["item_amount"])?></td> 
+            <td class="content_row_os"><?=printPrice($data[$x]["req_total_netto"])?></td>     
+
+            <td class="content_row_os" style="border-right: 4px solid #000;"><nobr><?=$data[$x]["vendedor"]?></nobr></td>
+            <?php
+            $horas_transcurrida9 = calcularDuracionHHMM($data[$x]["req_crtdat"],$data[$x]["req_production_initdate"]);
+            $horas_ejecutivo     = calcularDuracionHHMM($inicio_produccion,$data[$x]["req_production_initdate"]);
+            $dias_ejecutivo      = calcularDuracionDIAS($inicio_produccion,$data[$x]["req_production_initdate"]);
+            ?>
+            <td class="content_row_os" align="center"><nobr><?=date('d/m/Y H:i',$data[$x]["req_crtdat"])?></nobr></td>
+            <td class="content_row_os" align="center"><nobr><?= (!empty($data[$x]["req_production_initdate"]) && $data[$x]["req_production_initdate"] > 0) ? date('d/m/Y H:i', $data[$x]["req_production_initdate"]) : '&nbsp;' ?></nobr></td>
+            <td class="content_row_os" align="center" style="border-right: 4px solid #000;"><?=$horas_transcurrida9?></td>
+
+            <td class="content_row_os" align="center"><nobr><?=(!empty($inicio_produccion) && $inicio_produccion > 0) ? date('d/m/Y H:i', $inicio_produccion) : '&nbsp;' ?></nobr></td>            
+            <td class="content_row_os" align="center"><?=$horas_ejecutivo?></td>
+            <td class="content_row_os" align="center" style="border-right: 4px solid #000;"><?=$dias_ejecutivo?></td>
+
+            <?php
+            for ($i = 0; $i < 5; $i++) 
+            {
+                $fecha = isset($produccion_data['prodplan_date'][$i]) ? $produccion_data['prodplan_date'][$i] : null;
+                $monto = isset($produccion_data['prodplan_amt'][$i])  ? $produccion_data['prodplan_amt'][$i]  : null;
+                $horas_transcurridas = calcularDuracionDIAS($data[$x]["req_crtdat"],$fecha);
+                echo '<td class="content_row_os" align="center">';
+                echo $fecha ? date('d/m/Y', $fecha) : '&nbsp;';
+                echo '</td>';
+
+                echo '<td class="content_row_os" align="center">';
+                echo $monto !== null ? number_format($monto, 0, ',', '.') : '&nbsp;';
+                echo '</td>';
+
+                if($i== 4)
+                   echo '<td class="content_row_os" align="center" style="border-right: 4px solid #000;">';
+                else
+                   echo '<td class="content_row_os" align="center" style="border-right: 1px solid #000;">';
+                echo $horas_transcurridas !== null ? $horas_transcurridas : '&nbsp;';
+                echo '</td>';
+            }
+            ?>
+            <?php
+            // $horas_transcurridas5 = calcularDuracionDIAS($data[$x]["req_production_initdate"],$data[$x]["req_cliche_peli_solic_dat"]);
+            $horas_transcurridas5 = (!empty($data[$x]["req_cliche_peli_solic_dat"]) && $data[$x]["req_cliche_peli_solic_dat"] > 0) ? calcularDuracionDIAS($data[$x]["req_production_initdate"],$data[$x]["req_cliche_peli_solic_dat"]) : 0;
+            ?>
+            <td class="content_row_os" align="center"><nobr><?=(!empty($data[$x]["req_production_initdate"]) && $data[$x]["req_production_initdate"] > 0) ? date('d/m/Y H:i', $data[$x]["req_production_initdate"]) : '&nbsp;' ?></nobr></td>
+            <td class="content_row_os" align="center"><nobr><?=(!empty($data[$x]["req_cliche_peli_solic_dat"]) && $data[$x]["req_cliche_peli_solic_dat"] > 0) ? date('d/m/Y', $data[$x]["req_cliche_peli_solic_dat"]) : '&nbsp;' ?></nobr></td>
+            <td class="content_row_os" align="center"><?=($horas_transcurridas5==0)? '&nbsp;' : $horas_transcurridas5?></td>
+            <td class="content_row_os" align="center"><nobr><?= (!empty($data[$x]["req_cliche_peli_recep_dat"]) && $data[$x]["req_cliche_peli_recep_dat"] > 0) ? date('d/m/Y', $data[$x]["req_cliche_peli_recep_dat"]) : '&nbsp;' ?></nobr></td>            
+            <?php
+            $dias_req_cliche_peli_recep_dat = (!empty($data[$x]["req_cliche_peli_recep_dat"]) || $data[$x]["req_cliche_peli_recep_dat"] > 0) ? calcularDuracionDIAS($data[$x]["req_production_initdate"],$data[$x]["req_cliche_peli_recep_dat"]) : 0;
+            if(!empty($data[$x]["prd_fecha_number"]) && $data[$x]["prd_fecha_number"] > 0)
+               $fecha_inicio = $data[$x]["prd_fecha_number"];
+            else
+               $fecha_inicio = $data[$x]["req_cliche_peli_recep_dat"];
+
+            $fecha_despacho = null;
+            if(!empty($data[$x]["dlv_delivery_date"]) && $data[$x]["dlv_delivery_date"] > 0)
+            {
+               $fecha_despacho = $data[$x]["dlv_delivery_date"];
+            }
+            /*
+            if(empty($fecha_despacho))
+            {
+               $fecha_despacho = $data[$x]["invc_date"];
+            }
+            */
+
+            $horas_transcurridas2 = calcularDuracionHHMM($fecha_despacho,$data[$x]["cierre"]);
+            $horas_transcurridas3 = calcularDuracionHHMM($data[$x]["invc_date"],$data[$x]["cierre"]);
+            $horas_rebobinadora   = calcularDuracionHHMM($termino_selladora, $inicio_rebobinadora);
+            $horas_selladora      = calcularDuracionHHMM($termino_selladora,$inicio_selladora);
+            $horas_embalaje       = calcularDuracionHHMM($termino_embalaje,$inicio_embalaje);
+            $horas_produccion     = calcularDuracionHHMM($termino_produccion,$inicio_produccion);
+            ?>
+            <td class="content_row_os" align="center" style="border-right: 4px solid #000;"><?=($dias_req_cliche_peli_recep_dat == 0) ? '&nbsp;' : $dias_req_cliche_peli_recep_dat ?></td>
+            <td class="content_row_os" align="center" style="border-right: 4px solid #000;"><nobr><?=(!empty($fecha_inicio) && $fecha_inicio > 0) ? date('d/m/Y H:i', $fecha_inicio) : '&nbsp;' ?></nobr></td>            
+
+
+            <td class="content_row_os" align="center"><?=$fab_printtype?></td>
+            <td class="content_row_os" align="center"><nobr><?=(!empty($inicio_produccion) && $inicio_produccion > 0) ? date('d/m/Y H:i', $inicio_produccion) : '&nbsp;' ?></nobr></td>            
+            <td class="content_row_os" align="center"><nobr><?=(!empty($termino_produccion) && $termino_produccion > 0) ? date('d/m/Y H:i', $termino_produccion) : '&nbsp;' ?></nobr></td>            
+            <td class="content_row_os" align="center" style="border-right: 4px solid #000;"><nobr><?=$horas_produccion?></nobr></td>            
+
+
+            <td class="content_row_os" align="center"><nobr><?=(!empty($inicio_rebobinadora) && $inicio_rebobinadora > 0) ? date('d/m/Y H:i', $inicio_rebobinadora) : '&nbsp;' ?></nobr></td>
+            <td class="content_row_os" align="center"><nobr><?=(!empty($termino_rebobinadora) && $termino_rebobinadora > 0) ? date('d/m/Y H:i', $termino_rebobinadora) : '&nbsp;' ?></nobr></td>
+            <td class="content_row_os" align="center" style="border-right: 4px solid #000;"><?=$horas_rebobinadora?></td>
+
+            <td class="content_row_os" align="center"><nobr><?=(!empty($inicio_selladora) && $inicio_selladora > 0) ? date('d/m/Y H:i', $inicio_selladora) : '&nbsp;' ?></nobr></td>         
+            <td class="content_row_os" align="center"><nobr><?=(!empty($termino_selladora) && $termino_selladora > 0) ? date('d/m/Y H:i', $termino_selladora) : '&nbsp;' ?></nobr></td>         
+            <td class="content_row_os" align="center" style="border-right: 4px solid #000;"><?=$horas_selladora?></td>
+
+            <td class="content_row_os" align="center"><nobr><?=(!empty($inicio_embalaje) && $inicio_embalaje > 0) ? date('d/m/Y H:i', $inicio_embalaje) : '&nbsp;' ?></nobr></td>            
+            <td class="content_row_os" align="center"><nobr><?=(!empty($termino_embalaje) && $termino_embalaje > 0) ? date('d/m/Y H:i', $termino_embalaje) : '&nbsp;' ?></nobr></td>            
+            <td class="content_row_os" align="center" style="border-right: 4px solid #000;"><?=$horas_embalaje?></td>
+            <td class="content_row_os" align="center"><nobr><?=(!empty($data[$x]["cierre"]) && $data[$x]["cierre"] > 0) ? date('d/m/Y H:i', $data[$x]["cierre"]) : '&nbsp;' ?></nobr></td>     
+            <td class="content_row_os" align="center"><?=$data[$x]["cantidad_facturas"]?></td>                 
+
+            <td class="content_row_os" align="center"><nobr><?=(!empty($data[$x]["invc_date"]) && $data[$x]["invc_date"] > 0) ? date('d/m/Y', $data[$x]["invc_date"]) : '&nbsp;' ?></nobr></td>
+            <td class="content_row_os" align="center"><?=$horas_transcurridas3?></td>     
+            <td class="content_row_os" align="center"><?=$data[$x]["cantidad_entregas"]?></td>     
+            <td class="content_row_os" align="center"><nobr><?=(!empty($fecha_despacho) && $fecha_despacho > 0) ? date('d/m/Y', $fecha_despacho) : '&nbsp;' ?></nobr></td>            
+            <td class="content_row_os" align="center"><?=$horas_transcurridas2?></td>
+         </tr>
+         <?php
+         for ($i = 0; $i < 5; $i++) 
+         {
+            $fecha = null;
+            $monto = null;
+            $horat = null;
+
+            $fecha = isset($produccion_data['prodplan_date'][$i]) ? $produccion_data['prodplan_date'][$i] : null;
+            $monto = isset($produccion_data['prodplan_amt'][$i])  ? $produccion_data['prodplan_amt'][$i]  : null;
+            $horat = calcularDuracionDIAS($data[$x]["req_crtdat"],$fecha);
+            if(!empty($fecha))
+            {
+               $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["FechaEntrega".($i+1)]      = $fecha;
+               $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["CantidadEntrega".($i+1)]   = printPrice($monto);
+               $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["DuracionDiasHrs".($i+1)]   = $horat;
+            }   
+         }
+
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["NumeroCC"]                   = $data[$x]["req_number"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Rut Cliente"]                = $data[$x]["cust_rut"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Cliente"]                    = $data[$x]["cust_company"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["SKU"]                        = $data[$x]["item_number_prod"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Cantidad"]                   = printPrice($data[$x]["item_amount"]);
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Vendedor"]                   = $data[$x]["vendedor"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["FechaCreacion"]              = $data[$x]["req_crtdat"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["InicioFabricacion"]          = $data[$x]["req_production_initdate"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["TiempoTranscurrido"]         = $horas_transcurrida9;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["InicioFabricacion"]          = $data[$x]["req_production_initdate"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["SolicituddeClisePelicula"]   = $data[$x]["req_cliche_peli_solic_dat"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Montaje"]                    = $data[$x]["req_cliche_peli_recep_dat"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["DuracionMontaje"]            = $dias_req_cliche_peli_recep_dat;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["CreacionOT"]                 = $fecha_inicio;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Impresora"]                  = $fab_printtype;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["InicioProduccion"]           = $inicio_produccion;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["FinProducción"]              = $termino_produccion;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["DuracionInicio"]             = $horas_produccion;
+
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["i_Rebobinadora"]             = $inicio_rebobinadora;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Rebobinadora"]               = $termino_rebobinadora;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["horas_rebobinadora"]         = $horas_rebobinadora;
+
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["i_Selladora"]                = $inicio_selladora;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Selladora"]                  = $termino_selladora;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["horas_selladora"]            = $horas_selladora;
+
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["i_Embalaje"]                 = $inicio_embalaje;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Embalaje"]                   = $termino_embalaje;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["horas_embalaje"]             = $horas_embalaje;
+
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Cierre"]                     = $data[$x]["cierre"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Facturacion"]                = $data[$x]["invc_date"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Duracion1"]                  = $horas_transcurridas3;
+
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Despacho"]                   = $fecha_despacho;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Duracion2"]                  = $horas_transcurridas2;
+                          
+
+         // $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["inicio_produccion"]          =  $inicio_produccion;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["horas_ejecutivo"]            =  $horas_ejecutivo;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["dias_ejecutivo"]             =  $dias_ejecutivo;
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["Produccion"]                 = $fecha_inicio;
+
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["K_guias"]                    = $data[$x]["cantidad_entregas"];
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["K_facturas"]                 = $data[$x]["cantidad_facturas"];
+
+
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["cust_crtdat"]                 = $data[$x]["cust_crtdat"];         
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["cust_presupuesto"]            = ($data[$x]["cust_presupuesto"] == 1) ? 'SI' : 'NO';
+         $_SESSION["STATS"][$_sesmodulename]["DATA"][$x]["req_total_netto"]             = printPrice($data[$x]["req_total_netto"]);         
+        
+
+         }
+         if(!$x)
+         {  ?>
+            <tr bgcolor="<?=getRowColor(0)?>">
+               <td class="content_row" colspan="21" align="center">
+                  <br>
+                  <b class="msg_save_err">No hay datos disponibles.</b>
+                  <br><br>
+               </td>
+            </tr>
+            <?php
+         }
+      ?>
+      </table>
+      <?=Nifty_printF()?>
+      <br>
+   </td>
+</tr>
+</table>
+</form>
+<?php
+//----------------------------------------------------------------------------------
+function calcularDuracionHHMM($timestampInicio, $timestampFin)
+{
+    if (empty($timestampInicio) || empty($timestampFin)) return null;
+
+    // Validar que la fecha de fin no sea año 1969
+    if (date('Y', $timestampFin) == 1969) return null;
+
+    $inicio = (new DateTime())->setTimestamp($timestampInicio);
+    $fin = (new DateTime())->setTimestamp($timestampFin);
+
+    $intervalo = $inicio->diff($fin);
+    $horas = ($intervalo->days * 24) + $intervalo->h + ($intervalo->i / 60);
+
+    $hh = floor($horas);
+    $mm = round(($horas - $hh) * 60);
+
+    $hh_str = str_pad($hh, 2, "0", STR_PAD_LEFT);
+    $mm_str = str_pad($mm, 2, "0", STR_PAD_LEFT);
+
+    return "$hh_str:$mm_str";
+}
+//----------------------------------------------------------------------------------
+function calcularDuracionDIAS3($timestampInicio, $timestampFin)
+{
+if (date('Y', $timestampFin) == 1969) return null;
+
+$inicio = (new DateTime())->setTimestamp($timestampInicio);
+$fin = (new DateTime())->setTimestamp($timestampFin);
+
+$intervalo = $inicio->diff($fin);
+return $intervalo->days; 
+}
+
+function calcularDuracionDIAS($timestampInicio, $timestampFin)
+{
+    if (!is_numeric($timestampInicio) || !is_numeric($timestampFin)) return null;
+
+    // Asegurar que la diferencia sea positiva
+    $segundos = abs($timestampFin - $timestampInicio);
+
+    // Redondear hacia arriba los días
+    return ceil($segundos / 86400);
+}
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["printxls"])
+  $xlsfile = xls_createStatsProduccion($CON);
+
+if($xlsfile != "")
+{
+   $doctitle = "Produccion-CC-".time().".xls";
+   $xlslink = "./libs/modules/structure/document_file.php?type=0&hash={$xlsfile}.xls&name={$doctitle}&path=../../../docs.print/";
+   ?>
+   <iframe height="0" width="0" frameborder="0" src="<?=$xlslink?>"></iframe>
+   <?php
+}
+?>
+<iframe id="idxifrsrc" height="0" width="0" frameborder="0"></iframe>
+<?php
+$_SESSION["JSEXEC"] .= ';$("#obitpanel").html("");';
+?>

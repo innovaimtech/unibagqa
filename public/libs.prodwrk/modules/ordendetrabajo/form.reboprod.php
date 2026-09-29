@@ -1,0 +1,2303 @@
+<div class="btngrey" onclick="location.href = '/prodwrk.php?mid=2&agid=<?=$_REQUEST["agid"]?>';">
+   <i class="fa fa-fw fa-chevron-left" style="color:white;"></i> Volver&nbsp;
+</div>
+<?php
+if(count($_REQUEST["delsthids"]))
+{
+   $currtme = time();
+   foreach($_REQUEST["delsthids"] AS $delsthid)
+   {
+      delStockChange($CON, $delsthid);
+
+      $sql = " update stockchanges
+               set
+               stk_status = 0,
+               stk_upddat = {$currtme},
+               stk_updusr = {$_SESSION["user_id"]}
+               where
+               id = {$delsthid}";
+      $res = $CON->no_result($sql);
+   }
+}
+
+//----------------------------------------------------------------------------------
+$sql = " select distinct t1.*, t2.cat_id, t3.cat_title,
+                t4b.add_name 'colordesc',
+                t4.val_id 'colorid',
+                t6.add_name 'material',
+                t7.st_id,
+                SUM(t7.iss_inventory) 'iss_inventory'
+         from item t1
+         INNER JOIN item_productcats t2            ON t1.id = t2.item_id
+         INNER JOIN productcats t3                 ON t2.cat_id = t3.id
+         INNER JOIN tran_comments_item_vals t4     ON t4.item_id = t1.id
+         INNER JOIN tran_comments_vals t4b         ON t4.val_id = t4b.id
+         INNER JOIN tran_comments_item_vals t5     ON t5.item_id = t1.id
+         INNER JOIN tran_comments_vals t6          ON t5.val_id = t6.id
+         INNER JOIN item_shops_storehouses t7      ON t1.id = t7.item_id
+         INNER JOIN company_shops_storehouses t8   ON t7.st_id = t8.id
+         where
+         t1.item_status       > 0 and
+         t1.item_released     > 0 and
+         t1.item_reg_kg       > 0 and
+         t7.shop_id           = {$agenda["req_shop_id"]} and
+         t7.iss_inventory     > 0 and
+         t8.st_status         = 1 and
+         t8.st_name           like '3000%' and
+         t3.id                IN ({$_CONFIG["TELA_CATID"]},27) and
+         t4.com_id            = {$_CONFIG["TELA_COLOR_CHARACTID"]} and
+         t4.val_id            IN ({$agenda["fab_mat_fabric_color"]}, {$agenda["fab_mat_manilla_color"]}) and
+         t5.com_id            = {$_CONFIG["TELA_MATERIAL_CHARACTID"]} and
+         t6.add_name          = '{$agenda["fab_type"]}'
+         group by t1.id
+         order by t3.cat_title, t1.item_title, t1.item_number_prod";
+$allitems = $CON->select($sql);
+
+//----------------------------------------------------------------------------------
+if($reborder["req_rebo_type"] == "Corte")
+{
+   if((int)$_REQUEST["selitemid1"] )
+   {
+      $itemsel = Array();
+      foreach($allitems AS $allitem)
+      {
+         if((int)$_REQUEST["selitemid1"] == $allitem["id"])
+            $itemsel = $allitem;
+      }
+
+      if((int)$_REQUEST["rebofinalize"])
+      {
+         $origen_usekgamt = getPrice($_REQUEST["useamt_1"],2);
+         $origen_itemid   = (int)$_REQUEST["selitemid1"];
+         $origen_basekg   = $itemsel["item_reg_kg"];
+         $origen_units    = round($origen_usekgamt / $origen_basekg,10);
+
+         $stk_num          = createTransactionNumber($CON, $_SESSION["user_company_id"], "stockchange");
+         $annottext        = printPrice($origen_usekgamt,2).' Kilogramos';
+         $stk_bookdate     = time();
+         $currtme          = time();
+         $stk_fixedsthid   = $itemsel["st_id"];
+         $sth_fromrebo_agid_grphash = md5(microtime());
+
+         $item_reboprod_amt    = 1;
+         $item_reboprod_unitkg = round($origen_usekgamt,2);
+
+         if($origen_units > 0)
+         {
+            $sql = " insert into stockchanges
+                     (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative,
+                      stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash)
+                     VALUES
+                     ('{$stk_num}', '{$annottext}', 19, {$_SESSION["user_company_id"]}, {$agenda["req_shop_id"]},
+                      {$stk_bookdate}, 1, {$currtme}, {$_SESSION["user_id"]}, {$stk_fixedsthid}, {$_REQUEST["agid"]},
+                     '{$sth_fromrebo_agid_grphash}')";
+            $res = $CON->no_result($sql);
+            if($res)
+            {
+               $stk_id = mysql_insert_id();
+               $sql = " insert into stockchanges_items
+                        (stk_id, item_id, item_pos, item_amount, item_type, item_st_id, item_costprice_brutto,
+                         item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes, item_charges_act,
+                         item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                        VALUES
+                        ({$stk_id}, {$origen_itemid}, 0, {$origen_units}, 'item',
+                         {$stk_fixedsthid}, 0.00, 0.00, 0.00, 0.00, 0, 0,
+                         {$item_reboprod_amt}, {$item_reboprod_unitkg})";
+               $CON->no_result($sql);
+               bookStockChange($CON, $stk_id);
+            }
+
+            $_PRODITEMS = Array();
+            foreach(array_keys($_REQUEST) AS $reqkey)
+            {
+               if(strpos($reqkey, "stockplusitemid_") !== false && strpos($reqkey, "stockplusitemid_") == 0)
+               {
+                  $idx = (int)substr($reqkey, strrpos($reqkey, "_") +1);
+                  $dest_itemid = (int)$_REQUEST[$reqkey];
+                  $dest_dims = (float)round(getPrice($_REQUEST["rollo_dims_{$idx}"],2));
+
+                  if((int)$dest_itemid)
+                  {
+                     $sql = " select *
+                              from item
+                              where
+                              id = {$dest_itemid}";
+                     $dest_itemdata = $CON->select($sql);
+                     $dest_itemdata = $dest_itemdata[0];
+
+                     $dest_basekg   = $dest_itemdata["item_reg_kg"];
+                     $dest_usekgamt = (float)$_REQUEST["stockplustotalkg_{$idx}"];
+                     $dest_units    = round($dest_usekgamt / $dest_basekg,10);
+
+                     if($dest_units > 0)
+                     {
+                        unset($_PRODITEM);
+                        $_PRODITEM["dest_itemid"] = $dest_itemid;
+                        $_PRODITEM["dest_units"]   = $dest_units;
+                        $_PRODITEM["item_reboprod_amt"] = (int)$_REQUEST["reboamt_{$idx}"];
+                        $_PRODITEM["item_reboprod_unitkg"] = round((float)$_REQUEST["stockplustotalkg_{$idx}"] / (int)$_REQUEST["reboamt_{$idx}"],2);
+                        $_PRODITEMS[] = $_PRODITEM;
+                     }
+                  }
+                  else
+                  {
+                     // GENERATE NEW ITEM HERE
+                     $_PARENTARR = explode("/", $itemsel["item_title"]);
+                     $_ITEMNAME  = strtoupper($itemsel["material"])."/";
+                     $_ITEMNAME .= strtoupper($itemsel["colordesc"])."/";
+                     $_ITEMNAME .= strtoupper($_PARENTARR[2])."/";
+                     $_ITEMNAME .= $dest_dims."x";
+                     $_ITEMNAME .= (int)$itemsel["item_reg_gsm"]."x";
+                     $_ITEMNAME .= (int)$itemsel["item_reg_length"];
+
+                     $dest_usekgamt = (float)$_REQUEST["stockplustotalkg_{$idx}"];
+                     $dest_units    = (int)$_REQUEST["reboamt_{$idx}"];
+                     $dest_unitkg   = round($dest_usekgamt / $dest_units,2);
+
+                     $item_reg_length_orig = (int)$itemsel["item_reg_length"];
+                     $item_reg_length_new  = (int)$_REQUEST["stockpluslargo_{$idx}"];
+                     $unit_real            = $item_reg_length_new / $item_reg_length_orig;
+                     $dest_units           = round((int)$_REQUEST["reboamt_{$idx}"] * $unit_real,10);
+
+
+                     //----------------------------------------------------------------------------------
+                     // PLA/BLANCO/W80/6X75X1500
+                     // echo $_ITEMNAME."\n";
+                     // print_r($_PARENTARR);
+
+
+                     // var_dump($item_reg_length_orig);
+                     // var_dump($item_reg_length_new);
+                     // exit;
+
+
+
+                     $sql = " select *
+                              from item
+                              where
+                              id = {$origen_itemid}";
+                     $baseitem = $CON->select($sql);
+                     $baseitem = $baseitem[0];
+
+                     //START LOG
+                     $_LOGHEAD   = date("d.m.Y H:i:s")." | {$reborder["req_rebo_type"]} | {$agenda["req_number"]} | {$_SESSION["wrk_lastname"]} | VAR=baseitem:\n";
+                     $_LOGHEAD   .= $sql."\n";
+                     file_put_contents("reboprod.log", $_LOGHEAD, FILE_APPEND);
+                     //END LOG
+
+                     $colnames = array_keys($baseitem);
+                     unset($colnames[0]);
+                     $collist = implode(", ", $colnames);
+
+                     $sql = " insert into item
+                              ({$collist})
+                              select {$collist}
+                              from item
+                              where
+                              id = {$baseitem["id"]}";
+                     $res = $CON->no_result($sql);
+
+                     //START LOG
+                     $_LOGHEAD   = date("d.m.Y H:i:s")." | {$agenda["req_number"]} | {$_SESSION["wrk_lastname"]} | res=".(int)$res.":\n";
+                     $_LOGHEAD   .= $sql."\n";
+                     file_put_contents("reboprod.log", $_LOGHEAD, FILE_APPEND);
+                     //END LOG
+
+                     if($res)
+                     {
+                        $newitemid        = mysql_insert_id();
+
+                        $_XCATID = 6;
+                        $_XPREFIX = "TEL";
+                        if(strpos($baseitem["item_number_prod"], "BTE") !== false)
+                        {
+                           $_XCATID = 27;
+                           $_XPREFIX = "BTE";
+                        }
+
+                        $sql_catid = (int)$_REQUEST["catid"];
+                        $sql = " select t1.*, t2.cat_prefix
+                                 from item t1
+                                 INNER JOIN item_productcats t3   ON t1.id = t3.item_id
+                                 INNER JOIN productcats t2        ON t3.cat_id = t2.id
+                                 where
+                                 t3.cat_id = {$_XCATID} and
+                                 t1.item_number_prod like '{$_XPREFIX}%'
+                                 order by t1.id";
+                        $items = $CON->select($sql);
+
+                        //START LOG
+                        $_LOGHEAD   = date("d.m.Y H:i:s")." | {$agenda["req_number"]} | {$_SESSION["wrk_lastname"]} | ITEMS FOR CATPREFIX:\n";
+                        $_LOGHEAD   .= $sql."\n";
+                        file_put_contents("reboprod.log", $_LOGHEAD, FILE_APPEND);
+                        //END LOG
+
+                        $maxid = 1;
+                        for($x = 0; $x < count($items) && $items != false; $x++)
+                        {
+                           $inumb   = $items[$x]["item_number_prod"];
+                           $thisid  = str_replace($items[$x]["cat_prefix"],"",$inumb);
+                           if($thisid +1 >= $maxid)
+                              $maxid = $thisid +1;
+                        }
+                        $item_number_prod = "{$_XPREFIX}".sprintf("%04s",$maxid);
+
+                        //----------------------------------------------------------------------------------
+                        $sql = " insert into item_productcats
+                                 (item_id, cat_id)
+                                 VALUES
+                                 ({$newitemid}, {$_XCATID})";
+                        $CON->no_result($sql);
+
+                        //----------------------------------------------------------------------------------
+                        $sql = " insert into item_shops
+                                 (item_id, shop_id)
+                                 select {$newitemid} AS 'item_id', shop_id
+                                 from item_shops
+                                 where
+                                 item_id = {$baseitem["id"]}";
+                        $CON->no_result($sql);
+
+                        $sql = " update item
+                                 set
+                                 item_title        = '{$_ITEMNAME}',
+                                 item_number_prod  = '{$item_number_prod}',
+                                 item_reg_width    = {$dest_dims},
+                                 item_reg_gsm      = ".(int)$itemsel["item_reg_gsm"].",
+                                 item_reg_kg       = {$dest_unitkg}
+                                 where
+                                 id = {$newitemid}";
+                        $xres = $CON->no_result($sql);
+
+                        //START LOG
+                        $_LOGHEAD   = date("d.m.Y H:i:s")." | {$agenda["req_number"]} | {$_SESSION["wrk_lastname"]} | UPDATE NEW ITEM ".(int)$xres.":\n";
+                        $_LOGHEAD   .= $sql."\n";
+                        file_put_contents("reboprod.log", $_LOGHEAD, FILE_APPEND);
+                        //END LOG
+                        //item_reg_length   = ".(int)$_REQUEST["stockpluslargo_{$idx}"].",
+
+                        // FALTA REGISTRAR CHARACTS
+                        //----------------------------------------------------------------------------------
+                        $sql = " select *
+                                 from tran_comments_item_vals
+                                 where
+                                 item_id = {$baseitem["id"]}";
+                        $cvals = $CON->select($sql);
+                        foreach($cvals AS $cval)
+                        {
+                           $val_desc      = trim(addslashes($cval["val_desc"]));
+                           $val_desc_eng  = trim(addslashes($cval["val_desc_eng"]));
+
+                           $sql = " insert into tran_comments_item_vals
+                                    (item_id, com_id, val_id, val_desc, val_desc_eng)
+                                    VALUES
+                                    ({$newitemid}, {$cval["com_id"]}, {$cval["val_id"]},
+                                     '{$cval["val_desc"]}', '{$cval["val_desc_eng"]}')";
+                           $CON->no_result($sql);
+                        }
+
+                        //INSERT / CREATE WITH CHARACT: 32 | LENGTH CHARACT: 33
+                        //----------------------------------------------------------------------------------
+                        $_UPDCOMIDARR  = Array();
+                        $_UPDCOMIDARR[0]["_UPDCOMID"]    = 32;
+                        $_UPDCOMIDARR[0]["_UPDCOMIVAL"]  = $dest_dims;
+                        // $_UPDCOMIDARR[1]["_UPDCOMID"]    = 33;
+                        // $_UPDCOMIDARR[1]["_UPDCOMIVAL"]  = (int)$_REQUEST["stockpluslargo_{$idx}"];
+
+                        foreach($_UPDCOMIDARR AS $_UPDCOMIDARROW)
+                        {
+                           $_UPDCOMID     = $_UPDCOMIDARROW["_UPDCOMID"];
+                           $_UPDCOMIVAL   = $_UPDCOMIDARROW["_UPDCOMIVAL"];
+
+                           $sql = " select *
+                                    from tran_comments_vals
+                                    where
+                                    add_com_id = {$_UPDCOMID} and
+                                    add_name   = '{$_UPDCOMIVAL}' and
+                                    add_status = 1";
+                           $valexistsid = $CON->select($sql);
+                           $valexistsid = (int)$valexistsid[0]["id"];
+                           if(!$valexists)
+                           {
+                              $sql = " insert into tran_comments_vals
+                                       (add_com_id, add_name, add_name_eng, add_crtdat, add_crtusr)
+                                       VALUES
+                                       ({$_UPDCOMID}, '{$_UPDCOMIVAL}', '{$_UPDCOMIVAL}', {$currtme}, {$_SESSION["user_id"]})";
+                              $CON->no_result($sql);
+                           }
+                           $sql = " select *
+                                    from tran_comments_vals
+                                    where
+                                    add_com_id = {$_UPDCOMID} and
+                                    add_name   = '{$_UPDCOMIVAL}' and
+                                    add_status = 1";
+                           $valexistsid = $CON->select($sql);
+                           $valexistsid = (int)$valexistsid[0]["id"];
+
+                           $sql = " delete from tran_comments_item_vals
+                                    where
+                                    item_id  = {$newitemid} and
+                                    com_id   = {$_UPDCOMID}";
+                           $CON->no_result($sql);
+
+                           $sql = " insert into tran_comments_item_vals
+                                    (item_id, com_id, val_id)
+                                    VALUES
+                                    ({$newitemid}, {$_UPDCOMID}, {$valexistsid})";
+                           $CON->no_result($sql);
+                        }
+
+                        unset($_PRODITEM);
+                        $_PRODITEM["dest_itemid"] = $newitemid;
+                        $_PRODITEM["dest_units"]  = $dest_units;
+                        $_PRODITEM["item_reboprod_amt"] = (int)$_REQUEST["reboamt_{$idx}"];
+                        $_PRODITEM["item_reboprod_unitkg"] = round((float)$_REQUEST["stockplustotalkg_{$idx}"] / (int)$_REQUEST["reboamt_{$idx}"],2);
+                        $_PRODITEMS[] = $_PRODITEM;
+                     }
+                  }
+               }
+            }
+
+            if(count($_PRODITEMS))
+            {
+               $stk_num = createTransactionNumber($CON, $_SESSION["user_company_id"], "stockchange");
+
+               $sql = " insert into stockchanges
+                        (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative,
+                         stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash)
+                        VALUES
+                        ('{$stk_num}', 'Generado por producción', 20, {$_SESSION["user_company_id"]}, {$agenda["req_shop_id"]},
+                         {$currtme},  0, {$currtme}, {$_SESSION["user_id"]}, {$stk_fixedsthid}, {$_REQUEST["agid"]},
+                         '{$sth_fromrebo_agid_grphash}')";
+               $res = $CON->no_result($sql);
+               if($res)
+               {
+                  $stk_id = mysql_insert_id();
+                  $item_pos = 0;
+                  foreach($_PRODITEMS AS $_PRODITEMROW)
+                  {
+                     $sql = " insert into stockchanges_items
+                              (stk_id, item_id, item_pos, item_amount, item_type, item_st_id, item_costprice_brutto,
+                               item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes, item_charges_act,
+                               item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                              VALUES
+                              ({$stk_id}, {$_PRODITEMROW["dest_itemid"]}, {$item_pos}, {$_PRODITEMROW["dest_units"]}, 'item',
+                               {$stk_fixedsthid}, 0.00, 0.00, 0.00, 0.00, 0, 0,
+                               {$_PRODITEMROW["item_reboprod_amt"]}, {$_PRODITEMROW["item_reboprod_unitkg"]})";
+                     $CON->no_result($sql);
+                     $item_pos++;
+
+                  }
+                  bookStockChange($CON, $stk_id);
+               }
+            }
+
+
+            ?>
+            <script language="Javascript">
+               location.href = 'prodwrk.php?mid=<?=$_REQUEST["mid"]?>&agid=<?=$_REQUEST["agid"]?>&mode=reboprod';
+            </script>
+            <?php
+         }
+      }
+      ?>
+      <script language="Javascript">
+      function recalcUsedAmt(xlineid)
+      {
+         var itemregkg     = parseFloat($('#ingresokgamt_' +xlineid).val().replaceAll(",", "."));
+         var sobranteamt   = parseFloat($('#sobranteamt_' +xlineid).val().replaceAll(",", "."));
+         var useamt        = parseFloat($('#useamt_' +xlineid).val().replaceAll(",", "."));
+
+         if(isNaN(sobranteamt))
+            sobranteamt = 0;
+
+         useamt = itemregkg - sobranteamt;
+         $('#useamt_' +xlineid).val(roundToDecimal(useamt,2));
+         $('#useamt_' +xlineid).val($('#useamt_' +xlineid).val().replaceAll(".", ","));
+         $('#sobranteamt_' +xlineid).val($('#sobranteamt_' +xlineid).val().replaceAll(".", ","));
+         $('#idx_btn_term').hide(0);
+         $('#idx_btn_save').show(0);
+      }
+      function roundToDecimal(num, decimalPlaces)
+      {
+         const factor = Math.pow(10, decimalPlaces);
+         return Math.round(num * factor) / factor;
+      }
+      </script>
+      <form action="prodwrk.php#xform_itemcalc" method="post" name="xform_itemcalc" id="xform_itemcalc">
+      <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+      <input type="hidden" name="agid" value="<?=$_REQUEST["agid"]?>">
+      <input type="hidden" name="mode" value="<?=$_REQUEST["mode"]?>">
+      <input type="hidden" name="refid" value="<?=$_REQUEST["refid"]?>">
+      <input type="hidden" name="selitemid1" value="<?=$_REQUEST["selitemid1"]?>">
+      <input type="hidden" name="selitemid2" value="<?=$_REQUEST["selitemid2"]?>">
+      <input type="hidden" name="req_rebo_type" value="<?=$reborder["req_rebo_type"]?>">
+      <input type="hidden" name="rebocalc" value="1">
+      <input type="hidden" name="rebofinalize" value="0">
+      <table border="0" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+         <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+            <br>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+               <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                  <i class="fa fa-fw fa-chevron-right"></i> ENTRADA REBOBINADORA
+               </td>
+            </tr>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" width="100" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+               <td align="left" class="tdheader" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Pesa</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Sobrante</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Usado</td>
+            </tr>
+            <?php
+            $item    = $itemsel;
+            $lidx    = 1;
+
+            if($_REQUEST["ingresokgamt_{$lidx}"] == "")
+               $_REQUEST["ingresokgamt_{$lidx}"] = printPrice($item["item_reg_kg"],2);
+
+            $_REQUEST["ingresokgamt_{$lidx}"] = getPrice(trim($_REQUEST["ingresokgamt_{$lidx}"]),2);
+            $_REQUEST["sobranteamt_{$lidx}"] = getPrice(trim($_REQUEST["sobranteamt_{$lidx}"]),2);
+            $useamt  = $_REQUEST["ingresokgamt_{$lidx}"] - $_REQUEST["sobranteamt_{$lidx}"];
+            $origusediffamt = $item["item_reg_kg"] - $useamt;
+
+            $baselength = $item["item_reg_length"] - (($origusediffamt * $item["item_reg_length"]) / $item["item_reg_kg"]);
+            ?>
+            <tr onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;"><?=$item["item_number_prod"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$item["material"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left"><?=$item["colordesc"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($item["item_reg_gsm"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($item["item_reg_width"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($baselength)?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                  <input type="text" class="inptxt" id="ingresokgamt_<?=$lidx?>" name="ingresokgamt_<?=$lidx?>"
+                  style="width:100%;text-align:center" onkeyup="recalcUsedAmt('<?=$lidx?>')"
+                  value="<?=printPrice($_REQUEST["ingresokgamt_{$lidx}"],2)?>">
+               </td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                  <input type="text" class="inptxt" id="sobranteamt_<?=$lidx?>" name="sobranteamt_<?=$lidx?>"
+                  style="width:100%;text-align:center" onkeyup="recalcUsedAmt('<?=$lidx?>')"
+                  value="<?=printPrice($_REQUEST["sobranteamt_{$lidx}"],2)?>">
+               </td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                  <input type="text" class="inptxt" id="useamt_<?=$lidx?>" name="useamt_<?=$lidx?>"
+                  style="width:100%;text-align:center;background-color:#EEEEEE" readonly
+                  value="<?=printPrice($useamt,2)?>">
+               </td>
+            </tr>
+            </table>
+
+            <table border="0" cellpadding="6" cellspacing="0">
+            <colgroup>
+               <col width="100">
+               <col width="100">
+            </colgroup>
+            <tr>
+               <td width="100">Merma Kg</td>
+               <td>
+                  <input type="text" class="inptxt" name="itemmermakg" id="itemmermakg" style="width:100%"
+                  onkeyup="$('#idx_btn_term').hide(0);$('#idx_btn_save').show(0);"
+                  value="<?if((float)$_REQUEST["itemmermakg"] > 0) echo printPrice($_REQUEST["itemmermakg"],2)?>">
+               </td>
+            </tr>
+            </table>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+               <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                  <i class="fa fa-fw fa-chevron-left"></i> SALIDA REBOBINADORA
+               </td>
+            </tr>
+            </table>
+
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <tr>
+               <td class="tdheader" width="100" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+               <td align="left" class="tdheader" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Total</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Unit.</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Merma</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+            </tr>
+            <?php
+            if($reborder["req_rebo_rolloscc_opttype"] != "Por rollo")
+               $rebovals = array_values($_REBOVALS["metro"]);
+            if($reborder["req_rebo_rolloscc_opttype"] != "Por metro")
+               $rebovals = array_values($_REBOVALS["rollo"]);
+
+            $x = 0;
+            $_TOTAL_WIDTH = 0;
+            foreach($rebovals AS $reboval)
+            {
+               if($_REQUEST["reboamt_{$x}"] == "")
+                  $_REQUEST["reboamt_{$x}"] = (int)$reboval["rollo_amt"];
+
+               if($_REQUEST["rollo_dims_{$x}"] == "")
+                  $_REQUEST["rollo_dims_{$x}"] = printPrice($reboval["rollo_dims"],2);
+
+               $_REQUEST["rollo_dims_{$x}"] = getPrice($_REQUEST["rollo_dims_{$x}"],2);
+
+               $_TOTAL_WIDTH += ($_REQUEST["reboamt_{$x}"] * $_REQUEST["rollo_dims_{$x}"]);
+
+               $_LARGO  = $item["item_reg_length"] - (($_REQUEST["itemmermakg"] * $item["item_reg_length"]) / $item["item_reg_kg"])
+                                                   - (($_REQUEST["sobranteamt_{$lidx}"] * $item["item_reg_length"]) / $item["item_reg_kg"])
+                                                   - (($origusediffamt * $item["item_reg_length"]) / $item["item_reg_kg"]);
+               $_KG     = ( ( $_REQUEST["rollo_dims_{$x}"] * ( $item["item_reg_kg"] - $_REQUEST["sobranteamt_1"] - $_REQUEST["itemmermakg"] - $origusediffamt ) ) / $item["item_reg_width"] ) * $_REQUEST["reboamt_{$x}"];
+
+               $sql_width = round($_REQUEST["rollo_dims_{$x}"]);
+               $sql = " select distinct t1.*, t2.cat_id, t3.cat_title,
+                               t4b.add_name 'colordesc',
+                               t4.val_id 'colorid',
+                               t6.add_name 'material',
+                               SUM(t7.iss_inventory) 'iss_inventory'
+                        from item t1
+                        INNER JOIN item_productcats t2            ON t1.id = t2.item_id
+                        INNER JOIN productcats t3                 ON t2.cat_id = t3.id
+                        INNER JOIN tran_comments_item_vals t4     ON t4.item_id = t1.id
+                        INNER JOIN tran_comments_vals t4b         ON t4.val_id = t4b.id
+                        INNER JOIN tran_comments_item_vals t5     ON t5.item_id = t1.id
+                        INNER JOIN tran_comments_vals t6          ON t5.val_id = t6.id
+                        LEFT JOIN item_shops_storehouses t7       ON t1.id = t7.item_id
+                        LEFT JOIN company_shops_storehouses t8    ON t7.st_id = t8.id
+                        where
+                        t1.item_status       > 0 and
+                        t1.item_released     > 0 and
+                        t1.item_reg_kg       > 0 and
+                        t3.id                IN ({$_CONFIG["TELA_CATID"]},27) and
+                        t4.com_id            = {$_CONFIG["TELA_COLOR_CHARACTID"]} and
+                        t4.val_id            IN ({$item["colorid"]}) and
+                        t5.com_id            = {$_CONFIG["TELA_MATERIAL_CHARACTID"]} and
+                        t6.add_name          = '{$agenda["fab_type"]}' and
+                        t1.item_reg_gsm      = {$item["item_reg_gsm"]} and
+                        t1.item_reg_width    = {$sql_width}
+                        group by t1.id
+                        order by SUM(t7.iss_inventory) desc, t3.cat_title, t1.item_title, t1.item_number_prod";
+               $refitems = $CON->select($sql);
+               $refitem = $refitems[0];
+               foreach($refitems AS $refitemrow)
+               {
+                  if((int)$refitemrow["item_reg_length"] == $_LARGO)
+                  {
+                     $refitem = $refitemrow;
+                  }
+               }
+               ?>
+
+               <input type="hidden" name="stockplustotalkg_<?=$x?>" value="<?=(float)round($_KG,2)?>">
+               <input type="hidden" name="stockpluslargo_<?=$x?>" value="<?=(float)$_LARGO?>">
+               <tr>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;">
+                     <input type="text" class="inptxt clsreboamt" style="width:100%;text-align:center"
+                     name="reboamt_<?=$x?>" value="<?=(int)$_REQUEST["reboamt_{$x}"]?>"
+                     onkeyup="$('#idx_btn_term').hide(0);$('#idx_btn_save').show(0);recalcTotalWidth();">
+                  </td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left">
+                     <?php
+                     if((int)$refitem["id"])
+                     {  ?>
+                        <b><?=$refitem["item_number_prod"]?></b>
+                        <input type="hidden" name="stockplusitemid_<?=$x?>" value="<?=$refitem["id"]?>">
+                        <?php
+                     }
+                     else
+                     {  ?>
+                        <b class=msg_save_err>[NUEVO]</b>
+                        <input type="hidden" name="stockplusitemid_<?=$x?>" value="">
+                        <?php
+                     }
+                     ?>
+                  </td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$item["material"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left"><?=$item["colordesc"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($item["item_reg_gsm"])?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                     <input type="text" class="inptxt" id="rollo_dims_<?=$x?>" name="rollo_dims_<?=$x?>"
+                     style="width:100%;text-align:center"
+                     onkeyup="$('#idx_btn_term').hide(0);$('#idx_btn_save').show(0);recalcTotalWidth();"
+                     value="<?=printPrice($_REQUEST["rollo_dims_{$x}"],2)?>">
+                  </td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($_KG,2)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($_KG/(int)$_REQUEST["reboamt_{$x}"],2)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                     <?=printPrice($_REQUEST["itemmermakg"]/2,2)?>
+                  </td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($_LARGO)?></td>
+               </tr>
+               <?php
+               $x++;
+            }
+            ?>
+            </table>
+            <script language="Javascript">
+            function recalcTotalWidth()
+            {
+               /*
+               $('.clsreboamt').each(function()
+               {
+                  var xamt    = $(this).val();
+                  var idx     = $(this).attr('name').split('_')[1];
+                  var xwidth  = $('#rollo_dims_' +idx).val();
+               });
+               */
+            }
+            </script>
+            <table border="0" cellpadding="6" cellspacing="0">
+            <tr>
+               <td width="100" height="41"></td>
+               <td width="100">
+                  <?php
+                  $dspcss == "";
+                  if(round($_TOTAL_WIDTH) == round($item["item_reg_width"]))
+                  {  ?>
+                     <input type="button" class="btngreen" id="idx_btn_term" value="Finalizar" style="width:100%;padding:6px;border:0px;font-size:14px;margin-left:2px"
+                     onclick="if(confirm('Estas seguro?')) { document.xform_itemcalc.rebofinalize.value='1'; document.xform_itemcalc.submit(); }">
+                     <?php
+                     $dspcss = "display:none;";
+                  }
+                  ?>
+                  <input type="button" class="btngrey" id="idx_btn_save" value="Actualizar" style="<?=$dspcss?>;width:100%;padding:6px;border:0px;font-size:14px;margin-left:2px"
+                  onclick="document.xform_itemcalc.rebofinalize.value='0'; document.xform_itemcalc.submit();">
+               </td>
+               <td width="396"></td>
+               <td width="80" class="tdnrm" style="border-left:1px solid #DDDDDD;border-right:1px solid #DDDDDD;" align="center">
+                  <b id="idx_total_width"><?=printPrice($_TOTAL_WIDTH,2)?></b>
+               </td>
+            </tr>
+            </table>
+         </td>
+      </tr>
+      </table>
+      </form>
+      <?php
+   }
+
+   $sql = " select t1.*, t3.item_title, t3.item_number_prod, t2.item_amount,
+                   t3.item_reg_kg, t2.item_reboprod_amt, t2.item_reboprod_unitkg
+            from stockchanges t1
+            INNER JOIN stockchanges_items t2 ON t1.id = t2.stk_id
+            INNER JOIN item t3 ON t2.item_id = t3.id
+            where
+            t1.sth_fromrebo_agid = {$_REQUEST["agid"]} and
+            t1.stk_status        = 2 and
+            t1.stk_negative      = 1 and
+            t1.sth_fromrebo_agid_grphash != ''
+            order by t1.id asc";
+   $moveouts = $CON->select($sql);
+   if(count($moveouts) && $moveouts != false)
+   {  ?>
+      <table border="0" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+         <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+            <br>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+               <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                  <i class="fa fa-fw fa-info"></i> PRODUCCIÓN FINALIZADA
+               </td>
+            </tr>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Transacción</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Tipo</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Fecha</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Material</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Unit.</td>
+            </tr>
+            <?php
+            $_PROD_AMOUNT = 0;
+            foreach($moveouts AS $moveout)
+            {
+               $kgtotal = round($moveout["item_reg_kg"] * $moveout["item_amount"],2);
+               $bgcss = "border-top:3px double #666666";
+
+               $sql = " select t1.*, t3.item_title, t3.item_number_prod, t2.item_amount,
+                               t3.item_reg_kg, t2.item_reboprod_amt, t2.item_reboprod_unitkg
+                        from stockchanges t1
+                        INNER JOIN stockchanges_items t2 ON t1.id = t2.stk_id
+                        INNER JOIN item t3 ON t2.item_id = t3.id
+                        where
+                        t1.sth_fromrebo_agid = {$_REQUEST["agid"]} and
+                        t1.stk_status        = 2 and
+                        t1.stk_negative      = 0 and
+                        t1.sth_fromrebo_agid_grphash = '{$moveout["sth_fromrebo_agid_grphash"]}'
+                        order by t1.id desc";
+               $moveins = $CON->select($sql);
+               $sql_del_str = "&delsthids[]={$moveout["id"]}";
+               foreach($moveins AS $movein)
+               {
+                  if(!(int)$_SQLIDS[$movein["id"]])
+                  {
+                     $sql_del_str .= "&delsthids[]={$movein["id"]}";
+                     $_SQLIDS[$movein["id"]] = 1;
+                  }
+               }
+               ?>
+               <tr>
+                  <td style="<?=$bgcss?>"><?=$moveout["stk_num"]?></td>
+                  <td style="<?=$bgcss?>;color:red"><nobr><i class="fa fa-fw fa-minus"></i> Uso material</nobr></td>
+                  <td style="<?=$bgcss?>"><?=date("d.m.Y", $moveout["stk_bookdate"])?></td>
+                  <td style="<?=$bgcss?>"><?=$moveout["item_number_prod"]?></td>
+                  <td style="<?=$bgcss?>"><?=$moveout["item_title"]?></td>
+                  <td style="<?=$bgcss?>"><?=printPrice($moveout["item_reboprod_amt"],10)?></td>
+                  <td style="<?=$bgcss?>">
+                     <?=printPrice($moveout["item_reboprod_unitkg"],2)?>
+                     <span style="float:right">
+                        <i class="fa fa-fw fa-times-circle" style="color:red;cursor:pointer"
+                        onclick="if(confirm('Estas seguro?')) { location.href = 'prodwrk.php?mid=<?=$_REQUEST["mid"]?>&agid=<?=$_REQUEST["agid"]?>&mode=reboprod<?=$sql_del_str?>'; } "></i>
+                     </span>
+                  </td>
+               </tr>
+               <?php
+               $_PROD_AMOUNT += $moveout["item_amount"];
+               foreach($moveins AS $movein)
+               {
+                  $kgtotal = round($movein["item_reg_kg"] * $movein["item_amount"],2)
+                  ?>
+                  <tr style="background-color:#EEEEEE">
+                     <td><?=$movein["stk_num"]?></td>
+                     <td style="color:green"><nobr><i class="fa fa-fw fa-plus"></i> Ingreso material</nobr></td>
+                     <td><?=date("d.m.Y", $movein["stk_bookdate"])?></td>
+                     <td><?=$movein["item_number_prod"]?></td>
+                     <td><?=$movein["item_title"]?></td>
+                     <td><?=printPrice($movein["item_reboprod_amt"],10)?></td>
+                     <td><?=printPrice($movein["item_reboprod_unitkg"],2)?></td>
+                  </tr>
+                  <?php
+               }
+            }
+            ?>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad requerida</td>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad procesada</td>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad pendiente</td>
+            </tr>
+            <?php
+            if($reborder["req_rebo_rolloscc_opttype"] != "" && $reborder["req_rebo_rolloscc_opttype"] != "Por metro")
+            {  ?>
+               <tr>
+                  <td align="center" style="background-color:darkorange;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal2)?></td>
+                  <td align="center" style="background-color:green;font-weight:bold;color:#FFFFFF"><?=printPrice($_PROD_AMOUNT)?></td>
+                  <td align="center" style="background-color:red;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal2 - $_PROD_AMOUNT)?></td>
+               </tr>
+               <?php
+            }
+            elseif($reborder["req_rebo_rolloscc_opttype"] != "" && $reborder["req_rebo_rolloscc_opttype"] != "Por rollo")
+            {  ?>
+               <tr>
+                  <td align="center" style="background-color:darkorange;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal)?></td>
+                  <td align="center" style="background-color:green;font-weight:bold;color:#FFFFFF"><?=printPrice($_PROD_AMOUNT)?></td>
+                  <td align="center" style="background-color:red;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal - $_PROD_AMOUNT)?></td>
+               </tr>
+               <?php
+
+            }
+            ?>
+            </table>
+         </td>
+      </tr>
+      </table>
+      <?php
+   }
+   ?>
+   <form action="prodwrk.php#xform_itemsel" method="post" name="xform_itemsel" id="xform_itemsel">
+   <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+   <input type="hidden" name="agid" value="<?=$_REQUEST["agid"]?>">
+   <input type="hidden" name="mode" value="<?=$_REQUEST["mode"]?>">
+   <input type="hidden" name="refid" value="<?=$_REQUEST["refid"]?>">
+   <table border="0" width="100%" cellpadding="0" cellspacing="0">
+   <tr>
+      <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+         <table border="0" width="100%" cellpadding="0" cellspacing="0">
+         <tr>
+            <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+               <i class="fa fa-fw fa-cubes"></i> MATERIALES DISPONIBLES PARA CONSUMIR
+            </td>
+         </tr>
+         </table>
+         <table border="0" width="100%" cellpadding="6" cellspacing="0">
+         <colgroup>
+         </colgroup>
+         <tr>
+            <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+            <td align="left" class="tdheader" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg</td>
+            <td width="100" class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD;">Stock</td>
+            <td width="20" class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD;">#1</td>
+         </tr>
+         <?php
+         for($x = 0; $x < count($allitems) && $allitems != false; $x++)
+         {
+            $item = $allitems[$x];
+
+            $bcss = "";
+            if($item["id"] == $_REQUEST["selitemid1"] || $item["id"] == $_REQUEST["selitemid2"])
+               $bcss = "background-color:#FFF5A0";
+            ?>
+            <tr onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>"><?=$item["item_number_prod"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=$item["material"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="left"><?=$item["colordesc"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_gsm"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_width"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_length"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_kg"],2)?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="right"><?=printPrice($item["iss_inventory"],10)?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center">
+                  <input type="radio" name="selitemid1" value="<?=$item["id"]?>" onclick="document.xform_itemsel.submit();"
+                  <?if($item["id"] == $_REQUEST["selitemid1"]) echo "checked"?>>
+               </td>
+            </tr>
+            <?php
+         }
+         ?>
+         </table>
+      </td>
+   </tr>
+   </table>
+   </form>
+   <br><br><br>
+   <?php
+}
+//----------------------------------------------------------------------------------
+elseif($reborder["req_rebo_type"] == "Rebobinado")
+{
+   if((int)$_REQUEST["selitemid1"] )
+   {
+      $itemsel = Array();
+      foreach($allitems AS $allitem)
+      {
+         if((int)$_REQUEST["selitemid1"] == $allitem["id"])
+            $itemsel = $allitem;
+      }
+
+
+      if((int)$_REQUEST["rebofinalize"])
+      {
+         // echo "<pre>";
+         // print_r($_REQUEST);
+         // exit;
+         // print_r($itemsel);
+
+
+         $origen_usekgamt = getPrice($_REQUEST["useamt_1"],2);
+         $origen_itemid   = (int)$_REQUEST["selitemid1"];
+         $origen_basekg   = $itemsel["item_reg_kg"];
+         $origen_units    = round($origen_usekgamt / $origen_basekg,10);
+
+         $stk_num          = createTransactionNumber($CON, $_SESSION["user_company_id"], "stockchange");
+         $annottext        = printPrice($origen_usekgamt,2).' Kilogramos';
+         $stk_bookdate     = time();
+         $currtme          = time();
+         $stk_fixedsthid   = $itemsel["st_id"];
+         $sth_fromrebo_agid_grphash = md5(microtime());
+
+         $item_reboprod_amt    = 1;
+         $item_reboprod_unitkg = round($origen_usekgamt,2);
+
+         $_PRODITEMS = Array();
+         if($origen_units > 0)
+         {
+            $sql = " insert into stockchanges
+                     (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative,
+                      stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash)
+                     VALUES
+                     ('{$stk_num}', '{$annottext}', 19, {$_SESSION["user_company_id"]}, {$agenda["req_shop_id"]},
+                      {$stk_bookdate}, 1, {$currtme}, {$_SESSION["user_id"]}, {$stk_fixedsthid}, {$_REQUEST["agid"]},
+                     '{$sth_fromrebo_agid_grphash}')";
+            $res = $CON->no_result($sql);
+            if($res)
+            {
+               $stk_id = mysql_insert_id();
+               $sql = " insert into stockchanges_items
+                        (stk_id, item_id, item_pos, item_amount, item_type, item_st_id, item_costprice_brutto,
+                         item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes, item_charges_act,
+                         item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                        VALUES
+                        ({$stk_id}, {$origen_itemid}, 0, {$origen_units}, 'item',
+                         {$stk_fixedsthid}, 0.00, 0.00, 0.00, 0.00, 0, 0,
+                         {$item_reboprod_amt}, {$item_reboprod_unitkg})";
+               $CON->no_result($sql);
+               bookStockChange($CON, $stk_id);
+
+
+               $dest_basekg   = $itemsel["item_reg_kg"];
+               $dest_usekgamt = (float)$_REQUEST["useamt_1"] - $_REQUEST["itemmermakg"];
+               $dest_units    = round($dest_usekgamt / $dest_basekg,10);
+
+               if($dest_units > 0)
+               {
+                  unset($_PRODITEM);
+                  $_PRODITEM["dest_itemid"] = $origen_itemid;
+                  $_PRODITEM["dest_units"]   = $dest_units;
+                  $_PRODITEM["item_reboprod_amt"] = 1;
+                  $_PRODITEM["item_reboprod_unitkg"] = round($dest_usekgamt,2);
+                  $_PRODITEMS[] = $_PRODITEM;
+               }
+            }
+         }
+
+         if(count($_PRODITEMS))
+         {
+            $stk_num = createTransactionNumber($CON, $_SESSION["user_company_id"], "stockchange");
+
+            $sql = " insert into stockchanges
+                     (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative,
+                      stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash)
+                     VALUES
+                     ('{$stk_num}', 'Generado por producción', 20, {$_SESSION["user_company_id"]}, {$agenda["req_shop_id"]},
+                      {$currtme},  0, {$currtme}, {$_SESSION["user_id"]}, {$stk_fixedsthid}, {$_REQUEST["agid"]},
+                      '{$sth_fromrebo_agid_grphash}')";
+            $res = $CON->no_result($sql);
+            if($res)
+            {
+               $stk_id = mysql_insert_id();
+               $item_pos = 0;
+               foreach($_PRODITEMS AS $_PRODITEMROW)
+               {
+                  $sql = " insert into stockchanges_items
+                           (stk_id, item_id, item_pos, item_amount, item_type, item_st_id, item_costprice_brutto,
+                            item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes, item_charges_act,
+                            item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                           VALUES
+                           ({$stk_id}, {$_PRODITEMROW["dest_itemid"]}, {$item_pos}, {$_PRODITEMROW["dest_units"]}, 'item',
+                            {$stk_fixedsthid}, 0.00, 0.00, 0.00, 0.00, 0, 0,
+                            {$_PRODITEMROW["item_reboprod_amt"]}, {$_PRODITEMROW["item_reboprod_unitkg"]})";
+                  $CON->no_result($sql);
+                  $item_pos++;
+
+               }
+               bookStockChange($CON, $stk_id);
+            }
+         }
+
+
+         ?>
+         <script language="Javascript">
+            location.href = 'prodwrk.php?mid=<?=$_REQUEST["mid"]?>&agid=<?=$_REQUEST["agid"]?>&mode=reboprod';
+         </script>
+         <?php
+      }
+      ?>
+      <script language="Javascript">
+      function recalcUsedAmt(xlineid)
+      {
+         var itemregkg     = parseFloat($('#ingresokgamt_' +xlineid).val().replaceAll(",", "."));
+         var sobranteamt   = parseFloat($('#sobranteamt_' +xlineid).val().replaceAll(",", "."));
+         var useamt        = parseFloat($('#useamt_' +xlineid).val().replaceAll(",", "."));
+
+         if(isNaN(sobranteamt))
+            sobranteamt = 0;
+
+         useamt = itemregkg - sobranteamt;
+         $('#useamt_' +xlineid).val(roundToDecimal(useamt,2));
+         $('#useamt_' +xlineid).val($('#useamt_' +xlineid).val().replaceAll(".", ","));
+         $('#sobranteamt_' +xlineid).val($('#sobranteamt_' +xlineid).val().replaceAll(".", ","));
+         $('#idx_btn_term').hide(0);
+      }
+      function roundToDecimal(num, decimalPlaces)
+      {
+         const factor = Math.pow(10, decimalPlaces);
+         return Math.round(num * factor) / factor;
+      }
+      </script>
+      <form action="prodwrk.php#xform_itemcalc" method="post" name="xform_itemcalc" id="xform_itemcalc">
+      <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+      <input type="hidden" name="agid" value="<?=$_REQUEST["agid"]?>">
+      <input type="hidden" name="mode" value="<?=$_REQUEST["mode"]?>">
+      <input type="hidden" name="refid" value="<?=$_REQUEST["refid"]?>">
+      <input type="hidden" name="selitemid1" value="<?=$_REQUEST["selitemid1"]?>">
+      <input type="hidden" name="selitemid2" value="<?=$_REQUEST["selitemid2"]?>">
+      <input type="hidden" name="rebocalc" value="1">
+      <input type="hidden" name="rebofinalize" value="0">
+      <table border="0" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+         <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+            <br>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+               <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                  <i class="fa fa-fw fa-chevron-right"></i> ENTRADA REBOBINADORA
+               </td>
+            </tr>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" width="100" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+               <td align="left" class="tdheader" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Pesa</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Sobrante</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Usado</td>
+            </tr>
+            <?php
+            $item    = $itemsel;
+            $lidx    = 1;
+
+            if($_REQUEST["ingresokgamt_{$lidx}"] == "")
+               $_REQUEST["ingresokgamt_{$lidx}"] = printPrice($item["item_reg_kg"],2);
+
+            $_REQUEST["ingresokgamt_{$lidx}"] = getPrice(trim($_REQUEST["ingresokgamt_{$lidx}"]),2);
+            $_REQUEST["sobranteamt_{$lidx}"] = getPrice(trim($_REQUEST["sobranteamt_{$lidx}"]),2);
+            $useamt  = $_REQUEST["ingresokgamt_{$lidx}"] - $_REQUEST["sobranteamt_{$lidx}"];
+            $origusediffamt = $item["item_reg_kg"] - $useamt;
+
+            $baselength = $item["item_reg_length"] - (($origusediffamt * $item["item_reg_length"]) / $item["item_reg_kg"]);
+            ?>
+            <input type="hidden" id="itemregkg_<?=$lidx?>" value="<?=$item["item_reg_kg"]?>">
+            <tr onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;"><?=$item["item_number_prod"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$item["material"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left"><?=$item["colordesc"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($item["item_reg_gsm"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($item["item_reg_width"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($baselength)?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                  <input type="text" class="inptxt" id="ingresokgamt_<?=$lidx?>" name="ingresokgamt_<?=$lidx?>"
+                  style="width:100%;text-align:center" onkeyup="recalcUsedAmt('<?=$lidx?>')"
+                  value="<?=printPrice($_REQUEST["ingresokgamt_{$lidx}"],2)?>">
+               </td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                  <input type="text" class="inptxt" id="sobranteamt_<?=$lidx?>" name="sobranteamt_<?=$lidx?>"
+                  style="width:100%;text-align:center" onkeyup="recalcUsedAmt('<?=$lidx?>')"
+                  value="<?=printPrice($_REQUEST["sobranteamt_{$lidx}"],2)?>">
+               </td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                  <input type="text" class="inptxt" id="useamt_<?=$lidx?>" name="useamt_<?=$lidx?>"
+                  style="width:100%;text-align:center;background-color:#EEEEEE" readonly
+                  value="<?=printPrice($useamt,2)?>">
+               </td>
+            </tr>
+            <?php
+
+            $_REQUEST["itemmermakg"] = getPrice(trim($_REQUEST["itemmermakg"]),2);
+            ?>
+            </table>
+
+            <table border="0" cellpadding="6" cellspacing="0">
+            <colgroup>
+               <col width="100">
+               <col width="80">
+               <col width="100">
+            </colgroup>
+            <tr style="display:none">
+               <td width="100">Cantidad</td>
+               <td width="80">
+                  <input type="text" class="inptxt" name="itemprodamt" id="itemprodamt" style="width:100%"
+                  onkeyup="$('#idx_btn_term').hide(0);"
+                  value="<?if((int)$_REQUEST["itemprodamt"] > 0) echo (int)$_REQUEST["itemprodamt"]; else echo "1"?>">
+               </td>
+            </tr>
+            <tr>
+               <td width="100">Merma Kg</td>
+               <td width="80">
+                  <input type="text" class="inptxt" name="itemmermakg" id="itemmermakg" style="width:100%"
+                  onkeyup="$('#idx_btn_term').hide(0);"
+                  value="<?if((float)$_REQUEST["itemmermakg"] > 0) echo printPrice($_REQUEST["itemmermakg"],2)?>">
+               </td>
+               <td>
+                  <input type="button" class="btngrey" value="Calcular" style="width:100%;padding:6px;border:0px;font-size:14px;margin-left:2px"
+                  onclick="document.xform_itemcalc.submit();">
+               </td>
+            </tr>
+            </table>
+            <?php
+            if((int)$_REQUEST["rebocalc"])
+            {
+               $refitem = $itemsel;
+
+               $origusediffamt = $item["item_reg_kg"] - $_REQUEST["ingresokgamt_{$lidx}"];
+               $_LARGO  = $item["item_reg_length"] - (($_REQUEST["itemmermakg"] * $item["item_reg_length"]) / $item["item_reg_kg"])
+                                                   - (($_REQUEST["sobranteamt_{$lidx}"] * $item["item_reg_length"]) / $item["item_reg_kg"])
+                                                   - (($origusediffamt * $item["item_reg_length"]) / $item["item_reg_kg"]);
+               ?>
+               <table border="0" width="100%" cellpadding="0" cellspacing="0">
+               <tr>
+                  <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                     <i class="fa fa-fw fa-chevron-left"></i> SALIDA REBOBINADORA
+                  </td>
+               </tr>
+               </table>
+               <table border="0" width="100%" cellpadding="6" cellspacing="0">
+               <tr>
+                  <td class="tdheader" width="100" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+                  <td align="left" class="tdheader" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Merma</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Salida</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+               </tr>
+               <tr>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;"><b><?=$refitem["item_number_prod"]?></b></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$refitem["material"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left"><?=$refitem["colordesc"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($refitem["item_reg_gsm"])?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($refitem["item_reg_width"])?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($useamt * $_REQUEST["itemprodamt"],2)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                     <?=printPrice($_REQUEST["itemmermakg"],2)?>
+                  </td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice(($useamt * $_REQUEST["itemprodamt"]) - $_REQUEST["itemmermakg"],2)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($_LARGO)?></td>
+               </tr>
+               </table>
+
+               <table border="0" cellpadding="6" cellspacing="0">
+               <tr>
+                  <td width="100">
+                     <?php
+                     $dspcss == "";
+                     if($_LARGO <= 0.00)
+                        $dspcss = "display:none;";
+                     ?>
+                     <input type="button" class="btngreen" id="idx_btn_term" value="Finalizar" style="<?=$dspcss?>;width:100%;padding:6px;border:0px;font-size:14px;margin-left:2px"
+                     onclick="if(confirm('Estas seguro?')) { document.xform_itemcalc.rebofinalize.value='1'; document.xform_itemcalc.submit(); }">
+                  </td>
+               </tr>
+               </table>
+               <?php
+            }
+            ?>
+         </td>
+      </tr>
+      </table>
+      </form>
+      <?php
+   }
+
+   $sql = " select t1.*, t3.item_title, t3.item_number_prod, t2.item_amount,
+                   t3.item_reg_kg, t2.item_reboprod_amt, t2.item_reboprod_unitkg
+            from stockchanges t1
+            INNER JOIN stockchanges_items t2 ON t1.id = t2.stk_id
+            INNER JOIN item t3 ON t2.item_id = t3.id
+            where
+            t1.sth_fromrebo_agid = {$_REQUEST["agid"]} and
+            t1.stk_status        = 2 and
+            t1.stk_negative      = 1 and
+            t1.sth_fromrebo_agid_grphash != ''
+            order by t1.id asc";
+   $moveouts = $CON->select($sql);
+   if(count($moveouts) && $moveouts != false)
+   {  ?>
+      <table border="0" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+         <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+            <br>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+               <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                  <i class="fa fa-fw fa-info"></i> PRODUCCIÓN FINALIZADA
+               </td>
+            </tr>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Transacción</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Tipo</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Fecha</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Material</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Unit.</td>
+            </tr>
+            <?php
+            $_PROD_AMOUNT = 0;
+            $_PROD_AMOUNT_LENGTH = 0;
+            foreach($moveouts AS $moveout)
+            {
+               $kgtotal = round($moveout["item_reg_kg"] * $moveout["item_amount"],2);
+               $bgcss = "border-top:3px double #666666";
+
+               $sql = " select t1.*, t3.item_title, t3.item_number_prod, t2.item_amount,
+                               t3.item_reg_kg, t2.item_reboprod_amt, t2.item_reboprod_unitkg,
+                               t3.item_reg_length
+                        from stockchanges t1
+                        INNER JOIN stockchanges_items t2 ON t1.id = t2.stk_id
+                        INNER JOIN item t3 ON t2.item_id = t3.id
+                        where
+                        t1.sth_fromrebo_agid = {$_REQUEST["agid"]} and
+                        t1.stk_status        = 2 and
+                        t1.stk_negative      = 0 and
+                        t1.sth_fromrebo_agid_grphash = '{$moveout["sth_fromrebo_agid_grphash"]}'
+                        order by t1.id desc";
+               $moveins = $CON->select($sql);
+               $sql_del_str = "&delsthids[]={$moveout["id"]}";
+               foreach($moveins AS $movein)
+               {
+                  if(!(int)$_SQLIDS[$movein["id"]])
+                  {
+                     $sql_del_str .= "&delsthids[]={$movein["id"]}";
+                     $_SQLIDS[$movein["id"]] = 1;
+                  }
+               }
+               ?>
+               <tr>
+                  <td style="<?=$bgcss?>"><?=$moveout["stk_num"]?></td>
+                  <td style="<?=$bgcss?>;color:red"><nobr><i class="fa fa-fw fa-minus"></i> Uso material</nobr></td>
+                  <td style="<?=$bgcss?>"><?=date("d.m.Y", $moveout["stk_bookdate"])?></td>
+                  <td style="<?=$bgcss?>"><?=$moveout["item_number_prod"]?></td>
+                  <td style="<?=$bgcss?>"><?=$moveout["item_title"]?></td>
+                  <td style="<?=$bgcss?>"><?=printPrice($moveout["item_reboprod_amt"],10)?></td>
+                  <td style="<?=$bgcss?>">
+                     <?=printPrice($moveout["item_reboprod_unitkg"],2)?>
+                     <span style="float:right">
+                        <i class="fa fa-fw fa-times-circle" style="color:red;cursor:pointer"
+                        onclick="if(confirm('Estas seguro?')) { location.href = 'prodwrk.php?mid=<?=$_REQUEST["mid"]?>&agid=<?=$_REQUEST["agid"]?>&mode=reboprod<?=$sql_del_str?>'; } "></i>
+                     </span>
+                  </td>
+               </tr>
+               <?php
+               $_PROD_AMOUNT += $moveout["item_amount"];
+               foreach($moveins AS $movein)
+               {
+                  $kgtotal = round($movein["item_reg_kg"] * $movein["item_amount"],2)
+                  ?>
+                  <tr style="background-color:#EEEEEE">
+                     <td><?=$movein["stk_num"]?></td>
+                     <td style="color:green"><nobr><i class="fa fa-fw fa-plus"></i> Ingreso material</nobr></td>
+                     <td><?=date("d.m.Y", $movein["stk_bookdate"])?></td>
+                     <td><?=$movein["item_number_prod"]?></td>
+                     <td><?=$movein["item_title"]?></td>
+                     <td><?=printPrice($movein["item_reboprod_amt"],10)?></td>
+                     <td><?=printPrice($movein["item_reboprod_unitkg"],2)?></td>
+                  </tr>
+                  <?php
+                  $_PROD_AMOUNT_LENGTH += ($movein["item_amount"] * $movein["item_reg_length"]);
+               }
+            }
+            ?>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad requerida</td>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad procesada</td>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad pendiente</td>
+            </tr>
+            <?php
+            if($reborder["req_rebo_rolloscc_opttype"] != "" && $reborder["req_rebo_rolloscc_opttype"] != "Por metro")
+            {  ?>
+               <tr>
+                  <td align="center" style="background-color:darkorange;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal2)?></td>
+                  <td align="center" style="background-color:green;font-weight:bold;color:#FFFFFF"><?=printPrice($_PROD_AMOUNT)?></td>
+                  <td align="center" style="background-color:red;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal2 - $_PROD_AMOUNT)?></td>
+               </tr>
+               <?php
+            }
+            elseif($reborder["req_rebo_rolloscc_opttype"] != "" && $reborder["req_rebo_rolloscc_opttype"] != "Por rollo")
+            {  ?>
+               <tr>
+                  <td align="center" style="background-color:darkorange;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal)?></td>
+                  <td align="center" style="background-color:green;font-weight:bold;color:#FFFFFF"><?=printPrice($_PROD_AMOUNT_LENGTH)?></td>
+                  <td align="center" style="background-color:red;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal - $_PROD_AMOUNT_LENGTH)?></td>
+               </tr>
+               <?php
+
+            }
+            ?>
+            </table>
+         </td>
+      </tr>
+      </table>
+      <?php
+   }
+   ?>
+   <form action="prodwrk.php#xform_itemsel" method="post" name="xform_itemsel" id="xform_itemsel">
+   <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+   <input type="hidden" name="agid" value="<?=$_REQUEST["agid"]?>">
+   <input type="hidden" name="mode" value="<?=$_REQUEST["mode"]?>">
+   <input type="hidden" name="refid" value="<?=$_REQUEST["refid"]?>">
+   <table border="0" width="100%" cellpadding="0" cellspacing="0">
+   <tr>
+      <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+         <table border="0" width="100%" cellpadding="0" cellspacing="0">
+         <tr>
+            <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+               <i class="fa fa-fw fa-cubes"></i> MATERIALES DISPONIBLES PARA CONSUMIR
+            </td>
+         </tr>
+         </table>
+         <table border="0" width="100%" cellpadding="6" cellspacing="0">
+         <colgroup>
+         </colgroup>
+         <tr>
+            <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+            <td align="left" class="tdheader" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg</td>
+            <td width="100" class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD;">Stock</td>
+            <td width="20" class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD;">#1</td>
+         </tr>
+         <?php
+         for($x = 0; $x < count($allitems) && $allitems != false; $x++)
+         {
+            $item = $allitems[$x];
+
+            $bcss = "";
+            if($item["id"] == $_REQUEST["selitemid1"] || $item["id"] == $_REQUEST["selitemid2"])
+               $bcss = "background-color:#FFF5A0";
+            ?>
+            <tr onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>"><?=$item["item_number_prod"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=$item["material"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="left"><?=$item["colordesc"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_gsm"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_width"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_length"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_kg"],2)?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="right"><?=printPrice($item["iss_inventory"],10)?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center">
+                  <input type="radio" name="selitemid1" value="<?=$item["id"]?>" onclick="document.xform_itemsel.submit();"
+                  <?if($item["id"] == $_REQUEST["selitemid1"]) echo "checked"?>>
+               </td>
+            </tr>
+            <?php
+         }
+         ?>
+         </table>
+      </td>
+   </tr>
+   </table>
+   </form>
+   <br><br><br>
+   <?php
+}
+//----------------------------------------------------------------------------------
+elseif($reborder["req_rebo_type"] == "Empalme")
+{
+   if((int)$_REQUEST["selitemid1"] && (int)$_REQUEST["selitemid2"])
+   {
+      $itemsels = Array();
+      foreach($allitems AS $allitem)
+      {
+         if((int)$_REQUEST["selitemid1"] == $allitem["id"])
+         {
+            $itemsel_1  =  $allitem;
+            $itemsels[] = $allitem;
+         }
+      }
+      foreach($allitems AS $allitem)
+      {
+         if((int)$_REQUEST["selitemid2"] == $allitem["id"])
+         {
+            $itemsel_2  =  $allitem;
+            $itemsels[] = $allitem;
+         }
+
+         if((int)$_REQUEST["SALIDA_ITEMPARENTID"] == $allitem["id"])
+         {
+            $itemsel_parent = $allitem;
+         }
+      }
+
+      if((int)$_REQUEST["rebocalc"])
+      {
+         $_REQUEST["itemprodamt"] = (int)trim($_REQUEST["itemprodamt"]);
+         if($_REQUEST["itemprodamt"] <= 0)
+            $_REQUEST["itemprodamt"] = 1;
+      }
+
+      if((int)$_REQUEST["rebofinalize"])
+      {
+         // echo "<pre>";
+         // print_r($_REQUEST);
+
+         $origen_usekgamt = getPrice($_REQUEST["useamt_1"],2);
+         $origen_itemid   = (int)$_REQUEST["selitemid1"];
+         $origen_basekg   = $itemsel_1["item_reg_kg"];
+         $origen_units    = round($origen_usekgamt / $origen_basekg,10);
+
+         $stk_num          = createTransactionNumber($CON, $_SESSION["user_company_id"], "stockchange");
+         $annottext        = printPrice($origen_usekgamt,2).' Kilogramos';
+         $stk_bookdate     = time();
+         $currtme          = time();
+         $stk_fixedsthid   = $itemsel_1["st_id"];
+         $sth_fromrebo_agid_grphash = md5(microtime());
+
+         $item_reboprod_amt    = 1;
+         $item_reboprod_unitkg = round($origen_usekgamt,2);
+
+         if($origen_units > 0)
+         {
+            $sql = " insert into stockchanges
+                     (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative,
+                      stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash)
+                     VALUES
+                     ('{$stk_num}', '{$annottext}', 19, {$_SESSION["user_company_id"]}, {$agenda["req_shop_id"]},
+                      {$stk_bookdate}, 1, {$currtme}, {$_SESSION["user_id"]}, {$stk_fixedsthid}, {$_REQUEST["agid"]},
+                     '{$sth_fromrebo_agid_grphash}')";
+            $res = $CON->no_result($sql);
+            if($res)
+            {
+               $stk_id = mysql_insert_id();
+               $sql = " insert into stockchanges_items
+                        (stk_id, item_id, item_pos, item_amount, item_type, item_st_id, item_costprice_brutto,
+                         item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes, item_charges_act,
+                         item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                        VALUES
+                        ({$stk_id}, {$origen_itemid}, 0, {$origen_units}, 'item',
+                         {$stk_fixedsthid}, 0.00, 0.00, 0.00, 0.00, 0, 0,
+                         {$item_reboprod_amt}, {$item_reboprod_unitkg})";
+               $CON->no_result($sql);
+
+               $origen_usekgamt = getPrice($_REQUEST["useamt_2"],2);
+               $origen_itemid   = (int)$_REQUEST["selitemid2"];
+               $origen_basekg   = $itemsel_2["item_reg_kg"];
+               $origen_units    = round($origen_usekgamt / $origen_basekg,10);
+               $item_reboprod_amt    = 1;
+               $item_reboprod_unitkg = round($origen_usekgamt,2);
+
+               $sql = " insert into stockchanges_items
+                        (stk_id, item_id, item_pos, item_amount, item_type, item_st_id, item_costprice_brutto,
+                         item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes, item_charges_act,
+                         item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                        VALUES
+                        ({$stk_id}, {$origen_itemid}, 1, {$origen_units}, 'item',
+                         {$stk_fixedsthid}, 0.00, 0.00, 0.00, 0.00, 0, 0,
+                         {$item_reboprod_amt}, {$item_reboprod_unitkg})";
+               $CON->no_result($sql);
+
+               bookStockChange($CON, $stk_id);
+            }
+
+            $dest_itemid = (int)$_REQUEST["stockplusitemid_1"];
+            $dest_dims = (float)$_REQUEST["rollo_dims_1"];
+
+            if((int)$dest_itemid)
+            {
+               $sql = " select *
+                        from item
+                        where
+                        id = {$dest_itemid}";
+               $dest_itemdata = $CON->select($sql);
+               $dest_itemdata = $dest_itemdata[0];
+
+               $dest_basekg   = $dest_itemdata["item_reg_kg"];
+               $dest_usekgamt = (float)$_REQUEST["stockplustotalkg_{$idx}"];
+               $dest_units    = round($dest_usekgamt / $dest_basekg,10);
+
+               $dest_usekgamt = (float)$_REQUEST["SALIDA_KG_UNIT"];
+               $dest_units    = (int)$_REQUEST["SALIDA_LARGO_UNIT"] / $_REQUEST["SALIDA_LARGO"];
+               $dest_unitkg   = round($dest_usekgamt / $dest_units,2);
+
+               $item_reg_length_orig = (int)$_REQUEST["SALIDA_LARGO"];
+               $item_reg_length_new  = (int)$_REQUEST["SALIDA_LARGO_UNIT"];
+               $unit_real            = $item_reg_length_new / $item_reg_length_orig;
+               $dest_units           = round(1 * $unit_real,10);
+
+               if($dest_units > 0)
+               {
+                  unset($_PRODITEM);
+                  $_PRODITEM["dest_itemid"] = $dest_itemid;
+                  $_PRODITEM["dest_units"]   = $dest_units;
+                  $_PRODITEM["item_reboprod_amt"] = 1;
+                  $_PRODITEM["item_reboprod_unitkg"] = round($_REQUEST["SALIDA_KG_UNIT"],2);
+                  $_PRODITEMS[] = $_PRODITEM;
+               }
+            }
+            else
+            {
+               $_PARENTARR = explode("/", $itemsel_parent["item_title"]);
+               $_ITEMNAME  = strtoupper($itemsel_parent["material"])."/";
+               $_ITEMNAME .= strtoupper($itemsel_parent["colordesc"])."/";
+               $_ITEMNAME .= strtoupper($_PARENTARR[2])."/";
+               $_ITEMNAME .= $dest_dims."x";
+               $_ITEMNAME .= (int)$itemsel_parent["item_reg_gsm"]."x";
+               $_ITEMNAME .= (int)$_REQUEST["SALIDA_LARGO"];
+
+               $dest_usekgamt = (float)$_REQUEST["SALIDA_KG_UNIT"];
+               $dest_units    = (int)$_REQUEST["SALIDA_LARGO_UNIT"] / $_REQUEST["SALIDA_LARGO"];
+               $dest_unitkg   = round($dest_usekgamt / $dest_units,2);
+
+               $item_reg_length_orig = (int)$_REQUEST["SALIDA_LARGO"];
+               $item_reg_length_new  = (int)$_REQUEST["SALIDA_LARGO_UNIT"];
+               $unit_real            = $item_reg_length_new / $item_reg_length_orig;
+               $dest_units           = round(1 * $unit_real,10);
+
+               // echo $_ITEMNAME."<br>";
+               // echo $dest_units."<br>";
+
+               $sql = " select *
+                        from item
+                        where
+                        id = {$_REQUEST["SALIDA_ITEMPARENTID"]}";
+               $baseitem = $CON->select($sql);
+               $baseitem = $baseitem[0];
+
+               //START LOG
+               $_LOGHEAD   = date("d.m.Y H:i:s")." | {$reborder["req_rebo_type"]} | {$agenda["req_number"]} | {$_SESSION["wrk_lastname"]} | VAR=baseitem:\n";
+               $_LOGHEAD   .= $sql."\n";
+               file_put_contents("reboprod.log", $_LOGHEAD, FILE_APPEND);
+               //END LOG
+
+
+               $colnames = array_keys($baseitem);
+               unset($colnames[0]);
+               $collist = implode(", ", $colnames);
+
+               $sql = " insert into item
+                        ({$collist})
+                        select {$collist}
+                        from item
+                        where
+                        id = {$baseitem["id"]}";
+               $res = $CON->no_result($sql);
+
+               //START LOG
+               $_LOGHEAD   = date("d.m.Y H:i:s")." | {$agenda["req_number"]} | {$_SESSION["wrk_lastname"]} | res=".(int)$res.":\n";
+               $_LOGHEAD   .= $sql."\n";
+               file_put_contents("reboprod.log", $_LOGHEAD, FILE_APPEND);
+               //END LOG
+
+               if($res)
+               {
+                  $newitemid        = mysql_insert_id();
+
+                  $sql_catid = (int)$_REQUEST["catid"];
+                  $_XCATID = 6;
+                  $_XPREFIX = "TEL";
+                  if(strpos($baseitem["item_number_prod"], "BTE") !== false)
+                  {
+                     $_XCATID = 27;
+                     $_XPREFIX = "BTE";
+                  }
+
+                  $sql_catid = (int)$_REQUEST["catid"];
+                  $sql = " select t1.*, t2.cat_prefix
+                           from item t1
+                           INNER JOIN item_productcats t3   ON t1.id = t3.item_id
+                           INNER JOIN productcats t2        ON t3.cat_id = t2.id
+                           where
+                           t3.cat_id = {$_XCATID} and
+                           t1.item_number_prod like '{$_XPREFIX}%'
+                           order by t1.id";
+                  $items = $CON->select($sql);
+
+                  //START LOG
+                  $_LOGHEAD   = date("d.m.Y H:i:s")." | {$agenda["req_number"]} | {$_SESSION["wrk_lastname"]} | ITEMS FOR CATPREFIX:\n";
+                  $_LOGHEAD   .= $sql."\n";
+                  file_put_contents("reboprod.log", $_LOGHEAD, FILE_APPEND);
+                  //END LOG
+
+                  $maxid = 1;
+                  for($x = 0; $x < count($items) && $items != false; $x++)
+                  {
+                     $inumb   = $items[$x]["item_number_prod"];
+                     $thisid  = str_replace($items[$x]["cat_prefix"],"",$inumb);
+                     if($thisid +1 >= $maxid)
+                        $maxid = $thisid +1;
+                  }
+                  $item_number_prod = "{$_XPREFIX}".sprintf("%04s",$maxid);
+
+                  //----------------------------------------------------------------------------------
+                  $sql = " insert into item_productcats
+                           (item_id, cat_id)
+                           VALUES
+                           ({$newitemid}, {$_XCATID})";
+                  $CON->no_result($sql);
+
+                  //----------------------------------------------------------------------------------
+                  $sql = " insert into item_shops
+                           (item_id, shop_id)
+                           select {$newitemid} AS 'item_id', shop_id
+                           from item_shops
+                           where
+                           item_id = {$baseitem["id"]}";
+                  $CON->no_result($sql);
+
+                  $sql = " update item
+                           set
+                           item_title        = '{$_ITEMNAME}',
+                           item_number_prod  = '{$item_number_prod}',
+                           item_reg_width    = {$dest_dims},
+                           item_reg_gsm      = ".(int)$baseitem["item_reg_gsm"].",
+                           item_reg_kg       = {$dest_unitkg}
+                           where
+                           id = {$newitemid}";
+                  $xres = $CON->no_result($sql);
+
+                  //START LOG
+                  $_LOGHEAD   = date("d.m.Y H:i:s")." | {$agenda["req_number"]} | {$_SESSION["wrk_lastname"]} | UPDATE NEW ITEM ".(int)$xres.":\n";
+                  $_LOGHEAD   .= $sql."\n";
+                  file_put_contents("reboprod.log", $_LOGHEAD, FILE_APPEND);
+                  //END LOG
+
+                  //item_reg_length   = ".(int)$_REQUEST["stockpluslargo_{$idx}"].",
+
+                  // FALTA REGISTRAR CHARACTS
+                  //----------------------------------------------------------------------------------
+                  $sql = " select *
+                           from tran_comments_item_vals
+                           where
+                           item_id = {$baseitem["id"]}";
+                  $cvals = $CON->select($sql);
+                  foreach($cvals AS $cval)
+                  {
+                     $val_desc      = trim(addslashes($cval["val_desc"]));
+                     $val_desc_eng  = trim(addslashes($cval["val_desc_eng"]));
+
+                     $sql = " insert into tran_comments_item_vals
+                              (item_id, com_id, val_id, val_desc, val_desc_eng)
+                              VALUES
+                              ({$newitemid}, {$cval["com_id"]}, {$cval["val_id"]},
+                               '{$cval["val_desc"]}', '{$cval["val_desc_eng"]}')";
+                     $CON->no_result($sql);
+                  }
+
+                  //INSERT / CREATE WITH CHARACT: 32 | LENGTH CHARACT: 33
+                  //----------------------------------------------------------------------------------
+                  $_UPDCOMIDARR  = Array();
+                  $_UPDCOMIDARR[0]["_UPDCOMID"]    = 32;
+                  $_UPDCOMIDARR[0]["_UPDCOMIVAL"]  = $dest_dims;
+
+                  foreach($_UPDCOMIDARR AS $_UPDCOMIDARROW)
+                  {
+                     $_UPDCOMID     = $_UPDCOMIDARROW["_UPDCOMID"];
+                     $_UPDCOMIVAL   = $_UPDCOMIDARROW["_UPDCOMIVAL"];
+
+                     $sql = " select *
+                              from tran_comments_vals
+                              where
+                              add_com_id = {$_UPDCOMID} and
+                              add_name   = '{$_UPDCOMIVAL}' and
+                              add_status = 1";
+                     $valexistsid = $CON->select($sql);
+                     $valexistsid = (int)$valexistsid[0]["id"];
+                     if(!$valexists)
+                     {
+                        $sql = " insert into tran_comments_vals
+                                 (add_com_id, add_name, add_name_eng, add_crtdat, add_crtusr)
+                                 VALUES
+                                 ({$_UPDCOMID}, '{$_UPDCOMIVAL}', '{$_UPDCOMIVAL}', {$currtme}, {$_SESSION["user_id"]})";
+                        $CON->no_result($sql);
+                     }
+                     $sql = " select *
+                              from tran_comments_vals
+                              where
+                              add_com_id = {$_UPDCOMID} and
+                              add_name   = '{$_UPDCOMIVAL}' and
+                              add_status = 1";
+                     $valexistsid = $CON->select($sql);
+                     $valexistsid = (int)$valexistsid[0]["id"];
+
+                     $sql = " delete from tran_comments_item_vals
+                              where
+                              item_id  = {$newitemid} and
+                              com_id   = {$_UPDCOMID}";
+                     $CON->no_result($sql);
+
+                     $sql = " insert into tran_comments_item_vals
+                              (item_id, com_id, val_id)
+                              VALUES
+                              ({$newitemid}, {$_UPDCOMID}, {$valexistsid})";
+                     $CON->no_result($sql);
+                  }
+
+                  unset($_PRODITEM);
+                  $_PRODITEM["dest_itemid"] = $newitemid;
+                  $_PRODITEM["dest_units"]  = $dest_units;
+                  $_PRODITEM["item_reboprod_amt"] = 1;
+                  $_PRODITEM["item_reboprod_unitkg"] = round($_REQUEST["SALIDA_KG_UNIT"],2);
+                  $_PRODITEMS[] = $_PRODITEM;
+               }
+            }
+         }
+
+         if(count($_PRODITEMS))
+         {
+            $stk_num = createTransactionNumber($CON, $_SESSION["user_company_id"], "stockchange");
+
+            $sql = " insert into stockchanges
+                     (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative,
+                      stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash)
+                     VALUES
+                     ('{$stk_num}', 'Generado por producción', 20, {$_SESSION["user_company_id"]}, {$agenda["req_shop_id"]},
+                      {$currtme},  0, {$currtme}, {$_SESSION["user_id"]}, {$stk_fixedsthid}, {$_REQUEST["agid"]},
+                      '{$sth_fromrebo_agid_grphash}')";
+            $res = $CON->no_result($sql);
+            if($res)
+            {
+               $stk_id = mysql_insert_id();
+               $item_pos = 0;
+               foreach($_PRODITEMS AS $_PRODITEMROW)
+               {
+                  $sql = " insert into stockchanges_items
+                           (stk_id, item_id, item_pos, item_amount, item_type, item_st_id, item_costprice_brutto,
+                            item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes, item_charges_act,
+                            item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                           VALUES
+                           ({$stk_id}, {$_PRODITEMROW["dest_itemid"]}, {$item_pos}, {$_PRODITEMROW["dest_units"]}, 'item',
+                            {$stk_fixedsthid}, 0.00, 0.00, 0.00, 0.00, 0, 0,
+                            {$_PRODITEMROW["item_reboprod_amt"]}, {$_PRODITEMROW["item_reboprod_unitkg"]})";
+                  $CON->no_result($sql);
+                  $item_pos++;
+
+               }
+               bookStockChange($CON, $stk_id);
+            }
+         }
+
+
+         ?>
+         <script language="Javascript">
+            location.href = 'prodwrk.php?mid=<?=$_REQUEST["mid"]?>&agid=<?=$_REQUEST["agid"]?>&mode=reboprod';
+         </script>
+         <?php
+      }
+      ?>
+      <script language="Javascript">
+      function recalcUsedAmt(xlineid)
+      {
+         var itemregkg     = parseFloat($('#ingresokgamt_' +xlineid).val().replaceAll(",", "."));
+         var sobranteamt   = parseFloat($('#sobranteamt_' +xlineid).val().replaceAll(",", "."));
+         var useamt        = parseFloat($('#useamt_' +xlineid).val().replaceAll(",", "."));
+
+         if(isNaN(sobranteamt))
+            sobranteamt = 0;
+
+         useamt = itemregkg - sobranteamt;
+         $('#useamt_' +xlineid).val(roundToDecimal(useamt,2));
+         $('#useamt_' +xlineid).val($('#useamt_' +xlineid).val().replaceAll(".", ","));
+         $('#sobranteamt_' +xlineid).val($('#sobranteamt_' +xlineid).val().replaceAll(".", ","));
+         $('#idx_btn_term').hide(0);
+      }
+      function roundToDecimal(num, decimalPlaces)
+      {
+         const factor = Math.pow(10, decimalPlaces);
+         return Math.round(num * factor) / factor;
+      }
+      </script>
+      <form action="prodwrk.php#xform_itemcalc" method="post" name="xform_itemcalc" id="xform_itemcalc">
+      <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+      <input type="hidden" name="agid" value="<?=$_REQUEST["agid"]?>">
+      <input type="hidden" name="mode" value="<?=$_REQUEST["mode"]?>">
+      <input type="hidden" name="refid" value="<?=$_REQUEST["refid"]?>">
+      <input type="hidden" name="selitemid1" value="<?=$_REQUEST["selitemid1"]?>">
+      <input type="hidden" name="selitemid2" value="<?=$_REQUEST["selitemid2"]?>">
+      <input type="hidden" name="rebocalc" value="1">
+      <input type="hidden" name="rebofinalize" value="">
+      <table border="0" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+         <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+            <br>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+               <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                  <i class="fa fa-fw fa-chevron-right"></i> ENTRADA REBOBINADORA
+               </td>
+            </tr>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" width="100" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+               <td align="left" class="tdheader" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Pesa</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Sobrante</td>
+               <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Usado</td>
+            </tr>
+            <?php
+            $_SUM_WIDTH    = 0.00;
+            $_SALIDA_LARGO = $itemsels[0]["item_reg_length"];
+            $_SALIDA_LARGO_ORIG = $itemsels[0]["item_reg_length"];
+            $_SALIDA_KG    = $itemsels[0]["item_reg_kg"];
+            $_SALIDA_GR    = $itemsels[0]["item_reg_gsm"];
+            $_SALIDA_ITEMPARENTID = $itemsels[0]["id"];
+            $_SALIDA_USEKG = 0;
+            for($x = 0; $x < count($itemsels) && $itemsels != false; $x++)
+            {
+               $item    = $itemsels[$x];
+               $lidx    = $x +1;
+
+               if($_REQUEST["ingresokgamt_{$lidx}"] == "")
+                  $_REQUEST["ingresokgamt_{$lidx}"] = printPrice($item["item_reg_kg"],2);
+
+               $_REQUEST["ingresokgamt_{$lidx}"] = getPrice(trim($_REQUEST["ingresokgamt_{$lidx}"]),2);
+               $_REQUEST["sobranteamt_{$lidx}"] = getPrice(trim($_REQUEST["sobranteamt_{$lidx}"]),2);
+               $useamt  = $_REQUEST["ingresokgamt_{$lidx}"] - $_REQUEST["sobranteamt_{$lidx}"];
+               $origusediffamt = $item["item_reg_kg"] - $useamt;
+
+               $baselength = $item["item_reg_length"] - (($origusediffamt * $item["item_reg_length"]) / $item["item_reg_kg"]);
+               ?>
+               <input type="hidden" id="itemregkg_<?=$lidx?>" value="<?=$item["item_reg_kg"]?>">
+               <tr onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;"><?=$item["item_number_prod"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$item["material"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left"><?=$item["colordesc"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($item["item_reg_gsm"])?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($item["item_reg_width"])?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($baselength)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                     <input type="text" class="inptxt" id="ingresokgamt_<?=$lidx?>" name="ingresokgamt_<?=$lidx?>"
+                     style="width:100%;text-align:center" onkeyup="recalcUsedAmt('<?=$lidx?>')"
+                     value="<?=printPrice($_REQUEST["ingresokgamt_{$lidx}"],2)?>">
+                  </td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                     <input type="text" class="inptxt" id="sobranteamt_<?=$lidx?>" name="sobranteamt_<?=$lidx?>"
+                     style="width:100%;text-align:center" onkeyup="recalcUsedAmt('<?=$lidx?>')"
+                     value="<?=printPrice($_REQUEST["sobranteamt_{$lidx}"],2)?>">
+                  </td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                     <input type="text" class="inptxt" id="useamt_<?=$lidx?>" name="useamt_<?=$lidx?>"
+                     style="width:100%;text-align:center;background-color:#EEEEEE" readonly
+                     value="<?=printPrice($useamt,2)?>">
+                  </td>
+               </tr>
+               <?php
+               $_SUM_WIDTH += $item["item_reg_width"];
+
+               if($baselength < $_SALIDA_LARGO)
+               {
+                  $_SALIDA_LARGO = $baselength;
+                  $_SALIDA_LARGO_ORIG = $item["item_reg_length"];
+                  $_SALIDA_KG = $item["item_reg_kg"];
+                  $_SALIDA_ITEMPARENTID = $item["id"];
+               }
+               if($item["item_reg_gsm"] > $_SALIDA_GR)
+               {
+                  $_SALIDA_GR = $item["item_reg_gsm"];
+               }
+               $_SALIDA_USEKG += $useamt;
+            }
+
+            $_REQUEST["itemmermakg"] = getPrice(trim($_REQUEST["itemmermakg"]),2);
+            ?>
+            </table>
+            <table border="0" cellpadding="6" cellspacing="0">
+            <colgroup>
+               <col width="100">
+               <col width="80">
+               <col width="100">
+            </colgroup>
+            <tr style="display:none">
+               <td width="100">Cantidad</td>
+               <td width="80">
+                  <input type="text" class="inptxt" name="itemprodamt" id="itemprodamt" style="width:100%"
+                  value="<?if((int)$_REQUEST["itemprodamt"] > 0) echo (int)$_REQUEST["itemprodamt"]; else echo "1"?>">
+               </td>
+            </tr>
+            <tr>
+               <td width="100">Merma Kg</td>
+               <td width="80">
+                  <input type="text" class="inptxt" name="itemmermakg" id="itemmermakg" style="width:100%"
+                  onkeyup="$('#idx_btn_term').hide(0);"
+                  value="<?if((float)$_REQUEST["itemmermakg"] > 0) echo printPrice($_REQUEST["itemmermakg"],2)?>">
+               </td>
+               <td>
+                  <input type="button" class="btngrey" value="Calcular" style="width:100%;padding:6px;border:0px;font-size:14px;margin-left:2px"
+                  onclick="document.xform_itemcalc.submit();">
+               </td>
+            </tr>
+            </table>
+            <?php
+            if((int)$_REQUEST["rebocalc"])
+            {
+               //J25
+               $_SALIDA_WIDTH    = $_SUM_WIDTH -2;
+
+               //M25
+               $_MERMA_KG        = $_REQUEST["itemmermakg"];
+
+               //J20 => $_SALIDA_LARGO
+               //K20 => $_SALIDA_KG
+               //E25 => $_REQUEST["itemprodamt"]
+               //L25 => $_SALIDA_USEKG
+
+               //K25
+               $_SALIDA_LARGO_UNIT = $_SALIDA_LARGO - (($_MERMA_KG * $_SALIDA_LARGO) / $_SALIDA_KG);
+
+               $sql = " select distinct t1.*, t2.cat_id, t3.cat_title,
+                               t4b.add_name 'colordesc',
+                               t4.val_id 'colorid',
+                               t6.add_name 'material',
+                               SUM(t7.iss_inventory) 'iss_inventory'
+                        from item t1
+                        INNER JOIN item_productcats t2            ON t1.id = t2.item_id
+                        INNER JOIN productcats t3                 ON t2.cat_id = t3.id
+                        INNER JOIN tran_comments_item_vals t4     ON t4.item_id = t1.id
+                        INNER JOIN tran_comments_vals t4b         ON t4.val_id = t4b.id
+                        INNER JOIN tran_comments_item_vals t5     ON t5.item_id = t1.id
+                        INNER JOIN tran_comments_vals t6          ON t5.val_id = t6.id
+                        LEFT JOIN item_shops_storehouses t7       ON t1.id = t7.item_id
+                        LEFT JOIN company_shops_storehouses t8    ON t7.st_id = t8.id
+                        where
+                        t1.item_status       > 0 and
+                        t1.item_released     > 0 and
+                        t1.item_reg_kg       > 0 and
+                        t3.id                IN ({$_CONFIG["TELA_CATID"]},27) and
+                        t4.com_id            = {$_CONFIG["TELA_COLOR_CHARACTID"]} and
+                        t4.val_id            IN ({$item["colorid"]}) and
+                        t5.com_id            = {$_CONFIG["TELA_MATERIAL_CHARACTID"]} and
+                        t6.add_name          = '{$agenda["fab_type"]}' and
+                        t1.item_reg_gsm      = {$item["item_reg_gsm"]} and
+                        t1.item_reg_width    = {$_SALIDA_WIDTH}
+                        group by t1.id
+                        order by SUM(t7.iss_inventory) desc, t3.cat_title, t1.item_title, t1.item_number_prod";
+               $refitems = $CON->select($sql);
+               $refitem = $refitems[0];
+               foreach($refitems AS $refitemrow)
+               {
+                  if((int)$refitemrow["item_reg_length"] == $_SALIDA_LARGO_UNIT)
+                  {
+                     $refitem = $refitemrow;
+                  }
+               }
+               ?>
+               <table border="0" width="100%" cellpadding="0" cellspacing="0">
+               <tr>
+                  <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                     <i class="fa fa-fw fa-chevron-left"></i> SALIDA REBOBINADORA
+                  </td>
+               </tr>
+               </table>
+               <table border="0" width="100%" cellpadding="6" cellspacing="0">
+               <tr>
+                  <td class="tdheader" width="100" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+                  <td align="left" class="tdheader" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Merma</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Salida</td>
+                  <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+               </tr>
+               <tr>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;">
+                     <?php
+                     if((int)$refitem["id"])
+                     {
+                        echo "<b>{$refitem["item_number_prod"]}</b>";
+                        ?>
+                        <input type="hidden" name="stockplusitemid_1" value="<?=$refitem["id"]?>">
+                        <?php
+                     }
+                     else
+                     {
+                        echo "<b class=msg_save_err>[NUEVO]</b>";
+                        ?>
+                        <input type="hidden" name="stockplusitemid_1" value="">
+                        <?php
+                     }
+                     ?>
+                  </td>
+                  <input type="hidden" name="SALIDA_ITEMPARENTID" value="<?=(int)$_SALIDA_ITEMPARENTID?>">
+                  <input type="hidden" name="rollo_dims_1" value="<?=(float)$_SALIDA_WIDTH?>">
+                  <input type="hidden" name="SALIDA_LARGO_UNIT" value="<?=round($_SALIDA_LARGO_UNIT)?>">
+                  <input type="hidden" name="SALIDA_LARGO" value="<?=(int)round($_SALIDA_LARGO_ORIG)?>">
+                  <input type="hidden" name="SALIDA_KG_UNIT" value="<?=round(($_SALIDA_USEKG * $_REQUEST["itemprodamt"]) - $_MERMA_KG,2)?>">
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$item["material"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left"><?=$item["colordesc"]?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($_SALIDA_GR)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($_SALIDA_WIDTH)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($_SALIDA_USEKG * $_REQUEST["itemprodamt"],2)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                     <?=printPrice($_MERMA_KG,2)?>
+                  </td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice(($_SALIDA_USEKG * $_REQUEST["itemprodamt"]) - $_MERMA_KG,2)?></td>
+                  <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=printPrice($_SALIDA_LARGO_UNIT)?></td>
+               </tr>
+               </table>
+
+               <table border="0" cellpadding="6" cellspacing="0">
+               <tr>
+                  <td width="100">
+                     <?php
+                     $dspcss == "";
+                     if($_SALIDA_LARGO_UNIT <= 0.00)
+                        $dspcss = "display:none;";
+                     ?>
+                     <input type="button" class="btngreen" id="idx_btn_term" value="Finalizar" style="<?=$dspcss?>;width:100%;padding:6px;border:0px;font-size:14px;margin-left:2px"
+                     onclick="if(confirm('Estas seguro?')) { document.xform_itemcalc.rebofinalize.value='1'; document.xform_itemcalc.submit(); }">
+                  </td>
+               </tr>
+               </table>
+               <?php
+            }
+            ?>
+         </td>
+      </tr>
+      </table>
+      </form>
+      <?php
+   }
+
+   $sql = " select t1.*, t3.item_title, t3.item_number_prod, t2.item_amount,
+                   t3.item_reg_kg, t2.item_reboprod_amt, t2.item_reboprod_unitkg
+            from stockchanges t1
+            INNER JOIN stockchanges_items t2 ON t1.id = t2.stk_id
+            INNER JOIN item t3 ON t2.item_id = t3.id
+            where
+            t1.sth_fromrebo_agid = {$_REQUEST["agid"]} and
+            t1.stk_status        = 2 and
+            t1.stk_negative      = 1 and
+            t1.sth_fromrebo_agid_grphash != ''
+            order by t1.id asc";
+   $moveouts = $CON->select($sql);
+   if(count($moveouts) && $moveouts != false)
+   {  ?>
+      <table border="0" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+         <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+            <br>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+               <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+                  <i class="fa fa-fw fa-info"></i> PRODUCCIÓN FINALIZADA
+               </td>
+            </tr>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Transacción</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Tipo</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Fecha</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Material</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad</td>
+               <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Unit.</td>
+            </tr>
+            <?php
+            $_PROD_AMOUNT = 0;
+            $lastnum = "";
+            foreach($moveouts AS $moveout)
+            {
+               $kgtotal = round($moveout["item_reg_kg"] * $moveout["item_amount"],2);
+
+               if($moveout["stk_num"] == $lastnum)
+                  $bgcss = "";
+               else
+                  $bgcss = "border-top:3px double #666666";
+
+               $lastnum = $moveout["stk_num"];
+
+               $sql = " select t1.*, t3.item_title, t3.item_number_prod, t2.item_amount,
+                               t3.item_reg_kg, t2.item_reboprod_amt, t2.item_reboprod_unitkg
+                        from stockchanges t1
+                        INNER JOIN stockchanges_items t2 ON t1.id = t2.stk_id
+                        INNER JOIN item t3 ON t2.item_id = t3.id
+                        where
+                        t1.sth_fromrebo_agid = {$_REQUEST["agid"]} and
+                        t1.stk_status        = 2 and
+                        t1.stk_negative      = 0 and
+                        t1.sth_fromrebo_agid_grphash = '{$moveout["sth_fromrebo_agid_grphash"]}'
+                        order by t1.id desc";
+               $moveins = $CON->select($sql);
+               $sql_del_str = "&delsthids[]={$moveout["id"]}";
+               foreach($moveins AS $movein)
+               {
+                  if(!(int)$_SQLIDS[$movein["id"]])
+                  {
+                     $sql_del_str .= "&delsthids[]={$movein["id"]}";
+                     $_SQLIDS[$movein["id"]] = 1;
+                  }
+               }
+               ?>
+               <tr>
+                  <td style="<?=$bgcss?>"><?=$moveout["stk_num"]?></td>
+                  <td style="<?=$bgcss?>;color:red"><nobr><i class="fa fa-fw fa-minus"></i> Uso material</nobr></td>
+                  <td style="<?=$bgcss?>"><?=date("d.m.Y", $moveout["stk_bookdate"])?></td>
+                  <td style="<?=$bgcss?>"><?=$moveout["item_number_prod"]?></td>
+                  <td style="<?=$bgcss?>"><?=$moveout["item_title"]?></td>
+                  <td style="<?=$bgcss?>"><?=printPrice($moveout["item_reboprod_amt"],10)?></td>
+                  <td style="<?=$bgcss?>">
+                     <?=printPrice($moveout["item_reboprod_unitkg"],2)?>
+                     <?php
+                     if($bgcss != "")
+                     {  ?>
+                        <span style="float:right">
+                           <i class="fa fa-fw fa-times-circle" style="color:red;cursor:pointer"
+                           onclick="if(confirm('Estas seguro?')) { location.href = 'prodwrk.php?mid=<?=$_REQUEST["mid"]?>&agid=<?=$_REQUEST["agid"]?>&mode=reboprod<?=$sql_del_str?>'; } "></i>
+                        </span>
+                        <?php
+                     }
+                     ?>
+                  </td>
+               </tr>
+               <?php
+               if($bgcss == "")
+               {
+                  foreach($moveins AS $movein)
+                  {
+                     $kgtotal = round($movein["item_reg_kg"] * $movein["item_amount"],2)
+                     ?>
+                     <tr style="background-color:#EEEEEE">
+                        <td><?=$movein["stk_num"]?></td>
+                        <td style="color:green"><nobr><i class="fa fa-fw fa-plus"></i> Ingreso material</nobr></td>
+                        <td><?=date("d.m.Y", $movein["stk_bookdate"])?></td>
+                        <td><?=$movein["item_number_prod"]?></td>
+                        <td><?=$movein["item_title"]?></td>
+                        <td><?=printPrice($movein["item_reboprod_amt"],10)?></td>
+                        <td><?=printPrice($movein["item_reboprod_unitkg"],2)?></td>
+                     </tr>
+                     <?php
+                     $_PROD_AMOUNT += $moveout["item_amount"];
+                  }
+               }
+            }
+            ?>
+            </table>
+            <table border="0" width="100%" cellpadding="6" cellspacing="0">
+            <colgroup>
+            </colgroup>
+            <tr>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad requerida</td>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad procesada</td>
+               <td class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cantidad pendiente</td>
+            </tr>
+            <?php
+            if($reborder["req_rebo_rolloscc_opttype"] != "" && $reborder["req_rebo_rolloscc_opttype"] != "Por metro")
+            {  ?>
+               <tr>
+                  <td align="center" style="background-color:darkorange;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal2)?></td>
+                  <td align="center" style="background-color:green;font-weight:bold;color:#FFFFFF"><?=printPrice($_PROD_AMOUNT)?></td>
+                  <td align="center" style="background-color:red;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal2 - $_PROD_AMOUNT)?></td>
+               </tr>
+               <?php
+            }
+            elseif($reborder["req_rebo_rolloscc_opttype"] != "" && $reborder["req_rebo_rolloscc_opttype"] != "Por rollo")
+            {  ?>
+               <tr>
+                  <td align="center" style="background-color:darkorange;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal)?></td>
+                  <td align="center" style="background-color:green;font-weight:bold;color:#FFFFFF"><?=printPrice($_PROD_AMOUNT)?></td>
+                  <td align="center" style="background-color:red;font-weight:bold;color:#FFFFFF"><?=printPrice($xtotal - $_PROD_AMOUNT)?></td>
+               </tr>
+               <?php
+
+            }
+            ?>
+            </table>
+         </td>
+      </tr>
+      </table>
+      <?php
+   }
+
+   ?>
+   <script language="Javascript">
+   function itemsSelected()
+   {
+      var selitemid1val = document.xform_itemsel.selitemid1.value;
+      var selitemid2val = document.xform_itemsel.selitemid2.value;
+      if(selitemid1val != '' && selitemid2val != '')
+      {
+         document.xform_itemsel.submit();
+      }
+   }
+   </script>
+   <form action="prodwrk.php#xform_itemsel" method="post" name="xform_itemsel" id="xform_itemsel">
+   <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+   <input type="hidden" name="agid" value="<?=$_REQUEST["agid"]?>">
+   <input type="hidden" name="mode" value="<?=$_REQUEST["mode"]?>">
+   <input type="hidden" name="refid" value="<?=$_REQUEST["refid"]?>">
+   <table border="0" width="100%" cellpadding="0" cellspacing="0">
+   <tr>
+      <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:0px">
+         <table border="0" width="100%" cellpadding="0" cellspacing="0">
+         <tr>
+            <td colspan="2" style="background-color:#1AAAA4;color:#FFFFFF;padding:6px;font-weight:bold;text-align:center">
+               <i class="fa fa-fw fa-cubes"></i> MATERIALES DISPONIBLES PARA CONSUMIR
+            </td>
+         </tr>
+         </table>
+         <table border="0" width="100%" cellpadding="6" cellspacing="0">
+         <colgroup>
+         </colgroup>
+         <tr>
+            <td class="tdheader" width="100" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Código</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Materialidad</td>
+            <td align="left" class="tdheader" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Gramaje</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+            <td align="center" class="tdheader" width="80" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg</td>
+            <td width="100" class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD;">Stock</td>
+            <td width="20" class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD;">#1</td>
+            <td width="20" class="tdheader" align="center" style="color: white;background-color: #666666;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD;">#2</td>
+         </tr>
+         <?php
+         for($x = 0; $x < count($allitems) && $allitems != false; $x++)
+         {
+            $item = $allitems[$x];
+
+            $bcss = "";
+            if($item["id"] == $_REQUEST["selitemid1"] || $item["id"] == $_REQUEST["selitemid2"])
+               $bcss = "background-color:#FFF5A0";
+            ?>
+            <tr onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>"><?=$item["item_number_prod"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=$item["material"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="left"><?=$item["colordesc"]?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_gsm"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_width"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_length"])?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center"><?=printPrice($item["item_reg_kg"],2)?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="right"><?=printPrice($item["iss_inventory"],10)?></td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center">
+                  <input type="radio" name="selitemid1" value="<?=$item["id"]?>" onclick="itemsSelected()"
+                  <?if($item["id"] == $_REQUEST["selitemid1"]) echo "checked"?>>
+               </td>
+               <td class="tdnrm" style="border-left:1px solid #DDDDDD;<?=$bcss?>" align="center">
+                  <input type="radio" name="selitemid2" value="<?=$item["id"]?>" onclick="itemsSelected()"
+                  <?if($item["id"] == $_REQUEST["selitemid2"]) echo "checked"?>>
+               </td>
+            </tr>
+            <?php
+         }
+         ?>
+         </table>
+      </td>
+   </tr>
+   </table>
+   </form>
+   <br><br><br>
+   <?php
+
+}

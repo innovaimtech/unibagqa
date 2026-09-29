@@ -1,0 +1,220 @@
+<?php
+//----------------------------------------------------------------------------------
+// Author:        1BIT LTDA
+// Copyright:     2020 by 1BIT LTDA. All Rights Reserved.
+// Any unauthorized redistribution, reselling, modifying or reproduction of part
+// or all of the contents in any form is strictly prohibited.
+//----------------------------------------------------------------------------------
+
+//----------------------------------------------------------------------------------
+$_sesmodulename         = "equipo_puntos_autocontrol";
+$_sesbasefilterstatus   = "1";
+$_sesbaseorderby        = "2";
+$_sesbaseordersort      = "asc";
+
+//----------------------------------------------------------------------------------
+resetOverviewSession($_sesmodulename);
+
+if($_REQUEST["exec"] == "edit")
+   require_once("edit.php");
+else
+{
+   //----------------------------------------------------------------------------------
+   if($_REQUEST["subexec"] == "search")
+   {
+      $_SESSION[$_sesmodulename]["sql_stext"]      = trim(addslashes(str_replace("*","%",$_REQUEST["sql_stext"])));
+      $_SESSION[$_sesmodulename]["sql_type_ant_id"]     = (int)$_REQUEST["sql_type_ant_id"];
+      $_SESSION[$_sesmodulename]["page"]           = 0;
+      $_SESSION[$_sesmodulename]["search_active"]  = 1;
+   }
+   
+   //----------------------------------------------------------------------------------
+   prepareOverviewSession($_sesmodulename, $_sesbasefilterstatus, $_sesbaseorderby, $_sesbaseordersort);
+   
+   if($_REQUEST["exec"] == "del" && (int)$_REQUEST["id"])
+   {
+      $currtme = time();
+
+      $sql = " update equipo_puntos_autocontrol
+               set
+               ac_status = 0,
+               ac_updusr = {$_SESSION["user_id"]},
+               ac_upddat = {$currtme}
+               where
+               id = {$_REQUEST["id"]}";
+      $res = $CON->no_result($sql);
+
+      $savemsg = getSaveMessage($res);
+   }
+
+   //----------------------------------------------------------------------------------
+   $cntsql = " select count(t1.id) 'cc'
+               from equipo_puntos_autocontrol t1
+               LEFT OUTER JOIN equipo_type t2 ON t1.ac_equipotype_id = t2.id
+               where
+               t1.ac_status > 0 ";
+
+   //----------------------------------------------------------------------------------
+   $datsql = " select t1.id, t1.ac_name, t1.ac_crtdat, t2.type_ant_title, t1.ac_order
+               from equipo_puntos_autocontrol t1
+               LEFT OUTER JOIN equipo_type t2 ON t1.ac_equipotype_id = t2.id
+               where
+               t1.ac_status > 0 ";
+
+   if($_SESSION[$_sesmodulename]["sql_stext"] != "")
+      $seasql .= " and t1.ac_name like '%{$_SESSION[$_sesmodulename]["sql_stext"]}%' ";
+   if((int)$_SESSION[$_sesmodulename]["sql_type_ant_id"])
+      $seasql .= " and t1.ac_equipotype_id = {$_SESSION[$_sesmodulename]["sql_type_ant_id"]} ";
+
+   //----------------------------------------------------------------------------------
+   $cntsql   .= $seasql;
+   $datsql   .= $seasql;
+   $itemcount = $CON->select($cntsql);
+   $itemcount = (int)$itemcount[0]["cc"];
+
+   //----------------------------------------------------------------------------------
+   $_SESSION[$_sesmodulename]["startrow"] = $_SESSION[$_sesmodulename]["page"] * $_SESSION[$_sesmodulename]["rows_per_page"];
+
+   $datsql .= " order by 4,5,2 ";
+   $datsql .= " LIMIT {$_SESSION[$_sesmodulename]["startrow"]}, {$_SESSION[$_sesmodulename]["rows_per_page"]}";
+
+   //----------------------------------------------------------------------------------
+   $equipo = $CON->select($datsql);
+
+   //----------------------------------------------------------------------------------
+   $xtipos = getTiposEquipo($CON);
+   ?>
+   <table border="0" cellpadding="0" cellspacing="0" width="822">
+   <tr>
+      <td height="30"><b class="content_header">Resumen de puntos de autocontrol</b></td>
+      <td align="right" class="content_row_clear"><?php if($savemsg == "") printOverviewResults($itemcount); else echo $savemsg;?></td>
+   </tr>
+   <tr>
+      <td class="content_headerline" colspan="2">&nbsp;</td>
+   </tr>
+   </table>
+   <table border="0" cellpadding="0" cellspacing="0" width="100%">
+   <tr>
+      <td>
+         <form action="index.php" method="post" name="xform_itemsearch" class="fokusfirst">
+         <input type="hidden" name="subexec" value="search">
+         <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+         <?=Nifty_printH("box2", "822")?>
+         <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+         <colgroup>
+            <col width="120">
+            <col>
+            <col width="100">
+            <col width="300">
+         </colgroup>
+         <tr>
+            <td class="content_tbl_header" colspan="4">Opciones de búsqueda</td>
+         </tr>
+         <tr>
+            <td class="content_rowl">Tipo de máquina</td>
+            <td class="content_row">
+               <select class="text" name="sql_type_ant_id" id="sql_type_ant_id" style="width:100%"
+               onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+                  <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+                  <?php
+                  foreach ($xtipos as $tipoAntena)
+                  {  ?>
+                     <option value="<?=$tipoAntena["id"]?>" <?php if($tipoAntena["id"] == $_SESSION[$_sesmodulename]["sql_type_ant_id"]) echo "selected"?>>
+                        <?=$tipoAntena["type_ant_title"]?>
+                     </option>
+                     <?php
+                  }
+                  ?>
+               </select>
+            </td>
+            <td class="content_rowl">Nombre</td>
+            <td class="content_row">
+               <input name="sql_stext" type="text" class="text" style="width:300px"
+               value="<?=str_replace("%","*",$_SESSION[$_sesmodulename]["sql_stext"])?>"
+               onfocus="markfield(this,0)" onblur="markfield(this,1)">
+            </td>
+         </tr>
+         <tr>
+            <td class="content_row" align="right" colspan="4">
+               <table border="0" cellpadding="0" cellspacing="0" width="270">
+               <tr>
+                  <td align="right">
+                     <?php
+                     if((int)$_SESSION[$_sesmodulename]["search_active"])
+                        printButton("Resetear", "postnav", "index.php?mid={$_REQUEST["mid"]}&searchexec=reset", "", "arrow-circle-double-135", 130);
+                     ?>
+                  </td>
+                  <td align="right">
+                     <?php
+                     printButton("Buscar", "postnav_save", "javascript: deactivateFormChange()", "submitForm(document.xform_itemsearch)", "magnifier", 130);
+                     $_SESSION["_SUBMITBTN"] = 1;
+                     ?>
+                  </td>
+               </tr>
+               </table>
+            </td>
+         </tr>
+         </table>
+         <?=Nifty_printF(false)?>
+         </form>
+      </td>
+   </tr>
+   <tr>
+      <td>
+         <?=Nifty_printH("box1", "822")?>
+         <?php
+         printPageCounts($_SESSION[$_sesmodulename]["rows_per_page"], $itemcount, $_SESSION[$_sesmodulename]["page"]);
+         ?>
+         <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+         <colgroup>
+            <col>
+            <col>
+            <col width="100">
+            <col width="120">
+         </colgroup>
+         <tr>
+            <td class="content_tbl_subheader">Tipo máquina</td>
+            <td class="content_tbl_subheader">Punto autocontrol</td>
+            <td class="content_tbl_subheader">Creado</td>
+            <td class="content_tbl_subheader" align="center">Opciones</td>
+         </tr>
+         <?php
+         
+         //----------------------------------------------------------------------------------
+         for($x = 0; $x < count($equipo) && $equipo != false; $x++)
+         {  ?>
+            <tr bgcolor="<?=getRowColor($x)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+               <td class="content_row"><?=$equipo[$x]["type_ant_title"]?></td>
+               <td class="content_row"><?=$equipo[$x]["ac_name"]?></td>
+               <td class="content_row"><?=displayDate($equipo[$x]["ac_crtdat"])?></td>
+               <td class="content_row" align="center">
+                  <?php
+                  printButton($_LANG["FORM"]["BUTTON"][3], "postnav", "index.php?mid={$_REQUEST["mid"]}&exec=edit&id={$equipo[$x]["id"]}", "", "pencil");
+                  ?>
+               </td>
+            </tr>
+            <?php
+         }
+         if(!$x)
+         {  ?>
+            <tr bgcolor="<?=getRowColor(0)?>">
+               <td class="content_row" align="center" colspan="4">
+                  <br>
+                  <b class="msg_save_err">No hay datos disponibles.</b>
+                  <br><br>
+               </td>
+            </tr>
+            <?php
+         }
+         ?>
+         </table>
+         <?php
+         printPageCounts($_SESSION[$_sesmodulename]["rows_per_page"], $itemcount, $_SESSION[$_sesmodulename]["page"]);
+         ?>
+         <?=Nifty_printF()?>
+         <br>
+      </td>
+   </tr>
+   </table>
+   <?php
+}

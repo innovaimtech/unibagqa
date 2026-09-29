@@ -1,0 +1,747 @@
+<script type="text/javascript" src="https://me.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=6r3qejXkY0K_JVF7kHxngcPzzxhBN7m-8pPdXkSRzNogoQpBhvdzFpplbZ2pG4WEasqCn7yJnlucfbQNkfsGEjSqfRHl3sqs8B1zUWEWL_nqgyjKdH1z4gn-FJ1Gb-jDOcvfP0F9oycEUGqVe9ktsI4bcvxSjJeJRx1mP3Z1XUsBgmooSdpxN1UwOLwdPXLMsPU4vFDm6YAus160nmw-GfG5N-Y9iPcYUnACSAT1KPdC-oc5anpHfGIfTUVhUHNTlbjkife2PCWeDg57zcf_bg" charset="UTF-8"></script><?
+//----------------------------------------------------------------------------------
+$sql = " select t1.*, t3.company_short, t4.shop_name, t7.pay_title,
+                t5.user_firstname 'upd_firstname', t5.user_lastname 'upd_lastname',
+                t6.user_firstname 'crt_firstname', t6.user_lastname 'crt_lastname',
+                t8.country_name, t9.name, t10.nombre, t11.pro_name,
+                t12.pl_title
+         from offers t1
+         LEFT OUTER JOIN company_data t3     ON t1.req_company_id       = t3.id
+         LEFT OUTER JOIN company_shops t4    ON t1.req_shop_id          = t4.id
+         LEFT OUTER JOIN user t5             ON t1.req_updusr           = t5.id
+         LEFT OUTER JOIN user t6             ON t1.req_crtusr           = t6.id
+         LEFT OUTER JOIN payments t7         ON t1.req_paymentid        = t7.id
+         LEFT OUTER JOIN country t8          ON t1.req_cust_countryid   = t8.id
+         LEFT OUTER JOIN regions t9          ON t1.req_cust_regionid    = t9.id
+         LEFT OUTER JOIN comunas t10         ON t1.req_cust_comunaid    = t10.id
+         LEFT OUTER JOIN provincias t11      ON t1.req_cust_provinciaid = t11.id
+         LEFT OUTER JOIN price_lists_fab t12 ON t1.req_plid_fab = t12.id
+         where
+         t1.id = {$_REQUEST["id"]}";
+$headdata = $CON->select($sql);
+$headdata = $headdata[0];
+
+//----------------------------------------------------------------------------------
+if(!(int)$_REQUEST["itemid"])
+{
+   $_REQUEST["sql_xtext"] = trim(addslashes($_REQUEST["sql_xtext"]));
+   $_REQUEST["sql_xcode"] = trim(addslashes($_REQUEST["sql_xcode"]));
+   
+   $sql = " select distinct t2.id, t2.item_number_prod, t2.item_title
+            from price_lists_fab_items t1
+            INNER JOIN item t2 ON t1.fab_item_id = t2.id
+            INNER JOIN price_lists_fab_items_predefines t3 ON t1.id = t3.header_id
+            where
+            t1.pl_id       = {$headdata["req_plid_fab"]} and
+            t1.fab_active  = 1 ";
+   if($_REQUEST["sql_xtext"] != "")
+      $sql .= " and t2.item_title like '%{$_REQUEST["sql_xtext"]}%' ";
+   if($_REQUEST["sql_xcode"] != "")
+      $sql .= " and t2.item_number_prod like '%{$_REQUEST["sql_xcode"]}%' ";
+   $sql .= " order by t2.item_title, t2.item_number_prod";
+   $items = $CON->select($sql);
+   ?>
+   <div style="height:2px"></div>
+   <form action="iframe.fancy.php" method="post" class="fokusfirst" name="xform_search" class="xform_search">
+   <input type="hidden" name="module" value="<?=$_REQUEST["module"]?>">
+   <input type="hidden" name="id" value="<?=$_REQUEST["id"]?>">
+   <?=Nifty_printH("box2", "99%")?>
+   <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+   <colgroup>
+      <col width="100">
+      <col width="50%">
+      <col width="100">
+      <col width="50%">
+   </colgroup>
+   <tr>
+      <td class="content_tbl_header" colspan="4">Opciones de búsqueda</td>
+   </tr>
+   <tr>
+      <td class="content_rowl" style="padding-right:30px">Nombre</td>
+      <td class="content_row">
+         <input name="sql_xtext" type="text" class="text" style="width:100%"
+         value="<?=$_REQUEST["sql_xtext"]?>"
+         onfocus="markfield(this,0)" onblur="markfield(this,1)">
+      </td>
+      <td class="content_rowl" style="padding-right:30px">Código</td>
+      <td class="content_row">
+         <input name="sql_xcode" type="text" class="text" style="width:100%"
+         value="<?=$_REQUEST["sql_xcode"]?>"
+         onfocus="markfield(this,0)" onblur="markfield(this,1)">
+      </td>
+   </tr>
+   <tr>
+      <td class="content_row" align="right" colspan="4">
+         <?
+         printButton("Buscar", "postnav_save", "javascript: deactivateFormChange()", "submitForm(document.xform_search)", "magnifier", 120);
+         $_SESSION["_SUBMITBTN"] = 1;
+         ?>
+      </td>
+   </tr>
+   </table>
+   </form>
+   <?=Nifty_printF(false)?>
+   <br>
+   <?=Nifty_printH("box1", "99%")?>
+   <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+   <colgroup>
+      <col width="120">
+      <col>
+      <col width="120">
+   </colgroup>
+   <tr>
+      <td class="content_tbl_header" colspan="3">Seleccionar producto</td>
+   </tr>
+   <tr>
+      <td class="content_tbl_subheader">Código</td>
+      <td class="content_tbl_subheader">Descripción</td>
+      <td class="content_tbl_subheader" align="center">Opciones</td>
+   </tr>
+   <?
+   for($x = 0; $x < count($items) && $items != false; $x++)
+   {  ?>
+      <tr bgcolor="<?=getRowColor($x)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+         <td class="content_row"><?=$items[$x]["item_number_prod"]?></td>
+         <td class="content_row"><?=$items[$x]["item_title"]?>&nbsp;</td>
+         <td class="content_row" align="center">
+            <?
+            printButton("Seleccionar", "postnav_save", "iframe.fancy.php?module={$_REQUEST["module"]}&id={$_REQUEST["id"]}&itemid={$items[$x]["id"]}", "", "tick-circle-frame");
+            ?>
+         </td>
+      </tr>
+      <?
+   }
+   if(!$x)
+   {  ?>
+      <tr bgcolor="<?=getRowColor(0)?>">
+         <td class="content_row" colspan="3" align="center" valign="middle" height="30">
+            <br>
+            <b class="msg_save_err">No hay datos disponibles.</b>
+            <br><br>
+         </td>
+      </tr>
+      <?
+   }
+   ?>
+   </table>
+   <?=Nifty_printF()?>
+   <?
+}
+//----------------------------------------------------------------------------------
+elseif($_REQUEST["exec"] == "")
+{
+   $sql = " select t4.*, t2.item_title, t2.item_number_prod, t3.inc_name, t1.fab_desc, t1.fab_type
+            from price_lists_fab_items t1
+            LEFT OUTER JOIN item t2                         ON t1.fab_item_id = t2.id
+            LEFT OUTER JOIN price_lists_fab_increments t3   ON t1.fab_inc_id = t3.id
+            INNER JOIN price_lists_fab_items_predefines t4  ON t1.id = t4.header_id
+            where
+            t1.pl_id          = {$headdata["req_plid_fab"]} and
+            t1.fab_item_id    = {$_REQUEST["itemid"]}
+            order by t1.fab_type, t4.fab_printtype, t4.fab_print_colors_front, t4.fab_print_colors_back,
+            t1.fab_desc, t2.item_title, t1.fab_item_id, t1.id,  t4.fab_med_width";
+   $data = $CON->select($sql);
+   $colspan = 10;
+   if((int)$headdata["req_prices_cnt"] <= 1)
+      $colspan = 11;
+   ?>
+   <script language="JavaScript">
+   function setFabPreItem(preid)
+   {
+      var xamt = parseInt($('#selamt_' +preid).val());
+
+      if(xamt > 0)
+      {
+         location.href = 'iframe.fancy.php?exec=save&module=<?=$_REQUEST["module"]?>&id=<?=$_REQUEST["id"]?>&itemid=<?=$_REQUEST["itemid"]?>' +'&preids[]=' +preid +'-' +xamt;
+      }
+   }
+   function setFabPreItemMulti()
+   {
+      var hasdata  = false;
+      var baselink = 'iframe.fancy.php?exec=save&module=<?=$_REQUEST["module"]?>&id=<?=$_REQUEST["id"]?>&itemid=<?=$_REQUEST["itemid"]?>';
+      $('.clsselamts_chk').each(function()
+      {
+         if($(this).attr('checked'))
+         {
+            var objid = $(this).attr('id').split('_');
+            objid = objid[1];
+            baselink = baselink +'&preids[]=' +objid +'-' +$(this).val();
+            hasdata = true;
+         }
+      });
+
+      $('.clsselamts_sel').each(function()
+      {
+         if(parseInt($(this).val()) > 0)
+         {
+            var objid = $(this).attr('id').split('_');
+            objid = objid[1];
+            baselink = baselink +'&preids[]=' +objid +'-' +parseInt($(this).val());
+            hasdata = true;
+         }
+      });
+
+      if(hasdata)
+         location.href = baselink;
+   }
+   </script>
+   <?=Nifty_printH("box1", "99%")?>
+   <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+   <colgroup>
+      <col>
+      <col>
+      <col>
+      <col width="40">
+      <col width="40">
+      <col width="40">
+      <col width="40">
+      <col width="75">
+      <col width="40">
+      <?
+      if((int)$headdata["req_prices_cnt"] <= 1)
+      {  ?>
+         <col width="75">
+         <?
+      }
+      ?>
+      <col width="60" style="<? if((int)$headdata["req_prices_cnt"] <= 1) echo "display:none"?>">
+   </colgroup>
+   <tr>
+      <td class="content_tbl_header" colspan="<?=$colspan?>">Seleccionar producto</td>
+   </tr>
+   <tr>
+      <td class="content_tbl_subheader content_row_os">Producto</td>
+      <td class="content_tbl_subheader content_row_os">Incremento</td>
+      <td class="content_tbl_subheader content_row_os">Descripción</td>
+      <td class="content_tbl_subheader content_row_os">Tela</td>
+      <td class="content_tbl_subheader content_row_os" align="center">Ancho</td>
+      <td class="content_tbl_subheader content_row_os" align="center">Alto</td></td>
+      <td class="content_tbl_subheader content_row_os" align="center">Fuelle</td>
+      <td class="content_tbl_subheader content_row_os">Impresion</td>
+      <td class="content_tbl_subheader content_row_os" align="center">Colores</td>
+      <?
+      if((int)$headdata["req_prices_cnt"] <= 1)
+      {  ?>
+         <td class="content_tbl_subheader content_row_os" align="center">Cantidad</td>
+         <?
+      }
+      ?>
+      <td class="content_tbl_subheader content_row_os" align="center" style="<? if((int)$headdata["req_prices_cnt"] <= 1) echo "display:none"?>">Opciones</td>
+   </tr>
+   <?
+   for($x = 0; $x < count($data) && $data != false; $x++)
+   {  ?>
+      <tr bgcolor="<?=getRowColor($x)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+         <td class="content_row_os"><?=$data[$x]["item_number_prod"]?> - <?=$data[$x]["item_title"]?></td>
+         <td class="content_row_os"><?=$data[$x]["inc_name"]?>&nbsp;</td>
+         <td class="content_row_os"><?=$data[$x]["fab_desc"]?>&nbsp;</td>
+         <td class="content_row_os"><?=$data[$x]["fab_type"]?>&nbsp;</td>
+         <td class="content_row_os" align="center"><?if((int)$data[$x]["id"]) echo (int)$data[$x]["fab_med_width"]?>&nbsp;</td>
+         <td class="content_row_os" align="center"><?if((int)$data[$x]["id"]) echo (int)$data[$x]["fab_med_height"]?>&nbsp;</td>
+         <td class="content_row_os" align="center"><?if((int)$data[$x]["fab_med_fuelle"]) echo (int)$data[$x]["fab_med_fuelle"]?>&nbsp;</td>
+         <td class="content_row_os">
+            <?
+            if($data[$x]["fab_printtype"] == "FLEX")
+               echo "Flexografía";
+            elseif($data[$x]["fab_printtype"] == "SERI")
+               echo "Serigrafía";
+            ?>
+         </td>
+         <td class="content_row_os" align="center">
+            <nobr><?=$data[$x]["fab_print_colors_front"]?> / <?=$data[$x]["fab_print_colors_back"]?></nobr>
+         </td>
+         <?
+         if((int)$headdata["req_prices_cnt"] <= 1)
+         {
+            $sql = " select prc_amount
+                     from price_lists_fab_items_prices
+                     where
+                     pl_id          = {$headdata["req_plid_fab"]} and
+                     prc_headerid   = {$data[$x]["header_id"]}
+                     order by prc_amount ";
+            $prices = $CON->select($sql);
+            ?>
+            <td class="content_row_os" align="center">
+               <select style="width:65px;" class="clsselamts_sel text" id="selamt_<?=$data[$x]["id"]?>">
+                  <option value=""></option>
+                  <?
+                  foreach($prices AS $price)
+                  {  ?>
+                     <option value="<?=(int)$price["prc_amount"]?>"><?=printPrice($price["prc_amount"])?></option>
+                     <?
+                  }
+                  ?>
+               </select>
+            </td>
+            <?
+         }
+         else
+         {  ?>
+            <td class="content_row_os" align="center">
+               <input type="checkbox" class="clsselamts_chk" id="selamt_<?=$data[$x]["id"]?>" value="1">
+            </td>
+            <?
+         }
+         ?>
+         <!--
+         <td class="content_row_os" align="center" style="<? if((int)$headdata["req_prices_cnt"] <= 1) echo "display:none"?>">
+            <?
+            printButton("Agregar", "postnav_save", "javascript: deactivateFormChange()", "setFabPreItem('{$data[$x]["id"]}')", "plus");
+            ?>
+         </td>
+         -->
+      </tr>
+      <?
+   }
+   if(!$x)
+   {  ?>
+      <tr bgcolor="<?=getRowColor(0)?>">
+         <td class="content_row" colspan="<?=$colspan?>" align="center" valign="middle" height="30">
+            <br>
+            <b class="msg_save_err">No hay datos disponibles.</b>
+            <br><br>
+         </td>
+      </tr>
+      <?
+   }
+   ?>
+   </table>
+   <?=Nifty_printF()?>
+   <div style="position:fixed;bottom:0px;right:8px">
+      <?
+      printButton("Agregar", "postnav_save", "javascript: deactivateFormChange()", "setFabPreItemMulti()", "plus", 120);
+      ?>
+   </div>
+   <div style="height:35px"></div>
+   <?
+}
+//----------------------------------------------------------------------------------
+elseif($_REQUEST["exec"] == "save")
+{
+   foreach($_REQUEST["preids"] AS $xpreidsarr)
+   {
+      $xpreidsarr = explode("-", $xpreidsarr);
+      $_REQUEST["preid"] = $xpreidsarr[0];
+      $_REQUEST["xamt"]  = $xpreidsarr[1];
+      
+      $sql = " select *
+               from price_lists_fab_items_predefines
+               where
+               id = {$_REQUEST["preid"]}";
+      $predefine = $CON->select($sql);
+      $predefine = $predefine[0];
+
+      $sql = " select *
+               from item
+               where
+               id = {$_REQUEST["itemid"]}";
+      $itemdata = $CON->select($sql);
+      $itemdata = $itemdata[0];
+
+      $sql = " select *
+               from price_lists_fab_items
+               where
+               id = {$predefine["header_id"]}";
+      $medida = $CON->select($sql);
+      $medida = $medida[0];
+
+      $sql = " select MAX(item_pos) 'max_item_pos'
+               from offers_items
+               where
+               req_id = {$_REQUEST["id"]}";
+      $max_item_pos = $CON->select($sql);
+      if($max_item_pos[0]["max_item_pos"] != "")
+         $max_item_pos = $max_item_pos[0]["max_item_pos"] + 1;
+      else
+         $max_item_pos = 0;
+
+      //----------------------------------------------------------------------------------
+      $item_amount      = (int)$_REQUEST["xamt"];
+      $sql_sellprice    = 0.00;
+      $sql_taxesperc    = 0.00;
+      $sql_sellnetto    = 0.00;
+      $sql_taxes        = 0.00;
+      $fab_print_width     = (int)$medida["fab_print_width"];
+      $fab_print_height    = (int)$medida["fab_print_height"];
+
+      //----------------------------------------------------------------------------------
+      for($x = 1; $x <= 20; $x++)
+         unset($_REQUEST["fab_print_colors_front_{$x}"]);
+      for($x = 1; $x <= 20; $x++)
+         unset($_REQUEST["fab_print_colors_back_{$x}"]);
+
+      //----------------------------------------------------------------------------------
+      for($x = 1; $x <= $predefine["fab_print_colors_front"]; $x++)
+         $_REQUEST["fab_print_colors_front_{$x}"]  = 1;
+      for($x = 1; $x <= $predefine["fab_print_colors_back"]; $x++)
+         $_REQUEST["fab_print_colors_back_{$x}"]  = 1;
+
+      //----------------------------------------------------------------------------------
+      $_FRONT_COLORS    = 0;
+      $_BACK_COLORS     = 0;
+      $_COLORS_2SIDES   = 0;
+      $_COLORS_1SIDES   = 0;
+      foreach(array_keys($_REQUEST) AS $reqkey)
+      {
+         if(strpos($reqkey, "fab_print_colors_front_") !== false && strpos($reqkey, "fab_print_colors_front_") == 0)
+         {
+            $idx = substr($reqkey, strrpos($reqkey, "_") +1);
+            if((int)$_REQUEST["fab_print_colors_front_{$idx}"] && (int)$_REQUEST["fab_print_colors_back_{$idx}"])
+               $_COLORS_2SIDES++;
+            else
+               $_COLORS_1SIDES++;
+
+            $_FRONT_COLORS++;
+         }
+         if(strpos($reqkey, "fab_print_colors_back_") !== false && strpos($reqkey, "fab_print_colors_back_") == 0)
+         {
+            $idx = substr($reqkey, strrpos($reqkey, "_") +1);
+
+            if((int)$_REQUEST["fab_print_colors_back_{$idx}"] && !(int)$_REQUEST["fab_print_colors_front_{$idx}"])
+               $_COLORS_1SIDES++;
+
+            $_BACK_COLORS++;
+         }
+      }
+      $_ROW_COLORS_1SIDES = $_COLORS_1SIDES;
+      $_ROW_COLORS_2SIDES = $_COLORS_2SIDES;
+
+      //----------------------------------------------------------------------------------
+      $item_img      = $itemdata["item_img"];
+      $new_item_img  = "";
+      if($item_img != "")
+      {
+         $new_item_img = $_REQUEST["id"]."_".md5(microtime()).$item_img;
+         copy("{$_SESSION["_CONF"]["conf_shopadmin_path"]}images/items/{$item_img}", "{$_SESSION["_CONF"]["conf_shopadmin_path"]}docs.offer/{$new_item_img}");
+      }
+
+      if($itemdata["item_des_personalizada"]==0)
+      {
+            //----------------------------------------------------------------------------------
+            $item_compdesc = "<b>{$itemdata["item_fabricate_prefix"]} modelo {$itemdata["item_title"]}</b>";
+
+            $omitFabDesc = false;
+            if($itemdata["item_fabricate_fabrictext"] != "")
+            {
+               $item_compdesc .= " {$itemdata["item_fabricate_fabrictext"]}, medidas ";
+               $omitFabDesc = true;
+            }
+
+            if(!$omitFabDesc)
+            {
+               $sql = " select fabt_desc
+                        from fabric_types
+                        where
+                        fabt_status > 0 and
+                        fabt_code   = '{$medida["fab_type"]}'";
+               $fabt_desc = $CON->select($sql);
+               $fabt_desc = $fabt_desc[0]["fabt_desc"];
+
+               if($fabt_desc != "")
+                  $item_compdesc .= " {$fabt_desc}, color a elección, medidas ";
+               else
+                  $item_compdesc .= " color a elección, medidas ";
+            }
+      
+            $fulle_addtxt = "";
+            if($itemdata["item_fabricate_fuelletext"] != "")
+               $fulle_addtxt = " {$itemdata["item_fabricate_fuelletext"]}";
+      
+            $item_compdesc .= "<b>".(int)$predefine["fab_med_width"]."cm (ancho) x ".(int)$predefine["fab_med_height"]."cm (alto) ";
+            if((int)$predefine["fab_med_fuelle"])
+               $item_compdesc .= "x ".(int)$predefine["fab_med_fuelle"]."cm (fuelle{$fulle_addtxt})";
+            $item_compdesc .= "</b>, ";
+
+            if((int)$medida["fab_manilla_length"])
+               $item_compdesc .= "con manillas de largo ".(int)$medida["fab_manilla_length"]." cm de color a elección, ";
+
+            $item_compdesc .= "impresión por ";
+         
+            if($predefine["fab_printtype"] == "FLEX")
+               $item_compdesc .= "Flexografía";
+            elseif($predefine["fab_printtype"] == "SERI")
+               $item_compdesc .= "Serigrafía";
+
+            $_x_item_compdesc = " a {$predefine["fab_print_colors_front"]}/{$predefine["fab_print_colors_back"]} colores.";
+            if((int)$predefine["fab_print_colors_front"] == (int)$predefine["fab_print_colors_back"] && (int)$predefine["fab_print_colors_front"] > 0)
+            {
+               if((int)$predefine["fab_print_colors_front"] == 1)
+                  $_x_item_compdesc = " a ".$_LANG["MODULE"]["OFFERNUMS"][(int)$predefine["fab_print_colors_front"]]." color, ambos lados.";
+               else
+                  $_x_item_compdesc = " a ".$_LANG["MODULE"]["OFFERNUMS"][(int)$predefine["fab_print_colors_front"]]." colores, ambos lados.";
+            }
+            elseif((int)$predefine["fab_print_colors_front"] > (int)$predefine["fab_print_colors_back"] && (int)$predefine["fab_print_colors_back"] == 0)
+            {
+               if((int)$predefine["fab_print_colors_front"] == 1)
+                  $_x_item_compdesc = " a ".$_LANG["MODULE"]["OFFERNUMS"][(int)$predefine["fab_print_colors_front"]]." color, un lado.";
+               else
+                  $_x_item_compdesc = " a ".$_LANG["MODULE"]["OFFERNUMS"][(int)$predefine["fab_print_colors_front"]]." colores, un lado.";
+            }
+            $item_compdesc .= $_x_item_compdesc;
+
+            $pos_incid = $medida["fab_inc_id"];
+            $fab_noprint_discount = $medida["fab_noprint_discount"];
+      }
+      else
+      {
+         $lin = "\n";
+         $item_compdesc = "<b>{$itemdata["item_title"]}</b>".$lin.$lin;;
+         $item_compdesc .= "{$itemdata["item_desc"]}";
+      }
+               
+      //----------------------------------------------------------------------------------
+      if((int)$headdata["req_prices_cnt"] <= 1)
+      {
+         $sql = " select *
+                  from price_lists_fab_amounts
+                  where
+                  pl_id       = {$headdata["req_plid_fab"]} and
+                  amt_status  > 0 and
+                  amt_val     = {$item_amount}";
+         $amt_dsc = $CON->select($sql);
+         $amt_dsc = (float)$amt_dsc[0]["amt_dsc"];
+
+         $sql = " select prc_price
+                  from price_lists_fab_items_prices
+                  where
+                  pl_id          = {$headdata["req_plid_fab"]} and
+                  prc_headerid   = {$medida["id"]} and
+                  prc_amount     = {$item_amount} ";
+         $prc_price_base = $CON->select($sql);
+         $prc_price_base = $prc_price_base[0]["prc_price"];
+
+         $sql = " select *
+                  from price_lists_fab_increments_pos
+                  where
+                  pl_id       = {$headdata["req_plid_fab"]} and
+                  pos_amount  = {$item_amount} and
+                  pos_incid   = {$pos_incid}";
+         $increment = $CON->select($sql);
+         $increment = $increment[0];
+
+         $incrval = 0;
+         if(!(int)$_ROW_COLORS_1SIDES && !(int)$_ROW_COLORS_2SIDES)
+            $incrval = $fab_noprint_discount * -1;
+         else
+         {
+            if($predefine["fab_printtype"] == "FLEX")
+            {
+               if($_ROW_COLORS_2SIDES > 0)
+                  $_ROW_COLORS_2SIDES--;
+               elseif($_ROW_COLORS_1SIDES > 0)
+                  $_ROW_COLORS_1SIDES--;
+
+               if($_ROW_COLORS_2SIDES > 0)
+                  $incrval += ($_ROW_COLORS_2SIDES * $increment["aum_prc_flexo_2sides"]);
+               if($_ROW_COLORS_1SIDES > 0)
+                  $incrval += ($_ROW_COLORS_1SIDES * $increment["aum_prc_flexo_1sides"]);
+            }
+            elseif($predefine["fab_printtype"] == "SERI")
+            {
+               if($_ROW_COLORS_2SIDES > 0)
+               {
+                  $_ROW_COLORS_2SIDES--;
+                  $_ROW_COLORS_1SIDES++;
+               }
+               elseif($_ROW_COLORS_1SIDES > 0)
+                  $_ROW_COLORS_1SIDES--;
+
+               if($_ROW_COLORS_2SIDES > 0)
+                  $incrval += ($_ROW_COLORS_2SIDES * 2 * $increment["aum_prc_seri_1sides"]);
+               if($_ROW_COLORS_1SIDES > 0)
+                  $incrval += ($_ROW_COLORS_1SIDES * $increment["aum_prc_seri_1sides"]);
+            }
+         }
+
+         if($amt_dsc > 0.00)
+         {
+            if((int)$_COLORS_1SIDES == 0 && (int)$_COLORS_2SIDES == 0)
+               $incrval -= $amt_dsc;
+         }
+
+         $itemunitprice    =  $prc_price_base + $incrval;
+         $itemtotalprice   = $item_amount * $itemunitprice;
+
+         $sql_sellnetto = (int)$itemunitprice;
+         $sql_taxesperc = $_SESSION["_CONF"]["conf_taxes"];
+         $sql_taxes     = round($sql_sellnetto / 100 * $sql_taxesperc);
+         $sql_sellprice = $sql_sellnetto + $sql_taxes;
+
+         for($x = 1; $x <= 5; $x++)
+         {
+            $_REQUEST["fab_print_colors_front_{$x}"]  = (int)$_REQUEST["fab_print_colors_front_{$x}"];
+            $_REQUEST["fab_print_colors_back_{$x}"]   = (int)$_REQUEST["fab_print_colors_back_{$x}"];
+         }
+         
+         //----------------------------------------------------------------------------------
+         $sql = " insert into offers_items
+                  (req_id, item_id, item_pos, item_amount, item_type, item_sellprice_brutto,
+                   item_sellprice_taxes_perc, item_sellprice_netto, item_sellprice_taxes, item_desc,
+                   item_sellprice_netto_ccval1, item_sellprice_netto_ccval2, item_sellprice_netto_ccval3,
+                   item_sellprice_netto_ccval4, item_sellprice_netto_ccval5, item_compdesc,
+                   fab_type, fab_printtype, fab_med_width, fab_med_height, fab_med_fuelle, fab_print_width,
+                   fab_print_height, fab_manilla_length, fab_mat_fabric_color, fab_mat_manilla_color, fab_print_colors_front_1,
+                   fab_print_colors_back_1, fab_print_colors_front_2, fab_print_colors_back_2, fab_print_colors_front_3,
+                   fab_print_colors_back_3, fab_print_colors_front_4, fab_print_colors_back_4, fab_print_colors_front_5,
+                   fab_print_colors_back_5, item_img_hash)
+                  VALUES
+                  ({$_REQUEST["id"]}, {$_REQUEST["itemid"]}, {$max_item_pos}, {$item_amount}, 'item',
+                   {$sql_sellprice}, {$sql_taxesperc}, {$sql_sellnetto}, {$sql_taxes}, '',
+                   0, 0, 0, 0, 0, '{$item_compdesc}',
+                   '{$medida["fab_type"]}', '{$predefine["fab_printtype"]}',
+                   {$predefine["fab_med_width"]}, {$predefine["fab_med_height"]}, {$predefine["fab_med_fuelle"]},
+                   {$fab_print_width}, {$fab_print_height}, {$medida["fab_manilla_length"]},
+                   0, 0,
+                   {$_REQUEST["fab_print_colors_front_1"]}, {$_REQUEST["fab_print_colors_back_1"]},
+                   {$_REQUEST["fab_print_colors_front_2"]}, {$_REQUEST["fab_print_colors_back_2"]},
+                   {$_REQUEST["fab_print_colors_front_3"]}, {$_REQUEST["fab_print_colors_back_3"]},
+                   {$_REQUEST["fab_print_colors_front_4"]}, {$_REQUEST["fab_print_colors_back_4"]},
+                   {$_REQUEST["fab_print_colors_front_5"]}, {$_REQUEST["fab_print_colors_back_5"]},
+                   '{$new_item_img}')";
+         $CON->no_result($sql);
+
+         recalcOrderItem($CON, $_REQUEST["id"], $_REQUEST["itemid"], $max_item_pos, true, "OFFER");
+         recalcOrder($CON, $_REQUEST["id"], "OFFER");
+      }
+      else
+      {
+         //----------------------------------------------------------------------------------
+         $_PRICESSQL["item_sellprice_netto_ccval1"] = 0;
+         $_PRICESSQL["item_sellprice_netto_ccval2"] = 0;
+         $_PRICESSQL["item_sellprice_netto_ccval3"] = 0;
+         $_PRICESSQL["item_sellprice_netto_ccval4"] = 0;
+         $_PRICESSQL["item_sellprice_netto_ccval5"] = 0;
+
+         //----------------------------------------------------------------------------------
+         for($xx = 1; $xx <= $headdata["req_prices_cnt"]; $xx++)
+         {
+            if($headdata["req_prices_ccval{$xx}"] > 0)
+            {
+               $item_amount = (int)$headdata["req_prices_ccval{$xx}"];
+               $_ROW_COLORS_1SIDES = $_COLORS_1SIDES;
+               $_ROW_COLORS_2SIDES = $_COLORS_2SIDES;
+
+               $sql = " select *
+                        from price_lists_fab_amounts
+                        where
+                        pl_id       = {$headdata["req_plid_fab"]} and
+                        amt_status  > 0 and
+                        amt_val     = {$item_amount}";
+               $amt_dsc = $CON->select($sql);
+               $amt_dsc = (float)$amt_dsc[0]["amt_dsc"];
+
+               $sql = " select prc_price
+                        from price_lists_fab_items_prices
+                        where
+                        pl_id          = {$headdata["req_plid_fab"]} and
+                        prc_headerid   = {$medida["id"]} and
+                        prc_amount     = {$item_amount} ";
+               $prc_price_base = $CON->select($sql);
+               $prc_price_base = $prc_price_base[0]["prc_price"];
+
+               $sql = " select *
+                        from price_lists_fab_increments_pos
+                        where
+                        pl_id       = {$headdata["req_plid_fab"]} and
+                        pos_amount  = {$item_amount} and
+                        pos_incid   = {$pos_incid}";
+               $increment = $CON->select($sql);
+               $increment = $increment[0];
+
+               $incrval = 0;
+               if(!(int)$_ROW_COLORS_1SIDES && !(int)$_ROW_COLORS_2SIDES)
+                  $incrval = $fab_noprint_discount * -1;
+               else
+               {
+                  if($predefine["fab_printtype"] == "FLEX")
+                  {
+                     if($_ROW_COLORS_2SIDES > 0)
+                        $_ROW_COLORS_2SIDES--;
+                     elseif($_ROW_COLORS_1SIDES > 0)
+                        $_ROW_COLORS_1SIDES--;
+
+                     if($_ROW_COLORS_2SIDES > 0)
+                        $incrval += ($_ROW_COLORS_2SIDES * $increment["aum_prc_flexo_2sides"]);
+                     if($_ROW_COLORS_1SIDES > 0)
+                        $incrval += ($_ROW_COLORS_1SIDES * $increment["aum_prc_flexo_1sides"]);
+                  }
+                  elseif($predefine["fab_printtype"] == "SERI")
+                  {
+                     if($_ROW_COLORS_2SIDES > 0)
+                     {
+                        $_ROW_COLORS_2SIDES--;
+                        $_ROW_COLORS_1SIDES++;
+                     }
+                     elseif($_ROW_COLORS_1SIDES > 0)
+                        $_ROW_COLORS_1SIDES--;
+
+                     if($_ROW_COLORS_2SIDES > 0)
+                        $incrval += ($_ROW_COLORS_2SIDES * 2 * $increment["aum_prc_seri_1sides"]);
+                     if($_ROW_COLORS_1SIDES > 0)
+                        $incrval += ($_ROW_COLORS_1SIDES * $increment["aum_prc_seri_1sides"]);
+                  }
+               }
+
+               if($amt_dsc > 0.00)
+               {
+                  if((int)$_COLORS_1SIDES == 0 && (int)$_COLORS_2SIDES == 0)
+                     $incrval -= $amt_dsc;
+               }
+
+               $itemunitprice    = $prc_price_base + $incrval;
+               $itemtotalprice   = $item_amount * $itemunitprice;
+
+               $_PRICESSQL["item_sellprice_netto_ccval{$xx}"] = $itemunitprice;
+            }
+         }
+
+         //----------------------------------------------------------------------------------
+         for($x = 1; $x <= 5; $x++)
+         {
+            $_REQUEST["fab_print_colors_front_{$x}"]  = (int)$_REQUEST["fab_print_colors_front_{$x}"];
+            $_REQUEST["fab_print_colors_back_{$x}"]   = (int)$_REQUEST["fab_print_colors_back_{$x}"];
+         }
+
+         //----------------------------------------------------------------------------------
+         $sql_taxesperc = $_SESSION["_CONF"]["conf_taxes"];
+         $sql = " insert into offers_items
+                  (req_id, item_id, item_pos, item_amount, item_type, item_sellprice_brutto,
+                   item_sellprice_taxes_perc, item_sellprice_netto, item_sellprice_taxes, item_desc,
+                   item_sellprice_netto_ccval1, item_sellprice_netto_ccval2, item_sellprice_netto_ccval3,
+                   item_sellprice_netto_ccval4, item_sellprice_netto_ccval5, item_compdesc,
+                   fab_type, fab_printtype, fab_med_width, fab_med_height, fab_med_fuelle, fab_print_width,
+                   fab_print_height, fab_manilla_length, fab_mat_fabric_color, fab_mat_manilla_color, fab_print_colors_front_1,
+                   fab_print_colors_back_1, fab_print_colors_front_2, fab_print_colors_back_2, fab_print_colors_front_3,
+                   fab_print_colors_back_3, fab_print_colors_front_4, fab_print_colors_back_4, fab_print_colors_front_5,
+                   fab_print_colors_back_5, item_img_hash)
+                  VALUES
+                  ({$_REQUEST["id"]}, {$_REQUEST["itemid"]}, {$max_item_pos}, {$item_amount}, 'item',
+                   0, {$sql_taxesperc}, 0, 0, '',
+                   {$_PRICESSQL["item_sellprice_netto_ccval1"]},
+                   {$_PRICESSQL["item_sellprice_netto_ccval2"]},
+                   {$_PRICESSQL["item_sellprice_netto_ccval3"]},
+                   {$_PRICESSQL["item_sellprice_netto_ccval4"]},
+                   {$_PRICESSQL["item_sellprice_netto_ccval5"]},
+                   '{$item_compdesc}',
+                   '{$medida["fab_type"]}', '{$predefine["fab_printtype"]}',
+                   {$predefine["fab_med_width"]}, {$predefine["fab_med_height"]}, {$predefine["fab_med_fuelle"]},
+                   {$fab_print_width}, {$fab_print_height}, {$medida["fab_manilla_length"]},
+                   0, 0,
+                   {$_REQUEST["fab_print_colors_front_1"]}, {$_REQUEST["fab_print_colors_back_1"]},
+                   {$_REQUEST["fab_print_colors_front_2"]}, {$_REQUEST["fab_print_colors_back_2"]},
+                   {$_REQUEST["fab_print_colors_front_3"]}, {$_REQUEST["fab_print_colors_back_3"]},
+                   {$_REQUEST["fab_print_colors_front_4"]}, {$_REQUEST["fab_print_colors_back_4"]},
+                   {$_REQUEST["fab_print_colors_front_5"]}, {$_REQUEST["fab_print_colors_back_5"]},
+                   '{$new_item_img}')";
+         $CON->no_result($sql);
+         
+         recalcOrderItem($CON, $_REQUEST["id"], $_REQUEST["itemid"], $max_item_pos, true, "OFFER");
+         recalcOrder($CON, $_REQUEST["id"], "OFFER");
+      }
+   }
+   ?>
+   <script language="JavaScript">
+      parent.location.href = '/index.php?mid=770&exec=edit&subcatexec=basic&id=<?=$_REQUEST["id"]?>';
+   </script>
+   <?
+}

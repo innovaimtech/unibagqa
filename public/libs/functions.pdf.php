@@ -1,0 +1,765 @@
+<?php
+//----------------------------------------------------------------------------------
+// Author:        1BIT LTDA
+// Copyright:     2011 by 1BIT LTDA. All Rights Reserved.
+// Any unauthorized redistribution, reselling, modifying or reproduction of part
+// or all of the contents in any form is strictly prohibited.
+//----------------------------------------------------------------------------------
+
+require_once("pdf.supplierorder.php");
+require_once("pdf.order.php");
+require_once("pdf.offer.php");
+require_once("pdf.item.price.history.php");
+require_once("pdf.item.price.percent.php");
+require_once("pdf.item.price.selling.php");
+require_once("pdf.item.price.buying.php");
+require_once("xls.stats.php");
+require_once("pdf.stats.php");
+
+//----------------------------------------------------------------------------------
+function prepareDoc($doc_filename, $doc_paper, $doc_orientation, $doc_type)
+{
+   $pdffile = "{$doc_filename}";
+   $fp = fopen($doc_filename, "w");
+   {
+      fclose($fp);
+      require_once("./libs/thirdparty/pdfClassesAndFonts/class.ezpdf.php");
+      $pdf = new Cezpdf($doc_paper, $doc_orientation);
+      $pdf->selectFont("./libs/thirdparty/pdfClassesAndFonts/fonts/Helvetica.afm");
+
+      switch($doc_type)
+      {
+         case "supplier_order": $pdf->ezSetMargins(140, 60, 30, 35); break;
+         case "order": $pdf->ezSetMargins(140, 35, 30, 35); break;
+         case "orderext": $pdf->ezSetMargins(50, 35, 30, 35); break;
+         case "list": $pdf->ezSetMargins(85, 35, 35, 35); break;
+         case "list_ship_app": $pdf->ezSetMargins(120, 35, 35, 35); break;
+         case "listx": $pdf->ezSetMargins(60, 35, 35, 35); break;
+         case "card": $pdf->ezSetMargins(20, 20, 20, 20); break;
+         case "offer": $pdf->ezSetMargins(120, 35, 30, 35); break;
+      }
+
+      return $pdf;
+   }
+   return false;
+}
+
+//----------------------------------------------------------------------------------
+function prepareDocV2($doc_filename, $doc_paper, $doc_orientation, $doc_type)
+{
+   $pdffile = "{$doc_filename}";
+   $fp = fopen($doc_filename, "w");
+   {
+      fclose($fp);
+      //require_once("./libs/thirdparty/pdf-php/src/Cezpdf.php");
+      //$pdf = new Cezpdf($doc_paper, $doc_orientation);
+      require_once("./libs/thirdparty/pdf-php/extensions/CezTableImage.php");
+      $pdf = new CezTableImage($doc_paper, $doc_orientation);
+      $pdf->selectFont("./libs/thirdparty/pdf-php/src/fonts/Helvetica.afm");
+      
+      switch($doc_type)
+      {
+         case "supplier_order": $pdf->ezSetMargins(140, 60, 30, 35); break;
+         case "order": $pdf->ezSetMargins(140, 35, 30, 35); break;
+         case "orderext": $pdf->ezSetMargins(50, 35, 30, 35); break;
+         case "list": $pdf->ezSetMargins(85, 35, 35, 35); break;
+         case "list_ship_app": $pdf->ezSetMargins(120, 35, 35, 35); break;
+         case "listx": $pdf->ezSetMargins(60, 35, 35, 35); break;
+         case "card": $pdf->ezSetMargins(20, 20, 20, 20); break;
+         case "offer": $pdf->ezSetMargins(120, 35, 30, 35); break;
+      }
+
+      return $pdf;
+   }
+   return false;
+}
+
+//----------------------------------------------------------------------------------
+function doc_linedraw($pdf, $left, $width, $lheight = 3, $margintop = 0)
+{
+   $pdf->setStrokeColor(0.33,0.33,0.33);
+
+   $y = $pdf->ezText(" ", 3);
+   $y -= $margintop;
+   $pdf->setLineStyle($lheight);
+   $pdf->line($left, $y -3, $width + $left, $y -3);
+   $pdf->setLineStyle(1);
+   $pdf->ezText(" ", 3);
+   return $pdf;
+}
+
+//----------------------------------------------------------------------------------
+function doc_printSig($CON, $pdf, $ty)
+{
+   $sql = " select user_doc_signature
+            from user
+            where
+            id = {$_SESSION["user_id"]}";
+   $user_doc_signature = $CON->select($sql);
+   $user_doc_signature = $user_doc_signature[0]["user_doc_signature"];
+
+   if($user_doc_signature != "")
+   {
+      $pdf->ezSetY($ty + 60);
+      $pdf->ezImage("./images/user_signatures/s{$user_doc_signature}", 0, 150, 'none', 'left');
+   }
+   return $pdf;
+}
+
+//----------------------------------------------------------------------------------
+function printPDFLine($pdf)
+{
+   /*
+   $pdf->SetStrokeColor(0.33, 0.33, 0.33);
+   $pdf->SetColor(0.33, 0.33, 0.33);
+   $pdf->ezText(". . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . "
+               .". . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . "
+               .". . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . "
+               .". . . . . . . . .", 9);
+   $pdf->SetStrokeColor(0, 0, 0);
+   $pdf->SetColor(0, 0, 0);
+   */
+
+   return $pdf;
+}
+
+//----------------------------------------------------------------------------------
+function printPDFFooter($CON, $pdf, $companyid, $mode = "", $modedata = NULL, $shopid = 0)
+{
+   //----------------------------------------------------------------------------------
+   $sql = " select *
+            from company_data
+            where
+            id = {$companyid}";
+   $companydata = $CON->select($sql);
+   $companydata = $companydata[0];
+
+   //----------------------------------------------------------------------------------
+   $sql = " select t1.*, t2.nombre 'comuna', t3.pro_name 'provincia'
+            from company_shops t1
+            LEFT OUTER JOIN comunas t2 ON t1.shop_comunaid = t2.id
+            LEFT OUTER JOIN provincias t3 ON t1.shop_provinciaid = t3.id
+            where
+            t1.id = {$shopid}";
+   $shopdata = $CON->select($sql);
+   $shopdata = $shopdata[0];
+
+   if(strpos($shopdata["shop_street"], ", Parque") !== false)
+      $shopdata["shop_street"] = str_replace(", Parque", ",\nParque", $shopdata["shop_street"]);
+
+   //----------------------------------------------------------------------------------
+   $pagearr    = $pdf->ezPages;
+   $pcounter   = 0;
+
+   //----------------------------------------------------------------------------------
+   foreach($pagearr AS $pageid)
+   {
+      $pdf->reopenObject($pageid);
+
+
+      if($mode == "supplier_order")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(580);
+         if($companydata["company_img_buy"] != "" && file_exists("./images/companies/{$companydata["company_img_buy"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_buy"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(580);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 750, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3,
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>ORDEN DE COMPRA</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+
+         unset($data);
+         $pdf->ezSetY(580);
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 10, 
+                         "showLines" => 0, "rowGap" => 2, "colGap" => 3, "width" => "735",
+                         "outerLineThickness" => 1, "innerLineThickness" => 1,
+                         "cols" =>
+                         Array ("x1" => Array("width" => "300", "justification" => "left")),
+                         Array ("x2" => Array("width" => "435", "justification" => "left")));
+
+         $data[0]["x1"] = " ";
+         $data[0]["x2"] = "{$companydata["company_name"]}";
+         $data[1]["x1"] = " ";
+         $data[1]["x2"] = "{$shopdata["shop_street"]}";
+         $data[2]["x1"] = " ";
+         $data[2]["x2"] = "{$shopdata["comuna"]}, {$shopdata["provincia"]}";
+         $data[3]["x1"] = " ";
+         $data[3]["x2"] = "Rut: {$companydata["company_rut"]}";
+         $data[4]["x1"] = " ";
+         $data[4]["x2"] = "Fono: {$shopdata["shop_phone"]}";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+      }
+      elseif($mode == "supplier_order_en")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(580);
+         if($companydata["company_img_buy"] != "" && file_exists("./images/companies/{$companydata["company_img_buy"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_buy"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(580);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 750, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3,
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>PURCHASE ORDER</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+
+         unset($data);
+         $pdf->ezSetY(580);
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 10, 
+                         "showLines" => 0, "rowGap" => 2, "colGap" => 3, "width" => "735",
+                         "outerLineThickness" => 1, "innerLineThickness" => 1,
+                         "cols" =>
+                         Array ("x1" => Array("width" => "300", "justification" => "left")),
+                         Array ("x2" => Array("width" => "435", "justification" => "left")));
+
+         $data[0]["x1"] = " ";
+         $data[0]["x2"] = "{$companydata["company_name"]}";
+         $data[1]["x1"] = " ";
+         $data[1]["x2"] = "{$shopdata["shop_street"]}";
+         $data[2]["x1"] = " ";
+         $data[2]["x2"] = "{$shopdata["comuna"]}, {$shopdata["provincia"]}, CHILE";
+         $data[3]["x1"] = " ";
+         $data[3]["x2"] = "TaxId: {$companydata["company_rut"]}";
+         $data[4]["x1"] = " ";
+         $data[4]["x2"] = "Phone: {$shopdata["shop_phone"]}";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+         /*
+         $pdf->ezSetY(55);
+         $pdf = doc_linedraw($pdf, 30, 735, 1);
+         $pdf->ezText(" ", 2);
+
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 8,
+                         "showLines" => 0, "rowGap" => 1, "colGap" => 2, "width" => "735",
+                         "outerLineThickness" => 1, "innerLineThickness" => 1,
+                         "cols" =>
+                         Array ("x1" => Array("width" => "285", "justification" => "left")),
+                         Array ("x2" => Array("width" => "245", "justification" => "left")),
+                         Array ("x3" => Array("width" => "205", "justification" => "left")));
+         $data[0]["x1"] = "{$companydata["company_name"]} - {$shopdata["shop_name"]}";
+         $data[0]["x2"] = "TaxId: {$companydata["company_rut"]}";
+         $data[0]["x3"] = "Giro: {$shopdata["shop_giro"]}";
+         $data[1]["x1"] = "{$shopdata["shop_street"]}";
+         $data[1]["x2"] = "{$shopdata["provincia"]} - {$shopdata["comuna"]}";
+         $data[1]["x3"] = "";
+         $data[2]["x1"] = "Phone: {$shopdata["shop_phone"]}";
+         $data[2]["x2"] = "Fax: {$shopdata["shop_fax"]}";
+         $data[2]["x3"] = "Email: {$shopdata["shop_email"]}";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+         */
+      }
+      elseif($mode == "order")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(580);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(580);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 750, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3,
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>NOTA DE VENTA</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+      }
+      elseif($mode == "order2")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(780);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 580, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3,
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>NOTA DE VENTA</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+      }
+      elseif($mode == "stockchange")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(780);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 12, "xOrientation" => "left",
+                            "xPos" => 520, "showLines" => 0, "rowGap" => 0, "colGap" => 0,
+                            "cols" => Array ("x1" => Array("width" => "100", "justification" => "center")));
+
+            $data[0]["x1"] = "<b>PAGINA ".($pcounter +1)." / ".count($pagearr)."</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+      }
+      elseif($mode == "offer")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(580);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(580);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 750, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3,
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>COTIZACIÓN</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+      }
+      elseif($mode == "offer2")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(780);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 580, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3,
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>COTIZACIÓN      \n\n{$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+      }
+      elseif($mode == "expect")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(590);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(580);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 750, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3,
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>ANTICIPO</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+      }
+      elseif($mode == "loan")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(590);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(580);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 750, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3,
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>PRESTAMO</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+      }
+      elseif($mode == "list")
+      {
+         $pdf->ezSetY(580);
+         $pdf->ezTable($modedata["DATA"],$type,$dummy,$modedata["ATTR"]);
+         $pdf->ezSetY(580);
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 12, "xOrientation" => "left",
+                         "xPos" => 760, "showLines" => 0, "rowGap" => 0, "colGap" => 0,
+                         "cols" => Array ("x1" => Array("width" => "100", "justification" => "center")));
+
+         $data[0]["x1"] = "<b>PAGINA ".($pcounter +1)." / ".count($pagearr)."</b>\n";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+      }
+      elseif($mode == "list_ship_app")
+      {
+         $pdf->ezSetY(580);
+         $pdf->ezTable($modedata["DATA"],$type,$dummy,$modedata["ATTR"]);
+         $pdf->ezSetY(580);
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 12, "xOrientation" => "left",
+                         "xPos" => 760, "showLines" => 0, "rowGap" => 0, "colGap" => 0,
+                         "cols" => Array ("x1" => Array("width" => "100", "justification" => "center")));
+
+         $data[0]["x1"] = "<b>PAGINA ".($pcounter +1)." / ".count($pagearr)."</b>\n";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+         $pdf->SetStrokeColor(0, 0, 0);
+         $pdf->SetColor(0, 0, 0);
+         $pdf->ezText(" ", 11);
+         $pdf->ezText(" ", 11);
+         $pdf->ezText("O/C  <u>                                        </u>                FECHA   <u>                                        </u>", 11);
+      }
+      elseif($mode == "inventory")
+      {
+         $pdf->ezSetY(780);
+         $pdf->ezTable($modedata["DATA"],$type,$dummy,$modedata["ATTR"]);
+         $pdf->ezSetY(780);
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 12, "xOrientation" => "left",
+                         "xPos" => 585, "showLines" => 0, "rowGap" => 0, "colGap" => 0,
+                         "cols" => Array ("x1" => Array("width" => "100", "justification" => "center")));
+
+         $data[0]["x1"] = "<b>PAGINA ".($pcounter +1)." / ".count($pagearr)."</b>\n";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+      }
+      elseif($mode == "listx")
+      {
+         $pdf->ezSetY(780);
+         $pdf->ezTable($modedata["DATA"],$type,$dummy,$modedata["ATTR"]);
+         $pdf->ezSetY(780);
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 12, "xOrientation" => "left",
+                         "xPos" => 585, "showLines" => 0, "rowGap" => 0, "colGap" => 0,
+                         "cols" => Array ("x1" => Array("width" => "100", "justification" => "center")));
+
+         $data[0]["x1"] = "<b>PAGINA ".($pcounter +1)." / ".count($pagearr)."</b>\n";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+      }
+      elseif($mode == "pageonly")
+      {
+         $pdf->ezSetY(780);
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 12, "xOrientation" => "left",
+                         "xPos" => 585, "showLines" => 0, "rowGap" => 0, "colGap" => 0,
+                         "cols" => Array ("x1" => Array("width" => "100", "justification" => "center")));
+
+         $data[0]["x1"] = "<b>PAGINA ".($pcounter +1)." / ".count($pagearr)."</b>\n";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+      }
+      elseif($mode == "pagepic")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 8,
+                         "showLines" => 0, "rowGap" => 0, "colGap" => 0, "width" => "540",
+                         "cols" => Array ("x1" => Array("width" => "80", "justification" => "left"),
+                                          "x2" => Array("width" => "460", "justification" => "left")));
+
+         $data[0]["x1"] = "<b>PAGINA: </b>";
+         $data[0]["x2"] = "<b>".($pcounter +1)." / ".count($pagearr)."</b>";
+         $data[1]["x1"] = "<b>FECHA: </b>";
+         $data[1]["x2"] = "<b>{$modedata["DATA"][0]["x3"]}</b>";
+         $data[2]["x1"] = "<b>NOMBRE: </b>";
+         $data[2]["x2"] = "<b>{$modedata["DATA"][0]["x1"]}</b>";
+         $pdf->ezTable($data,$type,$dummy,$attr);
+         unset($data);
+         $pdf->ezText(" ", 11);
+      }
+      elseif($mode == "shipment")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(780);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 570, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3, "lineCol" => array(1,0,0), "textCol" => array(1,0,0),
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>GUIA DE DESPACHO</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+         $pdf->setColor(0,0,0);
+      }
+      elseif($mode == "vi_factura")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(780);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 570, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3, "lineCol" => array(1,0,0), "textCol" => array(1,0,0),
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>FACTURA</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+         $pdf->setColor(0,0,0);
+      }
+      elseif($mode == "invoicebuy")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(780);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 570, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3, "lineCol" => array(1,0,0), "textCol" => array(1,0,0),
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>FACTURA</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+         $pdf->setColor(0,0,0);
+      }
+      elseif($mode == "invoicebuynote1")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(780);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 570, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3, "lineCol" => array(1,0,0), "textCol" => array(1,0,0),
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>NOTA DE CREDITO</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+         $pdf->setColor(0,0,0);
+      }
+      elseif($mode == "invoicebuynote2")
+      {
+         $pdf->ezSetMargins(0, 0, 25, 10);
+         $pdf->ezSetY(780);
+
+         if($companydata["company_img_sell"] != "" && file_exists("./images/companies/{$companydata["company_img_sell"]}"))
+         {
+            $pdf->ezImage("./images/companies/s{$companydata["company_img_sell"]}", 0, 320, 'none', 'left');
+            $pdf->ezSetY(780);
+            $attr = Array  ("showHeadings" => 0, "shaded" => 0, "fontSize" => 14, "xOrientation" => "left",
+                            "xPos" => 570, "showLines" => 1, "rowGap" => 3, "colGap" => 3,
+                            "outerLineThickness" => 3, "innerLineThickness" => 3, "lineCol" => array(1,0,0), "textCol" => array(1,0,0),
+                            "cols" => Array ("x1" => Array("width" => "180", "justification" => "center")));
+
+            $data[0]["x1"] = "\n<b>NOTA DE DEDITO</b>\n\n<b>N° {$modedata}</b>\n";
+            $pdf->ezTable($data,$type,$dummy,$attr);
+            unset($data);
+         }
+         $pdf->setColor(0,0,0);
+      }
+      $pcounter++;
+   }
+
+   return $pdf;
+}
+
+//----------------------------------------------------------------------------------
+function createOverviewDoc($CON, $doctype, $doctitle, $pageformat, $cols, $sql)
+{
+   require_once("./libs/thirdparty/pdfClassesAndFonts_ovw/class.ezpdf.php");
+   
+   $currtme    = time();
+   $hash       = md5(microtime());
+   $filedir    = "./docs.print/";
+   $filename   = "{$_SESSION["user_id"]}.{$doctype}.{$hash}";
+   $fileext    = ".pdf";
+   $pdffile    = "{$filedir}{$filename}{$fileext}";
+
+   //----------------------------------------------------------------------------------
+   if ($handle = opendir($filedir))
+   {
+      while (false !== ($file = readdir($handle)))
+         if ($file != "." && $file != ".." && strpos($file,"{$_SESSION["user_id"]}.{$doctype}.") !== false)
+            unlink("{$filedir}{$file}");
+      closedir($handle);
+   }
+
+   //----------------------------------------------------------------------------------
+   $fp = fopen($pdffile, "w");
+   if($fp)
+   {
+      $pdf = new Cezpdf("LETTER", $pageformat);
+      $pdf->selectFont("./libs/thirdparty/pdfClassesAndFonts_ovw/fonts/Helvetica.afm");
+      $pdf->ezSetMargins(30, 30, 30, 30);
+
+      $pdf->ezText("<b>{$doctitle}</b>\n",16, Array("justification" => "center"));
+      $pdf->ezText("", 10);
+
+      //----------------------------------------------------------------------------------
+      unset($data);
+      $data = Array();
+      
+      $attr = Array("showHeadings" => 1, "shaded" => 1, "shadeCol" => Array(0.95,0.95,0.95),
+                    "width" => "750", "xpos" => "left", "showLines" => 1,
+                    "rowGap" => 2, "colGap" => 4, "cols" => array_values($cols));
+
+      $sqldata = $CON->select($sql);
+
+      $counter = 0;
+      foreach($sqldata AS $sqlrow)
+      {
+         foreach(array_keys($cols) AS $colname)
+         {
+            $colinfo    = $cols[$colname];
+            $colvalue   = $sqlrow[$colname];
+            $colname    = "<b>{$colinfo["name"]}</b>";
+            $colformat  = $colinfo["format"];
+
+            switch($colformat)
+            {
+               case "text":      $colvalue = trim($colvalue); break;
+               case "datetime":  $colvalue = displayDate($colvalue); break;
+               case "date":      $colvalue = date('d.m.Y', $colvalue); break;
+               case "price":     $colvalue = printPrice($colvalue); break;
+               case "perc":      $colvalue = printPrice($colvalue,2); break;
+            }
+            
+            $data[$counter][$colname] = $colvalue;
+         }
+         $counter++;
+      }
+      $pdf->ezTable($data,$type,$dummy,$attr);
+      
+      //----------------------------------------------------------------------------------
+      $pdfdata = $pdf->output();
+      fwrite($fp, $pdfdata);
+      fclose($fp);
+
+      return $filename;
+   }
+   return false;
+}
+
+//----------------------------------------------------------------------------------
+function doc_prepareOrderDoc($CON, $orderid, $doc_type, $doc_prefix, $deleteold = true)
+{
+   /*
+   require_once("./libs/thirdparty/pdfClassesAndFonts/class.ezpdf.php");
+   
+   $currtme    = time();
+   $hash       = md5(microtime());
+   $filedir    = "./docs.{$doc_type}/";
+   $filename   = "{$orderid}.{$hash}";
+   $fileext    = ".pdf";
+   $pdffile    = "{$filedir}{$filename}{$fileext}";
+   $fp         = fopen($pdffile, "w");
+   
+   if($fp)
+   {
+      $sql = " select *
+               from orders
+               where
+               id = {$orderid}";
+      $orderheader = $CON->select($sql);
+      $orderheader = $orderheader[0];
+
+      $sql = " select *
+               from company_data";
+      $companydata = $CON->select($sql);
+      $companydata = $companydata[0];
+      
+      if($deleteold)
+      {
+         $olddoccount = "";
+         
+         $sql = " select *
+                  from orders_docs
+                  where
+                  doc_req_id  = {$orderid} and
+                  doc_type    = '{$doc_type}'";
+         $olddoc = $CON->select($sql);
+         $olddoc = $olddoc[0];
+   
+         if($olddoc["doc_hash"] != "")
+            unlink("{$filedir}{$orderid}.{$olddoc["doc_hash"]}{$fileext}");
+      
+         $sql = " delete from orders_docs
+                  where
+                  doc_req_id  = {$orderid} and
+                  doc_type    = '{$doc_type}'";
+         $CON->no_result($sql);
+      }
+      else
+      {
+         $sql = " select count(*) 'cc'
+                  from orders_docs
+                  where
+                  doc_req_id  = {$orderid} and
+                  doc_type    = '{$doc_type}'";
+         $olddoccount = $CON->select($sql);
+         $olddoccount = "-".((int)$olddoccount[0]["cc"] +1);
+      }
+
+      $doc_name = $doc_prefix.substr($orderheader["req_order_number"], strpos($orderheader["req_order_number"], "-")).$olddoccount;
+
+      $sql_mb_invc_text    = trim(addslashes($_REQUEST["mb_invc_text"]));
+
+      $sql = " insert into orders_docs
+               (doc_req_id, doc_type, doc_hash, doc_name, doc_crtdat, doc_crtusr)
+               VALUES
+               ({$orderid}, '{$doc_type}', '{$hash}', '{$doc_name}.pdf', {$currtme}, {$_SESSION["user_id"]})";
+      $res = $CON->no_result($sql);
+
+      //----------------------------------------------------------------------------------
+      if($res)
+      {
+         $pdf = new Cezpdf();
+         $pdf->selectFont("./libs/thirdparty/pdfClassesAndFonts/fonts/Helvetica.afm");
+         $pdf->ezSetMargins(115, 70, 25, 10);
+
+         $sql = " select MAX(id) 'thisid'
+                  from orders_docs
+                  where
+                  doc_type = '{$doc_type}' and
+                  doc_hash = '{$hash}'";
+         $thisid = $CON->select($sql);
+         
+
+         $retdata["PDF"]   = $pdf;
+         $retdata["ORDER"] = $orderheader;
+         $retdata["COMP"]  = $companydata;
+         $retdata["FP"]    = $fp;
+         $retdata["FPFL"]  = $pdffile;
+         $retdata["DOC"]   = $doc_name;
+         $retdata["DOCID"] = $thisid[0]["thisid"];
+
+         return $retdata;
+      }
+   }
+   return false;
+   */
+}

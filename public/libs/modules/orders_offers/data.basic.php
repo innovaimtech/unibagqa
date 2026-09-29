@@ -1,0 +1,2773 @@
+<?php
+//----------------------------------------------------------------------------------
+// Author:        1BIT LTDA
+// Copyright:     2011 by 1BIT LTDA. All Rights Reserved.
+// Any unauthorized redistribution, reselling, modifying or reproduction of part
+// or all of the contents in any form is strictly prohibited.
+// Fecha de Actualizaciones: 29/05/2025
+//----------------------------------------------------------------------------------
+$_HIDETAXES = true;
+//----------------------------------------------------------------------------------
+$sql = " select t1.id, t1.cat_name, t1.cat_crtdat
+         from customer_cats t1
+         where
+         t1.cat_status > 0
+         order by t1.cat_name";
+$custcats = $CON->select($sql);
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["subexec"] == "create")
+{
+   $currtme = time();
+
+   $_REQUEST["company_id"]    = (int)$_REQUEST["company_id"];
+   $_REQUEST["shop_id"]       = (int)$_REQUEST["shop_id"];
+   $_REQUEST["req_date"]      = time();
+
+   $req_paymentid = 0;
+   $payments = getPayments($CON, $_REQUEST["shop_id"]);
+   foreach($payments AS $payment)
+      if((int)$payment["pay_offer_default"])
+         $req_paymentid = (int)$payment["id"];
+
+   //----------------------------------------------------------------------------------
+   //$req_num = createTransactionNumber($CON, $_REQUEST["company_id"], "offer");
+   //$req_num = createInternalAltaNumber($CON);
+   $req_num = "[Pendiente]";
+
+   //----------------------------------------------------------------------------------
+   $sql = " select *
+            from texts
+            where
+            text_status > 0 and
+            text_default_act = 1";
+   $pretext = $CON->select($sql);
+   $pretext = $pretext[0];
+   $req_conditions_desc = trim(addslashes($pretext["text_comment"]));
+
+   //----------------------------------------------------------------------------------
+   $sql = " select id
+            from price_lists_fab
+            where
+            pl_status = 1 and
+            pl_isdefault = 1";
+   $req_plid_fab = $CON->select($sql);
+   $req_plid_fab = (int)$req_plid_fab[0]["id"];
+
+   //----------------------------------------------------------------------------------
+   $sql = " insert into offers
+            (req_number, req_company_id, req_shop_id, req_date, req_crtdat, req_crtusr, req_plid_fab,
+             req_conditions_desc, req_paymentid)
+            VALUES
+            ('{$req_num}', {$_REQUEST["company_id"]}, {$_REQUEST["shop_id"]}, {$_REQUEST["req_date"]},
+              {$currtme}, {$_SESSION["user_id"]}, {$req_plid_fab}, '{$req_conditions_desc}', {$req_paymentid})";
+   $res = $CON->no_result($sql);
+
+   if($res)
+   {
+      $sql = " select MAX(id) 'thisid'
+               from offers
+               where
+               req_crtusr = {$_SESSION["user_id"]}";
+      $sorder = $CON->select($sql);
+      $_REQUEST["id"]   = $sorder[0]["thisid"];
+
+      ?>
+      <script language="JavaScript">
+         location.href = 'index.php?mid=770&exec=edit&id=<?=$_REQUEST["id"]?>'
+      </script>
+      <?php
+   }
+
+   $savemsg = getSaveMessage($res);
+}
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["setStatus"] == "3" || $_REQUEST["setStatus"] == "4")
+{
+   $currtme = time();
+   $sql = " update offers
+            set
+            req_status           = {$_REQUEST["setStatus"]},
+            req_updusr           = {$_SESSION["user_id"]},
+            req_upddat           = {$currtme}
+            where
+            id = {$_REQUEST["id"]}";
+   $res = $CON->no_result($sql);
+   $savemsg = getSaveMessage($res);
+}
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["req_status"] == "1")
+{
+   $sql = " select *
+            from offers
+            where
+            id = {$_REQUEST["id"]}";
+   $headdata = $CON->select($sql);
+   $headdata = $headdata[0];
+
+   if($headdata["req_status"] > 1)
+   {
+      if($headdata["req_hash"] != "")
+      {
+         $sql = " select count(*) 'cc'
+                  from offers_docs_versions
+                  where
+                  offer_id = {$_REQUEST["id"]}";
+         $xpos = $CON->select($sql);
+         $xpos = (int)$xpos[0]["cc"] +1;
+               
+         $currtme = time();
+         $sql = " insert into offers_docs_versions
+                  (offer_id, doc_hash, doc_name, doc_date)
+                  VALUES
+                  ({$_REQUEST["id"]}, '{$headdata["req_hash"]}', '{$headdata["req_number"]}', {$currtme})";
+         $CON->no_result($sql);
+
+         $sql = " update offers
+                  set
+                  req_hash = ''
+                  where
+                  id = {$_REQUEST["id"]}";
+         $CON->no_result($sql);
+      }
+   }
+}
+
+//----------------------------------------------------------------------------------
+$xsql_rut = str_replace(".", "", $headdata["req_cust_rut"]);
+if(trim($xsql_rut) != "")
+{
+   $sql = " select t2.*
+            from customer t1
+            INNER JOIN user t2 ON t1.cust_sellerid = t2.id
+            where
+            t1.cust_status > 0 and
+            REPLACE(t1.cust_rut,'.','') like '{$sql_rut}' and
+            t1.cust_rut != ''";
+   $custvendedor = $CON->select($sql);
+   $custvendedor = $custvendedor[0];
+
+}
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["subexec"] == "save")
+{
+   $currtme = time();
+
+   //----------------------------------------------------------------------------------
+   $sql = " select *
+            from offers
+            where
+            id = {$_REQUEST["id"]}";
+   $headdata = $CON->select($sql);
+   $headdata = $headdata[0];
+   
+   //----------------------------------------------------------------------------------
+   $_REQUEST["req_desc"]            = trim(addslashes($_REQUEST["req_desc"]));
+   $_REQUEST["req_desc_intern"]     = trim(addslashes($_REQUEST["req_desc_intern"]));
+   $_REQUEST["req_number"]          = trim(addslashes($_REQUEST["req_number"]));
+   $_REQUEST["req_date"]            = trim(addslashes($_REQUEST["req_date"]));
+   $_REQUEST["req_paymentid"]       = (int)$_REQUEST["req_paymentid"];
+   $_REQUEST["req_cust_company"]    = trim(addslashes($_REQUEST["req_cust_company"]));
+   $_REQUEST["req_cust_street"]     = trim(addslashes($_REQUEST["req_cust_street"]));
+   $_REQUEST["req_cust_phone"]      = trim(addslashes($_REQUEST["req_cust_phone"]));
+   $_REQUEST["req_id_cc"]           = trim(addslashes($_REQUEST["req_id_cc"]));
+   $_REQUEST["req_cust_name"]       = trim(addslashes($_REQUEST["req_cust_name"]));
+   // $_REQUEST["id_contacto"]         = trim(addslashes($_REQUEST["id_contacto"]));
+   $_REQUEST["id_contacto"]         = (int)$_REQUEST["id_contacto"];
+   $_REQUEST["req_cust_email"]      = trim(addslashes($_REQUEST["req_cust_email"]));
+   $_REQUEST["req_cust_rut"]        = trim(addslashes($_REQUEST["req_cust_rut"]));
+   $_REQUEST["country"]             = (int)$_REQUEST["country"];
+   $_REQUEST["regions"]             = (int)$_REQUEST["regions"];
+   $_REQUEST["comunas"]             = (int)$_REQUEST["comunas"];
+   $_REQUEST["provincias"]          = (int)$_REQUEST["provincias"];
+   $_REQUEST["req_plid"]            = (int)$_REQUEST["req_plid"];
+   $_REQUEST["req_plptype"]         = (int)$_REQUEST["req_plptype"];
+   $_REQUEST["req_prices_cnt"]      = (int)$_REQUEST["req_prices_cnt"];
+   $_REQUEST["req_plid_fab"]        = (int)$_REQUEST["req_plid_fab"];
+   $_REQUEST["req_cust_catid"]      = (int)$_REQUEST["req_cust_catid"]; 
+   $_REQUEST["req_prices_totals_act"]  = (int)$_REQUEST["req_prices_totals_act"];
+   $_REQUEST["req_discount_perc"]      = getPrice($_REQUEST["req_discount_perc"],2);
+   $_REQUEST["req_discount_amt"]       = getPrice($_REQUEST["req_discount_amt"]);
+
+   $_REQUEST["req_plazo_entrega"]      = trim(addslashes($_REQUEST["req_plazo_entrega"]));
+   $_REQUEST["req_alert_dat"]          = trim(addslashes($_REQUEST["req_alert_dat"]));
+   $_REQUEST["req_alert_dat"]          = explode(".", $_REQUEST["req_alert_dat"]);
+   $_REQUEST["req_alert_dat"]          = (int)mktime(0, 0, 0, $_REQUEST["req_alert_dat"][1], $_REQUEST["req_alert_dat"][0], $_REQUEST["req_alert_dat"][2]);
+
+   $_REQUEST["req_prices_ccval1"]   = (float)getPrice(trim($_REQUEST["req_prices_ccval1"]));
+   $_REQUEST["req_prices_ccval2"]   = (float)getPrice(trim($_REQUEST["req_prices_ccval2"]));
+   $_REQUEST["req_prices_ccval3"]   = (float)getPrice(trim($_REQUEST["req_prices_ccval3"]));
+   $_REQUEST["req_prices_ccval4"]   = (float)getPrice(trim($_REQUEST["req_prices_ccval4"]));
+   $_REQUEST["req_prices_ccval5"]   = (float)getPrice(trim($_REQUEST["req_prices_ccval5"]));
+
+   $_REQUEST["req_conditions_desc"] = str_replace("\r", "", $_REQUEST["req_conditions_desc"]);
+   $_REQUEST["req_conditions_desc"] = str_replace("\n", "", $_REQUEST["req_conditions_desc"]);
+   $_REQUEST["req_conditions_desc"] = str_replace("<div>", "\n", $_REQUEST["req_conditions_desc"]);
+   $_REQUEST["req_conditions_desc"] = str_replace("<br>", "\n", $_REQUEST["req_conditions_desc"]);
+   $_REQUEST["req_conditions_desc"] = str_replace("<br/>", "\n", $_REQUEST["req_conditions_desc"]);
+   $_REQUEST["req_conditions_desc"] = str_replace("<br />", "\n", $_REQUEST["req_conditions_desc"]);
+   $_REQUEST["req_conditions_desc"] = str_replace("</div>", "", $_REQUEST["req_conditions_desc"]);
+   $_REQUEST["req_conditions_desc"] = str_replace("&nbsp;", " ", $_REQUEST["req_conditions_desc"]);
+   $_REQUEST["req_conditions_desc"] = strip_tags($_REQUEST["req_conditions_desc"],'<b><i></b></i>');
+   $_REQUEST["req_conditions_desc"] = trim(addslashes($_REQUEST["req_conditions_desc"]));
+   
+   if($_REQUEST["req_prices_cnt"] > 1)
+      $_REQUEST["req_prices_totals_act"] = 0;
+
+   //----------------------------------------------------------------------------------
+   $_REQUEST["req_date"] = explode(".", $_REQUEST["req_date"]);
+   $_REQUEST["req_date"] = (int)mktime(date('H'), date('i'), date('s'), $_REQUEST["req_date"][1], $_REQUEST["req_date"][0], $_REQUEST["req_date"][2]);
+
+   if($_REQUEST["req_paymentid"] != $headdata["req_paymentid"])
+      $itemfullupdate = true;
+   else
+      $itemfullupdate = false;
+
+   //----------------------------------------------------------------------------------
+   $sql = " select *
+            from offers
+            where
+            id = {$_REQUEST["id"]}";
+   $headdata = $CON->select($sql);
+   $headdata = $headdata[0];
+    
+   $final = false;
+   if($headdata["req_status"] == 1 && $_REQUEST["req_status"] == 2)
+      $final = true;
+
+   $sql = " update offers
+            set
+            req_status            = {$_REQUEST["req_status"]},
+            req_desc              = '{$_REQUEST["req_desc"]}',
+            req_desc_intern       = '{$_REQUEST["req_desc_intern"]}',
+            req_paymentid         = {$_REQUEST["req_paymentid"]},
+            req_date              = {$_REQUEST["req_date"]},
+            req_cust_company      = '{$_REQUEST["req_cust_company"]}',
+            req_cust_street       = '{$_REQUEST["req_cust_street"]}',
+            req_cust_phone        = '{$_REQUEST["req_cust_phone"]}',
+            req_cust_fax          = '{$_REQUEST["req_cust_name"]}',
+            req_cust_email        = '{$_REQUEST["req_cust_email"]}',
+            req_cust_rut          = '{$_REQUEST["req_cust_rut"]}',
+            req_plazo_entrega     = '{$_REQUEST["req_plazo_entrega"]}',
+            req_alert_dat         =  {$_REQUEST["req_alert_dat"]},
+            req_cust_countryid    =  {$_REQUEST["country"]},
+            req_cust_regionid     =  {$_REQUEST["regions"]},
+            req_cust_comunaid     =  {$_REQUEST["comunas"]},
+            req_cust_provinciaid  =  {$_REQUEST["provincias"]},
+            req_discount_perc     =  {$_REQUEST["req_discount_perc"]},
+            req_discount_amt      =  {$_REQUEST["req_discount_amt"]},
+            req_plid              =  {$_REQUEST["req_plid"]},
+            req_plptype           =  {$_REQUEST["req_plptype"]},
+            req_prices_cnt        =  {$_REQUEST["req_prices_cnt"]},
+            req_prices_ccval1     =  {$_REQUEST["req_prices_ccval1"]},
+            req_prices_ccval2     =  {$_REQUEST["req_prices_ccval2"]},
+            req_prices_ccval3     =  {$_REQUEST["req_prices_ccval3"]},
+            req_prices_ccval4     =  {$_REQUEST["req_prices_ccval4"]},
+            req_prices_ccval5     =  {$_REQUEST["req_prices_ccval5"]},
+            req_prices_totals_act =  {$_REQUEST["req_prices_totals_act"]},
+            req_conditions_desc   = '{$_REQUEST["req_conditions_desc"]}',
+            req_cust_catid        =  {$_REQUEST["req_cust_catid"]},
+            req_plid_fab          =  {$_REQUEST["req_plid_fab"]},
+            req_updusr            = {$_SESSION["user_id"]},
+            req_upddat            = {$currtme},
+            req_id_contacto       = {$_REQUEST["id_contacto"]}
+            where
+            id = {$_REQUEST["id"]}";
+   $res = $CON->no_result($sql);
+   
+   $sql2 = "update customer_contacts set
+            add_cellphone = '{$_REQUEST["req_cust_phone"]}',
+            add_phone = '{$_REQUEST["req_cust_phone"]}',
+            add_email = '{$_REQUEST["req_cust_email"]}'
+            where
+            id = '{$_REQUEST["req_id_cc"]}'";
+   $res2 = $CON->no_result($sql2);
+
+   $sql = " select *
+            from offers
+            ";
+   $savemsg = getSaveMessage($res);
+
+
+    //----------------------------------------------------------------------------------
+   if($final)
+   {
+      //----------------------------------------------------------------------------------
+      $sql = " select *
+               from offers
+               where
+               id = {$_REQUEST["id"]}";
+      $headdata = $CON->select($sql);
+      $headdata = $headdata[0];
+
+      if(trim($headdata["req_number"]) == "" || trim($headdata["req_number"]) == "[Pendiente]")
+      {
+         $req_num = createInternalAltaNumber($CON);
+
+         $sql = " update offers
+                  set
+                  req_number = '{$req_num}-1'
+                  where
+                  id = {$_REQUEST["id"]}";
+         $CON->no_result($sql);
+      }
+      else
+      {
+         $sql = " select *
+                  from offers
+                  where
+                  id = {$_REQUEST["id"]}";
+         $headdata = $CON->select($sql);
+         $headdata = $headdata[0];
+
+         $new_req_num = trim($headdata["req_number"]);
+         $new_arr     = explode("-", $new_req_num);
+         if(count($new_arr) == 4)
+         {
+            $prestr = substr($new_req_num, 0, strrpos($new_req_num, "-"));
+            $sufstr = (int)substr($new_req_num, strrpos($new_req_num, "-")+1);
+            $new_req_num = $prestr."-".((int)$sufstr +1);
+            $sql = " update offers
+                     set
+                     req_number = '{$new_req_num}'
+                     where
+                     id = {$_REQUEST["id"]}";
+            $CON->no_result($sql);
+         }
+      }
+
+
+   }
+
+   //----------------------------------------------------------------------------------
+   if($_REQUEST["delposimg"] != "")
+   {
+      $delposimgarr = explode("-", $_REQUEST["delposimg"]);
+      
+      $sql = " select item_img_hash
+               from offers_items
+               where
+               req_id   = {$_REQUEST["id"]} and
+               item_id  = {$delposimgarr[0]} and
+               item_pos = {$delposimgarr[1]}";
+      $delitem_img_hash = $CON->select($sql);
+      $delitem_img_hash = $delitem_img_hash[0];
+
+      @unlink("{$_SESSION["_CONF"]["conf_shopadmin_path"]}docs.offer/{$delitem_img_hash["item_img_hash"]}");
+
+      $sql = " update offers_items
+               set
+               item_img_hash = ''
+               where
+               req_id   = {$_REQUEST["id"]} and
+               item_id  = {$delposimgarr[0]} and
+               item_pos = {$delposimgarr[1]}";
+      $CON->no_result($sql);
+   }
+   
+   //----------------------------------------------------------------------------------
+   $poscounter = 0;
+   $valor_menor = 0;
+   foreach(array_keys($_REQUEST) AS $reqkey)
+   {
+      if(strpos($reqkey, "item_id_") !== false && strpos($reqkey, "item_id_") == 0)
+      {
+         $idx           = substr($reqkey, strrpos($reqkey, "_") +1);
+         $existing_id   = (int)$_REQUEST["existing_id_{$idx}"];
+         $existing_pos  = (int)$_REQUEST["existing_pos_{$idx}"];
+
+         //----------------------------------------------------------------------------------
+         $_REQUEST["item_amount_{$idx}"]               = getPrice($_REQUEST["item_amount_{$idx}"],4);
+         $_REQUEST["item_sellprice_nettocnt_{$idx}_1"] = getPrice($_REQUEST["item_sellprice_nettocnt_{$idx}_1"],4);
+         $_REQUEST["item_sellprice_nettocnt_{$idx}_2"] = getPrice($_REQUEST["item_sellprice_nettocnt_{$idx}_2"],4);
+         $_REQUEST["item_sellprice_nettocnt_{$idx}_3"] = getPrice($_REQUEST["item_sellprice_nettocnt_{$idx}_3"],4);
+         $_REQUEST["item_sellprice_nettocnt_{$idx}_4"] = getPrice($_REQUEST["item_sellprice_nettocnt_{$idx}_4"],4);
+         $_REQUEST["item_sellprice_nettocnt_{$idx}_5"] = getPrice($_REQUEST["item_sellprice_nettocnt_{$idx}_5"],4);
+
+         //----------------------------------------------------------------------------------
+         $_REQUEST["item_compdesc_{$idx}"] = str_replace("\r", "", $_REQUEST["item_compdesc_{$idx}"]);
+         $_REQUEST["item_compdesc_{$idx}"] = str_replace("\n", "", $_REQUEST["item_compdesc_{$idx}"]);
+         $_REQUEST["item_compdesc_{$idx}"] = str_replace("<div>", "\n", $_REQUEST["item_compdesc_{$idx}"]);
+         $_REQUEST["item_compdesc_{$idx}"] = str_replace("<br>", "\n", $_REQUEST["item_compdesc_{$idx}"]);
+         $_REQUEST["item_compdesc_{$idx}"] = str_replace("</div>", "", $_REQUEST["item_compdesc_{$idx}"]);
+         $_REQUEST["item_compdesc_{$idx}"] = str_replace("&nbsp;", " ", $_REQUEST["item_compdesc_{$idx}"]);
+         $_REQUEST["item_compdesc_{$idx}"] = strip_tags($_REQUEST["item_compdesc_{$idx}"],'<b><i></b></i>');
+         $_REQUEST["item_compdesc_{$idx}"] = trim(addslashes($_REQUEST["item_compdesc_{$idx}"]));
+
+         //----------------------------------------------------------------------------------
+         $newitemimg = "";
+         if($_FILES["itemimage_{$idx}"]["name"] != "" &&
+            $_FILES["itemimage_{$idx}"]["tmp_name"] != "" &&
+            $_FILES["itemimage_{$idx}"]["error"] == 0 &&
+            $_FILES["itemimage_{$idx}"]["size"] > 0)
+         {
+            $doc_type = substr($_FILES["itemimage_{$idx}"]["name"], strrpos($_FILES["itemimage_{$idx}"]["name"], ".") +1);
+            if(strtoupper($doc_type) == "JPG" || strtoupper($doc_type) == "JPEG" || strtoupper($doc_type) == "PNG" )
+            {
+               $doc_hash = md5(microtime());
+               $doc_name = "{$_REQUEST["id"]}_{$doc_hash}.{$doc_type}";
+               $doc_dir  = "{$_SESSION["_CONF"]["conf_shopadmin_path"]}docs.offer/";
+               $ftres    = move_uploaded_file($_FILES["itemimage_{$idx}"]["tmp_name"], "{$doc_dir}{$doc_name}");
+               if($ftres)
+               {
+                  resizeImage("{$doc_dir}{$doc_name}", 300, "", "{$doc_dir}{$doc_name}");
+                  $newitemimg = $doc_name;
+               }
+            }
+         }
+
+         //----------------------------------------------------------------------------------
+         if(($_REQUEST["item_id_{$idx}"] != "" && $_REQUEST["item_amount_{$idx}"] > 0.00 && (int)$headdata["req_prices_cnt"] == 1) ||
+            ($_REQUEST["item_id_{$idx}"] != "" && (int)$headdata["req_prices_cnt"] > 1 && $_REQUEST["delposmultiitem"]." " != $idx." "))
+         {
+            $itemvalues    = explode("#", $_REQUEST["item_id_{$idx}"]);
+            $sql_id        = (int)$itemvalues[0];
+            $sql_type      = $itemvalues[1];
+            $sql_taxesperc = getPrice($_REQUEST["item_sellprice_taxes_perc_{$idx}"], 2);
+
+            //----------------------------------------------------------------------------------
+            $sql_sellnetto = getPrice($_REQUEST["item_sellprice_netto_{$idx}"]);
+            $sql_taxes     = (float)sprintf("%.{$_SESSION["_CONF"]["conf_number_decimal_places"]}f", $sql_sellnetto / 100 * $sql_taxesperc);
+            $sql_sellprice = (float)sprintf("%.{$_SESSION["_CONF"]["conf_number_decimal_places"]}f", $sql_sellnetto + $sql_taxes);
+
+            //----------------------------------------------------------------------------------
+            if((int)$_REQUEST["manual_pos_{$idx}"])
+               $_REQUEST["item_desc_{$idx}"] = trim(addslashes($_REQUEST["item_desc_{$idx}"]));
+            else
+               $_REQUEST["item_desc_{$idx}"] = "";
+
+            if($valor_menor == 0)
+            {
+               $valor_menor = $sql_sellnetto;
+            }
+            else
+            {
+               if($valor_menor > $sql_sellnetto)
+               {
+                  $valor_menor = $sql_sellnetto;
+               }
+            }
+            //----------------------------------------------------------------------------------
+            if($existing_id)
+            {
+               $sql = " update offers_items
+                        set
+                        item_amount                   = {$_REQUEST["item_amount_{$idx}"]},
+                        item_sellprice_brutto         = {$sql_sellprice},
+                        item_sellprice_taxes_perc     = {$sql_taxesperc},
+                        item_sellprice_netto          = {$sql_sellnetto},
+                        item_sellprice_taxes          = {$sql_taxes},
+                        item_pos                      = {$poscounter},
+                        item_desc                     = '{$_REQUEST["item_desc_{$idx}"]}',
+                        item_sellprice_netto_ccval1   = {$_REQUEST["item_sellprice_nettocnt_{$idx}_1"]},
+                        item_sellprice_netto_ccval2   = {$_REQUEST["item_sellprice_nettocnt_{$idx}_2"]},
+                        item_sellprice_netto_ccval3   = {$_REQUEST["item_sellprice_nettocnt_{$idx}_3"]},
+                        item_sellprice_netto_ccval4   = {$_REQUEST["item_sellprice_nettocnt_{$idx}_4"]},
+                        item_sellprice_netto_ccval5   = {$_REQUEST["item_sellprice_nettocnt_{$idx}_5"]},
+                        item_compdesc                 = '{$_REQUEST["item_compdesc_{$idx}"]}'
+                        where
+                        req_id   = {$_REQUEST["id"]} and
+                        item_id  = {$existing_id} and
+                        item_pos = {$existing_pos}";
+               $CON->no_result($sql);
+
+               if($newitemimg != "")
+               {
+                  $sql = " update offers_items
+                           set
+                           item_img_hash = '{$newitemimg}'
+                           where
+                           req_id   = {$_REQUEST["id"]} and
+                           item_id  = {$existing_id} and
+                           item_pos = {$existing_pos}";
+                  $CON->no_result($sql);      
+               }
+
+               recalcOrderItem($CON, $_REQUEST["id"], $existing_id, $poscounter, $itemfullupdate, "OFFER");
+
+               //----------------------------------------------------------------------------------
+               $_TABLENAME    = "offers_items";
+               $_TABLENAMEHD  = "offers";
+               $_COLPREFIX    = "req";
+               $_AMOUNTFIELD  = "item_amount";
+
+               //----------------------------------------------------------------------------------
+               if(!$itemfullupdate)
+               {
+                  $_REQUEST["item_pcat_dsc_act_{$idx}"]     = (int)$_REQUEST["item_pcat_dsc_act_{$idx}"];
+                  $_REQUEST["item_vol_act_{$idx}"]          = (int)$_REQUEST["item_vol_act_{$idx}"];
+                  $_REQUEST["item_value_act_{$idx}"]        = (int)$_REQUEST["item_value_act_{$idx}"];
+
+                  $_REQUEST["item_discount_{$idx}"]         = getPrice($_REQUEST["item_discount_{$idx}"],2);
+                  $_REQUEST["item_discount_type_{$idx}"]    = (int)$_REQUEST["item_discount_type_{$idx}"];
+
+                  for($y = 1; $y <= 4; $y++)
+                     $_REQUEST["item_pcat_dsc_{$idx}_{$y}"] = getPrice($_REQUEST["item_pcat_dsc_{$idx}_{$y}"],2);
+
+                  $sql = " update {$_TABLENAME}
+                           set
+                           item_discount        = {$_REQUEST["item_discount_{$idx}"]},
+                           item_discount_type   = {$_REQUEST["item_discount_type_{$idx}"]},
+                           item_pcat_dsc_act    = {$_REQUEST["item_pcat_dsc_act_{$idx}"]},
+                           item_pcat_dsc1       = {$_REQUEST["item_pcat_dsc_{$idx}_1"]},
+                           item_pcat_dsc2       = {$_REQUEST["item_pcat_dsc_{$idx}_2"]},
+                           item_pcat_dsc3       = {$_REQUEST["item_pcat_dsc_{$idx}_3"]},
+                           item_pcat_dsc4       = {$_REQUEST["item_pcat_dsc_{$idx}_4"]},
+                           item_vol_act         = {$_REQUEST["item_vol_act_{$idx}"]},
+                           item_value_act       = {$_REQUEST["item_value_act_{$idx}"]}
+                           where
+                           {$_COLPREFIX}_id     = {$_REQUEST["id"]} and
+                           item_pos             = {$poscounter}";
+                  $CON->no_result($sql);
+               }
+            }
+            else
+            {
+               $insertimg = "";
+               if($sql_type == "item")
+               {
+                  $sql = " select item_img
+                           from item
+                           where
+                           id = {$sql_id}";
+                  $item_img = $CON->select($sql);
+                  $item_img = $item_img[0];
+
+                  if($item_img["item_img"] != "")
+                  {
+                     $doc_type = substr($item_img["item_img"], strrpos($item_img["item_img"], ".") +1);
+                     if(strtoupper($doc_type) == "JPG" || strtoupper($doc_type) == "JPEG")
+                     {
+                        $doc_hash = md5(microtime());
+                        $doc_name = "{$_REQUEST["id"]}_{$doc_hash}.{$doc_type}";
+                        $doc_dir  = "{$_SESSION["_CONF"]["conf_shopadmin_path"]}docs.offer/";
+                        $ftres    = copy("{$_SESSION["_CONF"]["conf_shopadmin_path"]}images/items/{$item_img["item_img"]}", "{$doc_dir}{$doc_name}");
+                        if($ftres)
+                        {
+                           resizeImage("{$doc_dir}{$doc_name}", 300, "", "{$doc_dir}{$doc_name}");
+                           $insertimg = $doc_name;
+                        }
+                     }
+                  }
+               }
+               
+               $sql = " insert into offers_items
+                        (req_id, item_id, item_pos, item_amount, item_type, item_sellprice_brutto,
+                         item_sellprice_taxes_perc, item_sellprice_netto, item_sellprice_taxes, item_desc,
+                         item_sellprice_netto_ccval1, item_sellprice_netto_ccval2, item_sellprice_netto_ccval3,
+                         item_sellprice_netto_ccval4, item_sellprice_netto_ccval5, item_compdesc, item_img_hash)
+                        VALUES
+                        ({$_REQUEST["id"]}, {$sql_id}, {$poscounter}, {$_REQUEST["item_amount_{$idx}"]}, '{$sql_type}',
+                         {$sql_sellprice}, {$sql_taxesperc}, {$sql_sellnetto}, {$sql_taxes}, '{$_REQUEST["item_desc_{$idx}"]}',
+                         {$_REQUEST["item_sellprice_nettocnt_{$idx}_1"]}, {$_REQUEST["item_sellprice_nettocnt_{$idx}_2"]},
+                         {$_REQUEST["item_sellprice_nettocnt_{$idx}_3"]}, {$_REQUEST["item_sellprice_nettocnt_{$idx}_4"]},
+                         {$_REQUEST["item_sellprice_nettocnt_{$idx}_5"]}, '{$_REQUEST["item_compdesc_{$idx}"]}', '{$insertimg}')";
+               $ires = $CON->no_result($sql);
+
+               if($ires && $sql_type == "item")
+               {
+                  $sql = " select item_desc
+                           from item
+                           where
+                           id = {$sql_id}";
+                  $itemdesc = $CON->select($sql);
+                  $itemdesc = trim(addslashes($itemdesc[0]["item_desc"]));
+
+                  if($itemdesc != "")
+                  {
+                     $sql = " update offers_items
+                              set
+                              item_compdesc = '{$itemdesc}'
+                              where
+                              req_id      = {$_REQUEST["id"]} and
+                              item_id     = {$sql_id} and
+                              item_pos    = {$poscounter} and
+                              item_type   = '{$sql_type}'";
+                     $CON->no_result($sql);
+                  }
+               }
+
+               recalcOrderItem($CON, $_REQUEST["id"], $sql_id, $poscounter, true, "OFFER");
+            }
+
+            $poscounter++;
+         }
+         elseif($existing_id)
+         {
+            $sql = " delete from offers_items
+                     where
+                     req_id   = {$_REQUEST["id"]} and
+                     item_id  = {$existing_id} and
+                     item_pos = {$existing_pos}";
+            $CON->no_result($sql);
+         }
+      }
+   }
+
+   recalcOrder($CON, $_REQUEST["id"], "OFFER");
+
+   
+   $sql = "select req_total_netto from offers where id = {$_REQUEST["id"]}";
+   $req_total_netto = $CON->select($sql);
+   $req_total_netto = $req_total_netto[0]["req_total_netto"];
+
+   if((int)$req_total_netto == 0)
+   {
+      $sql       = "select u.req_number, u.columna, u.val
+                           FROM (
+                              SELECT b.req_number, 'neto1' AS columna, b.neto1 AS val
+                              FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                              UNION ALL
+                              SELECT b.req_number, 'neto2', b.neto2 FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                              UNION ALL
+                              SELECT b.req_number, 'neto3', b.neto3 FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                              UNION ALL
+                              SELECT b.req_number, 'neto4', b.neto4 FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                              UNION ALL
+                              SELECT b.req_number, 'neto5', b.neto5 FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                           ) AS u
+                           WHERE u.val > 0
+                           ORDER BY u.val
+                           LIMIT 1;
+                           ";
+      $monto     = $CON->select($sql);
+      $monto     = $monto[0]['val'];
+      $CON->no_result("update offers set req_total_netto = {$monto} where id = {$_REQUEST["id"]}");
+   }
+   
+   //----------------------------------------------------------------------------------
+   if($final)
+      doc_createOffer($CON, $_REQUEST["id"]);
+}
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["subexec"] == "send")
+{
+   $currtme = time();
+
+   $sql = " select *
+            from offers
+            where
+            id = {$_REQUEST["id"]}";
+   $attachfile = $CON->select($sql);
+   
+   $filedir    = "./docs.offer/";
+   $filename   = "{$attachfile[0]["id"]}.{$attachfile[0]["req_hash"]}";
+   $fileext    = ".pdf";
+   $pdffile    = "{$filedir}{$filename}{$fileext}";
+   
+   $temp["NAME"]  = "{$attachfile[0]["req_number"]}{$fileext}";
+   $temp["FILE"]  = $pdffile;
+   $attachfiles[0] = $temp;
+
+   $sql = " select t1.*, t2.docto_title, t3.user_firstname 'crt_firstname', t3.user_lastname 'crt_lastname'
+            from tran_docs t1
+            LEFT OUTER JOIN tran_docs_types t2 ON t1.doc_typeid = t2.id
+            LEFT OUTER JOIN user t3 ON t1.doc_crtusr = t3.id
+            where
+            t1.doc_tran_id    = {$_REQUEST["id"]} and
+            t1.doc_tran_type  = 'orders_offers' and
+            t1.doc_name      != ''
+            order by t1.id";
+   $anexos = $CON->select($sql);
+   foreach($anexos AS $anexo)
+   {
+      $temp["NAME"]  = "{$anexo["doc_name"]}";
+      $temp["FILE"]  = "./docs.tran/orders_offers/{$anexo["doc_file"]}";;
+      $attachfiles[] = $temp;
+   }
+
+   $_REQUEST["sendtype"] = (int)$_REQUEST["sendtype"];
+
+   // echo("send  : ( ".$_REQUEST["sendtype"]." )");
+
+   if((int)$_REQUEST["sendtype"])
+   {
+      // echo("paso 1");
+      $_OVERWRITE_MAILS = Array();
+      $_CCOADDR = Array();
+
+      foreach($_REQUEST["xcco"] AS $xccouid)
+      {
+         $sql = " select *
+                  from user
+                  where
+                  id = {$xccouid}";
+         $ccouser = $CON->select($sql);
+         $ccouser = $ccouser[0];
+
+         $temp["NAME"] = $ccouser["user_firstname"]." ".$ccouser["user_lastname"];
+         $temp["ADDR"] = $ccouser["user_mail"];
+         $_OVERWRITE_MAILS[] = $temp;
+      }
+   }
+   else
+   {
+      $_OVERWRITE_MAILS = Array();
+      foreach($_REQUEST["xrecpt"] AS $xrecptrow)
+      {
+         $rarr = explode("###", $xrecptrow);
+         $rtmp["NAME"] = $rarr[0];
+         $rtmp["ADDR"] = $rarr[1];
+         $_OVERWRITE_MAILS[] = $rtmp;
+      }
+
+      $_CCOADDR = Array();
+      unset($temp);
+      foreach($_REQUEST["xcco"] AS $xccouid)
+      {
+         $sql = " select *
+                  from user
+                  where
+                  id = {$xccouid}";
+         $ccouser = $CON->select($sql);
+         $ccouser = $ccouser[0];
+
+         $temp["NAME"] = $ccouser["user_firstname"]." ".$ccouser["user_lastname"];
+         $temp["ADDR"] = $ccouser["user_mail"];
+         $_CCOADDR[]   = $temp;
+         
+      }
+   }
+
+   $sentmails = false;  // valor por defecto
+   
+   if(count($_OVERWRITE_MAILS))
+   {
+  
+      $text    = '<html>
+                  <head><style type="text/css">body{font-family:Arial;font-size:12px;}</style></head>
+                  <body style="margin:10px" class="page">'.$_REQUEST["msg_body"].'</body></html>';
+
+      //$_OVERWRITENAME = "Cotizador Unibag";
+      $sentmails = sendExternalMail($_REQUEST["msg_header"],
+                                    $text,
+                                    $_REQUEST["msg_toaddr"],
+                                    $_REQUEST["msg_toname"],
+                                    "",
+                                    "",
+                                    $attachfiles);
+
+      if(!$sentmails) 
+      {
+            echo '<div style="border:2px solid red;
+                              background-color:#ffe5e5;
+                              color:#b30000;
+                              padding:10px;
+                              margin:10px 0;
+                              font-family:Arial;
+                              font-size:13px;
+                              font-weight:bold;
+                              width:980px;
+                              box-sizing:border-box;
+                              text-align:left;">
+                     &#9888; El sistema no pudo enviar el correo o hubo un problema en el envío, Favor Reintentar.
+                  </div>';
+
+      }                                    
+   }
+   
+      /* Envio informacion a CRM */
+
+      // Limpiar espacios y puntos de las variables
+      $cust_rut_sp = preg_replace('/[\s\.]/', '', $attachfile[0]['req_cust_rut']);
+      $sql       = "select * from customer where REPLACE(REPLACE(cust_rut, ' ', ''), '.', '') = '{$cust_rut_sp}' ";
+      $idcliente = $CON->select($sql);
+      $idcliente = $idcliente[0];
+      $idcrm     = $idcliente['cust_id_crm'];
+
+      $sql         = "select * from parametros where tabla = 'CANAL' and codigo = {$idcliente["cust_canal"]}";
+      $canal       = $CON->select($sql);
+      $canal       = $canal[0];
+      $canal       = $canal["descripcion"];
+
+      /*
+      $sql       = "select min(item_sellprice_netto_dsc) as monto from offers_items where req_id = {$_REQUEST["id"]}";
+      $monto     = $CON->select($sql);
+      $monto     = $monto[0]['monto'];
+      */
+      $sql  = "select u.req_number, u.columna, u.val
+                           FROM (
+                              SELECT b.req_number, 'neto1' AS columna, b.neto1 AS val
+                              FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                              UNION ALL
+                              SELECT b.req_number, 'neto2', b.neto2 FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                              UNION ALL
+                              SELECT b.req_number, 'neto3', b.neto3 FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                              UNION ALL
+                              SELECT b.req_number, 'neto4', b.neto4 FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                              UNION ALL
+                              SELECT b.req_number, 'neto5', b.neto5 FROM (
+                                 SELECT o.req_number,
+                                          (o.req_prices_ccval1 * oi.item_sellprice_netto_ccval1) AS neto1,
+                                          (o.req_prices_ccval2 * oi.item_sellprice_netto_ccval2) AS neto2,
+                                          (o.req_prices_ccval3 * oi.item_sellprice_netto_ccval3) AS neto3,
+                                          (o.req_prices_ccval4 * oi.item_sellprice_netto_ccval4) AS neto4,
+                                          (o.req_prices_ccval5 * oi.item_sellprice_netto_ccval5) AS neto5
+                                 FROM offers o
+                                 INNER JOIN offers_items oi ON oi.req_id = o.id
+                                 WHERE o.id = {$_REQUEST["id"]}
+                              ) AS b
+                           ) AS u
+                           WHERE u.val > 0
+                           ORDER BY u.val
+                           LIMIT 1;
+                           ";
+      $monto     = $CON->select($sql);
+      $monto     = $monto[0]['val'];
+
+      $sql        = "select nombre from comunas where id = {$idcliente['cust_comunaid']}";
+      $comunas    = $CON->select($sql);
+      $comuna     = $comunas[0]['nombre'];
+
+      $sql        = "select * from regions where id = {$idcliente['cust_regionid']}";
+      $regiones   = $CON->select($sql);
+      $region     = $regiones[0]['name'];
+
+      $sql        = "select * from country where id = {$idcliente['cust_countryid']}";
+      $paises     = $CON->select($sql);
+      $pais       = $paises[0]['country_name'];
+      // echo($sql);
+
+      $sql         = "select * from parametros where tabla = 'CRM_SELLER' and codigo = {$custvendedor['id']}";
+      $vendedor    = $CON->select($sql);
+      $vendedor    = $vendedor[0];
+      $vendedor    = $vendedor["descripcion"];
+
+      /*
+      $sql = "select id, cat_name, cat_crtdat from customer_cats where id = {$idcliente['cust_catid']}";
+      $categorias = $CON->select($sql);
+      $categoria  = $categorias[0]['cat_name'];
+      */
+
+      $sql        = "select * from giros where id = {$idcliente['cust_giroid']}";
+      $giros      = $CON->select($sql);
+      $giro       = $giros[0]['giro_name'];
+
+      $rubro      = $CON->select("SELECT cat_name from customer_cats where {$idcliente['cust_catid']}");
+      $rubro      = $rubro[0]["cat_name"];
+
+      $sql = "select * from customer_sub_cats where id = {$idcliente['cust_subrubro']}";
+      $subrubro = $CON->select($sql);
+      $subrubro  = $subrubro[0]['sub_cat_name'];
+
+      $sql = "select * from customer_contacts where id = {$attachfile[0]["req_id_contacto"]}";
+      $cus_contacto = $CON->select($sql);
+      $cus_contacto = $cus_contacto[0];
+      if($cus_contacto["add_id_crm"]=="")
+         $idcrm      = $idcliente['cust_id_crm'];
+      else
+         $idcrm      = $cus_contacto["add_id_crm"];
+     
+      $nombre      = $cus_contacto['add_firstname'].' '.$cus_contacto["add_lastname"];
+      $rut         = $idcliente['cust_rut'];
+      $direccion   = $idcliente['cust_street'];
+      $empresa     = $idcliente['cust_company'];
+      $email       = $cus_contacto['add_email'];
+      $celular     = $cus_contacto['add_cellphone'];
+      $iderp       = $idcliente['id'];
+      if((int)$idcliente['cust_seg_act'])
+         $fechaseg   = $idcliente['cust_seg_alertdate'];
+      else         
+         $fechaseg   = time();
+
+      // CallApiCRM("contacto",$idcrm, $monto,$nombre,$rut,$direccion,$empresa,$email,$celular,$comuna,$region,$pais,$categoria,$giro);
+      // $CON->no_result("insert into mensajes(texto) values('esta ingresado, CALLAPICRM 3 -> {$attachfile[0]["req_cust_rut"]} <- {$idcrm} -> {$attachfile[0]["id_contacto"]} <- ')");
+      if($idcrm != "")
+      {
+         // $CON->no_result("insert into mensajes(texto) values('esta ingresado, CALLAPICRM')");
+
+         // CallApiCRM('contacto',$idcrm,$monto,$nombre,$rut,$direccion,$empresa,$email,$celular,$comuna,$region,$pais,$categoria,$giro,$vendedor,$fechaseg,$iderp,$canal,$rubro);
+         CallApiCRM('contacto',$idcrm, $monto,$nombre,$rut,$direccion,$empresa,$email,$celular,$comuna,$region,$pais,$giro,$vendedor,$fechaseg,$iderp,$canal,$rubro,$subrubro);
+         $respuesta = CallApiCRM("cotizacion",$idcrm, $monto,$nombre,$rut,$direccion,$empresa,$email,$celular,$comuna,$region,$pais,$giro,$vendedor,$fechaseg,$iderp,$canal,$rubro,$subrubro);
+         $sql = "insert into log_crm (log_crm_fecha
+                                    ,log_crm_cust_id
+                                    ,log_crm_cust_id_crm
+                                    ,log_crm_identificador
+                                    ,log_crm_accion
+                                    ,log_crm_respuesta
+                                    ,log_crm_idrespuesta
+                                    ,log_crm_boton)                                  
+               select {$currtme}
+                     ,{$idcliente['id']}
+                     ,'{$idcliente['cust_id_crm']}'
+                     ,{$_REQUEST["id"]}
+                     ,'cotizacion'
+                     ,'{$respuesta["status"]}'
+                     ,'{$respuesta["id"]}'
+                     ,'{$_REQUEST["subexec"]}'";
+         $CON->no_result($sql);
+      }
+
+   if(!$sentmails)
+      $savemsg = "<b class='msg_save_err'>El sistema no pudo enviar el correo o hubo un problema en el envío, Favor Reintentar. ({$sentmails})</b>";
+   else
+      $savemsg = "<b class='msg_save_ok'>Mail enviado Correctamente</b>";
+
+}
+//----------------------------------------------------------------------------------
+$sql = " select t1.*, t3.company_short, t4.shop_name, t7.pay_title,
+                t5.user_firstname 'upd_firstname', t5.user_lastname 'upd_lastname',
+                t6.user_firstname 'crt_firstname', t6.user_lastname 'crt_lastname',
+                t8.country_name, t9.name, t10.nombre, t11.pro_name,
+                t12.pl_title
+         from offers t1
+         LEFT OUTER JOIN company_data t3     ON t1.req_company_id       = t3.id
+         LEFT OUTER JOIN company_shops t4    ON t1.req_shop_id          = t4.id
+         LEFT OUTER JOIN user t5             ON t1.req_updusr           = t5.id
+         LEFT OUTER JOIN user t6             ON t1.req_crtusr           = t6.id
+         LEFT OUTER JOIN payments t7         ON t1.req_paymentid        = t7.id
+         LEFT OUTER JOIN country t8          ON t1.req_cust_countryid   = t8.id
+         LEFT OUTER JOIN regions t9          ON t1.req_cust_regionid    = t9.id
+         LEFT OUTER JOIN comunas t10         ON t1.req_cust_comunaid    = t10.id
+         LEFT OUTER JOIN provincias t11      ON t1.req_cust_provinciaid = t11.id
+         LEFT OUTER JOIN price_lists_fab t12 ON t1.req_plid_fab = t12.id
+         where
+         t1.id = {$_REQUEST["id"]}";
+$headdata = $CON->select($sql);
+$headdata = $headdata[0];
+
+//----------------------------------------------------------------------------------
+$sql = " select *
+         from offers_docs_versions
+         where
+         offer_id = {$_REQUEST["id"]}
+         order by id desc
+         LIMIT 0,12";
+$docs_versions = $CON->select($sql);
+
+//----------------------------------------------------------------------------------
+$payments   = getPayments($CON, $headdata["req_shop_id"]);
+$companies  = getCompanies($CON);
+$shops      = getShops($CON);
+$countries  = getCountries($CON);
+$regions    = getRegions($CON);
+$comunas    = getComunas($CON);
+$posdata    = getOfferPos($CON, $_REQUEST["id"], $_REQUEST["setPosOrder"]);
+$provincias = getProvincias($CON);
+
+//----------------------------------------------------------------------------------
+$rowcount = 0;
+if($posdata != false && count($posdata))
+   $rowcount = count($posdata);
+
+if($rowcount <= 6)
+   $rowcount = 10;
+else
+   $rowcount += 5;
+
+if($headdata["req_status"] >= 2)
+{
+   $rdlo       = " readonly ";
+   $dabl       = " disabled ";
+   $rowcount   = count($posdata);
+
+   if(!$posdata)
+      $rowcount = 0;
+}
+
+//----------------------------------------------------------------------------------
+if((int)$_SESSION["user_pricesell_perm"] || (int)$_REQUEST["user_pricesell_perm"])
+   $hasprcsellperm = true;
+else
+   $hasprcsellperm = false;
+
+
+//----------------------------------------------------------------------------------
+$custselarr = Array();
+   
+$custname = str_replace(",","", str_replace("'","", str_replace('"',"", trim($headdata["req_cust_company"]))));
+$custmail = str_replace(",","", str_replace("'","", str_replace('"',"", trim($headdata["req_cust_email"]))));
+if($custmail != "")
+{
+   $temp["NAME"] = $custname;
+   $temp["MAIL"] = $custmail;
+
+   array_push($custselarr, $temp);
+}
+
+//----------------------------------------------------------------------------------
+$sql_rut = str_replace(".", "", $headdata["req_cust_rut"]);
+$sql = "select t2.id
+             , ifnull(t2.add_email,'x') as add_email
+             , t2.add_firstname
+             , t2.add_lastname
+             , case when t2.add_id_crm = '' then '0' else ifnull(t2.add_id_crm,'0') end as add_id_crm
+             , ifnull(t2.add_cellphone,'0') as add_cellphone
+         from customer t1
+         INNER JOIN customer_contacts t2 ON t1.id = t2.add_cust_id
+         where
+         t1.cust_status > 0 and
+         REPLACE(t1.cust_rut,'.','') like '{$sql_rut}'
+         order by t2.add_pos asc";
+$suppcontacts = $CON->select($sql);
+
+//----------------------------------------------------------------------------------
+$xsql_rut = str_replace(".", "", $headdata["req_cust_rut"]);
+if(trim($xsql_rut) != "")
+{
+   $sql = " select t2.*
+            from customer t1
+            INNER JOIN user t2 ON t1.cust_sellerid = t2.id
+            where
+            t1.cust_status > 0 and
+            REPLACE(t1.cust_rut,'.','') like '{$sql_rut}' and
+            t1.cust_rut != ''";
+   $custvendedor = $CON->select($sql);
+   $custvendedor = $custvendedor[0];
+}
+
+//----------------------------------------------------------------------------------
+/*
+for($x = 0; $x < count($suppcontacts) && $suppcontacts != false; $x++)
+{
+   $custname = str_replace(",","", str_replace("'","", str_replace('"',"", trim($suppcontacts[$x]["add_firstname"]." ".$suppcontacts[$x]["add_lastname"]))));
+   $custmail = str_replace(",","", str_replace("'","", str_replace('"',"", trim($suppcontacts[$x]["add_email"]))));
+
+   if($custmail != "")
+   {
+      $temp["NAME"] = $custname;
+      $temp["MAIL"] = $custmail;
+
+      array_push($custselarr, $temp);
+   }
+}
+*/
+
+if(!(int)$headdata["req_cust_countryid"])
+   $headdata["req_cust_countryid"] = 81;
+//----------------------------------------------------------------------------------
+$cdatastyle = 'style="border-top-width:3px;border-top-style:solid"';
+
+$proms = getActivePromotions($CON, $headdata["req_shop_id"]);
+
+$sql = " select t1.id, t1.pl_title
+         from price_lists t1
+         where
+         t1.pl_status = 1 ";
+$pricelists = $CON->select($sql);
+
+$sql = " select t1.*
+         from texts t1
+         where
+         t1.text_status = 1
+         order by t1.text_title";
+$texts = $CON->select($sql);
+
+$sql = " select id, user_firstname, user_lastname, user_mail
+         from user
+         where
+         user_status > 0 and
+         user_mail like '%@%'
+         order by user_firstname, user_lastname";
+$ccousers = $CON->select($sql);
+?>
+<script language="JavaScript">
+   document.all.idx_status_msg.innerHTML = "<?=$savemsg?>";
+
+   function generateNV()
+   {
+      var xurl = '/iframe.fancy.php?module=gennvfromoffer&id=<?=$_REQUEST["id"]?>';
+      showFancybox(xurl, 'iframe', 900, 550, 'auto');
+   }
+   function detectEvent (event, rowcount, reqid)
+   {
+      var xurl = './libs/modules/orders_offers/searchitem.fancy.php?rowcount=' +rowcount + '&reqid=' +reqid;
+      var keyCode = ('which' in event) ? event.which : event.keyCode;
+      if(keyCode == 112)
+         showFancybox(xurl, 'iframe', 1000, 450, 'auto');
+   }
+
+   function CargarDatos()
+   {
+      if (this.selectedIndex !== -1)
+      {
+         console.log("Elemento <select>:", this);
+         console.log("selectedIndex:", this.selectedIndex);
+         var selectedOption = event.target.options[event.target.selectedIndex];
+         console.log("selectedIndex:", selectedOption);
+         var idcrmValue = selectedOption.getAttribute("data-idcrm");
+         var idmailValue = selectedOption.getAttribute("data-mail");
+         var idfonoValue = selectedOption.getAttribute("data-fono");
+         var idcontactValue = selectedOption.getAttribute("data-idcc");
+         var idcontactName = selectedOption.getAttribute("data-name-contact");
+         document.getElementById("req_cust_phone").value = idfonoValue;
+         document.getElementById("req_cust_email").value = idmailValue;
+         document.getElementById("add_id_crm").value = idcrmValue;
+         document.getElementById("req_id_cc").value = idcontactValue;
+         document.getElementById("req_cust_name").value = idcontactName;
+      }
+   }
+
+   <?php
+   generateCountryJS($countries, $regions, $comunas, $provincias);
+   ?>
+
+   function showStockAct(idx, itemid)
+   {
+      var dataString = "itemid="+itemid+"&req_shop_id=<?=$headdata["req_shop_id"]?>";
+      $.ajax({
+         type:       "POST",
+         cache:      false,
+         url:        "/libs/modules/orders_offers/jquery.stockact.php",
+         data:       dataString,
+         dataType:   "html",
+         success: function(res)
+         {
+            res = res.split('#!#!#!#!');
+            $("#stockact_"+idx).html(res[0]);
+            $("#stocktrans_"+idx).html(res[1]);
+            $("#stockcomp_"+idx).html(res[2]);
+            $("#stockdisp_"+idx).html(res[3]);
+         }
+      });
+   }
+
+   var xtimeout;
+   function searchCustomerInline(xval, jqobj, xmode)
+   {
+      <?php
+      if($rdlo == "")
+      {  ?>
+         clearTimeout(xtimeout);
+         xtimeout = setTimeout(function()
+         {
+            var dataString = "xval=" +xval +"&xmode=" +xmode;
+            $.ajax({
+               type:       "POST",
+               cache:      false,
+               url:        "/libs/modules/orders_offers/jquery.cust.autocomplete.php",
+               data:       dataString,
+               dataType:   "html",
+               success: function(res)
+               {
+                  jqobj.html(res);
+               }
+            });
+         }, 500);
+         <?php
+      }
+      ?>
+   }
+
+   function v2setCustid(custid)
+   {
+      document.getElementById('idxifrsrc').src = '/libs/modules/orders_offers/jq.setcustid.php?custid=' +custid;
+      $('#idx_jqcustdata0').html('');
+      $('#idx_jqcustdata1').html('');
+   }
+</script>
+<style>
+.editor
+{
+   min-height: 80px !important;
+}
+</style>
+<?php
+if(count($docs_versions) && $docs_versions != false)
+{  ?>
+   <div style="position:absolute;top:74px;left:1000px">
+      <?php
+      foreach($docs_versions AS $docs_version)
+      {  ?>
+         <div style="border-radius:3px;padding:10px;background-color:#F6F6F6;border:1px solid #999999">
+         <b style="font-family:Arial;font-size:12px;color:#666666">
+         <img src="/images/menu/icons/document-pdf.png" style="vertical-align:bottom"> <?=date("d.m.Y H:i", $docs_version["doc_date"])?></b><br>
+         <div style="height:3px"></div>
+         <input type="button" value="<?=$docs_version["doc_name"]?>"
+         onclick="document.all.idxifrsrc.src = './libs/modules/structure/document_file.php?type=0&id=<?=$_REQUEST["id"]?>&hash=<?=$docs_version["doc_hash"]?>.pdf&name=<?=$docs_version["doc_name"]?>.pdf&path=../../../docs.offer/';"><br>
+         </div>
+         <div style="height:8px"></div>
+         <?php
+      }  
+      ?>
+   </div>
+   <?php
+   $hasdocversions = true;
+}
+?>
+<style type="text/css"><!-- @import url(./libs/jscripts/datepicker/datepicker.css); //--></style>
+<script language="JavaScript" src="./libs/jscripts/datepicker/datepicker.js"></script>
+<script src="./libs/jscripts/classyedit/jquery.classyedit.js"></script>
+<link rel="stylesheet" type="text/css" href="./libs/jscripts/classyedit/jquery.classyedit.css" />
+<form action="index.php" method="post" name="form_reqpos" id="form_reqpos" enctype="multipart/form-data"
+onsubmit="<?php
+if($rdlo != "")
+   echo "return false";
+else
+   echo "if(Rut(this.req_cust_rut, this.req_cust_rut.value))
+   {
+      var chk1 = checkform(new Array(this.req_paymentid, this.req_cust_company, this.req_cust_rut, this.id_contacto,
+                           this.req_cust_email, this.req_cust_catid));
+      if(chk1)
+      {
+         if(this.req_conditions_desc.value == '')
+         {
+            alert('Favor ingresar condiciones.');
+            return false;
+         }
+
+         if(this.req_cust_email.value != '')
+         {
+            if(!avzCheckEmail(this.req_cust_email.value))
+            {
+               alert('Email no valido.');
+               return false;
+            }
+         }
+
+         this.req_cust_phone.value = this.req_cust_phone.value.replace(/\D/g,'');
+
+         if(this.req_cust_phone.value != '' && this.req_cust_phone.value.length < 9)
+         {
+            alert('Telefono/Celular no valido.');
+            return false;
+         }
+         return true;
+      }
+      return false;
+   }
+   else
+      return false;";
+   ?>">
+<input type="hidden" name="exec" value="edit">
+<input type="hidden" name="subexec" value="save">
+<input type="hidden" name="id" value="<?=$_REQUEST["id"]?>">
+<input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+<input type="hidden" name="req_status" value="1">
+<input type="hidden" name="autoprintmode" value="">
+<input type="hidden" name="previewprintmode" value="">
+<input type="hidden" name="setPosOrder" value="">
+<input type="hidden" name="showDiscounts" value="<?=$_REQUEST["showDiscounts"]?>">
+<input type="hidden" name="user_pricesell_perm" value="<?=$_REQUEST["user_pricesell_perm"]?>">
+<input type="hidden" name="delposimg" value="">
+<input type="hidden" name="delposmultiitem" value="">
+<input type="hidden" name="openfancymode" value="">
+<input type="hidden" name="add_id_crm" id="add_id_crm" value="">
+<input type="hidden" name="req_cust_fax" value="">
+
+<?=Nifty_printH("box1", "980")?>
+<table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%" id="ifx_tblheader">
+<colgroup>
+   <col width="130">
+   <col width="360">
+   <col width="130">
+   <col>
+</colgroup>
+<tr>
+   <td class="content_tbl_header" colspan="4">
+      <img src="./images/menu/icons/arrow-move.png" height="14" style="cursor:pointer;vertical-align:bottom"
+      onclick="var x=0;var brows = $('#ifx_tblheader > tbody');
+               brows.each(function(){x++;if(x > 1)
+               {if($(this).is(':hidden')) $(this).show(); else $(this).hide();}});">
+      Datos básicos
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl">Número</td>
+   <td class="content_row"><?=$headdata["req_number"]?></td>
+   <td class="content_rowl">Fecha solicitud</td>
+   <td class="content_row">
+      <input type="text" style="width:80px" id="req_date" name="req_date" <?=$rdlo?>
+      class="text format-d-m-y divider-dot highlight-days-67 no-locale no-transparency"
+      onfocus="markfield(this,0)" onblur="markfield(this,1)"
+      value="<?=date('d.m.Y', $headdata["req_date"])?>">
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl">Empresa</td>
+   <td class="content_row"><?=$headdata["company_short"]?></td>
+   <td class="content_rowl">Sucursal</td>
+   <td class="content_row"><?=$headdata["shop_name"]?></td>
+</tr>
+<tbody>
+<tr>
+   <td class="content_rowl" <?=$cdatastyle?>>RUT</td>
+   <td class="content_row" <?=$cdatastyle?>>
+      <input name="req_cust_rut" type="text" class="text" style="width:100px" value="<?=$headdata["req_cust_rut"]?>" <?=$rdlo?>
+      onfocus="markfield(this,0)" onblur="markfield(this,1)" autocomplete="off"
+      onkeyup="searchCustomerInline(this.value, $('#idx_jqcustdata1'), 'rut')">
+      <div id="idx_jqcustdata1" style="z-index:99999;position:absolute;width:700px;background-color:#FFFFFF;"></div>
+   </td>
+   <td class="content_rowl" <?=$cdatastyle?>>Nombre de Cliente</td>
+   <td class="content_row" <?=$cdatastyle?>>
+      <input name="req_cust_company" type="text" class="text" style="width:350px" autocomplete="off"
+      value="<?=$headdata["req_cust_company"]?>" <?=$rdlo?>
+      onfocus="markfield(this,0)" onblur="markfield(this,1)"
+      onkeyup="searchCustomerInline(this.value, $('#idx_jqcustdata0'), 'name')">
+      <div id="idx_jqcustdata0" style="margin-left:-300px;z-index:99999;position:absolute;width:700px;background-color:#FFFFFF;"></div>
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl">Dirección</td>
+   <td class="content_row">
+      <input name="req_cust_street" type="text" class="text" style="width:350px" value="<?=$headdata["req_cust_street"]?>" <?=$rdlo?>
+      onfocus="markfield(this,0)" onblur="markfield(this,1)">
+   </td>
+   <td class="content_rowl">Nombre de Contacto</td>
+   <td class="content_row">
+      <select name="id_contacto" id="id_contacto"  type="text" class="text" style="width:350px" onmousedown="markfield(this,0)" onblur="markfield(this,1)"
+      onchange="CargarDatos()">
+      <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+      <?php
+         foreach($suppcontacts AS $cont)
+         {
+            ?>
+               <option value="<?=$cont["id"]?>" 
+                     data-idcrm="<?=$cont["add_id_crm"]?>" 
+                     data-fono="<?=$cont["add_cellphone"]?>" 
+                     data-mail="<?=$cont["add_email"]?>"
+                     data-idcc="<?=$cont["id"]?>"
+                     data-name-contact="<?=$cont["add_firstname"] . ' ' . $cont["add_lastname"]?>" 
+               <?php if($cont["id"] == $headdata["req_id_contacto"]) echo "selected"?>><?=$cont["add_firstname"] . ' ' . $cont["add_lastname"]?></option>
+            <?php
+         }
+      ?>
+      </select>
+   </td>
+
+
+</tr>
+<tr>
+   <td class="content_rowl">Comuna</td>
+   <td class="content_row">
+      <select class="text" style="width:350px" name="comunas" id="comunas" onmousedown="markfield(this,0)" onblur="markfield(this,1)"
+      onchange="jqUnibagSetComuna(this.value, 'offer')">
+         <?php
+         if($dabl == "")
+         {  ?>
+            <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+            <?php
+            $allcomunas = getAllComunas($CON);
+            foreach($allcomunas AS $comuna)
+            {  ?>
+               <option value="<?=$comuna["id"]?>"
+               <?php if($comuna["id"] == $headdata["req_cust_comunaid"]) echo "selected"?>><?=$comuna["nombre"]?></option>
+               <?php
+            }
+         }
+         else
+         {  ?>
+            <option value="<?=$headdata["req_cust_comunaid"]?>"><?=$headdata["nombre"]?></option>
+            <?php
+         }
+         ?>
+      </select>
+   </td>
+   <td class="content_rowl">Mail de Contacto</td>
+   <td class="content_row">
+      <input name="req_cust_email" id="req_cust_email" type="text" class="text" style="width:350px" value="<?=$headdata["req_cust_email"]?>" <?=$rdlo?>
+      onfocus="markfield(this,0)" onblur="markfield(this,1)">
+   </td>
+   <input type="hidden" name="req_cust_name" id="req_cust_name" >
+   <input type="hidden" name="req_id_cc" id="req_id_cc" >
+</tr>
+<tr>
+   <td class="content_rowl">Provincia</td>
+   <td class="content_row">
+      <select class="text" style="width:350px" name="provincias" id="provincias" onmousedown="markfield(this,0)" onblur="markfield(this,1)"
+      onchange="setComunas(this.value)">
+         <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+         <?php
+         if((int)$headdata["req_cust_regionid"])
+         {
+            foreach($provincias as $provincia)
+            {
+               if($provincia["region_id"] == $headdata["req_cust_regionid"])
+               {  ?>
+                  <option value="<?=$provincia["id"]?>"
+                  <?php if($provincia["id"] == $headdata["req_cust_provinciaid"]) echo "selected"?>><?=$provincia["pro_name"]?></option>
+                  <?php
+               }
+            }
+         }
+         ?>
+      </select>
+   </td>
+   <td class="content_rowl">Teléfono de Contacto</td>
+   <td class="content_row">
+      <input name="req_cust_phone" id="req_cust_phone" type="text" class="text" style="width:350px" value="<?=$headdata["req_cust_phone"]?>" <?=$rdlo?>
+      onfocus="markfield(this,0)" onblur="markfield(this,1)">
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl">Región</td>
+   <td class="content_row">
+      <select class="text" style="width:350px" name="regions" id="regions"
+      onchange="setProvincias(this.value);"
+      onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+         <?php
+         if($dabl == "")
+         {  ?>
+            <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+            <?php
+            if((int)$headdata["req_cust_countryid"])
+            {
+               foreach($regions as $region)
+               {
+                  if($region["id_pais"] == $headdata["req_cust_countryid"])
+                  {  ?>
+                     <option value="<?=$region["id"]?>"
+                     <?php if($region["id"] == $headdata["req_cust_regionid"]) echo "selected"?>><?=$region["name"]?></option>
+                     <?php
+                  }
+               }
+            }
+         }
+         else
+         {  ?>
+            <option value="<?=$headdata["req_cust_regionid"]?>"><?=$headdata["name"]?></option>
+            <?php
+         }
+         ?>
+      </select>
+   </td>
+   <td class="content_rowl">Categoria</td>
+   <td class="content_row">
+      <select class="text" style="width:350px" name="req_cust_catid" id="req_cust_catid"
+      onmousedown="markfield(this,0)" onblur="markfield(this,1)" <?=$rdlo?>>
+         <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+         <?php
+         foreach($custcats as $custcat)
+         {  ?>
+            <option value="<?=$custcat["id"]?>"
+            <?php if($custcat["id"] == $headdata["req_cust_catid"]) echo "selected"?>><?=$custcat["cat_name"]?></option>
+            <?php
+         }
+         ?>
+      </select>
+   </td>
+      <?php
+      /*
+      <table border="0" cellpadding="0" cellspacing="0">
+      <tr>
+      <?php
+      if($headdata["req_cust_rut"] != "")
+      {
+         $sql = " select *
+                  from customer
+                  where
+                  cust_rut = '{$headdata["req_cust_rut"]}' and
+                  cust_status > 0";
+         $custexists = $CON->select($sql);
+         $custexists = $custexists[0];
+         if(!(int)$custexists["id"])
+         {  ?>
+            <td style="padding-right:3px">
+            <?php
+            printButton("Traspasar a clientes", "postnav", "index.php?mid=628&cpFromOffer={$_REQUEST["id"]}&exec=edit", "", "disk-black", 160);
+            ?>
+            </td>
+            <?php
+         }
+      }
+      if($dabl == "")
+      {  ?>
+         <td>
+            <?php
+            printButton("Buscar cliente", "postnav", "javascript: deactivateFormChange()", "showFancybox('/libs/modules/orders_offers/searchcust.fancy.php', 'iframe', 1000, 450, 'auto')", "magnifier-zoom", 120);
+            ?>
+         </td>
+         <?php
+      }
+      ?>
+      </tr>
+      </table>
+      <?php
+      */
+      ?>
+   </td>
+</tr>
+<tr>
+   
+   <?php
+   $sql = " select id, pl_title
+            from price_lists_fab
+            where
+            pl_status = 1 
+            order by pl_isdefault desc, pl_title";
+   $fabplists = $CON->select($sql);
+   ?>
+   <td class="content_rowl">País</td>
+   <td class="content_row">
+      <select class="text" style="width:350px" name="country" id="country"
+      onchange="setRegions(this.value)"
+      onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+         <?php
+         if($dabl == "")
+         {  ?>
+            <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+            <?php
+            foreach($countries as $country)
+            {  ?>
+               <option value="<?=$country["id"]?>"
+               <?php if($country["id"] == $headdata["req_cust_countryid"]) echo "selected"?>><?=$country["country_name"]?></option>
+               <?php
+            }
+         }
+         else
+         {  ?>
+            <option value="<?=$headdata["req_cust_countryid"]?>"><?=$headdata["country_name"]?></option>
+            <?php
+         }
+         ?>
+      </select>
+   </td>
+   <td class="content_rowl">Lista de precios</td>
+   <td class="content_row">
+      <select class="text" style="width:350px" name="req_plid_fab" id="req_plid_fab"
+      onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+         <?php
+         if($dabl == "")
+         {  ?>
+            <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+            <?php
+            foreach($fabplists as $fabplist)
+            {  ?>
+               <option value="<?=$fabplist["id"]?>"
+               <?php if($fabplist["id"] == $headdata["req_plid_fab"]) echo "selected"?>><?=$fabplist["pl_title"]?></option>
+               <?php
+            }
+         }
+         else
+         {  ?>
+            <option value="<?=$headdata["req_plid_fab"]?>"><?=$headdata["pl_title"]?></option>
+            <?php
+         }
+         ?>
+      </select>
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl">Plazo de entrega</td>
+   <td class="content_row">
+      <input name="req_plazo_entrega" type="text" class="text" style="width:350px" value="<?=$headdata["req_plazo_entrega"]?>" <?=$rdlo?>
+      onfocus="markfield(this,0)" onblur="markfield(this,1)">
+   </td>
+   <td class="content_rowl">Alerta seguimiento</td>
+   <td class="content_row">
+      <input type="text" style="width:80px" id="req_alert_dat" name="req_alert_dat" <?=$rdlo?>
+      class="text format-d-m-y divider-dot highlight-days-67 no-locale no-transparency"
+      onfocus="markfield(this,0)" onblur="markfield(this,1)"
+      value="<?if((int)$headdata["req_alert_dat"]) echo date('d.m.Y', $headdata["req_alert_dat"])?>">
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl" <?=$cdatastyle?>>Forma de pago</td>
+   <td class="content_row" <?=$cdatastyle?>>
+      <?php
+      $payselw = "322px";
+      if($rdlo != "")
+         $payselw = "350px";
+      ?>
+      <select class="text" style="width:<?=$payselw?>" name="req_paymentid" id="req_paymentid"
+      onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+         <?php
+         if($dabl == "")
+         {  ?>
+            <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+            <?php
+            foreach($payments as $payment)
+            {  ?>
+               <option value="<?=$payment["id"]?>"
+               <?php if($payment["id"] == $headdata["req_paymentid"]) echo "selected"?>><?=$payment["pay_title"]?></option>
+               <?php
+            }
+         }
+         else
+         {  ?>
+            <option value="<?=$headdata["req_paymentid"]?>"><?=$headdata["pay_title"]?></option>
+            <?php
+         }
+         ?>
+      </select>
+      <?php
+      if($rdlo == "")
+      {  ?>
+         <input type="button" class="button" value="+" style="width:25px"
+         onclick="showFancybox('/libs/modules/payment/fancy.edit.php', 'iframe', 670, 250, 'auto')">
+         <?php
+      }
+      ?>
+   </td>
+   <td class="content_rowl" <?=$cdatastyle?>>Estado</td>
+   <td class="content_row" <?=$cdatastyle?>>
+      <?php
+      if($headdata["req_status"] == 0)
+         $headdata["req_status"] = 1;
+      $statimg = "";
+      switch((int)$headdata["req_status"])
+      {
+         case 1: $statimg = "red_active.gif"; break;
+         case 2: $statimg = "green_active.gif"; break;
+         case 3: $statimg = "purple_active.gif"; break;
+         case 4: $statimg = "blue_active.gif"; break;
+      }
+      ?>
+      <img class="select" src="./images/content/<?=$statimg?>">
+      <?=getOfferStatus($headdata["req_status"], true)?>
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl" valign="top">Observaciones<br>[cliente]</td>
+   <td class="content_row">
+      <textarea class="text" style="width:350px; height:45px" name="req_desc" <?=$rdlo?>
+      onfocus="markfield(this,0)" onblur="markfield(this,1)"><?=stripslashes($headdata["req_desc"])?></textarea>
+   </td>
+   <td class="content_rowl" valign="top">Observaciones<br>[Atención]</td>
+   <td class="content_row">
+      <textarea class="text" style="width:350px; height:45px" name="req_desc_intern" <?=$rdlo?>
+      onfocus="markfield(this,0)" onblur="markfield(this,1)"><?=stripslashes($headdata["req_desc_intern"])?></textarea>
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl" valign="top">Precios</td>
+   <td class="content_row" valign="top">
+      <select class="text" style="width:50px" name="req_prices_cnt" id="req_prices_cnt"
+      onmousedown="markfield(this,0)" onblur="markfield(this,1)"
+      onchange="deactivateFormChange();document.form_reqpos.submit();">
+         <?php
+         if($rdlo != "")
+         {  ?>
+            <option value="<?=$headdata["req_prices_cnt"]?>" selected><?=$headdata["req_prices_cnt"]?></option>
+            <?php
+         }
+         else
+         {
+            for($xx = 1; $xx <= 5; $xx++)
+            {  ?>
+               <option value="<?=$xx?>" <?php if($headdata["req_prices_cnt"] == $xx) echo "selected"?>><?=$xx?></option>
+               <?php
+            }
+         }
+         ?>
+      </select>
+   </td>
+   <?php
+   if((int)$headdata["req_prices_cnt"] > 1)
+   {  ?>
+      <td class="content_rowl" valign="top">Cantidades</td>
+      <td class="content_row" valign="top">
+         <?php
+         for($xx = 1; $xx <= $headdata["req_prices_cnt"]; $xx++)
+         {  ?>
+            Cantidad #<?=$xx?>:
+            <input name="req_prices_ccval<?=$xx?>" id="req_prices_ccval<?=$xx?>"
+            type="text" class="text" style="width:120px"
+            value="<?=printPrice($headdata["req_prices_ccval{$xx}"])?>" <?=$rdlo?>
+            onfocus="markfield(this,0)" onblur="markfield(this,1)"><br>
+            <?php
+         }
+         ?>
+      </td>
+      <?php
+   }
+   else
+   {  ?>
+      <td class="content_rowl">&nbsp;</td>
+      <td class="content_row">&nbsp;</td>
+      <?php
+   }
+   ?>
+</tr>
+<tr>
+   <td class="content_rowl" height="26">Mostrar totales</td>
+   <td class="content_row">
+      <input type="checkbox" value="1" class="checkbox" name="req_prices_totals_act" id="req_prices_totals_act"
+      <?php if((int)$headdata["req_prices_totals_act"]) echo "checked" ?>> Activado
+   </td>
+   <td class="content_rowl">Vendedor (cliente)</td>
+   <td class="content_row" id="idx_vendedor_customer"><?=$custvendedor["user_firstname"]?>&nbsp;<?=$custvendedor["user_lastname"]?></td>
+</tr>
+<tr>
+   <td class="content_rowl" valign="top">Condiciones / Notas</td>
+   <td class="content_row" colspan="3">
+      <select class="text" style="width:100%" onchange="jqLoadConditions(this.value, 'req_conditions_desc')">
+         <option value="">&lt; Seleccionar condiciones &gt;</option>
+         <?php
+         foreach($texts AS $text)
+         {  ?>
+            <option value="<?=$text["id"]?>"><?=$text["text_title"]?></option>
+            <?php
+         }
+         ?>
+      </select>
+      <div style="height:3px"></div>
+      <textarea class="text classy-editor" style="width:100%;height:120px"
+      name="req_conditions_desc" id="req_conditions_desc" <?=$rdlo?>><?=stripslashes(nl2br($headdata["req_conditions_desc"]))?></textarea>
+   </td>
+</tr>
+<tr>
+   <td class="content_rowl">Creado por</td>
+   <td class="content_row"><?=$headdata["crt_firstname"]?> <?=$headdata["crt_lastname"]?>&nbsp;</td>
+   <td class="content_rowl">Cambiado por</td>
+   <td class="content_row"><?=$headdata["upd_firstname"]?> <?=$headdata["upd_lastname"]?>&nbsp;</td>
+</tr>
+<tr>
+   <td class="content_rowl">Creado</td>
+   <td class="content_row"><?=displayDate($headdata["req_crtdat"])?></td>
+   <td class="content_rowl">Cambiado</td>
+   <td class="content_row"><?=displayDate($headdata["req_upddat"])?></td>
+</tr>
+</tbody>
+</table>
+<?=Nifty_printF()?>
+<br>
+<script language="Javascript" src="./libs/jscripts/overlib/overlib.js"></script>
+<div id="overDiv" style="position:absolute; visibility:hidden; z-index:1000"></div>
+<?=Nifty_printH("box2", "980")?>
+<table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+<colgroup>
+   <col width="90">
+   <col width="28">
+   <col>
+   <?php
+   if((int)$headdata["req_prices_cnt"] > 1)
+   {
+      $_COLSPAN = 3;
+      for($xx = 1; $xx <= $headdata["req_prices_cnt"]; $xx++)
+      {  ?>
+         <col width="50">
+         <col width="50">
+         <?php
+         $_COLSPAN += 2;
+         $selwidth = "470px";
+      }
+   }
+   else
+   {  ?>
+      <col width="50">
+      <col width="75">
+      <col width="45">
+      <col width="80" style="display:none">
+      <?php
+      $_COLSPAN = 7;
+      $selwidth = "628px";
+   }
+   ?>
+</colgroup>
+<tr>
+   <td class="content_tbl_header" colspan="<?=$_COLSPAN?>">
+      <table border="0" cellpadding="0" cellspacing="0" width="100%">
+      <tr>
+         <td class="content_tbl_header" style="padding:0px">Artículos</td>
+         <?php
+         if(!(int)$_SESSION["user_pricesell_perm"] && !(int)$_REQUEST["user_pricesell_perm"] && $headdata["req_status"] == 1)
+         {  ?>
+            <td class="content_tbl_header" style="padding:0px" width="190">
+               <img src="./images/menu/icons/currency.png" style="vertical-align:bottom">
+               <a class="link" style="color:#333333" href="javascript: deactivateFormChange()"
+               onclick="showFancybox('/libs/modules/orders/auth.pricechange.fancy.php?frmname=form_reqpos', 'iframe', 450, 160, 'no')">Activar cambio de precios</a>
+            </td>
+            <?php
+         }
+         if($headdata["req_status"] == 1)
+         {  ?>
+            <td class="content_tbl_header" style="padding:0px" align="right">
+               <img src="./images/menu/icons/plus.png" style="vertical-align:bottom">
+               <a class="link" style="color:#333333" href="javascript: deactivateFormChange()"
+               onclick="deactivateFormChange();document.form_reqpos.openfancymode.value='offeraddfabitempre';document.form_reqpos.submit();">Agregar producto predefinido</a>
+            </td>
+            <td class="content_tbl_header" style="padding:0px" align="right" width="220">
+               <img src="./images/menu/icons/plus.png" style="vertical-align:bottom">
+               <a class="link" style="color:#333333" href="javascript: deactivateFormChange()"
+               onclick="deactivateFormChange();document.form_reqpos.openfancymode.value='offeraddfabitem';document.form_reqpos.submit();">Agregar producto de fabricación</a>
+            </td>
+            <?php
+         }
+         ?>
+      </tr>
+      </table>
+   </td>
+</tr>
+<tr>
+   <td class="content_tbl_subheader content_row_os" valign="top">Busqueda</td>
+   <td class="content_tbl_subheader content_row_os" valign="top">Act.</td>
+   <td class="content_tbl_subheader content_row_os" valign="top">Artículo</td>
+   <?php
+   if((int)$headdata["req_prices_cnt"] > 1)
+   {
+      for($xx = 1; $xx <= $headdata["req_prices_cnt"]; $xx++)
+      {  ?>
+         <td class="content_tbl_subheader content_row_os" valign="top" align="center"
+         style="border-left:3px double #333333" colspan="2">
+            <b><?=printPrice($headdata["req_prices_ccval{$xx}"])?></b>
+         </td>
+         <?php
+      }
+   }
+   else
+   {  ?>
+      <td class="content_tbl_subheader content_row_os" valign="top" align="right">Cantidad</td>
+      <td class="content_tbl_subheader content_row_os" valign="top" align="right">Precio (neto)</td>
+      <td class="content_tbl_subheader content_row_os" valign="top" align="right" style="display:none">IVA %</td>
+      <td class="content_tbl_subheader content_row_os" valign="top" align="right"><nobr>Precio Total</nobr></td>
+      <?php
+   }
+   ?>
+</tr>
+<?php
+$hasItems = false;
+//----------------------------------------------------------------------------------
+for($x = 0; $x < $rowcount; $x++)
+{
+   $showmanual = false;
+   if((int)$posdata[$x]["item_id"] && $posdata[$x]["item_type"] == "manual")
+      $showmanual = true;
+
+   if(!$_FIELDREGS[$x]) $_FIELDREGS[$x] = Array(); $_FIELDREGS[$x][] = "xf_search_{$x}";
+   if(!$_FIELDREGS[$x]) $_FIELDREGS[$x] = Array(); $_FIELDREGS[$x][] = "item_id_{$x}";
+   if(!$_FIELDREGS[$x]) $_FIELDREGS[$x] = Array(); $_FIELDREGS[$x][] = "item_amount_{$x}";
+   if(!$_FIELDREGS[$x]) $_FIELDREGS[$x] = Array(); $_FIELDREGS[$x][] = "item_sellprice_netto_{$x}";
+   if(!$_HIDETAXES)
+   {
+      if(!$_FIELDREGS[$x]) $_FIELDREGS[$x] = Array(); $_FIELDREGS[$x][] = "item_sellprice_taxes_perc_{$x}";
+   }
+   ?>
+   <tr bgcolor="<?=getRowColor($x)?>">
+      <td class="content_row_os" valign="top">
+         <?if($showmanual) { echo "&nbsp;"; $_FIELDIGNORES["xf_search_{$x}"] = 1; } ?>
+         <table border="0" cellpadding="0" cellspacing="0" width="100%" id="idx_tdcol1_<?=$x?>" <?php if($showmanual) echo "style='display:none'" ?>>
+         <tr>
+            <td width="20"><img src="./images/menu/icons/magnifier-zoom.png"></td>
+            <td>
+               <input type="text" class="text" style="width:60px" name="xf_search_<?=$x?>" id="xf_search_<?=$x?>"
+               onfocus="markfield(this,0)" <?=$rdlo?> autocomplete="off"
+               <?php
+               if(!(int)$posdata[$x]["item_id"])
+               {
+                  $execvolmultiprc = 0;
+                  if((int)$headdata["req_prices_cnt"] > 1)
+                     $execvolmultiprc = 1;
+                  ?>
+                  onblur="markfield(this,1);if(this.value!=''){document.all.idxifrsrc.src='./libs/modules/orders_offers/searchitem.php?execvolmultiprc=<?=$execvolmultiprc?>&rowcount=<?=$x?>&reqid=<?=$headdata["id"]?>&search=' +this.value; } this.value='';"
+                  onkeyup="detectEvent(event, '<?=$x?>', '<?=$_REQUEST["id"]?>')"
+                  <?php
+               }
+               else
+               {  ?>
+                  onblur="markfield(this,1)"
+                  <?php
+                  $hasItems = true;
+               }
+               ?>>
+            </td>
+         </tr>
+         </table>
+      </td>
+      <td class="content_row_os" valign="top">
+         <?php
+         if((int)$posdata[$x]["item_id"])
+         {  ?>
+            <input type="hidden" name="existing_id_<?=$x?>" value="<?=$posdata[$x]["item_id"]?>">
+            <input type="hidden" name="existing_pos_<?=$x?>" value="<?=$posdata[$x]["item_pos"]?>">
+            <?php
+            if((int)$headdata["req_prices_cnt"] > 1)
+            {  ?>
+               <!--
+               <input type="button" class="buttonred" value="x" style="width:20px"
+               onmouseover="markbtn(this,0)" onmouseout="markbtn(this,1)" <?=$dabl?>
+               onclick="if(askDel('')) { document.form_reqpos.item_sellprice_nettocnt_<?=$x?>_1.value='0'; submitForm(document.form_reqpos); }">
+               -->
+               <input type="button" class="buttonred" value="x" style="width:20px"
+               onmouseover="markbtn(this,0)" onmouseout="markbtn(this,1)" <?=$dabl?>
+               onclick="if(askDel('')) { document.form_reqpos.delposmultiitem.value = '<?=$x?>'; submitForm(document.form_reqpos); }">
+               <?php
+            }
+            else
+            {  ?>
+               <input type="button" class="buttonred" value="x" style="width:20px"
+               onmouseover="markbtn(this,0)" onmouseout="markbtn(this,1)" <?=$dabl?>
+               onclick="if(askDel('')) { document.form_reqpos.item_amount_<?=$x?>.value='0'; submitForm(document.form_reqpos); }">
+               <?php
+            }
+         }
+         else
+         {  ?>
+            <img src="/images/menu/icons/notebook--plus.png" border="0" style="cursor:pointer"
+            onclick="showOrderPartPosManualEdit('<?=$x?>')">
+            <?php
+         }
+         ?>
+      </td>
+      <td class="content_row_os" valign="top">
+         <select class="text" style="width:<?=$selwidth?>;<?php if($showmanual) echo "display:none" ?>"
+         name="item_id_<?=$x?>" id="item_id_<?=$x?>"
+         onblur="markfield(this,1);removeSelStyle(this);removeUnSelected(this)"
+         onfocus="<?php if(!(int)$posdata[$x]["item_id"]) echo "addSelStyle(this);" ?>"
+         onchange="setItemInfosOrder('<?=$x?>', this.value);showStockAct(<?=$x?>, this.value);<?php
+         if($rdlo == "" && !(int)$posdata[$x]["item_fabricate_act"])
+         {  ?>
+            execUnibagMultiVolPrices('<?=$x?>', '<?=$_REQUEST["id"]?>');
+            <?php
+         }
+         ?>">
+            <?php
+            if((int)$posdata[$x]["item_id"])
+            {
+               $desc = trim(addslashes($posdata[$x]["item_title"]));
+               ?>
+               <option value="<?=$posdata[$x]["item_id"]?>#<?=$posdata[$x]["item_type"]?>"><?=$posdata[$x]["item_number_prod"]?> - <?=$desc?></option>
+               <?php
+            }
+            ?>
+         </select>
+         <textarea class="text" name="item_desc_<?=$x?>" id="item_desc_<?=$x?>"
+         onfocus="markfield(this,0)" onblur="markfield(this,1)" <?=$rdlo?>
+         style="width:<?=$selwidth?>;height:30px;<?php if(!$showmanual) echo "display:none" ?>"><?=$posdata[$x]["item_desc"]?></textarea>
+         <input type="hidden" name="manual_pos_<?=$x?>" id="manual_pos_<?=$x?>"
+         value="<?php if($showmanual) echo "1"; else echo "0" ?>">
+         <?php
+         if((int)$posdata[$x]["item_id"])
+         {  ?>
+            <div style="height:3px"></div>
+            <?php
+            if($rdlo != "")
+            {  ?>
+               <div style="padding:10px;width:calc(100% - 26px);border:1px solid #CCCCCC"><?=nl2br($posdata[$x]["item_compdesc"])?></div>
+               <textarea class="text" name="item_compdesc_<?=$x?>" id="item_compdesc_<?=$x?>"
+               style="width:<?=$selwidth?>;height:80px;display:none" placeholder="Registrar detalles del producto"
+               onfocus="markfield(this,0)" onblur="markfield(this,1)" <?=$rdlo?>><?=stripslashes(nl2br($posdata[$x]["item_compdesc"]))?></textarea>
+               <?php
+            }
+            else
+            {  ?>
+               <textarea class="text classy-editor" name="item_compdesc_<?=$x?>" id="item_compdesc_<?=$x?>"
+               style="width:<?=$selwidth?>;height:80px;" placeholder="Registrar detalles del producto"
+               onfocus="markfield(this,0)" onblur="markfield(this,1)" <?=$rdlo?>><?=stripslashes(nl2br($posdata[$x]["item_compdesc"]))?></textarea>
+               <?php
+            }
+            ?>
+            <div style="height:3px;clear:both"></div>
+            <?php
+            if($posdata[$x]["item_img_hash"] != "")
+            {  ?>
+               <img src="/docs.offer/<?=$posdata[$x]["item_img_hash"]?>" height="100" style="float:left">
+               <input type="button" value="Mostrar" class="button" style="margin-left:15px;margin-top:25px;width:120px"
+               onclick="showFancybox('/docs.offer/<?=$posdata[$x]["item_img_hash"]?>','image', 400, 400, 'no')">
+               <?php
+               if($rdlo == "")
+               {  ?>
+                  <br>
+                  <input type="button" value="Eliminar" class="buttonred" style="margin-left:15px;margin-top:5px;width:120px"
+                  onclick="if(askDel('')) { document.form_reqpos.delposimg.value = '<?=$posdata[$x]["item_id"]?>-<?=$x?>'; submitForm(document.form_reqpos); } ">
+                  <?php
+               }
+            }
+            else
+            {  ?>
+               <input type="file" name="itemimage_<?=$x?>" style="width:90%">
+               <?php
+            }
+         }
+         ?>
+      </td>
+      <?php
+      if((int)$headdata["req_prices_cnt"] > 1)
+      {  ?>
+         <div style="display:none">
+            <input type="text" class="text" style="width:38px;text-align:right" <?=$dscrdlo?>
+            name="item_sellprice_taxes_perc_<?=$x?>" id="item_sellprice_taxes_perc_<?=$x?>" autocomplete="off"
+            value="<?php
+                   if((int)$posdata[$x]["item_id"])
+                      echo printPrice($posdata[$x]["item_sellprice_taxes_perc"],2);
+                   else
+                      echo printPrice($_SESSION["_CONF"]["conf_taxes"], 2);
+                   ?>">
+            <input type="text" class="text" style="width:75px;text-align:right" <?=$dscrdlo?>
+            name="item_sellprice_netto_<?=$x?>" id="item_sellprice_netto_<?=$x?>" autocomplete="off"
+            value="<?php if((int)$posdata[$x]["item_id"]) echo printPrice($posdata[$x]["item_sellprice_netto"])?>">
+         </div>
+         <?php
+         for($xx = 1; $xx <= $headdata["req_prices_cnt"]; $xx++)
+         {  ?>
+            <td class="content_row_os" align="right" valign="top" style="border-left:3px double #333333">
+               <input type="text" class="text" style="width:45px;text-align:right;" <?=$dscrdlo?>
+               name="item_sellprice_nettocnt_<?=$x?>_<?=$xx?>" id="item_sellprice_nettocnt_<?=$x?>_<?=$xx?>" autocomplete="off"
+               value="<?php if((int)$posdata[$x]["item_id"]) echo printPrice($posdata[$x]["item_sellprice_netto_ccval{$xx}"])?>"
+               onfocus="markfield(this,0)" onblur="markfield(this,1)">
+            </td>
+            <td class="content_row_os" align="right" valign="top">
+               <input type="text" class="text" readonly tabindex="-1" id="item_sellprice_nettoccval_<?=$x?>_<?=$xx?>"
+               style="width:65px;text-align:right;background-color:<?if((int)$posdata[$x]["item_id"]) echo "#E1FFD6"; else echo "#FFD6D8"?>"
+               value="<?php if((int)$posdata[$x]["item_id"]) echo printPrice($headdata["req_prices_ccval{$xx}"] * $posdata[$x]["item_sellprice_netto_ccval{$xx}"])?>">
+            </td>
+            <?php
+         }
+      }
+      else
+      {  ?>
+         <td class="content_row_os" align="right" valign="top">
+            <input type="text" class="text" style="width:50px;text-align:right"
+            onfocus="markfield(this,0)" onblur="markfield(this,1)" autocomplete="off"
+            name="item_amount_<?=$x?>" id="item_amount_<?=$x?>" <?=$rdlo?>
+            <?php
+            if($rdlo == "" && !(int)$posdata[$x]["item_fabricate_act"])
+            {  ?>
+               onkeyup="jqGetUnibagVolPrices('<?=$x?>', 'one', '<?=$_REQUEST["id"]?>')"
+               <?php
+            }
+            ?>
+            value="<?php if((int)$posdata[$x]["item_id"]) echo printPrice($posdata[$x]["item_amount"],2)?>">
+         </td>
+         <td class="content_row_os" align="right" valign="top">
+            <?php
+            if(!$hasprcsellperm)
+               $dscrdlo = " readonly ";
+            else
+               $dscrdlo = $rdlo;
+            ?>
+            <input type="text" class="text" style="width:75px;text-align:right" <?=$dscrdlo?>
+            name="item_sellprice_netto_<?=$x?>" id="item_sellprice_netto_<?=$x?>" autocomplete="off"
+            value="<?php if((int)$posdata[$x]["item_id"]) echo printPrice($posdata[$x]["item_sellprice_netto"])?>"
+            onfocus="markfield(this,0)" onblur="markfield(this,1)">
+         </td>
+         <td class="content_row_os" align="right" valign="top" style="display:none">
+            <?php
+            if(!$hasprcsellperm)
+               $dscrdlo = " readonly ";
+            else
+               $dscrdlo = $rdlo;
+            ?>
+            <input type="text" class="text" style="width:38px;text-align:right" <?=$dscrdlo?>
+            name="item_sellprice_taxes_perc_<?=$x?>" id="item_sellprice_taxes_perc_<?=$x?>" autocomplete="off"
+            value="<?php
+                   if((int)$posdata[$x]["item_id"])
+                      echo printPrice($posdata[$x]["item_sellprice_taxes_perc"],2);
+                   else
+                      echo printPrice($_SESSION["_CONF"]["conf_taxes"], 2);
+                   ?>"
+            onfocus="markfield(this,0);" onblur="markfield(this,1)">
+         </td>
+         <td class="content_row_os" align="right" valign="top">
+            <nobr>
+            <input type="text" class="text" readonly tabindex="-1" id="idx_item_sellprice_netto_dsc_<?=$x?>"
+            style="width:75px;text-align:right;background-color:<?if((int)$posdata[$x]["item_id"]) echo "#E1FFD6"; else echo "#FFD6D8"?>"
+            value="<?php if((int)$posdata[$x]["item_id"]) echo printPrice($posdata[$x]["item_sellprice_netto_dsc"])?>">
+            </nobr>
+         </td>
+         <?php
+      }
+      ?>
+   </tr>
+   <?php
+   /*
+   if(!(int)$posdata[$x]["item_id"] && $_REQUEST["subexec"] == "save" && !$focusexec)
+   {
+      $_SESSION["JSEXEC"] .= "document.form_reqpos.xf_search_{$x}.focus();$('html,body').animate({scrollTop:$(window).scrollTop() + 100}, 200);";
+      $focusexec = true;
+   }
+   */
+}
+?>
+</table>
+<?=Nifty_printF()?>
+<br>
+<?php
+if((int)$headdata["req_prices_cnt"] <= 1 && (int)$headdata["req_prices_totals_act"])
+{  ?>
+   <table border="0" cellpadding="0" cellspacing="0">
+   <tr>
+      <td valign="top">
+         <?=Nifty_printH("box1", "980")?>
+         <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%" style="padding:1px">
+         <colgroup>
+            <col>
+            <col width="55">
+            <col width="100">
+         </colgroup>
+         <tr bgcolor="<?=getRowColor(0)?>">
+            <td class="content_row_clear" colspan="2">SUBTOTAL</td>
+            <td class="content_row_clear" align="right">
+               <nobr>
+               $ <input type="text" class="text" style="width:110px;text-align:right" readonly
+               value="<?=printPrice($headdata["req_total_netto"] + $headdata["req_discount_amount_netto"])?>">
+               </nobr>
+            </td>
+         </tr>
+         <tr bgcolor="<?=getRowColor(0)?>">
+            <td class="content_row_clear" colspan="2">
+               <table border="0" class="content_table" cellpadding="0" cellspacing="0" width="100%">
+               <tr>
+                  <td class="content_row_clear">DESCUENTOS</td>
+                  <td class="content_row_clear" width="140">
+                     <nobr>
+                     <input type="text" class="text" style="text-align:center;width:100px;"
+                     id="req_discount_perc" name="req_discount_perc"
+                     value="<?=printPrice($headdata["req_discount_perc"],2)?>" <?=$rdlo?>> %
+                     </nobr>
+                  </td>
+                  <!--
+                  <td class="content_row_clear" align="right" width="1">
+                     <nobr>
+                     <input type="text" class="text" style="text-align:center;width:100px;"
+                     id="req_discount_amt" name="req_discount_amt"
+                     value="<?=printPrice($headdata["req_discount_amt"],2)?>" <?=$rdlo?>> $
+                     </nobr>
+                  </td>
+                  -->
+               </tr>
+               </table>
+            </td>
+            <td class="content_row_clear" align="right">
+               <nobr>
+               $ <input type="text" class="text" style="width:110px;text-align:right" readonly
+               value="<?=printPrice($headdata["req_discount_amount_netto"])?>">
+               </nobr>
+            </td>
+         </tr>
+         <?php
+         if($headdata["req_total_taxes"] > 0.00)
+         {  ?>
+            <tr bgcolor="<?=getRowColor(0)?>">
+               <td class="content_row_totals content_rowl" colspan="2">NETO</td>
+               <td class="content_row_totals content_row" align="right">
+                  <nobr>
+                  $ <input type="text" class="text" style="width:110px;text-align:right;font-weight:bold" readonly
+                  value="<?=printPrice($headdata["req_total_netto"])?>">
+                  </nobr>
+               </td>
+            </tr>
+            <tr bgcolor="<?=getRowColor(0)?>">
+               <td class="content_row content_rowl" colspan="2"><b>IVA</b></td>
+               <td class="content_row" align="right">
+                  <nobr>
+                  <b>$ <input type="text" class="text" style="width:110px;text-align:right;font-weight:bold" readonly
+                  value="<?=printPrice($headdata["req_total_taxes"])?>"></b>
+                  </nobr>
+               </td>
+            </tr>
+            <?php
+         }
+         ?>
+         <tr bgcolor="<?=getRowColor(0)?>">
+            <td class="content_row_totals content_rowl" colspan="2">TOTAL</td>
+            <td class="content_row_totals content_row" align="right">
+               <nobr>
+               $ <input type="text" class="text" style="width:110px;text-align:right;font-weight:bold;background-color:#E1FFD6" readonly
+               value="<?=printPrice($headdata["req_total_brutto"])?>">
+               </nobr>
+            </td>
+         </tr>
+         </table>
+         <?=Nifty_printF(false)?>
+      </td>
+      <td width="15" class="content_row_clear">&nbsp;</td>
+      <td valign="top">
+      </td>
+   </tr>
+   </table>
+   <br>
+   <?php
+}
+?>
+<?=Nifty_printH("boxopt_b", "980")?>
+<table border="0" cellspacing="0" cellpadding="0" width="100%">
+<tr>
+   <td width="130">
+      <?php
+      printButton($_LANG["FORM"]["BUTTON"][1], "postnav", "index.php?mid={$_REQUEST["mid"]}", "", "arrow-180");
+      ?>
+   </td>
+   <td>&nbsp;</td>
+   <?php
+   if($headdata["req_status"] > 1 )
+   {  ?>
+      <td width="130" style="padding-right:5px">
+         <?php
+         printButton("Editar", "postnav_del", "javascript: deactivateFormChange()", "if(askDel('')){document.form_reqpos.onsubmit='';document.form_reqpos.req_status.value='1';submitForm(document.form_reqpos);}", "arrow-circle-045-left");
+         ?>
+      </td>
+      <?php
+   }
+   if($headdata["req_status"] == 1)
+   {
+      // if(!$hasdocversions)
+      if($headdata["req_number"]=="[Pendiente]")
+      {  ?>
+         <td align="right" width="130" style="padding-right:5px">
+            <?php
+            printButton($_LANG["FORM"]["BUTTON"][2], "postnav_del", "javascript: deactivateFormChange()", "askDel('index.php?mid={$_REQUEST["mid"]}&subexec=del&id={$_REQUEST["id"]}')", "cross-circle-frame");
+            ?>
+         </td>
+         <?php
+      }
+      ?>
+      <td align="right" width="130" style="padding-right:5px">
+         <?php
+         printButton($_LANG["FORM"]["BUTTON"][0], "postnav", "javascript: deactivateFormChange()", "submitForm(document.form_reqpos)", "disk-black");
+         ?>
+      </td>
+      <?php
+      if($hasItems)
+      {  ?>
+         <td align="right" width="130" style="padding-right:5px">
+            <?php
+            printButton("Previsualizar", "postnav", "javascript: deactivateFormChange()", "document.form_reqpos.previewprintmode.value='1';submitForm(document.form_reqpos);", "eye");
+            ?>
+         </td>
+         <td align="right" width="130" style="padding-right:5px">
+            <?php
+            printButton("Imprimir", "postnav_save", "javascript: deactivateFormChange()", "if(askDel('')){document.form_reqpos.req_status.value='2';document.form_reqpos.autoprintmode.value='1';submitForm(document.form_reqpos);}", "tick-circle-frame");
+            ?>
+         </td>
+         <td align="right" width="130">
+            <?php
+            printButton("Enviar", "postnav_save", "javascript: deactivateFormChange()", "if(askDel('')){document.form_reqpos.openfancymode.value='gotosend';document.form_reqpos.req_status.value='2';submitForm(document.form_reqpos);}", "mail");
+            ?>
+         </td>
+         <?php
+      }
+   }
+   if($headdata["req_status"] == 2)
+   {  ?>
+      <td width="130" style="padding-right:5px">
+         <?php
+         printButton("Rechazado", "postnav", "index.php?mid={$_REQUEST["mid"]}&exec=edit&id={$_REQUEST["id"]}&setStatus=4", "", "minus-shield");
+         ?>
+      </td>
+      <td width="130" style="padding-right:5px">
+         <?php
+         printButton("Aceptado", "postnav_save", "index.php?mid={$_REQUEST["mid"]}&exec=edit&id={$_REQUEST["id"]}&setStatus=3", "", "tick-shield");
+         ?>
+      </td>
+      <?php
+   }
+   if($headdata["req_status"] == 3)
+   {  ?>
+      <td width="130" style="padding-right:5px">
+         <?php
+         printButton("Generar Confirmación de Compra", "postnav", "javascript: deactivateFormChange()", "generateNV()", "gear", 180);
+         ?>
+      </td>
+      <?php 
+   }
+   if($headdata["req_status"] >= 2 && $headdata["req_hash"] != "")
+   {  ?>
+      <td width="130" style="padding-right:5px">
+         <?php
+         printButton("Imprimir", "postnav", "javascript: deactivateFormChange()", "document.all.idxifrsrc.src = './libs/modules/structure/document_file.php?type=0&id={$_REQUEST["id"]}&hash={$headdata["req_hash"]}.pdf&name={$headdata["req_number"]}.pdf&path=../../../docs.offer/'", "script");
+         ?>
+      </td>
+      <?php
+      if($headdata["req_status"] >= 2 && count($custselarr))
+      {  ?>
+         <td width="130">
+            <?php
+            printButton("Enviar", "postnav_save", "javascript:document.getElementById('idx_mail').style.display='';$('html,body').animate({scrollTop:$('#idx_mail').offset().top}, 600);void(0)", "", "mail");
+            ?>
+         </td>
+         <?php
+      }
+   }
+   ?>
+</tr>
+</table>
+<?php
+if($_REQUEST["setStatus"] == "3")
+{
+   $_SESSION["JSEXEC"] .= ";generateNV();";
+}
+
+if($rdlo == "")
+   $_SESSION["JSEXEC"] .= "addFormListeners('form_reqpos');";
+?>
+<?=Nifty_printF(false)?>
+</form>
+
+<?php
+if($headdata["req_status"] >= 2 && $headdata["req_hash"] != "")
+{
+   if(count($custselarr))
+   {  ?>
+      <div id="idx_mail" style="display:none">
+      <script type="text/javascript" src="./libs/jscripts/tinymce_3_2_2_3/jscripts/tiny_mce/tiny_mce.js"></script>
+      <script type="text/javascript">
+         tinyMCE.init({
+            mode : "specific_textareas",
+            editor_selector : "mceEditor",
+            theme : "advanced",
+            plugins : "safari,pagebreak,style,layer,table,save,advhr,advimage,advlink,emotions,iespell,inlinepopups,insertdatetime,preview,media,searchreplace,print,contextmenu,paste,directionality,fullscreen,noneditable,visualchars,nonbreaking,xhtmlxtras,template",
+            theme_advanced_buttons1 : "bold,italic,underline,strikethrough,|,justifyleft,justifycenter,justifyright,justifyfull,bullist,numlist,outdent,indent,blockquote,|,forecolor,backcolor,tablecontrols",
+            theme_advanced_buttons2 : "", theme_advanced_buttons3 : "", theme_advanced_buttons4 : "",
+            theme_advanced_toolbar_location : "top", theme_advanced_toolbar_align : "left",
+            content_css : "css/content.css", template_external_list_url : "lists/template_list.js", external_link_list_url : "lists/link_list.js", external_image_list_url : "lists/image_list.js", media_external_list_url : "lists/media_list.js",
+            width: "810px", height: "150px", force_br_newlines: true, forced_root_block: ''
+         });
+      </script>
+      <form action="index.php" method="post" name="xform_docsend"
+       onsubmit="return checkform(new Array(this.msg_header, this.msg_body))">
+       <input type="hidden" name="exec" value="<?=$_REQUEST["exec"]?>">
+      <input type="hidden" name="subexec" value="send">
+      <input type="hidden" name="id" value="<?=$_REQUEST["id"]?>">
+      <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+      <?=Nifty_printH("box2", "980")?>
+      <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+      <colgroup>
+         <col width="150">
+         <col>
+      </colgroup>
+      <tr>
+         <td class="content_tbl_header" colspan="2">Enviar correo</td>
+      </tr>
+      <tr>
+         <td class="content_rowl">Tipo Envio</td>
+         <td class="content_row">
+            <input type="radio" name="sendtype" value="0" checked
+            onclick="$('#idx_custmails_tr').fadeIn(300);"> A correos del cliente
+            <input type="radio" name="sendtype" value="1"
+            onclick="$('.clscustmails').each(function() { $(this).attr('checked', false); });$('#idx_custmails_tr').fadeOut(300);"> A usuarios
+         </td>
+      </tr>
+      <tr id="idx_custmails_tr">
+         <td class="content_rowl" valign="top"><?=$_LANG["MODULE"]["MSG"][19]?></td>
+         <td class="content_row">
+            <?php
+            for($yy = 0; $yy < count($custselarr); $yy++)
+            {  ?>
+               <input type="checkbox" class="clscustmails" name="xrecpt[]" <?php if($yy == 0) echo "checked"?>
+               value="<?=$custselarr[$yy]["NAME"]?>###<?=$custselarr[$yy]["MAIL"]?>">
+               <?=$custselarr[$yy]["NAME"]?> &lt;<?=$custselarr[$yy]["MAIL"]?>&gt;
+               <br>
+               <?php
+            }
+            
+            $msg_header = "Cotización de Unibag a {$headdata["req_cust_company"]}: Nº {$headdata["req_number"]}";
+            $msg_header = str_replace("'", "", str_replace('"', "", $msg_header));
+
+            $sql = " select user_mail_signature_html
+                     from user
+                     where
+                     id = {$_SESSION["user_id"]}";
+            $mailsig = $CON->select($sql);
+            $mailsig = $mailsig[0]["user_mail_signature_html"];
+            if(trim($mailsig) != "")
+               $msg_body = "<br><br>".$mailsig;
+            ?>
+         </td>
+      </tr>
+      <tr>
+         <td class="content_rowl" valign="top">CCO</td>
+         <td class="content_row">
+            <?php
+            for($yy = 0; $yy < count($ccousers); $yy++)
+            {  ?>
+               <input type="checkbox" name="xcco[]" value="<?=$ccousers[$yy]["id"]?>">
+               <?=$ccousers[$yy]["user_firstname"]?> <?=$ccousers[$yy]["user_lastname"]?> &lt;<?=$ccousers[$yy]["user_mail"]?>&gt;
+               <br>
+               <?php
+            }
+            ?>
+         </td>
+      </tr>
+      <tr>
+         <td class="content_rowl"><?=$_LANG["MODULE"]["MSG"][29]?> *</td>
+         <td class="content_row">
+            <input type="text" class="text" style="width:810px" maxlength="254" name="msg_header" value="<?=$msg_header?>"
+            onfocus="markfield(this,0)" onblur="markfield(this,1)">
+         </td>
+      </tr>
+      <tr>
+         <td class="content_rowl" valign="top"><?=$_LANG["MODULE"]["MSG"][30]?> *</td>
+         <td class="content_row">
+            <textarea class="text mceEditor" style="width:810px; height:150px" name="msg_body"
+            onfocus="markfield(this,0)" onblur="markfield(this,1)">Estimado/a Cliente;<br><br>
+Junto con saludar envío adjunto cotización solicitada.<br><br>
+Quedo atento/a a sus consultas.<br>
+<?=stripslashes($msg_body)?></textarea>
+         </td>
+      </tr>
+      <tr>
+         <td class="content_rowl">Adjuntos</td>
+         <td class="content_row" id="idx_anexos_inner">
+            <?php
+            $sql = " select t1.*, t2.docto_title, t3.user_firstname 'crt_firstname', t3.user_lastname 'crt_lastname'
+                     from tran_docs t1
+                     LEFT OUTER JOIN tran_docs_types t2 ON t1.doc_typeid = t2.id
+                     LEFT OUTER JOIN user t3 ON t1.doc_crtusr = t3.id
+                     where
+                     t1.doc_tran_id    = {$headdata["id"]} and
+                     t1.doc_tran_type  = 'orders_offers'  and
+                     t1.doc_name      != ''
+                     order by t1.id";
+            $anexos = $CON->select($sql);
+            foreach($anexos AS $anexo)
+            {  ?>
+               <span style="float:left;background-color:#00A9A6;color:white;text-shadow:none;padding:3px;padding-left:6px;padding-right:6px;margin-right:3px;border-radius:3px"><?=$anexo["doc_name"]?></span>
+               <?php
+            }
+            ?>
+         </td>
+      </tr>
+      </table>
+      <?=Nifty_printF()?>
+      <br>
+      <table border="0" cellspacing="0" cellpadding="0" width="980">
+      <tr>
+         <td>&nbsp;</td>
+         <td width="130" style="padding-right:5px">
+            <?php
+            printButton("Enviar", "postnav_save", "javascript: deactivateFormChange()", "tinyMCE.triggerSave();submitForm(document.xform_docsend)", "mail");
+            ?>
+         </td>
+      </tr>
+      </form>
+      </table>
+      <br><br><br>
+      </div>
+      <?php
+   }
+}
+?>
+<div id="idx_volprices_jqoutput"></div>
+<iframe id="idxifrsrc" height="0" width="0" frameborder="0"></iframe>
+<script language="JavaScript">
+$(document).ready(function()
+{
+   $(".classy-editor").each(function()
+   {
+      $(this).ClassyEdit();
+   });
+});
+</script>
+<?php
+if($_REQUEST["setPosOrder"] == "prodnumber")
+{  ?>
+   <script language="JavaScript">
+      submitForm(document.form_reqpos);
+   </script>
+   <?php
+}
+
+if($_REQUEST["openfancymode"] == "offeraddfabitempre")
+{  ?>
+   <script language="JavaScript">
+   $(document).ready(function()
+   {
+      showFancybox('/iframe.fancy.php?module=offeraddfabitempre&id=<?=$_REQUEST["id"]?>', 'iframe', 1000, 550, 'yes');
+   });
+   </script>
+   <?php
+}
+if($_REQUEST["openfancymode"] == "offeraddfabitem")
+{  ?>
+   <script language="JavaScript">
+   $(document).ready(function()
+   {
+      showFancybox('/iframe.fancy.php?module=offeraddfabitem&id=<?=$_REQUEST["id"]?>', 'iframe', 900, 550, 'yes');
+   });
+   </script>
+   <?php
+}
+if($_REQUEST["openfancymode"] == "gotosend")
+{  ?>
+   <script language="JavaScript">
+   $(document).ready(function()
+   {
+      document.getElementById('idx_mail').style.display='';
+      setTimeout(function()
+      {
+         $('html,body').animate({scrollTop:$('#idx_mail').offset().top}, 600);
+      }, 600);
+   });
+   </script>
+   <?php
+}
+if((int)$_REQUEST["autoprintmode"])
+{  ?>
+   <script language="JavaScript">
+   $(document).ready(function()
+   {
+      document.all.idxifrsrc.src = './libs/modules/structure/document_file.php?type=0&id=<?=$_REQUEST["id"]?>&hash=<?=$headdata["req_hash"]?>.pdf&name=<?=$headdata["req_number"]?>.pdf&path=../../../docs.offer/';
+   });
+   </script>
+   <?php
+}
+if((int)$_REQUEST["previewprintmode"])
+{
+   $xfilename = doc_createOffer($CON, $_REQUEST["id"], 0);
+   $xfilename = str_replace("/tmp/", "", $xfilename);
+   ?>
+   <script language="JavaScript">
+   $(document).ready(function()
+   {
+      window.open('/libs/modules/structure/document_file.php?type=0&hash=<?=$xfilename?>&name=Previsualizacion-<?=$headdata["req_number"]?>.pdf&loadtemppath=1');
+   });
+   </script>
+   <?php
+}
+?>
+<script language="JavaScript">
+   function reloadSendAnex()
+   {
+      $.ajax({
+         type:       "POST",
+         cache:      false,
+         url:        "/libs/modules/orders_offers/jq.anexos.php",
+         data:       "id=<?=$_REQUEST["id"]?>",
+         dataType:   "html",
+         success: function(res)
+         {
+            $("#idx_anexos_inner").html(res);
+         }
+      });
+   }
+</script>
+<div id="idx_comunaout" style="display:none"></div>
+<?php
+/*
+if($_REQUEST["subexec"] == "save")
+{
+   ?>
+   <script language="JavaScript">
+      $(document).ready(function()
+      {
+         $('html,body').animate({scrollTop: $(document).height()}, 600);
+      });
+   </script>
+   <?php
+}
+*/
+
+if((int)$_REQUEST["clonegen"] && (int)$_REQUEST["id"])
+{
+
+   $sql = " insert into offers (req_desc, req_desc_intern, req_number, req_company_id, req_shop_id,
+                              req_hash, req_status, req_date, req_cust_id, req_cust_company, req_cust_rut,
+                              req_cust_street, req_cust_phone, req_cust_fax, req_cust_email, req_cust_countryid,
+                              req_cust_regionid, req_cust_provinciaid, req_cust_comunaid, req_total_netto,
+                              req_total_taxes, req_total_brutto, req_paymentid, req_crtdat, req_crtusr, req_upddat,
+                              req_updusr, req_discount_perc, req_discount_amt, req_discount_amount_netto, req_plid,
+                              req_plptype, req_prices_cnt, req_prices_ccval1, req_prices_ccval2, req_prices_ccval3,
+                              req_prices_ccval4, req_prices_ccval5, req_prices_totals_act, req_conditions_desc,
+                              req_plid_fab, req_cust_catid, req_plazo_entrega, req_alert_dat, req_id_contacto)
+         select req_desc, req_desc_intern, req_number, req_company_id, req_shop_id,
+                              req_hash, req_status, req_date, req_cust_id, req_cust_company, req_cust_rut,
+                              req_cust_street, req_cust_phone, req_cust_fax, req_cust_email, req_cust_countryid,
+                              req_cust_regionid, req_cust_provinciaid, req_cust_comunaid, req_total_netto,
+                              req_total_taxes, req_total_brutto, req_paymentid, req_crtdat, req_crtusr, req_upddat,
+                              req_updusr, req_discount_perc, req_discount_amt, req_discount_amount_netto, req_plid,
+                              req_plptype, req_prices_cnt, req_prices_ccval1, req_prices_ccval2, req_prices_ccval3,
+                              req_prices_ccval4, req_prices_ccval5, req_prices_totals_act, req_conditions_desc,
+                              req_plid_fab, req_cust_catid, req_plazo_entrega, req_alert_dat, req_id_contacto
+            from offers
+            where
+            id = {$_REQUEST["id"]}";
+   $res = $CON->no_result($sql);
+   if($res)
+   {
+      $offer_id = mysql_insert_id();
+      $currtme  = time();
+      
+      $sql = " update offers
+               set
+               req_number     = '[Pendiente]',
+               req_hash       = '',
+               req_status     = 1,
+               req_date       = {$currtme},
+               req_crtdat     = {$currtme},
+               req_crtusr     = {$_SESSION["user_id"]},
+               req_upddat     = {$currtme},
+               req_updusr     = {$_SESSION["user_id"]},
+               req_alert_dat  = 0
+               where
+               id = {$offer_id}";
+      $CON->no_result($sql);
+
+      if((int)$_REQUEST["clontocustid"])
+      {
+         $sql = " select *
+                  from customer
+                  where
+                  id = {$_REQUEST["clontocustid"]}";
+         $selcustomer = $CON->select($sql);
+         $selcustomer = $selcustomer[0];
+
+         $new_rut    = trim(addslashes(str_replace(".","",$selcustomer["cust_rut"])));
+         $this_rut   = trim(addslashes(str_replace(".","",$headdata["req_cust_rut"])));
+
+         if($new_rut != $this_rut)
+         {
+            $req_cust_company       = trim(addslashes($selcustomer["cust_company"]));
+            $req_cust_rut           = trim(addslashes($selcustomer["cust_rut"]));
+            $req_cust_street        = trim(addslashes($selcustomer["cust_street"]));
+            $req_cust_phone         = trim(addslashes($selcustomer["cust_phone"]));
+            $req_cust_fax           = trim(addslashes($selcustomer["cust_fax"]));
+            $req_cust_email         = trim(addslashes($selcustomer["cust_email"]));
+            $req_cust_countryid     = (int)$selcustomer["cust_countryid"];
+            $req_cust_regionid      = (int)$selcustomer["cust_regionid"];
+            $req_cust_provinciaid   = (int)$selcustomer["cust_provinciaid"];
+            $req_cust_comunaid      = (int)$selcustomer["cust_comunaid"];
+            $req_cust_id            = 0;
+            $req_cust_catid         = 0;
+
+            $sql = " update offers
+                     set
+                     req_cust_company        = '{$req_cust_company}',
+                     req_cust_rut            = '{$req_cust_rut}',
+                     req_cust_street         = '{$req_cust_street}',
+                     req_cust_phone          = '{$req_cust_phone}',
+                     req_cust_fax            = '{$req_cust_fax}',
+                     req_cust_email          = '{$req_cust_email}',
+                     req_cust_countryid      = {$req_cust_countryid},
+                     req_cust_regionid       = {$req_cust_regionid},
+                     req_cust_provinciaid    = {$req_cust_provinciaid},
+                     req_cust_comunaid       = {$req_cust_comunaid},
+                     req_cust_id             = {$req_cust_id},
+                     req_cust_catid          = {$req_cust_catid}
+                     where
+                     id = {$offer_id}";
+            $CON->no_result($sql);
+
+            $sqlclient = "";
+         }
+      }
+
+      $sql = " insert into offers_items (req_id, item_id, item_pos, item_amount, item_amount_shipped, item_type, item_sellprice_brutto,
+                                         item_sellprice_taxes_perc, item_sellprice_netto, item_sellprice_netto_dsc, item_sellprice_taxes,
+                                         item_discount, item_discount_type, item_pcat_dsc_act, item_pcat_dsc1, item_pcat_dsctype1, item_pcat_dsc2,
+                                         item_pcat_dsctype2, item_pcat_dsc3, item_pcat_dsctype3, item_pcat_dsc4, item_pcat_dsctype4, item_vol_act,
+                                         item_vol_dsc, item_vol_dsctype, item_value_act, item_value_dsc, item_value_dsctype, item_desc, item_promid,
+                                         item_promdsc, item_sellprice_netto_ccval1, item_sellprice_netto_ccval2, item_sellprice_netto_ccval3,
+                                         item_sellprice_netto_ccval4, item_sellprice_netto_ccval5, item_compdesc, item_img_hash, fab_type, fab_printtype,
+                                         fab_med_width, fab_med_height, fab_med_fuelle, fab_print_width, fab_print_height, fab_manilla_length,
+                                         fab_mat_fabric_color, fab_mat_manilla_color, fab_print_colors_front_1, fab_print_colors_back_1,
+                                         fab_print_colors_front_2, fab_print_colors_back_2, fab_print_colors_front_3, fab_print_colors_back_3,
+                                         fab_print_colors_front_4, fab_print_colors_back_4, fab_print_colors_front_5, fab_print_colors_back_5)
+               select {$offer_id} AS 'req_id', item_id, item_pos, item_amount, 0 AS 'item_amount_shipped', item_type, item_sellprice_brutto,
+                                         item_sellprice_taxes_perc, item_sellprice_netto, item_sellprice_netto_dsc, item_sellprice_taxes,
+                                         item_discount, item_discount_type, item_pcat_dsc_act, item_pcat_dsc1, item_pcat_dsctype1, item_pcat_dsc2,
+                                         item_pcat_dsctype2, item_pcat_dsc3, item_pcat_dsctype3, item_pcat_dsc4, item_pcat_dsctype4, item_vol_act,
+                                         item_vol_dsc, item_vol_dsctype, item_value_act, item_value_dsc, item_value_dsctype, item_desc, item_promid,
+                                         item_promdsc, item_sellprice_netto_ccval1, item_sellprice_netto_ccval2, item_sellprice_netto_ccval3,
+                                         item_sellprice_netto_ccval4, item_sellprice_netto_ccval5, item_compdesc, item_img_hash, fab_type, fab_printtype,
+                                         fab_med_width, fab_med_height, fab_med_fuelle, fab_print_width, fab_print_height, fab_manilla_length,
+                                         fab_mat_fabric_color, fab_mat_manilla_color, fab_print_colors_front_1, fab_print_colors_back_1,
+                                         fab_print_colors_front_2, fab_print_colors_back_2, fab_print_colors_front_3, fab_print_colors_back_3,
+                                         fab_print_colors_front_4, fab_print_colors_back_4, fab_print_colors_front_5, fab_print_colors_back_5
+               from offers_items
+               where
+               req_id = {$_REQUEST["id"]}";
+      $CON->no_result($sql);
+
+      $sql = " select req_id, item_id, item_pos, item_img_hash
+               from offers_items
+               where
+               req_id = {$offer_id} and
+               item_img_hash != ''";
+      $posdata = $CON->select($sql);
+      foreach($posdata AS $posdatarow)
+      {
+         $imgtype       = substr($posdatarow["item_img_hash"], strrpos($posdatarow["item_img_hash"], "."));
+         $item_img_hash = $offer_id."_".md5(microtime()).$imgtype;
+         copy("./docs.offer/{$posdatarow["item_img_hash"]}", "./docs.offer/{$item_img_hash}");
+
+         $sql = " update offers_items
+                  set
+                  item_img_hash = '{$item_img_hash}'
+                  where
+                  req_id   = {$posdatarow["req_id"]} and
+                  item_id  = {$posdatarow["item_id"]} and
+                  item_pos = {$posdatarow["item_pos"]}";
+         $CON->no_result($sql);
+      }
+   }
+   ?>
+   <script language="JavaScript">
+      location.href = '/index.php?mid=770';
+   </script>
+   <?php
+}

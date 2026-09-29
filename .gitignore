@@ -40,8 +40,17 @@ MAPA_COMPLETO_*.md
 PLAN_*.md
 DEPLOY_*.md
 GUIA_*.md
+*.md
+!README.md
+!INICIO_RAPIDO.md
+
+# Archivos de datos generados
+data/*.pptx
+!data/KP´S OPERACIONES AGOSTO 2026.pptx
+data/*.sqlite
 
 # Sistema operativo / editor
 .DS_Store
 Thumbs.db
 desktop.ini
+

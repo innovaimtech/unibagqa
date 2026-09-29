@@ -1,0 +1,607 @@
+<?php
+//----------------------------------------------------------------------------------
+// Author:        1BIT LTDA
+// Copyright:     2018 by 1BIT LTDA. All Rights Reserved.
+// Any unauthorized redistribution, reselling, modifying or reproduction of part
+// or all of the contents in any form is strictly prohibited.
+//----------------------------------------------------------------------------------
+
+//----------------------------------------------------------------------------------
+$_sesmodulename         = "price_change_sell";
+$_sesbasefilterstatus   = "0";
+$_sesbaseorderby        = "1";
+$_sesbaseordersort      = "asc";
+$_sortlinks             = Array("Número" => "1", "Artículo" => "2", "Proveedor" => "8", "Precio" => "6,7", "Codigo/Prov" => "11");
+$_SESSION[$_sesmodulename]["sql_company"] = $_SESSION["user_company_id"];
+unset($_SESSION["STATS"][$_sesmodulename]);
+
+//----------------------------------------------------------------------------------
+resetOverviewSession($_sesmodulename);
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["subexec"] == "search")
+{
+   $sql_item = explode("#", $_REQUEST["item_id"]);
+
+   $_SESSION[$_sesmodulename]["sql_company"]   = (int)$_REQUEST["sql_company"];
+   $_SESSION[$_sesmodulename]["sql_shop"]      = (int)$_REQUEST["sql_shop"];
+   $_SESSION[$_sesmodulename]["sql_item_id"]   = $sql_item[0];
+   $_SESSION[$_sesmodulename]["sql_item_type"] = $sql_item[1];
+   $_SESSION[$_sesmodulename]["sql_pcat"]      = (int)$_REQUEST["sql_pcat"];
+   $_SESSION[$_sesmodulename]["sql_supplier"]  = (int)$_REQUEST["sql_supplier"];
+   $_SESSION[$_sesmodulename]["sql_financedsc"] = (int)$_REQUEST["sql_financedsc"];
+   $_SESSION[$_sesmodulename]["page"]          = 0;
+   $_SESSION[$_sesmodulename]["search_active"] = 1;
+}
+
+//----------------------------------------------------------------------------------
+$companies  = getCompanies($CON);
+$shops      = getShops($CON);
+$suppliers  = getSuppliers($CON);
+
+if(!(int)$_SESSION[$_sesmodulename]["sql_company"])
+   $_SESSION[$_sesmodulename]["sql_company"] = $companies[0]["id"];
+if(!(int)$_SESSION[$_sesmodulename]["sql_shop"])
+{
+   $first = false;
+   foreach($shops AS $shop)
+      if($shop["shop_company_id"] == $_SESSION[$_sesmodulename]["sql_company"] && !$first)
+      {
+         $_SESSION[$_sesmodulename]["sql_shop"] = $shop["id"];
+         $first = true;
+      }
+}
+
+//----------------------------------------------------------------------------------
+prepareOverviewSession($_sesmodulename, $_sesbasefilterstatus, $_sesbaseorderby, $_sesbaseordersort, 100);
+
+//----------------------------------------------------------------------------------
+if($_REQUEST["savechanges"] == "1")
+{
+   foreach(array_keys($_REQUEST) AS $reqkey)
+   {
+      if(strpos($reqkey, "item_act_item") !== false && strpos($reqkey, "item_act_item") == 0)
+      {
+         $idx = explode("_", $reqkey);
+         $item_type  = $idx[2];
+         $item_id    = $idx[3];
+         $supp_id    = $idx[4];
+         $item_price = (float)($_REQUEST["itemsell_newprc_{$item_type}_{$item_id}_{$supp_id}"]);
+
+         if($item_type == "item")
+         {
+            $sql = " select * from item where id = {$item_id}";
+            $idata = $CON->select($sql);
+            $idata = $idata[0];
+            
+            $item_sellprice_netto      = $item_price;
+            $item_sellprice_taxes_perc = (float)$idata["item_sellprice_taxes_perc"];
+            $item_sellprice_taxes      = (float)sprintf("%.{$_SESSION["_CONF"]["conf_number_decimal_places"]}f", $item_sellprice_netto / 100 * $item_sellprice_taxes_perc);
+            $item_sellprice_brutto     = (float)sprintf("%.{$_SESSION["_CONF"]["conf_number_decimal_places"]}f", $item_sellprice_netto + $item_sellprice_taxes);
+
+            $sql = " update item
+                     set
+                     item_sellprice_netto       = {$item_sellprice_netto},
+                     item_sellprice_brutto      = {$item_sellprice_brutto},
+                     item_sellprice_taxes       = {$item_sellprice_taxes}
+                     where
+                     id = {$item_id}";
+            $CON->no_result($sql);
+
+            updateItemStorePrices($CON, $item_id);
+            registerSellPriceHistory($CON, $item_id, "item");
+         }
+         elseif($item_type == "itemlist")
+         {
+            $sql = " select * from itemlist where id = {$item_id}";
+            $idata = $CON->select($sql);
+            $idata = $idata[0];
+
+            $item_sellprice_netto      = $item_price;
+            $item_sellprice_taxes_perc = (float)$idata["item_sellprice_taxes_perc"];
+            $item_sellprice_taxes      = (float)sprintf("%.{$_SESSION["_CONF"]["conf_number_decimal_places"]}f", $item_sellprice_netto / 100 * $item_sellprice_taxes_perc);
+            $item_sellprice_brutto     = (float)sprintf("%.{$_SESSION["_CONF"]["conf_number_decimal_places"]}f", $item_sellprice_netto + $item_sellprice_taxes);
+
+            $sql = " update itemlist
+                     set
+                     item_sellprice_netto       = {$item_sellprice_netto},
+                     item_sellprice_brutto      = {$item_sellprice_brutto},
+                     item_sellprice_taxes       = {$item_sellprice_taxes}
+                     where
+                     id = {$item_id}";
+            $CON->no_result($sql);
+            updateItemlistStorePrices($CON, $item_id);
+            registerSellPriceHistory($CON, $item_id, "itemlist");
+         }
+      }
+   }
+}
+
+//----------------------------------------------------------------------------------
+$joisql = " INNER JOIN item_shops      t2 ON t1.id = t2.item_id
+            INNER JOIN company_shops   t3 ON ( t2.shop_id = t3.id and t3.shop_status = 1 )
+            INNER JOIN company_data    t4 ON ( t3.shop_company_id = t4.id and t4.company_status = 1 )
+            INNER JOIN item_suppliers  t5 ON ( t1.id = t5.item_id and ";
+
+if($_SESSION[$_sesmodulename]["sql_supplier"])
+   $joisql .= " t5.supplier_id = {$_SESSION[$_sesmodulename]["sql_supplier"]} ) ";
+else
+   $joisql .= " t5.item_supp_act = 1 ) ";
+
+$joisql .= " INNER JOIN supplier t6 ON ( t5.supplier_id = t6.id ) ";
+if($_SESSION[$_sesmodulename]["sql_pcat"])
+      $joisql .= " INNER JOIN item_productcats t7 ON t1.id = t7.item_id ";
+
+//----------------------------------------------------------------------------------
+$joisql2 = " INNER JOIN itemlist_shops       t2 ON t1.id = t2.item_id
+             INNER JOIN company_shops        t3 ON ( t2.shop_id = t3.id and t3.shop_status = 1 )
+             INNER JOIN company_data         t4 ON ( t3.shop_company_id = t4.id and t4.company_status = 1 )
+             INNER JOIN itemlist_suppliers   t5 ON ( t1.id = t5.item_id and ";
+
+if($_SESSION[$_sesmodulename]["sql_supplier"])
+   $joisql2 .= " t5.supplier_id = {$_SESSION[$_sesmodulename]["sql_supplier"]} ) ";
+else
+   $joisql2 .= " t5.item_supp_act = 1 ) ";
+
+$joisql2 .= " INNER JOIN supplier t6 ON ( t5.supplier_id = t6.id ) ";
+if($_SESSION[$_sesmodulename]["sql_pcat"])
+      $joisql2 .= " INNER JOIN item_productcats_itemlist t7 ON t1.id = t7.item_id ";
+
+//----------------------------------------------------------------------------------
+$cntsql = " select count(distinct t1.id) 'cc'
+            from item t1
+            {$joisql}
+            where
+            t1.item_status    = 1 and
+            t1.item_released  = 1 ";
+
+$datsql = " select t1.item_number_prod, t1.item_title, t1.id, t4.company_short, t3.shop_name,
+                   t5.item_costprice_netto, t5.item_costprice_usd, t6.supp_company, t6.id 'supplierid',
+                   'item_type' 'I', t5.item_code, t6.supp_short, t2.itemshop_sellprice_netto
+            from item t1
+            {$joisql}
+            where
+            t1.item_status    = 1 and
+            t1.item_released  = 1 ";
+     
+//----------------------------------------------------------------------------------
+if($_SESSION[$_sesmodulename]["sql_item_type"] == "itemlist")
+{
+   $datsql .= " and 1 = 2 ";
+   $cntsql .= " and 1 = 2 ";
+}
+elseif($_SESSION[$_sesmodulename]["sql_item_type"] == "item")
+{
+   $datsql .= " and t1.id = {$_SESSION[$_sesmodulename]["sql_item_id"]} ";
+   $cntsql .= " and t1.id = {$_SESSION[$_sesmodulename]["sql_item_id"]} ";
+}
+
+//----------------------------------------------------------------------------------
+if($_SESSION[$_sesmodulename]["sql_company"])
+   $seasql .= " and t3.shop_company_id = {$_SESSION[$_sesmodulename]["sql_company"]} ";
+if($_SESSION[$_sesmodulename]["sql_shop"])
+   $seasql .= " and t2.shop_id = {$_SESSION[$_sesmodulename]["sql_shop"]} ";
+if($_SESSION[$_sesmodulename]["sql_pcat"])
+   $seasql .= " and t7.cat_id = {$_SESSION[$_sesmodulename]["sql_pcat"]} ";
+      
+//----------------------------------------------------------------------------------
+$cntsql   .= $seasql;
+$datsql   .= $seasql;
+
+//----------------------------------------------------------------------------------
+$cntsql .= "UNION ALL
+            select count(distinct t1.id) 'cc'
+            from itemlist t1
+            {$joisql2}
+            where
+            t1.item_status    = 1 and
+            t1.item_released  = 1 ";
+$cntsql .= $seasql;
+
+//----------------------------------------------------------------------------------
+$datsql .= "UNION ALL
+            select t1.item_number_prod, t1.item_title, t1.id, t4.company_short, t3.shop_name,
+                   t5.item_costprice_netto, t5.item_costprice_usd, t6.supp_company, t6.id 'supplierid',
+                   'item_type' 'L', t5.item_code, t6.supp_short, t2.itemshop_sellprice_netto
+            from itemlist t1
+            {$joisql2}
+            where
+            t1.item_status    = 1 and
+            t1.item_released  = 1 ";
+            
+//----------------------------------------------------------------------------------
+if($_SESSION[$_sesmodulename]["sql_item_type"] == "item")
+{
+   $datsql .= " and 1 = 2 ";
+   $cntsql .= " and 1 = 2 ";
+}
+elseif($_SESSION[$_sesmodulename]["sql_item_type"] == "itemlist")
+{
+   $datsql .= " and t1.id = {$_SESSION[$_sesmodulename]["sql_item_id"]} ";
+   $cntsql .= " and t1.id = {$_SESSION[$_sesmodulename]["sql_item_id"]} ";
+}
+
+$datsql .= $seasql;
+
+
+$itemcount = $CON->select($cntsql);
+$itemcount = (int)$itemcount[0]["cc"] + (int)$itemcount[1]["cc"];
+
+//----------------------------------------------------------------------------------
+$_SESSION[$_sesmodulename]["startrow"] = $_SESSION[$_sesmodulename]["page"] * $_SESSION[$_sesmodulename]["rows_per_page"];
+
+$datsql .= " order by {$_SESSION[$_sesmodulename]["orderBy"]} {$_SESSION[$_sesmodulename]["orderSort"]} ";
+$repsql  = $datsql;
+
+//----------------------------------------------------------------------------------
+$items = $CON->select($datsql);
+
+//----------------------------------------------------------------------------------
+if((int)$_SESSION[$_sesmodulename]["sql_company"])
+{
+   $selshops = Array();
+   foreach($shops AS $shop)
+      if($shop["shop_company_id"] == $_SESSION[$_sesmodulename]["sql_company"])
+         array_push($selshops, $shop);
+}
+
+//----------------------------------------------------------------------------------
+$pcats = formatFullProductCats(getFullProductCats($CON, 0));
+
+printJSsetCompanyShop($shops);
+?>
+<script language="JavaScript">
+function detectEvent (event, mode)
+{
+   var xurl = './libs/modules/items/searchitem.fancy.php?mode=' +mode;
+   var keyCode = ('which' in event) ? event.which : event.keyCode;
+   if(keyCode == 112)
+      showFancybox(xurl, 'iframe', 1000, 450, 'auto');
+}
+</script>
+<table border="0" cellpadding="0" cellspacing="0" width="980">
+<tr>
+   <td height="30"><b class="content_header">Modificar precios de venta</b></td>
+   <td align="right" class="content_row_clear"><?php if($savemsg == "") printOverviewResults($itemcount); else echo $savemsg;?></td>
+</tr>
+<tr>
+   <td class="content_headerline" colspan="2">&nbsp;</td>
+</tr>
+</table>
+<table border="0" cellpadding="0" cellspacing="0" width="100%">
+<tr>
+   <td>
+      <form action="index.php" method="post" name="xform_itemsearch" class="fokusfirst"
+      onsubmit="return checkform(new Array(this.sql_supplier))">
+      <input type="hidden" name="subexec" value="search">
+      <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+      <input type="hidden" name="printpdf" value="0">
+      <input type="hidden" name="printxls" value="0">
+      <?=Nifty_printH("box2", "980")?>
+      <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+      <colgroup>
+         <col width="100">
+         <col>
+         <col width="100">
+         <col width="300">
+      </colgroup>
+      <tr>
+         <td class="content_tbl_header" colspan="4">Opciones de búsqueda</td>
+      </tr>
+      <tr>
+         <td class="content_rowl">Articulo</td>
+         <td class="content_row">
+            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+            <colgroup>
+               <col width="105">
+               <col>
+            </colgroup>
+            <tr>
+               <td>
+                  <input type="text" class="text" style="width:100px" onfocus="markfield(this,0)" name="xf_search"
+                  onblur="markfield(this,1);if(this.value != '') document.all.idxifrsrc.src='./libs/modules/stats/searchitem.php?search=' +this.value"
+                  onkeyup="detectEvent(event, 'stats')">
+               </td>
+               <td>
+                  <select class="text" style="width:270px" name="item_id"
+                  onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+                     <?php
+                     if((int)$_SESSION[$_sesmodulename]["sql_item_id"])
+                     {
+                        if($_SESSION[$_sesmodulename]["sql_item_type"] == "item")
+                        {
+                           $sql = " select *
+                                    from item
+                                    where
+                                    id = {$_SESSION[$_sesmodulename]["sql_item_id"]}";
+                           $item = $CON->select($sql);
+                           $item = $item[0];
+                        }
+                        else
+                        {
+                           $sql = " select *
+                                    from itemlist
+                                    where
+                                    id = {$_SESSION[$_sesmodulename]["sql_item_id"]}";
+                           $item = $CON->select($sql);
+                           $item = $item[0];
+                        }
+
+                        $desc       = trim(addslashes($item["item_title"]));
+                        $unitdesc   = getItemUnitDesc($CON, $_SESSION[$_sesmodulename]["sql_item_id"], $_SESSION[$_sesmodulename]["sql_item_type"]);
+                        ?>
+                        <option value="<?=$_SESSION[$_sesmodulename]["sql_item_id"]?>#<?=$_SESSION[$_sesmodulename]["sql_item_type"]?>">
+                           <?=$item["item_number_prod"]?> - <?=$desc?> (<?=$unitdesc?>)
+                        </option>
+                        <?php
+                     }
+                     ?>
+                  </select>
+               </td>
+            </tr>
+            </table>
+         </td>
+         <td class="content_rowl">Empresa</td>
+         <td class="content_row"><?php printOverviewCompanySelect($companies, $_sesmodulename) ?></td>
+      </tr>
+      <tr>
+         <td class="content_rowl">Proveedor</td>
+         <td class="content_row"><?php printOverviewSupplierSelect($suppliers, $_sesmodulename) ?></td>
+         <td class="content_rowl">Sucursal</td>
+         <td class="content_row"><?php printOverviewShopSelect($shops, $_sesmodulename) ?></td>
+      </tr>
+      <tr>
+         <td class="content_rowl">Familia</td>
+         <td class="content_row">
+            <select class="text" name="sql_pcat" style="width:375px"
+            onmousedown="markfield(this,0)" onblur="markfield(this,1)">
+               <option value="">&lt; <?=$_LANG["FORM"]["OPTION"][0]?> &gt;</option>
+               <?php
+               foreach($pcats AS $pcat)
+               {  ?>
+                  <option value="<?=$pcat["id"]?>"
+                  <?php if($pcat["id"] == $_SESSION[$_sesmodulename]["sql_pcat"]) echo "selected"?>><?=sprintf("%03s", $pcat["id"])?> - <?=$pcat["cat_title"]?>
+                  </option>
+                  <?php
+               }
+               ?>
+            </select>
+         </td>
+         <td class="content_rowl">Descuento fin.</td>
+         <td class="content_row">
+            <input type="radio" value="0" name="sql_financedsc" <?php if((int)$_SESSION[$_sesmodulename]["sql_financedsc"] == 0) echo "checked"?>> Aplicar
+            <input type="radio" value="1" name="sql_financedsc" <?php if((int)$_SESSION[$_sesmodulename]["sql_financedsc"] == 1) echo "checked"?>> No Aplicar
+         </td>
+      </tr>
+      <tr>
+         <td class="content_row" align="right" colspan="4">
+            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+            <colgroup>
+               <col width='132'>            
+               <col>
+               <col width="132">
+               <col width="132">
+            </colgroup>
+            <tr>
+               <td align="left">
+                  <?php
+                  if($itemcount > 0)
+                  {
+                     //printButton("Imprimir PDF", "postnav", "javascript: deactivateFormChange()", "document.xform_itemsearch.printpdf.value='1';submitForm(document.xform_itemsearch)", "document-pdf", 130);
+                     $_SESSION["_SUBMITBTN"] = 1;
+                  }
+                  ?>
+               </td>
+               <td align="left">
+                  <?php
+                  if($itemcount > 0)
+                  {
+                     //printButton("Generar XLS", "postnav", "javascript: deactivateFormChange()", "document.xform_itemsearch.printxls.value='1';submitForm(document.xform_itemsearch)", "document-excel", 130);
+                     $_SESSION["_SUBMITBTN"] = 1;
+                  }
+                  ?>
+               </td>               
+               <td align="right">
+                  <?php
+                  if((int)$_SESSION[$_sesmodulename]["search_active"])
+                     printButton("Resetear", "postnav", "index.php?mid={$_REQUEST["mid"]}&searchexec=reset", "", "arrow-circle-double-135", 130);
+                  ?>
+               </td>
+               <td align="right">
+                  <?php
+                  printButton("Buscar", "postnav_save", "javascript: deactivateFormChange()", "submitForm(document.xform_itemsearch)", "magnifier", 130);
+                  $_SESSION["_SUBMITBTN"] = 1;
+                  ?>
+               </td>
+            </tr>
+            </table>
+         </td>
+      </tr>
+      </table>
+      <?=Nifty_printF(false)?>
+      </form>
+   </td>
+</tr>
+<tr>
+   <td>
+      <script language="JavaScript">
+      function setMainMargen()
+      {
+         $(".mval").each(function ()
+         {
+            var itemid  = $(this).attr('id');
+            var idarr   = itemid.split('_');
+            var ididx   = idarr[1] + '_' + idarr[2] + '_' + idarr[3];
+
+            var itemact = document.getElementById('item_act_' +ididx).checked;
+            if(itemact)
+            {
+               var itembuy_changeperc  = document.getElementById('itembuy_changeperc_' +ididx).value;
+               var itembaseprice       = parseFloat(document.getElementById('itembaseprice_' +ididx).value);
+               var objsellprc          = document.getElementById('itemsell_newprc_' +ididx);
+
+               itembuy_changeperc = itembuy_changeperc.replace('.','');
+               itembuy_changeperc = itembuy_changeperc.replace(',','.');
+               itembuy_changeperc = parseFloat(itembuy_changeperc);
+               objsellprc.value   = Math.round(itembaseprice + (itembaseprice / 100 * itembuy_changeperc));
+            }
+         });
+      }
+      </script>
+      <div style="position:fixed;top:30px;left:1100px">
+      <?=Nifty_printH("box1", "140")?>
+      <table border="0" cellpadding="3" cellspacing="0" width="100%">
+      <tr>
+         <td class="content_tbl_header" colspan="2">Cambio de precios</td>
+      </tr>
+      <tr>
+         <td class="content_row">
+            <?php
+            printButton("Aplicar a marcados", "postnav", "javascript: deactivateFormChange()", "setMainMargen()", "document", 140);
+            ?>
+         </td>
+      </tr>
+      <tr>
+         <td class="content_row">
+            <?php
+            printButton("Guardar cambios", "postnav_save", "javascript: deactivateFormChange()", "document.xform_savechg.submit()", "document", 140);
+            ?>
+         </td>
+      </tr>
+      </table>
+      <?=Nifty_printF()?>
+      </div>
+      <form action="index.php" method="post" name="xform_savechg">
+      <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+      <input type="hidden" name="savechanges" value="1">
+      <?=Nifty_printH("box1", "1050")?>
+      <table border="0" cellpadding="3" cellspacing="0" width="100%">
+      <tr>
+         <td class="content_row_os content_tbl_subheader">
+            <input type="checkbox" onclick="$('.chkme').attr('checked',this.checked)">
+         </td>
+         <td class="content_row_os content_tbl_subheader"><?=printSortLink($_sesmodulename, $_sortlinks, 0)?></td>
+         <td class="content_row_os content_tbl_subheader"><?=printSortLink($_sesmodulename, $_sortlinks, 1)?></td>
+         <td class="content_row_os content_tbl_subheader"><?=printSortLink($_sesmodulename, $_sortlinks, 4)?></td>
+         <td class="content_row_os content_tbl_subheader">Unidad</td>
+         <td class="content_row_os content_tbl_subheader" align="right" style="border-left:3px double black">Precio<br>Compra<br>Actual<br>Basico</td>
+         <td class="content_row_os content_tbl_subheader" align="right">Precio<br>Compra<br>Actual<br>Final</td>
+         <td class="content_row_os content_tbl_subheader" align="left">Fecha<br>Actual.</td>
+         <td class="content_row_os content_tbl_subheader" align="right" style="border-left:3px double black">Precio<br>Compra<br>Antiguo<br>Basico</td>
+         <td class="content_row_os content_tbl_subheader" align="right">Precio<br>Compra<br>Antiguo<br>Final</td>
+         <td class="content_row_os content_tbl_subheader" align="left">Fecha<br>Actual.</td>
+         <td class="content_row_os content_tbl_subheader" align="right" style="border-left:3px double black">Diferencia<br>Precio<br>Compra<br>$</td>
+         <td class="content_row_os content_tbl_subheader" align="right">Diferencia<br>Precio<br>Compra<br>%</td>
+         <td class="content_row_os content_tbl_subheader" align="right" style="border-left:3px double black">Precio<br>Venta<br>Basico<br>Actual</td>
+         <td class="content_row_os content_tbl_subheader" align="right">Precio<br>Venta<br>Basico<br>Nuevo</td>
+      </tr>
+      <?php
+
+      //----------------------------------------------------------------------------------
+      for($x = 0; $x < count($items) && $items != false; $x++)
+      {
+         if($items[$x]["item_type"] == "item_typeI")
+            $items[$x]["item_type"] = "item";
+         else
+            $items[$x]["item_type"] = "itemlist";
+
+         $unitdesc      = getItemUnitDesc($CON, $items[$x]["id"], $items[$x]["item_type"]);
+
+         $sql = " select * 
+                  from pricehist_buy
+                  where
+                  prc_item_id       = {$items[$x]["id"]} and
+                  prc_item_type     = '{$items[$x]["item_type"]}' and
+                  prc_supplier_id   = {$items[$x]["supplierid"]}
+                  order by prc_crtdat desc
+                  LIMIT 0,2";
+         $phist = $CON->select($sql);
+         $currprc = $phist[0];
+         $lastprc = $phist[1];
+
+         $prcdiff       = 0.00;
+         $prcperc       = 0.00;
+         $last_buyval   = 0.00;
+         if((int)$lastprc["prc_crtdat"])
+         {
+            $prcdiff = $items[$x]["item_costprice_netto"] - $lastprc["prc_costprice_netto"];
+            $prcperc = ($items[$x]["item_costprice_netto"] - $lastprc["prc_costprice_netto"]) / $lastprc["prc_costprice_netto"] * 100;
+            $last_buyval = getSupplierFinalCostNetto($CON, $items[$x]["supplierid"], $items[$x]["id"], $items[$x]["item_type"], $lastprc["prc_costprice_netto"], $_SESSION[$_sesmodulename]["sql_financedsc"]);
+         }
+         $curr_buyval = getSupplierFinalCostNetto($CON, $items[$x]["supplierid"], $items[$x]["id"], $items[$x]["item_type"], 0.00, $_SESSION[$_sesmodulename]["sql_financedsc"]);
+
+         $newsellprc  = round($items[$x]["itemshop_sellprice_netto"] + ($items[$x]["itemshop_sellprice_netto"] / 100 * $prcperc),0);
+
+         $idx = $items[$x]["item_type"]."_".$items[$x]["id"]."_".$_SESSION[$_sesmodulename]["sql_shop"];
+         ?>
+         <tr bgcolor="<?=getRowColor($x)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+            <td class="content_row_os">
+               <input type="checkbox" class="chkme" name="item_act_<?=$idx?>" id="item_act_<?=$idx?>" value="1">
+               <input type="hidden" class="mval" name="itembaseprice_<?=$idx?>" id="itembaseprice_<?=$idx?>"
+               value="<?=(float)$items[$x]["itemshop_sellprice_netto"]?>">
+            </td>
+            <td class="content_row_os"><?=$items[$x]["item_number_prod"]?></td>
+            <td class="content_row_os"><?=$items[$x]["item_title"]?></td>
+            <td class="content_row_os"><?=$items[$x]["item_code"]?>&nbsp;</td>
+            <td class="content_row_os"><?=$unitdesc?></td>
+            <td class="content_row_os" align="right" style="border-left:3px double black"><?=printPrice($items[$x]["item_costprice_netto"],4)?></td>
+            <td class="content_row_os" align="right"><?=printPrice($curr_buyval,4)?></td>
+            <td class="content_row_os" align="left">
+               <?php
+               if((int)$currprc["prc_crtdat"])
+                  echo date('d.m.Y', $currprc["prc_crtdat"]);
+               else
+                  echo "&nbsp;";
+               ?>
+            </td>
+            <td class="content_row_os" align="right" style="border-left:3px double black">
+               <?php
+               if((int)$lastprc["prc_crtdat"])
+                  echo printPrice($lastprc["prc_costprice_netto"],4);
+               else
+                  echo "&nbsp;";
+               ?>
+            </td>
+            <td class="content_row_os" align="right"><?=printPrice($last_buyval,4,true)?></td>
+            <td class="content_row_os" align="left">
+               <?php
+               if((int)$lastprc["prc_crtdat"])
+                  echo date('d.m.Y', $lastprc["prc_crtdat"]);
+               else
+                  echo "&nbsp;";
+               ?>
+            </td>
+            <td class="content_row_os" align="right" style="border-left:3px double black"><?=printPrice($prcdiff, 2)?></td>
+            <td class="content_row_os" align="right">
+               <input type="text" class="text" style="width:60px" value="<?=printPrice($prcperc, 2)?>"
+               name="itembuy_changeperc_<?=$idx?>" id="itembuy_changeperc_<?=$idx?>">
+            </td>
+            <td class="content_row_os" align="right" style="border-left:3px double black"><?=printPrice($items[$x]["itemshop_sellprice_netto"])?></td>
+            <td class="content_row_os" align="right">
+               <input type="text" class="text" style="width:60px" value=""
+               name="itemsell_newprc_<?=$idx?>" id="itemsell_newprc_<?=$idx?>">
+            </td>
+         </tr>
+         <?php
+      }
+
+      if(!$x)
+      {  ?>
+         <tr bgcolor="<?=getRowColor(0)?>">
+            <td class="content_row" colspan="10" align="center">
+               <br>
+               <b class="msg_save_err">No hay datos disponibles.</b>
+               <br><br>
+            </td>
+         </tr>
+         <?php
+      }
+      ?>
+      </table>
+      <?=Nifty_printF()?>
+      </form>
+      <br>
+   </td>
+</tr>
+</table>
+<iframe id="idxifrsrc" height="0" width="0" frameborder="0"></iframe>

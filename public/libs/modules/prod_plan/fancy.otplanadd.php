@@ -1,0 +1,848 @@
+<?php
+//----------------------------------------------------------------------------------
+$_REQUEST["pagina"] = (int)$_REQUEST["pagina"] ? (int)$_REQUEST["pagina"] : 1;
+if((int)$_REQUEST["prdid"])
+{
+   $sql = " select t1.id, t1.req_number, t1.req_production_initdate, t1.req_status, t2.company_short,
+                   t3.shop_name, t4.cust_name, t1.req_hash, t2x.item_number_prod, t2x.item_title,
+                   t1x.item_amount, t3x.prd_number, t1x.fab_printtype, t1x.fab_type, t3x.id 'prdid',
+                   t1x.fab_med_width, t1x.fab_med_height, t1x.fab_med_fuelle, t1x.fab_print_width,
+                   t1x.fab_print_height, v1.add_name 'fabric_color', v2.add_name 'manilla_color',
+                   fab_print_colors_front_1, fab_print_colors_front_2, fab_print_colors_front_3, fab_print_colors_front_4,fab_print_colors_front_5,
+                   fab_print_colors_back_1, fab_print_colors_back_2, fab_print_colors_back_3, fab_print_colors_back_4, fab_print_colors_back_5,
+                   fab_print_colordesc_1, fab_print_colordesc_2, fab_print_colordesc_3, fab_print_colordesc_4, fab_print_colordesc_5,
+                   t3x.id 'prdid', t1x.fab_design_imagehash, t1x.fab_mat_gramms
+            from orders t1
+            LEFT OUTER JOIN company_data t2  ON t1.req_company_id = t2.id
+            LEFT OUTER JOIN company_shops t3 ON t1.req_shop_id    = t3.id
+            LEFT OUTER JOIN customer t4      ON t1.req_cust_id    = t4.id
+            INNER JOIN orders_items t1x      ON t1.id = t1x.req_id
+            INNER JOIN item t2x              ON t1x.item_id = t2x.id
+            INNER JOIN prod_header t3x  ON t1.id = t3x.prd_reqid and t3x.prd_status >= 2
+            LEFT OUTER JOIN tran_comments_vals v1 ON t1x.fab_mat_fabric_color = v1.id
+            LEFT OUTER JOIN tran_comments_vals v2 ON t1x.fab_mat_manilla_color = v2.id
+            where
+            t3x.id = {$_REQUEST["prdid"]}";
+   $otsel = $CON->select($sql);
+   $otsel = $otsel[0];
+
+   //----------------------------------------------------------------------------------
+   $selplanta = getPlantas($CON, $_REQUEST["sql_plantaid"]);
+   $selplanta = $selplanta[0];
+
+   //----------------------------------------------------------------------------------
+   $sqldate_from = getDateFromString($_REQUEST["sql_date_pfrom"]);
+   $sqldate_to   = getDateFromString($_REQUEST["sql_date_pto"], false);
+
+   for($x = $sqldate_from; $x <= $sqldate_to; $x += 30000)
+   {
+      $idx = date("d.m.Y", $x);
+      $_SELDAYS[$idx] = 1;
+   }
+
+   $sql = " select t1.*, t2.equipo_type_id, t2.equipo_name, t3.type_ant_title
+            from prod_compat_equipos t1
+            INNER JOIN equipo t2       ON t1.equ_id = t2.id
+            INNER JOIN equipo_type t3  ON t2.equipo_type_id = t3.id
+            where
+            t1.prd_id = {$_REQUEST["prdid"]}
+            order by t3.type_ant_title, t2.equipo_name";
+   $prdequs = $CON->select($sql);
+   foreach($prdequs AS $prdequ)
+   {
+      $idx1 = $prdequ["equipo_type_id"];
+      $idx2 = $prdequ["equ_id"];
+      $_PLANEQUIPOS[$idx1][$idx2] = $prdequ;
+
+      $_PLANEQUIPOTYPES[$idx1]   = $prdequ["type_ant_title"];
+      // $_PLANEQUIPOS[$idx2]       = $prdequ["equipo_name"];
+   }
+
+   //----------------------------------------------------------------------------------
+   $sql = " select distinct t0.*,
+                   t1.req_number, t1.req_production_initdate, t1.req_status, t2.company_short,
+                   t3.shop_name, t4.cust_name, t1.req_hash, t2x.item_number_prod, t2x.item_title,
+                   t1x.item_amount, t3x.prd_number, t1x.fab_printtype, t1x.fab_type, t3x.id 'prdid',
+                   t1x.fab_med_width, t1x.fab_med_height, t1x.fab_med_fuelle, t1x.fab_print_width,
+                   t1x.fab_print_height, v1.add_name 'fabric_color', v2.add_name 'manilla_color',
+                   fab_print_colors_front_1, fab_print_colors_front_2, fab_print_colors_front_3, fab_print_colors_front_4,fab_print_colors_front_5,
+                   fab_print_colors_back_1, fab_print_colors_back_2, fab_print_colors_back_3, fab_print_colors_back_4, fab_print_colors_back_5,
+                   fab_print_colordesc_1, fab_print_colordesc_2, fab_print_colordesc_3, fab_print_colordesc_4, fab_print_colordesc_5,
+                   t3x.id 'prdid', t1x.fab_design_name
+            from prod_agenda t0
+            INNER JOIN prod_header t3x       ON t0.ag_prdid = t3x.id and t3x.prd_status >= 2
+            INNER JOIN orders t1             ON t0.ag_reqid = t1.id
+            LEFT OUTER JOIN company_data t2  ON t1.req_company_id = t2.id
+            LEFT OUTER JOIN company_shops t3 ON t1.req_shop_id    = t3.id
+            LEFT OUTER JOIN customer t4      ON t1.req_cust_id    = t4.id
+            INNER JOIN orders_items t1x      ON t1.id = t1x.req_id
+            INNER JOIN item t2x              ON t1x.item_id = t2x.id
+            LEFT OUTER JOIN tran_comments_vals v1 ON t1x.fab_mat_fabric_color = v1.id
+            LEFT OUTER JOIN tran_comments_vals v2 ON t1x.fab_mat_manilla_color = v2.id
+            where
+            t0.ag_status      > 0 and
+            t0.ag_date_stamp  between {$sqldate_from} and {$sqldate_to} and
+            t0.ag_plantaid    = {$_REQUEST["sql_plantaid"]}
+            order by t0.ag_date_stamp asc, t0.ag_order, t0.id asc";
+   $agendas = $CON->select($sql);
+   foreach($agendas AS $agenda)
+   {
+      $idx1 = $agenda["ag_date"];
+      $idx2 = $agenda["ag_equipotype_id"];
+      $idx3 = $agenda["ag_equipo_id"];
+      $_AGENDA[$idx1][$idx2][$idx3][] = $agenda;
+   }
+   ?>
+   <script language="JavaScript" src="./libs/jscripts/jquery-ui.min.js"></script>
+   <style type="text/css"><!-- @import url(./libs/jscripts/datepicker/datepicker.css); //--></style>
+   <script language="JavaScript" src="./libs/jscripts/datepicker/datepicker.js"></script>
+   <div style="height:2px"></div>
+   <table border="0" cellpadding="0" cellspacing="0" width="100%">
+   <tr>
+      <td>
+         <form action="iframe.fancy.php" method="post" name="xform_itemsearch" class="fokusfirst">
+         <input type="hidden" name="subexec" value="search">
+         <input type="hidden" name="execsave" value="">
+         <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+         <input type="hidden" name="sql_date_pto" value="<?=$_REQUEST["sql_date_pto"]?>">
+         <input type="hidden" name="sql_date_pfrom" value="<?=$_REQUEST["sql_date_pfrom"]?>">
+         <input type="hidden" name="sql_plantaid" value="<?=$_REQUEST["sql_plantaid"]?>">
+         <input type="hidden" name="prdid" value="<?=$_REQUEST["prdid"]?>">
+         <input type="hidden" name="module" value="<?=$_REQUEST["module"]?>">
+         <?=Nifty_printH("box2", "100%")?>
+         <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+         <colgroup>
+            <col width="100">
+            <col width="">
+            <col width="100">
+            <col width="">
+            <col width="120">
+         </colgroup>
+         <tr>
+            <td class="content_tbl_header" colspan="5">Opciones de b?squeda</td>
+         </tr>
+         <tr>
+            <td class="content_rowl">Periodo</td>
+            <td class="content_row">
+               <nobr>
+               <input type="text" style="width:75px" id="sql_date_pfrom" name="sql_date_pfrom"
+               class="text format-d-m-y divider-dot highlight-days-67 no-locale no-transparency"
+               onfocus="markfield(this,0)" onblur="markfield(this,1)"
+               value="<?=$_REQUEST["sql_date_pfrom"]?>">
+               -
+               <input type="text" style="width:75px" id="sql_date_pto" name="sql_date_pto"
+               class="text format-d-m-y divider-dot highlight-days-67 no-locale no-transparency"
+               onfocus="markfield(this,0)" onblur="markfield(this,1)"
+               value="<?=$_REQUEST["sql_date_pto"]?>">
+               </nobr>
+            </td>
+            <td class="content_rowl">Planta</td>
+            <td class="content_row"><?=$selplanta["planta_name"]?></td>
+            <td class="content_row" align="right">
+               <table border="0" cellpadding="0" cellspacing="0" width="">
+               <tr>
+                  <td align="right">
+                     <?php
+                     printButton("Mostrar agenda", "postnav_save", "javascript: deactivateFormChange()", "submitForm(document.xform_itemsearch)", "magnifier", 130);
+                     $_SESSION["_SUBMITBTN"] = 1;
+                     ?>
+                  </td>
+               </tr>
+               </table>
+            </td>
+         </tr>
+         </table>
+         <?=Nifty_printF(false)?>
+         </form>
+      </td>
+   </tr>
+   <tr>
+      <td>
+         <?=Nifty_printH("box1", "100%")?>
+         <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+         <colgroup>
+            <col width="60">
+            <col>
+            <col width="60">
+            <col>
+            <col width="60">
+            <col>
+            <col width="60">
+            <col>
+            <col width="60">
+            <col>
+            <col width="60">
+            <col>
+         </colgroup>
+         <tr>
+            <td class="content_tbl_header" colspan="12">Informaciones OT</td>
+         </tr>
+         <?php
+         $thispos       = $otsel;
+         $printcolors   = "";
+         $entrega_vals  = "";
+
+         //----------------------------------------------------------------------------------
+         for($xx = 1; $xx <= 5; $xx++)
+         {
+            if((int)$thispos["fab_print_colors_front_{$xx}"] || (int)$thispos["fab_print_colors_back_{$xx}"])
+            {
+               if((int)$thispos["fab_print_colors_front_{$xx}"] && !(int)$thispos["fab_print_colors_back_{$xx}"])
+                  $printcolors .= "Frente: {$thispos["fab_print_colordesc_{$xx}"]}, ";
+               elseif(!(int)$thispos["fab_print_colors_front_{$xx}"] && (int)$thispos["fab_print_colors_back_{$xx}"])
+                  $printcolors .= "Dorso: {$thispos["fab_print_colordesc_{$xx}"]}, ";
+               elseif((int)$thispos["fab_print_colors_front_{$xx}"] && (int)$thispos["fab_print_colors_back_{$xx}"])
+                  $printcolors .= "Frente/Dorso: {$thispos["fab_print_colordesc_{$xx}"]}, ";
+            }
+         }
+         $printcolors = substr($printcolors, 0, -2);
+
+         //----------------------------------------------------------------------------------
+         $sql = " select *
+                  from prod_amtplan
+                  where
+                  prodplan_prdid = {$thispos["prdid"]}
+                  order by prodplan_date asc";
+         $entregas = $CON->select($sql);
+         foreach($entregas AS $entrega)
+            $entrega_vals .= printPrice($entrega["prodplan_amt"])." (".date("d.m.Y", $entrega["prodplan_date"])."), ";
+         $entrega_vals = substr($entrega_vals, 0, -2);
+         ?>
+         <tr>
+            <td class="content_rowl">N? OT</td>
+            <td class="content_row"><?=$thispos["prd_number"]?></td>
+            <td class="content_rowl">Cliente</td>
+            <td class="content_row"><?=$thispos["cust_name"]?>&nbsp;</td>
+            <td class="content_rowl">Producto</td>
+            <td class="content_row"><?=$thispos["item_title"]?>&nbsp;</td>
+            <td class="content_rowl">Medidas</td>
+            <td class="content_row"><?=(int)$thispos["fab_med_width"]?> x <?=(int)$thispos["fab_med_height"]?></td>
+            <td class="content_rowl">Fuelle</td>
+            <td class="content_row"><?=(int)$thispos["fab_med_fuelle"]?>&nbsp;</td>
+            <td class="content_rowl">Area</td>
+            <td class="content_row"><?=(int)$thispos["fab_print_width"]?> x <?=(int)$thispos["fab_print_height"]?></td>
+         </tr>
+         <tr>
+            <td class="content_rowl">Tela</td>
+            <td class="content_row"><?=$thispos["fabric_color"]?>&nbsp;</td>
+            <td class="content_rowl">Manillas</td>
+            <td class="content_row"><?=$thispos["manilla_color"]?>&nbsp;</td>
+            <td class="content_rowl">Colores</td>
+            <td class="content_row"><?=$printcolors?>&nbsp;</td>
+            <td class="content_rowl">Cantidad</td>
+            <td class="content_row"><?=printPrice($thispos["item_amount"])?></td>
+            <td class="content_rowl">Entregas</td>
+            <td class="content_row" colspan="3"><?=$entrega_vals?>&nbsp;</td>
+         </tr>
+         <tr>
+            <td class="content_rowl">Gramaje</td>
+            <td class="content_row"><?=$thispos["fab_mat_gramms"]?> gr&nbsp;</td>
+         </tr>
+         <?php
+         $px = 0;
+         foreach(array_keys($_PLANEQUIPOTYPES) AS $etypeid)
+         {
+            $_BASE_AMT = $thispos["item_amount"];
+            $_OT_STATS = getProdStats($CON, $thispos["prdid"], 0, 0, 0, 0, $etypeid);
+            $_BASE_AMT = $_BASE_AMT - $_OT_STATS["_PROD_AMOUNT"];
+            ?>
+            <tr>
+               <td class="content_rowl" colspan="3"><?=$_PLANEQUIPOTYPES[$etypeid]?></td>
+               <td class="content_row" colspan="3">
+                  <div class="dritem" draggable="true" id="idxequipotype_<?=$etypeid?>" style="cursor:pointer;margin-right:3px;background-color:#00A9A6;float:left;color:white;padding:4px;padding-left:6px;padding-right:6px;text-shadow:none">
+                     Arrastrar y Soltar en la agenda
+                  </div>
+                  Cantidad
+                  <input type="text" class="text" id="idxamount_<?=$etypeid?>" value="<?=printPrice($_BASE_AMT)?>"
+                  style="width:100px;text-align:center"> 
+                  &nbsp;
+                  | Producido: <?=printPrice($_OT_STATS["_PROD_AMOUNT"])?>
+               </td>
+               <?php
+               if($px == 0)
+               {  ?>
+                  <td class="content_row" colspan="6" rowspan="<?=count(array_keys($_PLANEQUIPOTYPES))?>" valign="top">
+                     <?php
+                     if($thispos["fab_design_imagehash"] != "")
+                     {  ?>
+                        <img border="0" src="./docs.order/<?=$thispos["fab_design_imagehash"]?>" height="120" style="float:left;cursor:pointer"
+                        onclick="window.open('/docs.order/<?=$thispos["fab_design_imagehash"]?>')">
+                        <?php
+                     }
+                     ?>
+                     <div style="height:5px"></div>
+                     <span style="padding:4px;text-shadow:none;margin-left:5px;background-color:#1AAAA6;color:white">N? CC: <?=$thispos["req_number"]?></span>
+                     <div style="height:7px"></div>
+                     <span style="padding:4px;margin-left:2px;">Impresiones desarrollo: <?=(int)$thispos["req_solic_devprints_cc"]?></span>
+                  </td>
+                  <?php
+               }
+               ?>
+            </tr>
+            <?php
+            $px++;
+         }
+         ?>
+         </table>
+         <?=Nifty_printF()?>
+         <script language="JavaScript">
+            var drag_equipotype_id = '';
+            $(document).ready(function()
+            {
+               $('.dritem').bind('dragstart',function(event)
+               {
+                  var xidx             = $(this).attr('id');
+                  var xidxarr          = xidx.split("_");
+                  drag_equipotype_id   = xidxarr[1];
+                  $('.drop > *').css('pointer-events', 'none');
+               });
+               
+               $('.dritem').bind('dragend',function(event)
+               {
+                  $('.drop > *').css('pointer-events', 'auto');
+               });
+
+               $('.drop').bind('dragover',function(event){
+                event.stopPropagation();
+                event.preventDefault();
+                return false;
+               });
+               $('.drop').bind('dragenter',function(event){
+                event.stopPropagation();
+                event.preventDefault();
+                $(this).css({'background-color':'#95EF9E'});
+                return false;
+               });
+               $('.drop').bind('dragleave',function(event){
+                event.stopPropagation();
+                event.preventDefault();
+                $(this).css({'background-color':''});
+                return false;
+               });
+               $('.drop').bind('drop',function(event){
+                event.stopPropagation();
+                event.preventDefault();
+                var xidx = $(this).attr('id');
+                $(this).css({'background-color':''});
+                directCreateEquipoAgenda(xidx);
+                return false;
+               });
+            });
+
+            function directCreateEquipoAgenda(xidx)
+            {
+               var equipotype_id = drag_equipotype_id;
+               var xidxarr       = xidx.split("_");
+               var plan_date     = xidxarr[1];
+               var equipo_id     = xidxarr[2];
+               var plan_amount   = $('#idxamount_' +equipotype_id).val();
+
+               var chkequipotype_id = xidxarr[3];
+               if(chkequipotype_id == equipotype_id)
+               {
+                  var dataString = "equipotype_id=" +equipotype_id +"&plan_date=" +plan_date;
+                  dataString = dataString +"&equipo_id=" +equipo_id +"&plan_amount=" +plan_amount;
+                  dataString = dataString +"&prdid=<?=$otsel["prdid"]?>&reqid=<?=$otsel["id"]?>&plantaid=<?=$_REQUEST["sql_plantaid"]?>";
+                  
+                  $.ajax({
+                     type:       "POST",
+                     cache:      false,
+                     url:        "/libs/modules/prod_plan/jq.addplanitem.php",
+                     data:       dataString,
+                     dataType:   "html",
+                     success: function(res)
+                     {
+                        $("#idx_jqout").html(res);
+                     }
+                  });
+               }
+               else
+               {
+                  alert('Tipo de maquina incompatible.');
+               }
+            }
+         </script>
+         <br>
+      </td>
+   </tr>
+   <tr>
+      <td>
+         <div id="idx_jqout"></div>
+         <?=Nifty_printH("box1", "100%")?>
+         <table border="0" cellpadding="3" cellspacing="0" width="100%">
+         <colgroup>
+            <col width="75">
+         </colgroup>
+         <tr>
+            <td class="content_tbl_header" rowspan="2" align="center">Fecha</td>
+            <?php
+            foreach(array_keys($_PLANEQUIPOTYPES) AS $etypeid)
+            {  ?>
+               <td class="content_tbl_header" style="border-left:3px double #666666" align="center" colspan="<?=count($_PLANEQUIPOS[$etypeid])?>">
+                  <?=$_PLANEQUIPOTYPES[$etypeid]?>
+               </td>
+               <?php
+            }
+            ?>
+         </tr>
+         <tr>
+            <?php
+            foreach(array_keys($_PLANEQUIPOTYPES) AS $etypeid)
+            {
+               $ex = 0;
+               foreach(array_keys($_PLANEQUIPOS[$etypeid]) AS $equipoid)
+               {  ?>
+                  <td class="content_tbl_subheader content_row_os" style="<?if(!(int)$ex) echo "border-left:3px double #666666"?>" align="center">
+                     <?=$_PLANEQUIPOS[$etypeid][$equipoid]["equipo_name"]?>
+                  </td>
+                  <?php
+                  $ex++;
+               }
+            }
+            ?>
+         </tr>
+         <?php
+         foreach(array_keys($_SELDAYS) AS $dayidx)
+         {
+            $mx = 0;
+            $rowcss = "";
+            if($dayidx != $last_dayidx)
+               $rowcss = "border-top:3px double #666666";
+
+            $divtrcss = "color:white;text-shadow:none";
+
+            $hasagenda = false;
+
+            foreach(array_keys($_PLANEQUIPOTYPES) AS $etypeid)
+            {
+               foreach(array_keys($_PLANEQUIPOS[$etypeid]) AS $equipoid)
+               {
+                  $rkeys = array_keys($_AGENDA[$dayidx][$etypeid][$equipoid]);
+                  if(count($rkeys))
+                     $hasagenda = true;
+               }
+            }
+
+            if($hasagenda)
+            {  ?>
+               <tr bgcolor="<?=getRowColor($x)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+                  <td class="content_tbl_subheader content_row_os" align="center" style="<?=$rowcss?>" valign="top"><?=$dayidx?></td>
+                  <?php
+                  foreach(array_keys($_PLANEQUIPOTYPES) AS $etypeid)
+                  {
+                     $ex = 0;
+                     foreach(array_keys($_PLANEQUIPOS[$etypeid]) AS $equipoid)
+                     {  ?>
+                        <td class="drop content_tbl_subheader content_row_os" id="droptarget_<?=$dayidx?>_<?=$equipoid?>_<?=$etypeid?>"
+                        style="color:#CCCCCC;<?=$rowcss?>;<?if(!(int)$ex) echo "border-left:3px double #666666"?>"
+                        align="center" valign="top">
+                           <?php
+                           $rkeys = array_keys($_AGENDA[$dayidx][$etypeid][$equipoid]);
+                           foreach($rkeys AS $rowidx)
+                           {
+                              $row        = $_AGENDA[$dayidx][$etypeid][$equipoid][$rowidx];
+
+                              $_THIS_STATS   = getProdStats($CON, 0, $row["id"], 0, 0, 0);
+                              $_OT_STATS     = getProdStats($CON, $row["prdid"], 0, 0, 0, 0);
+                        
+                              $amt_total  = (int)$row["ag_amount"];
+                              $amt_fab    = $_THIS_STATS["_PROD_AMOUNT"];
+                              $prg_perc   = round($amt_fab / $amt_total * 100);
+                              ?>
+                              <div class="clstd_<?=$equipo["id"]?>"
+                              style="<?if((int)$row["ag_active"]) echo "background-color:#6EBE6C;"; else echo "background-color:#00A9A6;"?>;border:1px solid #007472;margin-bottom:3px;color:white;padding:4px;padding-left:6px;padding-right:6px;text-shadow:none">
+                                 <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                                 <tr>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>"><b>OT:</b> <?=$row["prd_number"]?></td>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>" align="right"><b>CC:</b> <?=$row["req_number"]?></td>
+                                 </tr>
+                                 <tr>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>" colspan="2"><?=$row["cust_name"]?></td>
+                                 </tr>
+                                 <tr>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>" colspan="2"><?=$row["fab_design_name"]?></td>
+                                 </tr>
+                                 <tr>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>"><?=printPrice($row["ag_amount"])?> C/U</td>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>" align="right"><?=$row["item_number_prod"]?></td>
+                                 </tr>
+                                 <tr>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>" colspan="2"><?=$row["item_title"]?></td>
+                                 </tr>
+                                 <tr>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>"><?=$row["fab_printtype"]?></td>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>" align="right"><?=$row["fab_type"]?></td>
+                                 </tr>
+                                 <tr>
+                                    <td class="content_row_clear" style="<?=$divtrcss?>" colspan="2">
+                                       <div style="float:left;height:14px;width:100%;border:1px solid #007472;background-color:#EEEEEE;border-radius:3px">
+                                          <div style="position:absolute;font-size:10px;font-weight:bold;color:#333333;line-height:15px;">
+                                             &nbsp;<?=printPrice($amt_fab)?> de <?=printPrice($row["ag_amount"])?> | <?=printPrice($prg_perc)?>%
+                                          </div>
+                                          <div style="border-radius:3px;width:<?=$prg_perc?>%;height:14px;background-color:#69C36D"></div>
+                                       </div>
+                                    </td>
+                                 </tr>
+                                 <?php
+                                 if($row["ag_amount"] != $row["item_amount"])
+                                 {
+                                    $amt_total     = (int)$row["item_amount"];
+                                    $amt_fab       = $_OT_STATS["_PROD_AMOUNT"];
+                                    $prg_perc      = round($amt_fab / $amt_total * 100);
+                                    ?>
+                                    <tr>
+                                       <td class="content_row_clear" style="<?=$divtrcss?>;padding-top:3px" colspan="2">
+                                          <div style="float:left;height:14px;width:100%;border:1px solid #007472;background-color:#EEEEEE;border-radius:3px">
+                                             <div style="position:absolute;font-size:10px;font-weight:bold;color:#333333;line-height:15px;">
+                                                &nbsp;<?=printPrice($amt_fab)?> de <?=printPrice($row["item_amount"])?> | <?=printPrice($prg_perc)?>% Total
+                                             </div>
+                                             <div style="border-radius:3px;width:<?=$prg_perc?>%;height:14px;background-color:#69C36D"></div>
+                                          </div>
+                                       </td>
+                                    </tr>
+                                    <?php
+                                 }
+                                 ?>
+                                 </table>
+                              </div>
+                              <?php
+                           }
+                           ?>
+                        </td>
+                        <?php
+                        $ex++;
+                     }
+                  }
+                  ?>
+               </tr>
+               <?php
+            }
+            else
+            {  ?>
+               <tr bgcolor="<?=getRowColor($x)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)">
+                  <td class="content_tbl_subheader content_row_os" align="center" style="<?=$rowcss?>"><?=$dayidx?></td>
+                  <?php
+                  foreach(array_keys($_PLANEQUIPOTYPES) AS $etypeid)
+                  {
+                     $ex = 0;
+                     foreach(array_keys($_PLANEQUIPOS[$etypeid]) AS $equipoid)
+                     {  ?>
+                        <td class="drop content_tbl_subheader content_row_os" id="droptarget_<?=$dayidx?>_<?=$equipoid?>_<?=$etypeid?>"
+                        style="<?=$rowcss?>;<?if(!(int)$ex) echo "border-left:3px double #666666"?>" align="center">
+                           &nbsp;
+                        </td>
+                        <?php
+                        $ex++;
+                     }
+                  }
+                  ?>
+               </tr>
+               <?php
+            }
+            $mx++;
+            $last_dayidx = $dayidx;
+         }
+         ?>
+         </table>
+         <?=Nifty_printF(false)?>
+      </td>
+   </tr>
+   </table>
+   <?php
+}
+//----------------------------------------------------------------------------------
+else
+{
+   $_REQUEST["sql_ot"] = trim(addslashes($_REQUEST["sql_ot"]));
+   $_REQUEST["sql_cc"] = trim(addslashes($_REQUEST["sql_cc"]));
+
+   $sql = " select t1.id, t1.req_number, t1.req_production_initdate, t1.req_status, t2.company_short,
+                   t3.shop_name, t4.cust_name, t1.req_hash, t2x.item_number_prod, t2x.item_title,
+                   t1x.item_amount, t3x.prd_number, t1x.fab_printtype, t1x.fab_type, t3x.id 'prdid',
+                   t1x.fab_med_width, t1x.fab_med_height, t1x.fab_med_fuelle, t1x.fab_print_width,
+                   t1x.fab_print_height, v1.add_name 'fabric_color', v2.add_name 'manilla_color',
+                   fab_print_colors_front_1, fab_print_colors_front_2, fab_print_colors_front_3, fab_print_colors_front_4,fab_print_colors_front_5,
+                   fab_print_colors_back_1, fab_print_colors_back_2, fab_print_colors_back_3, fab_print_colors_back_4, fab_print_colors_back_5,
+                   fab_print_colordesc_1, fab_print_colordesc_2, fab_print_colordesc_3, fab_print_colordesc_4, fab_print_colordesc_5,
+                   t3x.id 'prdid', t1x.fab_design_name
+            from orders t1
+            LEFT OUTER JOIN company_data t2  ON t1.req_company_id = t2.id
+            LEFT OUTER JOIN company_shops t3 ON t1.req_shop_id    = t3.id
+            LEFT OUTER JOIN customer t4      ON t1.req_cust_id    = t4.id
+            INNER JOIN orders_items t1x      ON t1.id = t1x.req_id
+            INNER JOIN item t2x              ON t1x.item_id = t2x.id
+            INNER JOIN prod_header t3x  ON t1.id = t3x.prd_reqid and t3x.prd_status >= 2
+            LEFT OUTER JOIN tran_comments_vals v1 ON t1x.fab_mat_fabric_color = v1.id
+            LEFT OUTER JOIN tran_comments_vals v2 ON t1x.fab_mat_manilla_color = v2.id
+            where
+            t1.req_status           > 1 and
+            t1.req_production_act   = 1 and
+            t3x.prd_status          = 2 ";
+   if($_REQUEST["sql_ot"] != "")
+      $sql .=" and t3x.prd_number = '{$_REQUEST["sql_ot"]}' ";
+   if($_REQUEST["sql_cc"] != "")
+      $sql .=" and t1.req_number = '{$_REQUEST["sql_cc"]}' ";
+   $sql .= " order by t1.req_production_initdate desc";
+  
+
+
+   // Definir cantidad de registros por p?gina
+   $registros_por_pagina = 100;
+   $pagina_actual = isset($_REQUEST["pagina"]) ? (int)$_REQUEST["pagina"] : 1;
+   $inicio = ($pagina_actual - 1) * $registros_por_pagina;
+
+   // Obtener total de registros
+   
+   $sql1 = " select count(*) as total 
+            from orders t1
+            LEFT OUTER JOIN company_data t2  ON t1.req_company_id = t2.id
+            LEFT OUTER JOIN company_shops t3 ON t1.req_shop_id    = t3.id
+            LEFT OUTER JOIN customer t4      ON t1.req_cust_id    = t4.id
+            INNER JOIN orders_items t1x      ON t1.id = t1x.req_id
+            INNER JOIN item t2x              ON t1x.item_id = t2x.id
+            INNER JOIN prod_header t3x  ON t1.id = t3x.prd_reqid and t3x.prd_status >= 2
+            LEFT OUTER JOIN tran_comments_vals v1 ON t1x.fab_mat_fabric_color = v1.id
+            LEFT OUTER JOIN tran_comments_vals v2 ON t1x.fab_mat_manilla_color = v2.id
+            where
+            t1.req_status           > 1 and
+            t1.req_production_act   = 1 and
+            t3x.prd_status          = 2 ";
+   if($_REQUEST["sql_ot"] != "")
+      $sql1 .=" and t3x.prd_number = '{$_REQUEST["sql_ot"]}' ";
+   if($_REQUEST["sql_cc"] != "")
+      $sql1 .=" and t1.req_number = '{$_REQUEST["sql_cc"]}' ";
+   $sql1 .= " order by t1.req_production_initdate desc";
+
+   $total_result = $CON->select($sql1);
+   $total_filas = $total_result[0]["total"];
+   $total_paginas = ceil($total_filas / $registros_por_pagina);
+
+   if($_REQUEST["sql_ot"] == "" || $_REQUEST["sql_cc"] == "") 
+      $sql .= " LIMIT {$inicio}, {$registros_por_pagina} ";
+
+   $otpendings = $CON->select($sql);
+
+   ?>
+   <style type="text/css"><!-- @import url(./libs/jscripts/datepicker/datepicker.css); //--></style>
+   <script language="JavaScript" src="./libs/jscripts/datepicker/datepicker.js"></script>
+   <div style="height:2px"></div>
+   <table border="0" cellpadding="0" cellspacing="0" width="100%">
+   <tr>
+      <td>
+         <form action="iframe.fancy.php" method="post" name="xform_itemsearch" class="fokusfirst">
+         <input type="hidden" name="subexec" value="search">
+         <input type="hidden" name="execsave" value="">
+         <input type="hidden" name="mid" value="<?=$_REQUEST["mid"]?>">
+         <input type="hidden" name="sql_date_pto" value="<?=$_REQUEST["sql_date_pto"]?>">
+         <input type="hidden" name="sql_date_pfrom" value="<?=$_REQUEST["sql_date_pfrom"]?>">
+         <input type="hidden" name="sql_plantaid" value="<?=$_REQUEST["sql_plantaid"]?>">
+         <input type="hidden" name="prdid" value="">
+         <input type="hidden" name="module" value="<?=$_REQUEST["module"]?>">
+         <input type="hidden" name="pagina" id="pagina" value="<?=$_REQUEST["pagina"]?>">
+        
+         
+         <?=Nifty_printH("box2", "100%")?>
+         <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+         <colgroup>
+            <col width="100">
+            <col width="40%">
+            <col width="100">
+            <col width="40%">
+         </colgroup>
+         <tr>
+            <td class="content_tbl_header" colspan="4">Opciones de búsqueda</td>
+         </tr>
+         <tr>
+            <td class="content_rowl">N° CC</td>
+            <td class="content_row">
+               <input name="sql_cc" type="text" class="text" style="width:100%"
+               value="<?=$_REQUEST["sql_cc"]?>" onfocus="markfield(this,0)" onblur="markfield(this,1)">
+            </td>
+            <td class="content_rowl">N° OT</td>
+            <td class="content_row">
+               <input name="sql_ot" type="text" class="text" style="width:100%"
+               value="<?=$_REQUEST["sql_ot"]?>" onfocus="markfield(this,0)" onblur="markfield(this,1)">
+            </td>
+         </tr>
+         <tr>
+            <td class="content_row" align="right" width="100">&nbsp;</td>
+            <td class="content_row" align="right" colspan="3">
+               <table border="0" cellpadding="0" cellspacing="0" width="270">
+               <tr>
+                  <td align="right">
+                     <?php
+                     printButton("Buscar", "postnav_save", "javascript: deactivateFormChange()", "submitForm(document.xform_itemsearch)", "magnifier", 130);
+                     $_SESSION["_SUBMITBTN"] = 1;
+                     ?>
+                  </td>
+               </tr>
+               </table>
+            </td>
+         </tr>
+         </table>
+         <?=Nifty_printF(false)?>
+         </form>
+      </td>
+   </tr>
+   <tr>
+      <td>
+         <?=Nifty_printH("box1", "100%")?>
+         <div class="pagination">
+         <?php
+            if($_REQUEST["sql_ot"] == "" && $_REQUEST["sql_cc"] == "")
+            {
+               ?>
+                  <button onclick="cambiarPagina('prev')">Anterior</button>
+               <?php
+               if($_REQUEST["sql_ot"] == "" || $_REQUEST["sql_cc"] == "")
+               {
+                  for($pag = 1; $pag <= $total_paginas; $pag++)
+                  {
+                     if($pag==$_REQUEST["pagina"])
+                        $estilo = "style='background-color: #444; color: white;'";
+                     else
+                        $estilo = "";
+                     ?>
+                        <button onclick="cambiarPagina(<?=$pag?>)" <?=$estilo?>><?=$pag?></button>
+                     <?php
+                  }
+               }
+               ?>
+                  <button onclick="cambiarPagina('next')">Siguiente</button>
+               <?php
+            }
+         ?>
+         </div>
+         <table border="0" class="content_table" cellpadding="3" cellspacing="0" width="100%">
+         <colgroup>
+         </colgroup>
+         <tr>
+            <td class="content_tbl_header">N° CC</td>
+            <td class="content_tbl_header">N° OT</td>
+            <td class="content_tbl_header">Cliente</td>
+            <td class="content_tbl_header">Diseño</td>
+            <td class="content_tbl_header">Producto</td>
+            <td class="content_tbl_header" align="center">Medidas</td>
+            <td class="content_tbl_header" align="center">Fuelle</td>
+            <td class="content_tbl_header" align="center">Area</td>
+            <td class="content_tbl_header">Tela</td>
+            <td class="content_tbl_header">Manillas</td>
+            <td class="content_tbl_header">Colores</td>
+            <td class="content_tbl_header" align="center">Cantidad</td>
+            <td class="content_tbl_header">Entregas</td>
+            <td class="content_tbl_header" align="center">Opciones</td>
+         </tr>
+         <?php
+         for($x = 0; $x < count($otpendings) && $otpendings != false; $x++)
+         {
+            $thispos       = $otpendings[$x];
+            $printcolors   = "";
+            $entrega_vals  = "";
+
+            //----------------------------------------------------------------------------------
+            for($xx = 1; $xx <= 5; $xx++)
+            {
+               if((int)$thispos["fab_print_colors_front_{$xx}"] || (int)$thispos["fab_print_colors_back_{$xx}"])
+               {
+                  if((int)$thispos["fab_print_colors_front_{$xx}"] && !(int)$thispos["fab_print_colors_back_{$xx}"])
+                     $printcolors .= "Frente: {$thispos["fab_print_colordesc_{$xx}"]}, ";
+                  elseif(!(int)$thispos["fab_print_colors_front_{$xx}"] && (int)$thispos["fab_print_colors_back_{$xx}"])
+                     $printcolors .= "Dorso: {$thispos["fab_print_colordesc_{$xx}"]}, ";
+                  elseif((int)$thispos["fab_print_colors_front_{$xx}"] && (int)$thispos["fab_print_colors_back_{$xx}"])
+                     $printcolors .= "Frente/Dorso: {$thispos["fab_print_colordesc_{$xx}"]}, ";
+               }
+            }
+            $printcolors = substr($printcolors, 0, -2);
+
+            //----------------------------------------------------------------------------------
+            $sql = " select *
+                     from prod_amtplan
+                     where
+                     prodplan_prdid = {$otpendings[$x]["prdid"]}
+                     order by prodplan_date asc";
+            $entregas = $CON->select($sql);
+            foreach($entregas AS $entrega)
+               $entrega_vals .= printPrice($entrega["prodplan_amt"])." (".date("d.m.Y", $entrega["prodplan_date"])."), ";
+            $entrega_vals = substr($entrega_vals, 0, -2);
+            ?>
+            <tr bgcolor="<?=getRowColor($x)?>" onmouseover="mark(this, 0)" onmouseout="mark(this,1)" style="<?=$thisrowhide?>">
+               <td class="content_row_os"><nobr><?=$otpendings[$x]["req_number"]?></nobr></td>
+               <td class="content_row_os"><?=$otpendings[$x]["prd_number"]?></td>
+               <td class="content_row_os"><?=$otpendings[$x]["cust_name"]?>&nbsp;</td>
+               <td class="content_row_os"><?=$otpendings[$x]["fab_design_name"]?>&nbsp;</td>
+               <td class="content_row_os"><?=$otpendings[$x]["item_title"]?>&nbsp;</td>
+               <td class="content_row_os" align="center"><?=(int)$otpendings[$x]["fab_med_width"]?> x <?=(int)$otpendings[$x]["fab_med_height"]?></td>
+               <td class="content_row_os" align="center"><?=(int)$otpendings[$x]["fab_med_fuelle"]?>&nbsp;</td>
+               <td class="content_row_os" align="center"><?=(int)$otpendings[$x]["fab_print_width"]?> x <?=(int)$otpendings[$x]["fab_print_height"]?></td>
+               <td class="content_row_os"><?=$otpendings[$x]["fabric_color"]?>&nbsp;</td>
+               <td class="content_row_os"><?=$otpendings[$x]["manilla_color"]?>&nbsp;</td>
+               <td class="content_row_os"><?=$printcolors?>&nbsp;</td>
+               <td class="content_row_os" align="center"><?=printPrice($otpendings[$x]["item_amount"])?></td>
+               <td class="content_row_os"><?=$entrega_vals?>&nbsp;</td>
+               <td class="content_row_os" align="center">
+                  <?php
+                  printButton("Agendar", "postnav", "javascript:void(0)", "document.xform_itemsearch.prdid.value='{$otpendings[$x]["prdid"]}';document.xform_itemsearch.submit()", "calendar");
+                  ?>
+               </td>
+            </tr>
+            <?php
+         }
+         if(!$x)
+         {  ?>
+            <tr bgcolor="<?=getRowColor(0)?>">
+               <td class="content_row" align="center" colspan="14">
+                  <br>
+                  <b class="msg_save_err">No hay datos disponibles.</b>
+                  <br><br>
+               </td>
+            </tr>
+            <?php
+         }
+         ?>
+         </table>
+         <?=Nifty_printF()?>
+         <?=Nifty_printH("box1", "100%", 0)?>         
+         <div class="pagination">
+            <?php
+            if($_REQUEST["sql_ot"] == "" && $_REQUEST["sql_cc"] == "")
+            {
+               ?>
+                  <button onclick="cambiarPagina('prev')">Anterior</button>
+               <?php
+               if($_REQUEST["sql_ot"] == "" || $_REQUEST["sql_cc"] == "")
+               {
+                  for($pag = 1; $pag <= $total_paginas; $pag++)
+                  {
+                     if($pag==$_REQUEST["pagina"])
+                        $estilo = "style='background-color: #444; color: white;'";
+                     else
+                        $estilo = "";
+                     ?>
+                        <button onclick="cambiarPagina(<?=$pag?>)" <?=$estilo?>><?=$pag?></button>
+                     <?php
+                  }
+               }
+               ?>
+                  <button onclick="cambiarPagina('next')">Siguiente</button>
+               <?php
+            }
+            ?>
+        </div>
+        <script>
+            function cambiarPagina(pagina) {
+               let paginaActual = parseInt(document.getElementById("pagina").value);
+               if (pagina === 'prev') {
+                   pagina = paginaActual > 1 ? paginaActual - 1 : 1; 
+               } else if (pagina === 'next') {
+                  pagina = paginaActual + 1; 
+               }
+               document.getElementById("pagina").value = pagina;
+               submitForm(document.xform_itemsearch);
+            }
+         </script>
+         <?=Nifty_printF()?>
+      </td>
+   </tr>
+   </table>
+   <?php
+}
