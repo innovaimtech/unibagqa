@@ -798,6 +798,30 @@ final class ReceptionService
             $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD INDEX idx_waste_inventory_withdrawn (withdrawn_at)");
             $this->pdo->exec("ALTER TABLE waste_inventory_entries ADD INDEX idx_waste_inventory_withdrawal_op (withdrawal_operation_id)");
         }
+        $this->pdo->exec(
+            "CREATE TABLE IF NOT EXISTS waste_operations (
+                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                shift_session_id BIGINT UNSIGNED NULL,
+                operation_code VARCHAR(30) NOT NULL,
+                material_code VARCHAR(20) NULL,
+                weight_kg DECIMAL(10,3) NULL,
+                operator_name VARCHAR(120) NOT NULL,
+                supplier_operator_name VARCHAR(120) NULL,
+                supplier_machine_code VARCHAR(60) NULL,
+                supplier_machine_name VARCHAR(160) NULL,
+                solicitante VARCHAR(120) NULL,
+                area VARCHAR(100) NULL,
+                motivo VARCHAR(160) NULL,
+                entry_kg DECIMAL(10,3) NULL,
+                exit_kg DECIMAL(10,3) NULL,
+                pallet_count INT UNSIGNED NULL,
+                comments VARCHAR(255) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id),
+                KEY idx_waste_ops_shift (shift_session_id),
+                KEY idx_waste_ops_code (operation_code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        );
         if (!$this->columnExists('waste_operations', 'material_code')) {
             $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN material_code VARCHAR(20) NULL AFTER operation_code");
             $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN weight_kg DECIMAL(10,3) NULL AFTER material_code");
@@ -815,20 +839,6 @@ final class ReceptionService
             $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN exit_kg DECIMAL(10,3) NULL AFTER entry_kg");
             $this->pdo->exec("ALTER TABLE waste_operations ADD COLUMN pallet_count INT UNSIGNED NULL AFTER exit_kg");
         }
-
-        $this->pdo->exec(
-            "CREATE TABLE IF NOT EXISTS waste_operations (
-                id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                shift_session_id BIGINT UNSIGNED NULL,
-                operation_code VARCHAR(30) NOT NULL,
-                operator_name VARCHAR(120) NOT NULL,
-                comments VARCHAR(255) NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (id),
-                KEY idx_waste_ops_shift (shift_session_id),
-                KEY idx_waste_ops_code (operation_code)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
-        );
     }
 
     /**

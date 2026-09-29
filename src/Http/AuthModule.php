@@ -501,6 +501,10 @@ function handleAuthRoutes(string $path, string $method): bool
  */
 function unibagEnforceAuthenticatedAreaAccess(string $path): void
 {
+    if ($path === '/login' || $path === '/logout') {
+        return;
+    }
+
     if (!unibagIsAuthenticated()) {
         redirectResponse('/login');
     }
