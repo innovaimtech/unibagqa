@@ -47,6 +47,7 @@ require_once __DIR__ . '/../src/Http/WarehousesModule.php';
 require_once __DIR__ . '/../src/MonthlyPresentationService.php';
 require_once __DIR__ . '/../src/ProductionService.php';
 require_once __DIR__ . '/../src/Http/ProductionModule.php';
+require_once __DIR__ . '/../src/Http/OperatorLunchModule.php';
 
 Env::load(__DIR__ . '/../.env');
 $appTimezone = trim((string)(Env::get('APP_TIMEZONE', 'America/Santiago') ?? 'America/Santiago'));
@@ -161,6 +162,16 @@ if (handleErpReportRoutes($path, $method, $service)) {
 }
 
 if (handleWarehousesRoutes($path, $method, $service)) {
+    exit;
+}
+
+if ($path === '/reports/colaciones' || $path === '/reports/lunch-breaks' || $path === '/erp/colaciones') {
+    unibagHandleOperatorLunchBreaks($service);
+    exit;
+}
+
+if ($path === '/production/lunch-breaks' || $path === '/production/colaciones') {
+    redirectResponse('/reports/colaciones');
     exit;
 }
 
@@ -2881,8 +2892,10 @@ function render(string $title, string $body): void
     if ($activeModule === 'dashboard') {
         $isPanel = $currentPath === '/' || $currentPath === '/reports/production-dashboard';
         $isGraphics = $currentPath === '/reports/graphics';
+        $isLunch = str_starts_with($currentPath, '/reports/colaciones') || str_starts_with($currentPath, '/reports/lunch-breaks');
         echo '<a class="subitem' . ($isPanel ? ' active' : '') . '" href="/"><span>Panel Producción & Mermas</span></a>';
         echo '<a class="subitem' . ($isGraphics ? ' active' : '') . '" href="/reports/graphics"><span>Gráficos</span></a>';
+        echo '<a class="subitem' . ($isLunch ? ' active' : '') . '" href="/reports/colaciones"><span>🍱 Control Colaciones</span></a>';
     } elseif ($activeModule === 'reception') {
         $poStatus = (string)($_GET['status'] ?? 'active');
         $suppType = strtoupper((string)($_GET['supplier_type'] ?? 'NATIONAL'));
@@ -2894,9 +2907,11 @@ function render(string $title, string $body): void
         echo '<a class="subitem' . ($isImport ? ' active' : '') . '" href="/import-containers?status=active"><span>OC Importación (Contenedores)</span></a>';
         echo '<a class="subitem' . ($isComplete ? ' active' : '') . '" href="/purchase-orders?status=complete&supplier_type=NATIONAL"><span>Recepciones Finalizadas</span></a>';
     } elseif ($activeModule === 'reports') {
+        $isLunch = str_starts_with($currentPath, '/reports/colaciones') || str_starts_with($currentPath, '/reports/lunch-breaks');
         echo '<a class="subitem' . ($currentPath === '/reports/operator-waste' ? ' active' : '') . '" href="/reports/operator-waste"><span>Merma por Operador</span></a>';
         echo '<a class="subitem' . ($currentPath === '/reports/machine-production' ? ' active' : '') . '" href="/reports/machine-production"><span>Producción Máquinas</span></a>';
         echo '<a class="subitem' . ($currentPath === '/reports/machine-events' ? ' active' : '') . '" href="/reports/machine-events"><span>Eventos de Máquina</span></a>';
+        echo '<a class="subitem' . ($isLunch ? ' active' : '') . '" href="/reports/colaciones"><span>Control Colaciones</span></a>';
         echo '<a class="subitem' . ($currentPath === '/reports/nivel-servicio' ? ' active' : '') . '" href="/reports/nivel-servicio"><span>Nivel de Servicio</span></a>';
         echo '<a class="subitem' . (str_starts_with($currentPath, '/reports/monthly-presentation') ? ' active' : '') . '" href="/reports/monthly-presentation"><span>Informe Mensual PPT</span></a>';
     } elseif ($activeModule === 'bonificaciones') {

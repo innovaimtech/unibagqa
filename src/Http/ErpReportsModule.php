@@ -267,12 +267,66 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
 
     $body .= '</div>';
 
+    // Alerta de Horario de Colación (Panel Faltas por día límite 14:00)
+    $evalDate = date('Y-m-d');
+    if ($defaultFilterType === 'range' && !empty($rangeStartInput) && $rangeStartInput === $rangeEndInput) {
+        $evalDate = $rangeStartInput;
+    }
+    $lunchReport = $service->getOperatorLunchReport($evalDate);
+    $missingLunchCount = $lunchReport['missing_count'];
+    $isPastLunchDeadline = $lunchReport['is_past_deadline'];
+
+    if ($missingLunchCount > 0 && $isPastLunchDeadline) {
+        $body .= '<div class="alert-card-premium" style="border-color:#fdba74; background:linear-gradient(180deg, #fffbf5 0%, #ffffff 100%); margin-bottom:24px; box-shadow:0 10px 25px -5px rgba(234,88,12,0.08);">';
+        $body .= '<div class="alert-header">';
+        $body .= '<div style="display:flex; align-items:center; gap:12px;">';
+        $body .= '<div style="width:42px; height:42px; border-radius:50%; background:#ffedd5; color:#c2410c; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; flex-shrink:0;">🍱</div>';
+        $body .= '<div>';
+        $body .= '<div style="font-size:16px; font-weight:800; color:#9a3412;">Panel de Faltas: ' . $missingLunchCount . ' Operadores con Turno Iniciado sin Registro de Colación (Límite 14:00)</div>';
+        $body .= '<div style="font-size:12.5px; color:#64748b; margin-top:2px;">Jornada del día ' . date('d/m/Y', strtotime($evalDate)) . ': Operarios que iniciaron turno en planta y pasadas las 14:00 hrs aún no registran horario de almuerzo.</div>';
+        $body .= '</div>';
+        $body .= '</div>';
+        $body .= '<div style="display:flex; align-items:center; gap:10px;">';
+        $manageLunchUrl = '/reports/colaciones?date=' . urlencode($evalDate);
+        $body .= '<a class="btn secondary" href="' . h($manageLunchUrl) . '" style="background:#ea580c; border-color:#c2410c; color:#fff; font-weight:700; font-size:12px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(234,88,12,0.2);">⚡ Gestionar Colaciones (' . $missingLunchCount . ' pendientes) →</a>';
+        $body .= '<span class="alert-badge" style="background:#fee2e2; color:#b91c1c; border:1px solid #fca5a5;">Horario Límite: 14:00 hrs</span>';
+        $body .= '</div>';
+        $body .= '</div>';
+
+        $body .= '<div style="max-height:280px; overflow-y:auto; border:1px solid #fed7aa; border-radius:12px; background:#fff; box-shadow:inset 0 1px 2px rgba(0,0,0,.02);">';
+        $body .= '<table class="table-premium">';
+        $body .= '<thead><tr>';
+        $body .= '<th>Operador</th>';
+        $body .= '<th>Máquina / Equipo</th>';
+        $body .= '<th class="text-center">Inicio Turno</th>';
+        $body .= '<th class="text-center">Fin Turno</th>';
+        $body .= '<th class="text-center">Estado Colación</th>';
+        $body .= '<th class="text-center">Acción</th>';
+        $body .= '</tr></thead><tbody>';
+
+        foreach ($lunchReport['missing_operators'] as $op) {
+            $assignUrl = '/reports/colaciones?date=' . urlencode($evalDate) . '&edit_op=' . rawurlencode((string)$op['operator_name']);
+            $body .= '<tr>';
+            $body .= '<td style="font-weight:700; color:#1e293b;"><div style="display:flex; align-items:center; gap:8px;"><span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#ef4444;"></span>' . h($op['operator_name']) . '</div></td>';
+            $body .= '<td style="font-weight:600; color:#475569;"><span style="display:inline-block; padding:2px 8px; background:#f1f5f9; border-radius:6px; font-size:12px;">' . h($op['machine_name']) . '</span></td>';
+            $body .= '<td class="text-center" style="font-family:monospace; font-weight:700; color:#0f172a;">' . h($op['shift_start']) . '</td>';
+            $body .= '<td class="text-center" style="font-size:12px; color:#64748b;">' . h($op['shift_end']) . '</td>';
+            $body .= '<td class="text-center"><span style="display:inline-block; padding:3px 10px; border-radius:999px; font-weight:800; font-size:11.5px; background:#fee2e2; color:#b91c1c; border:1px solid #fca5a5;">⚠️ Sin Registro (>14:00)</span></td>';
+            $body .= '<td class="text-center"><a class="btn secondary" style="padding:4px 10px; font-size:11.5px; font-weight:700; background:#fff7ed; border-color:#fdba74; color:#c2410c;" href="' . h($assignUrl) . '">Asignar Horario</a></td>';
+            $body .= '</tr>';
+        }
+
+        $body .= '</tbody></table></div>';
+        $body .= '</div>';
+    }
+
     // Alerta de Producciones con Merma Crítica (> 5%)
     $criticalWasteOrders = $service->getCriticalWasteWorkOrders($start->format('Y-m-d H:i:s'), $end->format('Y-m-d H:i:s'), 5.0);
     $criticalCount = count($criticalWasteOrders);
 
     if ($criticalCount > 0) {
         $body .= '<div class="alert-card-premium">';
+
         $body .= '<div class="alert-header">';
         $body .= '<div style="display:flex; align-items:center; gap:12px;">';
         $body .= '<div style="width:42px; height:42px; border-radius:50%; background:#fee2e2; color:#dc2626; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; flex-shrink:0;">⚠️</div>';
@@ -3979,7 +4033,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
     $body .= '<div class="kpi-card text-center">';
     $body .= '<div class="kpi-label">Unid. Planificadas</div>';
     $body .= '<div class="kpi-value">' . number_format((float)($summary['total_requested_units'] ?? 0), 0, ',', '.') . '</div>';
-    $body .= '<div class="kpi-sub">Programadas en CC</div>';
+    $body .= '<div class="kpi-sub">Saldo por producir en período</div>';
     $body .= '</div>';
 
     $body .= '<div class="kpi-card text-center">';
@@ -4112,8 +4166,13 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
             $body .= '<td style="font-size:11.5px">' . h($fabDesc) . ($manillaColor !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">Manilla: ' . h($manillaColor) . '</span>' : '') . ($colorsFront !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">Colores: ' . h($colorsFront) . '</span>' : '') . '</td>';
             $body .= '<td style="font-size:11.5px">👤 ' . h($operator) . ($supervisor !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">Sup: ' . h($supervisor) . '</span>' : '') . ($helper !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">Ayd: ' . h($helper) . '</span>' : '') . '</td>';
             $body .= '<td class="text-center" style="font-size:11px">' . h($startDt) . '<br>' . h($endDt) . '</td>';
-            $body .= '<td class="text-center" style="font-size:11px"><strong>' . h($duration) . '</strong>' . ($speed > 0 ? '<br><span class="erp-prod-muted" style="font-size:10.5px">' . $speed . ' m/min</span>' : '') . '</td>';
-            $body .= '<td class="text-right">' . number_format($reqUnits, 0, ',', '.') . '</td>';
+            $totOrder = (float)($row['total_order_units'] ?? 0);
+            $priorProd = (float)($row['prior_produced_units'] ?? 0);
+            $planSub = '';
+            if ($priorProd > 0 && $totOrder > 0) {
+                $planSub = '<br><span class="erp-prod-muted" style="font-size:10px" title="Pedido total CC: ' . number_format($totOrder, 0, ',', '.') . ' | Producido antes: ' . number_format($priorProd, 0, ',', '.') . '">de ' . number_format($totOrder, 0, ',', '.') . ' (-' . number_format($priorProd, 0, ',', '.') . ' prev.)</span>';
+            }
+            $body .= '<td class="text-right"><strong>' . number_format($reqUnits, 0, ',', '.') . '</strong>' . $planSub . '</td>';
             $body .= '<td class="text-right" style="font-weight:700;color:#0f766e">' . number_format($prodUnits, 0, ',', '.') . '</td>';
             $body .= '<td class="text-right" style="' . $wasteStyle . '">' . number_format($wasteUnits, 0, ',', '.') . $wasteKgStr . '</td>';
             $body .= '<td class="text-right" style="' . $wasteStyle . '">' . ($wastePct !== null ? number_format($wastePct, 2, ',', '.') . '%' : '-') . '</td>';

@@ -9743,6 +9743,10 @@ SQL;
             tca.ass_init_min,
             tca.ass_end_hour,
             tca.ass_end_min,
+            t2.ag_prdid AS prd_id,
+            t2.id AS ag_id,
+            t2.ag_amount,
+            t10.item_amount,
             COALESCE(t10.item_amount, t2.ag_amount, 0) AS requested_units,
             COALESCE(pe.produced_units, 0) AS produced_units,
             COALESCE(pe.produced_meters, 0) AS produced_meters,
@@ -9870,6 +9874,48 @@ SQL;
         $totalWasteKg = 0.0;
         $totalSeconds = 0;
 
+        // Consulta cruzada: obtener producción acumulada en períodos/meses anteriores (antes de $startTs)
+        // para cada OT (prd_id) y tipo de máquina (equipo_type_id).
+        // De esta forma, si una orden comercial (CC) de 70.000 bolsas ya produjo 50.000 en meses anteriores,
+        // no se carga el total de 70.000 sino el saldo parcial que falta por terminar (20.000) en el período.
+        $priorProducedMap = [];
+        $distinctPrdIds = array_values(array_filter(array_unique(array_map(
+            static fn($r) => (int)($r['prd_id'] ?? 0),
+            $rawRows
+        ))));
+
+        if (!empty($distinctPrdIds) && $startTs > 0) {
+            $inPlaceholders = implode(',', array_fill(0, count($distinctPrdIds), '?'));
+            $sqlPrior = "
+                SELECT 
+                    pa.ag_prdid,
+                    eq.equipo_type_id,
+                    SUM(e.evt_amount) AS prior_prod
+                FROM prod_worker_ot wok
+                JOIN prod_agenda pa ON wok.wok_ag_id = pa.id
+                JOIN prod_worker_init win ON wok.wok_init_id = win.id
+                JOIN equipo eq ON win.win_equipoid = eq.id
+                JOIN prod_worker_ot_events e ON e.evt_prod_worker_otid = wok.id
+                WHERE pa.ag_prdid IN ($inPlaceholders)
+                  AND e.evt_type IN ('prod', 'production', 'prodsericolor')
+                  AND wok.wok_crtdat < ?
+                GROUP BY pa.ag_prdid, eq.equipo_type_id
+            ";
+            $priorParams = array_values($distinctPrdIds);
+            $priorParams[] = $startTs;
+
+            try {
+                $stmtPrior = $this->erpPdo->prepare($sqlPrior);
+                $stmtPrior->execute($priorParams);
+                foreach ($stmtPrior->fetchAll(PDO::FETCH_ASSOC) ?: [] as $prRow) {
+                    $k = ((int)$prRow['ag_prdid']) . '_' . ((int)$prRow['equipo_type_id']);
+                    $priorProducedMap[$k] = (float)$prRow['prior_prod'];
+                }
+            } catch (Throwable) {
+                $priorProducedMap = [];
+            }
+        }
+
         foreach ($rawRows as $row) {
             $startTsRow = (int)($row['wok_crtdat'] ?? 0);
             $endTsRow = (int)($row['wok_enddat'] ?? 0);
@@ -9902,7 +9948,25 @@ SQL;
                 $formatCm = ((int)$w) . 'x' . ((int)$h) . ($f > 0 ? ('x' . ((int)$f)) : '') . ' cm';
             }
 
-            $reqUnits = (float)($row['requested_units'] ?? 0.0);
+            $prdId = (int)($row['prd_id'] ?? 0);
+            $machineTypeId = (int)($row['machine_type_id'] ?? 0);
+            $priorKey = $prdId . '_' . $machineTypeId;
+            $priorProducedUnits = (float)($priorProducedMap[$priorKey] ?? 0.0);
+
+            $rawRequested = (float)($row['requested_units'] ?? 0.0);
+            $totalOrderUnits = (float)($row['item_amount'] ?? 0.0);
+            if ($totalOrderUnits <= 0) {
+                $totalOrderUnits = (float)($row['ag_amount'] ?? $rawRequested);
+            }
+
+            // Unidades planificadas para el período: saldo parcial que falta por terminar
+            // (Total CC menos lo producido en meses o días anteriores en este proceso)
+            if ($totalOrderUnits > 0) {
+                $reqUnits = max(0.0, $totalOrderUnits - $priorProducedUnits);
+            } else {
+                $reqUnits = $rawRequested;
+            }
+
             $prodUnits = (float)($row['produced_units'] ?? 0.0);
             $prodKg = (float)($row['produced_kg'] ?? 0.0);
 
@@ -9951,14 +10015,14 @@ SQL;
             $totalProduced += $prodUnits;
             $totalProducedKg += $prodKg;
             
-            // Las unidades solicitadas corresponden al pedido (OT / CC). Para no multiplicar
+            // Las unidades solicitadas corresponden al saldo planificado del pedido (OT / CC). Para no multiplicar
             // las cantidades cuando una OT es trabajada en múltiples turnos o máquinas,
-            // agrupamos el valor máximo solicitado por cada OT / CC único.
+            // agrupamos el valor máximo solicitado por cada OT / CC y proceso único.
             $otKey = trim((string)($row['ot_number'] ?? ''));
             $ccKey = trim((string)($row['cc_number'] ?? ''));
             $itemKey = trim((string)($row['item_code'] ?? ''));
-            $orderGroupKey = ($otKey !== '' ? $otKey : '') . '|' . ($ccKey !== '' ? $ccKey : '') . '|' . $itemKey;
-            if ($orderGroupKey === '||') {
+            $orderGroupKey = ($otKey !== '' ? $otKey : '') . '|' . ($ccKey !== '' ? $ccKey : '') . '|' . $itemKey . '|' . $machineTypeId;
+            if ($orderGroupKey === '|||' . $machineTypeId) {
                 $orderGroupKey = 'row_' . (int)($row['ot_id'] ?? 0);
             }
             if (!isset($requestedByOrder[$orderGroupKey]) || $reqUnits > $requestedByOrder[$orderGroupKey]) {
@@ -10057,6 +10121,9 @@ SQL;
                 'speed_m_min' => round((float)($row['speed_m_min'] ?? 0), 1),
                 'status_label' => $statusLabel,
                 'requested_units' => $reqUnits,
+                'total_order_units' => $totalOrderUnits,
+                'prior_produced_units' => $priorProducedUnits,
+                'ag_amount' => (float)($row['ag_amount'] ?? 0.0),
                 'produced_units' => $prodUnits,
                 'produced_meters' => (float)($row['produced_meters'] ?? 0),
                 'produced_kg' => $prodKg,
@@ -18861,5 +18928,1030 @@ SQL;
             return $emptyResponse;
         }
     }
+
+    // =========================================================================
+    // SECCIÓN: CONTROL Y GESTIÓN DE HORARIOS DE COLACIÓN DE OPERARIOS
+    // =========================================================================
+
+    public function ensureOperatorLunchBreaksTable(): void
+    {
+        try {
+            $this->pdo->exec(
+                "CREATE TABLE IF NOT EXISTS production_operator_lunch_breaks (
+                  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                  shift_date DATE NOT NULL,
+                  init_id BIGINT NULL,
+                  worker_id BIGINT NULL,
+                  operator_name VARCHAR(150) NOT NULL,
+                  machine_id INT UNSIGNED NULL,
+                  machine_name VARCHAR(120) NULL,
+                  start_time DATETIME NOT NULL,
+                  end_time DATETIME NULL,
+                  duration_minutes INT UNSIGNED NULL,
+                  erp_event_id BIGINT NULL,
+                  comments TEXT NULL,
+                  created_by VARCHAR(100) NULL,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  PRIMARY KEY (id),
+                  KEY idx_lunch_date (shift_date),
+                  KEY idx_lunch_worker (worker_id),
+                  KEY idx_lunch_init (init_id),
+                  KEY idx_lunch_machine (machine_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+            );
+        } catch (Throwable) {
+            // Ignorar si la tabla ya existe o faltan permisos de DDL
+        }
+    }
+
+    /**
+     * Obtiene el reporte consolidado de turnos y colaciones para una fecha específica.
+     * Lista a TODOS los operarios que iniciaron turno (hayan ido o no a colación).
+     *
+     * @param string $date Formato 'YYYY-MM-DD'
+     * @return array<string, mixed>
+     */
+    public function getOperatorLunchReport(string $date = ''): array
+    {
+        $this->ensureOperatorLunchBreaksTable();
+
+        if ($date === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+            $date = date('Y-m-d');
+        }
+
+        list($year, $month, $day) = explode('-', $date);
+
+        // 1. Obtener todas las máquinas activas de la planta excluyendo supervisión y mantención
+        $allMachines = [];
+        try {
+            $stmtEq = $this->erpPdo->query("
+                SELECT id, equipo_name 
+                FROM equipo 
+                WHERE equipo_status = 1 
+                  AND equipo_name NOT LIKE '%SUPERVISOR%' 
+                  AND equipo_name NOT LIKE '%MANTENCION%'
+                ORDER BY equipo_type_id ASC, equipo_name ASC
+            ");
+            foreach ($stmtEq->fetchAll(PDO::FETCH_ASSOC) as $eqRow) {
+                $mName = trim((string)$eqRow['equipo_name']);
+                if ($mName !== '') {
+                    $allMachines[(int)$eqRow['id']] = $mName;
+                }
+            }
+        } catch (Throwable) {}
+
+        // 2. Obtener registros guardados localmente en TRZ
+        $savedBreaks = [];
+        try {
+            $stmt = $this->pdo->prepare("SELECT * FROM production_operator_lunch_breaks WHERE shift_date = :d");
+            $stmt->execute([':d' => $date]);
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $sb) {
+                if (!empty($sb['init_id']) && !empty($sb['worker_id'])) {
+                    $savedBreaks['init_' . $sb['init_id'] . '_' . $sb['worker_id']] = $sb;
+                }
+                if (!empty($sb['worker_id'])) {
+                    $savedBreaks['wrk_' . $sb['worker_id']] = $sb;
+                }
+                if (!empty($sb['operator_name'])) {
+                    $savedBreaks['name_' . mb_strtolower(trim((string)$sb['operator_name']))] = $sb;
+                }
+            }
+        } catch (Throwable) {}
+
+        $operators = [];
+
+        // Identificar qué operarios están asignados o iniciaron turno en SELLADORA para esta fecha
+        // Regla: Los que estén en selladora y embalen se cuentan solo en selladora, no en embalaje
+        $workersOnSelladora = [];
+        try {
+            $stmtSell = $this->erpPdo->prepare("
+                SELECT a.assign_worker_id, eq.id AS eq_id, eq.equipo_name 
+                FROM turnos_config_assign a
+                LEFT JOIN equipo eq ON a.assign_equipoaid = eq.id
+                WHERE a.assign_year = :year AND a.assign_month = :month AND a.assign_day = :day
+                  AND eq.equipo_name LIKE '%SELLADORA%'
+            ");
+            $stmtSell->execute([':year' => (int)$year, ':month' => (int)$month, ':day' => (int)$day]);
+            foreach ($stmtSell->fetchAll(PDO::FETCH_ASSOC) as $sRow) {
+                $workersOnSelladora[(int)$sRow['assign_worker_id']] = [
+                    'machine_id' => (int)$sRow['eq_id'],
+                    'machine_name' => trim((string)$sRow['equipo_name']),
+                ];
+            }
+
+            $stmtInitsSell = $this->erpPdo->prepare("
+                SELECT wi.win_wrkid, eq.id AS eq_id, eq.equipo_name 
+                FROM prod_worker_init wi
+                LEFT JOIN equipo eq ON wi.win_equipoid = eq.id
+                WHERE wi.win_year = :year AND wi.win_month = :month AND wi.win_day = :day
+                  AND eq.equipo_name LIKE '%SELLADORA%'
+            ");
+            $stmtInitsSell->execute([':year' => (int)$year, ':month' => (int)$month, ':day' => (int)$day]);
+            foreach ($stmtInitsSell->fetchAll(PDO::FETCH_ASSOC) as $sRow) {
+                $workersOnSelladora[(int)$sRow['win_wrkid']] = [
+                    'machine_id' => (int)$sRow['eq_id'],
+                    'machine_name' => trim((string)$sRow['equipo_name']),
+                ];
+            }
+        } catch (Throwable) {}
+
+        // 3. Consultar programación de turnos en ERP (turnos_config_assign) - base de operarios programados
+        try {
+            $sqlAssign = "
+                SELECT 
+                    a.id AS assign_id,
+                    a.assign_worker_id AS worker_id,
+                    a.assign_equipoaid AS machine_id,
+                    eq.equipo_name AS machine_name,
+                    TRIM(CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, ''))) AS operator_name,
+                    w.wrk_cargoid,
+                    wt.type_name AS cargo_name,
+                    a.ass_init_hour,
+                    a.ass_init_min,
+                    a.ass_end_hour,
+                    a.ass_end_min
+                FROM turnos_config_assign a
+                LEFT JOIN equipo eq ON a.assign_equipoaid = eq.id
+                LEFT JOIN workers w ON a.assign_worker_id = w.id
+                LEFT JOIN workers_types wt ON w.wrk_cargoid = wt.id
+                WHERE a.assign_year = :year AND a.assign_month = :month AND a.assign_day = :day
+                  AND (a.confirm_falta_act IS NULL OR a.confirm_falta_act = 0)
+                  AND (eq.equipo_name IS NULL OR (eq.equipo_name NOT LIKE '%SUPERVISOR%' AND eq.equipo_name NOT LIKE '%MANTENCION%'))
+                  AND (w.wrk_cargoid IS NULL OR w.wrk_cargoid NOT IN (3, 4, 9, 10))
+                  AND (wt.type_name IS NULL OR (wt.type_name NOT LIKE '%Supervisor%' AND wt.type_name NOT LIKE '%Mantenci%' AND wt.type_name NOT LIKE '%Mantenim%'))
+                  AND (a.assign_worker_type IS NULL OR a.assign_worker_type NOT LIKE '%supervisor%')
+                  AND (a.assign_worker_id IS NULL OR a.assign_worker_id NOT IN (27, 68))
+                ORDER BY eq.equipo_name, w.wrk_firstname
+            ";
+            $stmt = $this->erpPdo->prepare($sqlAssign);
+            $stmt->execute([':year' => (int)$year, ':month' => (int)$month, ':day' => (int)$day]);
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $wId = (int)$r['worker_id'];
+                $mId = (int)$r['machine_id'];
+                $mName = trim((string)$r['machine_name']) ?: ($allMachines[$mId] ?? 'Sin Máquina');
+                $opName = trim((string)$r['operator_name']) ?: ('Operario #' . $wId);
+
+                // Regla: Los que estén en selladora y embalen se cuentan solo en selladora, no en embalaje
+                if (isset($workersOnSelladora[$wId]) && stripos($mName, 'embalaje') !== false) {
+                    continue;
+                }
+
+                $startH = $r['ass_init_hour'] !== null ? sprintf('%02d:%02d', (int)$r['ass_init_hour'], (int)$r['ass_init_min']) : '07:10';
+                $endH = $r['ass_end_hour'] !== null ? sprintf('%02d:%02d', (int)$r['ass_end_hour'], (int)$r['ass_end_min']) : '15:40';
+
+                $key = 'W_' . $wId;
+                if (!isset($operators[$key])) {
+                    $operators[$key] = [
+                        'key' => $key,
+                        'source' => 'ERP_ASSIGN',
+                        'init_id' => 0,
+                        'worker_id' => $wId,
+                        'operator_name' => $opName,
+                        'machine_id' => $mId,
+                        'machine_name' => $mName,
+                        'shift_start' => $startH,
+                        'shift_end' => $endH,
+                        'shift_status' => 'PROGRAMADO',
+                        'has_lunch' => false,
+                        'lunch_event_id' => null,
+                        'lunch_start' => '',
+                        'lunch_end' => '',
+                        'duration_minutes' => 0,
+                        'lunch_status' => 'PENDIENTE',
+                        'comments' => '',
+                        'latest_ot_id' => null,
+                    ];
+                }
+            }
+        } catch (Throwable) {}
+
+        // 4. Consultar turnos físicos iniciados en ERP (prod_worker_init)
+        try {
+            $sqlInit = "
+                SELECT 
+                    wi.id AS init_id,
+                    wi.win_crtdat,
+                    wi.win_enddat,
+                    wi.win_status,
+                    w.id AS worker_id,
+                    TRIM(CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, ''))) AS operator_name,
+                    eq.id AS machine_id,
+                    COALESCE(eq.equipo_name, 'Sin Máquina') AS machine_name,
+                    w.wrk_cargoid,
+                    wt.type_name AS cargo_name,
+                    ot.id AS ot_id,
+                    ev.id AS colacion_evt_id,
+                    ev.evt_crtdat AS colacion_inicio_ts,
+                    ev.evt_enddat AS colacion_fin_ts,
+                    ev.evt_status AS colacion_status
+                FROM prod_worker_init wi
+                LEFT JOIN workers w ON wi.win_wrkid = w.id
+                LEFT JOIN workers_types wt ON w.wrk_cargoid = wt.id
+                LEFT JOIN equipo eq ON wi.win_equipoid = eq.id
+                LEFT JOIN prod_worker_ot ot ON ot.wok_init_id = wi.id
+                LEFT JOIN prod_worker_ot_events ev ON ev.evt_prod_worker_otid = ot.id 
+                     AND ev.evt_pause_id = 1 AND ev.evt_type = 'pause' AND ev.evt_status > 0
+                WHERE wi.win_day = :day AND wi.win_month = :month AND wi.win_year = :year
+                  AND (eq.equipo_name IS NULL OR (eq.equipo_name NOT LIKE '%SUPERVISOR%' AND eq.equipo_name NOT LIKE '%MANTENCION%'))
+                  AND (w.wrk_cargoid IS NULL OR w.wrk_cargoid NOT IN (3, 4, 9, 10))
+                  AND (wt.type_name IS NULL OR (wt.type_name NOT LIKE '%Supervisor%' AND wt.type_name NOT LIKE '%Mantenci%' AND wt.type_name NOT LIKE '%Mantenim%'))
+                  AND (wi.win_wrkid IS NULL OR wi.win_wrkid NOT IN (27, 68))
+                ORDER BY wi.id ASC, ev.id DESC
+            ";
+            $stmt = $this->erpPdo->prepare($sqlInit);
+            $stmt->execute([':day' => (int)$day, ':month' => (int)$month, ':year' => (int)$year]);
+            $rawRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            foreach ($rawRows as $r) {
+                $wId = (int)$r['worker_id'];
+                $mId = (int)$r['machine_id'];
+                $mName = trim((string)$r['machine_name']) ?: ($allMachines[$mId] ?? 'Sin Máquina');
+                $opName = trim((string)$r['operator_name']) ?: ('Operario #' . $wId);
+
+                $isSelladora = (stripos($mName, 'selladora') !== false) || isset($workersOnSelladora[$wId]);
+                $isEmbalaje = (stripos($mName, 'embalaje') !== false);
+
+                // Regla: Los que estén en selladora y embalen se cuentan solo en selladora, no en embalaje
+                if ($isSelladora && $isEmbalaje) {
+                    if (isset($workersOnSelladora[$wId])) {
+                        $mId = (int)$workersOnSelladora[$wId]['machine_id'];
+                        $mName = (string)$workersOnSelladora[$wId]['machine_name'];
+                    }
+                }
+
+                $key = 'W_' . $wId;
+                $shiftStart = !empty($r['win_crtdat']) ? date('H:i', (int)$r['win_crtdat']) : '07:10';
+                $shiftEnd = (!empty($r['win_enddat']) && (int)$r['win_enddat'] > 0) ? date('H:i', (int)$r['win_enddat']) : 'En curso';
+                $shiftStatus = (int)$r['win_status'] === 1 ? 'ACTIVO' : 'CERRADO';
+
+                if (!isset($operators[$key])) {
+                    $operators[$key] = [
+                        'key' => $key,
+                        'source' => 'ERP_INIT',
+                        'init_id' => (int)$r['init_id'],
+                        'worker_id' => $wId,
+                        'operator_name' => $opName,
+                        'machine_id' => $mId,
+                        'machine_name' => $mName,
+                        'shift_start' => $shiftStart,
+                        'shift_end' => $shiftEnd,
+                        'shift_status' => $shiftStatus,
+                        'has_lunch' => false,
+                        'lunch_event_id' => null,
+                        'lunch_start' => '',
+                        'lunch_end' => '',
+                        'duration_minutes' => 0,
+                        'lunch_status' => 'PENDIENTE',
+                        'comments' => '',
+                        'latest_ot_id' => (int)($r['ot_id'] ?? 0) > 0 ? (int)$r['ot_id'] : null,
+                    ];
+                } else {
+                    // Actualizar datos con el turno real iniciado
+                    $operators[$key]['init_id'] = (int)$r['init_id'];
+                    $operators[$key]['shift_start'] = $shiftStart;
+                    $operators[$key]['shift_end'] = $shiftEnd;
+                    $operators[$key]['shift_status'] = $shiftStatus;
+                    if ($isSelladora && stripos($operators[$key]['machine_name'], 'embalaje') !== false) {
+                        $operators[$key]['machine_name'] = $mName;
+                        $operators[$key]['machine_id'] = $mId;
+                    }
+                    if ((int)($r['ot_id'] ?? 0) > 0 && empty($operators[$key]['latest_ot_id'])) {
+                        $operators[$key]['latest_ot_id'] = (int)$r['ot_id'];
+                    }
+                }
+
+                if (!empty($r['colacion_evt_id']) && !$operators[$key]['has_lunch']) {
+                    $operators[$key]['has_lunch'] = true;
+                    $operators[$key]['lunch_event_id'] = (int)$r['colacion_evt_id'];
+                    $operators[$key]['lunch_start'] = date('H:i', (int)$r['colacion_inicio_ts']);
+                    $operators[$key]['lunch_end'] = !empty($r['colacion_fin_ts']) ? date('H:i', (int)$r['colacion_fin_ts']) : '';
+                    if (!empty($r['colacion_fin_ts']) && $r['colacion_fin_ts'] > $r['colacion_inicio_ts']) {
+                        $operators[$key]['duration_minutes'] = (int)round(($r['colacion_fin_ts'] - $r['colacion_inicio_ts']) / 60);
+                        $operators[$key]['lunch_status'] = 'COMPLETADA';
+                    } else {
+                        $operators[$key]['lunch_status'] = 'EN_CURSO';
+                    }
+                }
+            }
+        } catch (Throwable) {}
+
+        // 4. Consultar turnos locales en TRZ (production_shift_sessions)
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT pss.*, pm.name AS machine_name
+                FROM production_shift_sessions pss
+                LEFT JOIN production_machines pm ON pm.id = pss.machine_id
+                WHERE DATE(pss.started_at) = :d
+                ORDER BY pss.id DESC
+            ");
+            $stmt->execute([':d' => $date]);
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $sRow) {
+                $opName = trim((string)$sRow['operator_name']);
+                if ($opName === '') continue;
+                $mName = trim((string)$sRow['machine_name']) ?: 'Sin Máquina';
+                if (stripos($mName, 'supervisor') !== false || stripos($mName, 'mantencion') !== false || stripos($mName, 'mantenimiento') !== false) {
+                    continue;
+                }
+                $key = 'TRZ_' . $sRow['id'];
+                $already = false;
+                foreach ($operators as $op) {
+                    if (strcasecmp($op['operator_name'], $opName) === 0) {
+                        $already = true;
+                        break;
+                    }
+                }
+                if (!$already) {
+                    $operators[$key] = [
+                        'key' => $key,
+                        'source' => 'TRZ',
+                        'init_id' => 0,
+                        'worker_id' => 0,
+                        'operator_name' => $opName,
+                        'machine_id' => (int)$sRow['machine_id'],
+                        'machine_name' => $mName,
+                        'shift_start' => date('H:i', strtotime($sRow['started_at'])),
+                        'shift_end' => $sRow['ended_at'] ? date('H:i', strtotime($sRow['ended_at'])) : 'En curso',
+                        'shift_status' => (string)$sRow['status'] === 'ACTIVE' ? 'ACTIVO' : 'CERRADO',
+                        'has_lunch' => false,
+                        'lunch_event_id' => null,
+                        'lunch_start' => '',
+                        'lunch_end' => '',
+                        'duration_minutes' => 0,
+                        'lunch_status' => 'PENDIENTE',
+                        'comments' => '',
+                        'latest_ot_id' => null,
+                    ];
+                }
+            }
+        } catch (Throwable) {}
+
+        // Regla: Los que estén en selladora y embalen se cuentan solo en selladora, no en embalaje
+        $workerHasSelladoraRow = [];
+        foreach ($operators as $op) {
+            if (!empty($op['worker_id']) && stripos((string)$op['machine_name'], 'selladora') !== false) {
+                $workerHasSelladoraRow[$op['worker_id']] = true;
+            }
+        }
+        $operators = array_filter($operators, function ($op) use ($workerHasSelladoraRow) {
+            if (!empty($op['worker_id']) && isset($workerHasSelladoraRow[$op['worker_id']]) && stripos((string)$op['machine_name'], 'embalaje') !== false) {
+                return false;
+            }
+            return true;
+        });
+
+        // Excluir de forma estricta cualquier registro que corresponda a Supervisores, Mantención o personal fuera del área
+        $operators = array_filter($operators, function ($op) {
+            $wId = (int)($op['worker_id'] ?? 0);
+            if (in_array($wId, [27, 68], true)) {
+                return false;
+            }
+            $m = mb_strtoupper((string)($op['machine_name'] ?? ''));
+            if (str_contains($m, 'SUPERVISOR') || str_contains($m, 'MANTENCION') || str_contains($m, 'MANTENIMIENTO')) {
+                return false;
+            }
+            $n = mb_strtoupper((string)($op['operator_name'] ?? ''));
+            if (str_contains($n, 'SUPERVISOR') || str_contains($n, 'TOTESAUT') || str_contains($n, 'PEROZO') || str_contains($n, 'PEREZ PALOMARES') || str_contains($n, 'NAVESNIK') || str_contains($n, 'HUAMÁN') || str_contains($n, 'HUAMAN') || str_contains($n, 'CORONADO')) {
+                return false;
+            }
+            return true;
+        });
+
+        // 6. Evaluar fecha y hora límite (14:00)
+        $isToday = ($date === date('Y-m-d'));
+        $currentHi = (int)date('Hi');
+        $isPastDeadline = (!$isToday && $date < date('Y-m-d')) || ($isToday && $currentHi >= 1400);
+
+        // 7. Vincular colaciones guardadas / editadas
+        foreach ($operators as $k => &$op) {
+            $saved = null;
+            if (!empty($op['init_id']) && !empty($op['worker_id'])) {
+                $saved = $savedBreaks['init_' . $op['init_id'] . '_' . $op['worker_id']] ?? null;
+            }
+            if (!$saved && !empty($op['worker_id'])) {
+                $saved = $savedBreaks['wrk_' . $op['worker_id']] ?? null;
+            }
+            if (!$saved && !empty($op['operator_name'])) {
+                $saved = $savedBreaks['name_' . mb_strtolower(trim((string)$op['operator_name']))] ?? null;
+            }
+
+            if ($saved) {
+                $op['has_lunch'] = true;
+                $op['lunch_start'] = date('H:i', strtotime($saved['start_time']));
+                $op['lunch_end'] = $saved['end_time'] ? date('H:i', strtotime($saved['end_time'])) : '';
+                $op['duration_minutes'] = (int)($saved['duration_minutes'] ?? 0);
+                $op['comments'] = (string)($saved['comments'] ?? '');
+                $op['lunch_status'] = !empty($op['lunch_end']) ? 'COMPLETADA' : 'EN_CURSO';
+                $op['trz_break_id'] = (int)$saved['id'];
+            }
+            if (!$op['has_lunch']) {
+                $op['lunch_status'] = $isPastDeadline ? 'FALTA_CRITICA' : 'PENDIENTE';
+            }
+        }
+        unset($op);
+
+        // Ordenar: primero faltas críticas, luego pendientes, luego en curso y completadas
+        uasort($operators, function ($a, $b) {
+            $priority = [
+                'FALTA_CRITICA' => 1,
+                'PENDIENTE' => 2,
+                'EN_CURSO' => 3,
+                'COMPLETADA' => 4,
+            ];
+            $pA = $priority[$a['lunch_status']] ?? 5;
+            $pB = $priority[$b['lunch_status']] ?? 5;
+            if ($pA !== $pB) {
+                return $pA <=> $pB;
+            }
+            $mCmp = strcasecmp((string)$a['machine_name'], (string)$b['machine_name']);
+            if ($mCmp !== 0) {
+                return $mCmp;
+            }
+            return strcasecmp((string)$a['operator_name'], (string)$b['operator_name']);
+        });
+
+        $total = count($operators);
+        $registered = count(array_filter($operators, fn($o) => $o['has_lunch']));
+        $missing = $total - $registered;
+        $missingOperators = array_values(array_filter($operators, fn($o) => !$o['has_lunch']));
+
+        // Construir lista exhaustiva de máquinas de producción (excluyendo puestos de supervisión y mantención)
+        $distinctMachines = [];
+        foreach ($allMachines as $m) {
+            $upper = mb_strtoupper($m);
+            if (!str_contains($upper, 'SUPERVISOR') && !str_contains($upper, 'MANTENCION') && !str_contains($upper, 'MANTENIMIENTO')) {
+                $distinctMachines[$m] = $m;
+            }
+        }
+        foreach ($operators as $o) {
+            if (!empty($o['machine_name'])) {
+                $upper = mb_strtoupper($o['machine_name']);
+                if (!str_contains($upper, 'SUPERVISOR') && !str_contains($upper, 'MANTENCION') && !str_contains($upper, 'MANTENIMIENTO')) {
+                    $distinctMachines[$o['machine_name']] = $o['machine_name'];
+                }
+            }
+        }
+        $machinesList = array_values($distinctMachines);
+        natcasesort($machinesList);
+        $machinesList = array_values($machinesList);
+
+        return [
+            'date' => $date,
+            'is_today' => $isToday,
+            'is_past_deadline' => $isPastDeadline,
+            'total_operators' => $total,
+            'registered_count' => $registered,
+            'missing_count' => $missing,
+            'compliance_percent' => $total > 0 ? round(($registered / $total) * 100, 1) : 100.0,
+            'operators' => array_values($operators),
+            'missing_operators' => $missingOperators,
+            'machines' => $machinesList,
+            'all_machines' => $allMachines,
+            'all_workers' => $this->getAllPlantWorkers(),
+        ];
+    }
+
+    /**
+     * Retorna la lista de todos los operarios de planta activos (excluyendo supervisores y mantención)
+     */
+    public function getAllPlantWorkers(): array
+    {
+        try {
+            $stmt = $this->erpPdo->query("
+                SELECT w.id, 
+                       TRIM(CONCAT(COALESCE(w.wrk_firstname,''), ' ', COALESCE(w.wrk_lastname,''))) AS name,
+                       w.wrk_cargoid, wt.type_name AS cargo_name
+                FROM workers w
+                LEFT JOIN workers_types wt ON w.wrk_cargoid = wt.id
+                WHERE w.wrk_status = 1
+                  AND w.id NOT IN (27, 68)
+                  AND (w.wrk_cargoid IS NULL OR w.wrk_cargoid NOT IN (3, 4, 9, 10))
+                  AND (wt.type_name IS NULL OR (wt.type_name NOT LIKE '%Supervisor%' AND wt.type_name NOT LIKE '%Mantenci%' AND wt.type_name NOT LIKE '%Mantenim%'))
+                ORDER BY w.wrk_firstname ASC, w.wrk_lastname ASC
+            ");
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Registra o actualiza el horario de colación de un operario individual.
+     */
+    public function saveOperatorLunchBreak(
+        string $date,
+        string $operatorName,
+        string $startTime,
+        string $endTime,
+        int $workerId = 0,
+        int $initId = 0,
+        int $machineId = 0,
+        string $machineName = '',
+        ?string $comments = null,
+        string $createdBy = ''
+    ): array {
+        $this->ensureOperatorLunchBreaksTable();
+
+        $operatorName = trim($operatorName);
+        $startTime = trim($startTime);
+        $endTime = trim($endTime);
+        if ($operatorName === '' || $startTime === '') {
+            return ['ok' => false, 'error' => 'Operador y hora de inicio son requeridos.'];
+        }
+
+        $fullStart = "$date $startTime:00";
+        $fullEnd = $endTime !== '' ? "$date $endTime:00" : null;
+        $startTs = strtotime($fullStart);
+        $endTs = $fullEnd ? strtotime($fullEnd) : null;
+        $duration = ($endTs && $endTs > $startTs) ? (int)round(($endTs - $startTs) / 60) : 0;
+
+        // 1. Sincronizar en ERP prod_worker_ot_events si el operario tiene OT o turno
+        $erpEventId = null;
+        try {
+            $targetOtId = 0;
+            if ($initId > 0) {
+                $stmtOt = $this->erpPdo->prepare("SELECT id FROM prod_worker_ot WHERE wok_init_id = :init_id ORDER BY id DESC LIMIT 1");
+                $stmtOt->execute([':init_id' => $initId]);
+                $targetOtId = (int)$stmtOt->fetchColumn();
+            }
+            if ($targetOtId <= 0 && $workerId > 0) {
+                list($y, $m, $d) = explode('-', $date);
+                $stmtOt = $this->erpPdo->prepare("
+                    SELECT ot.id 
+                    FROM prod_worker_ot ot
+                    INNER JOIN prod_worker_init wi ON ot.wok_init_id = wi.id
+                    WHERE wi.win_wrkid = :wrkid AND wi.win_day = :d AND wi.win_month = :m AND wi.win_year = :y
+                    ORDER BY ot.id DESC LIMIT 1
+                ");
+                $stmtOt->execute([':wrkid' => $workerId, ':d' => (int)$d, ':m' => (int)$m, ':y' => (int)$y]);
+                $targetOtId = (int)$stmtOt->fetchColumn();
+            }
+
+            if ($targetOtId > 0) {
+                $stmtEv = $this->erpPdo->prepare("
+                    SELECT id FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :otid AND evt_pause_id = 1 AND evt_type = 'pause'
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stmtEv->execute([':otid' => $targetOtId]);
+                $existingEvtId = (int)$stmtEv->fetchColumn();
+
+                if ($existingEvtId > 0) {
+                    $upd = $this->erpPdo->prepare("
+                        UPDATE prod_worker_ot_events
+                        SET evt_crtdat = :start_ts, evt_enddat = :end_ts, evt_status = 1, evt_comments = :comments
+                        WHERE id = :id
+                    ");
+                    $upd->execute([
+                        ':start_ts' => $startTs,
+                        ':end_ts' => $endTs ?: $startTs,
+                        ':comments' => $comments ?: 'Colación registrada por supervisor',
+                        ':id' => $existingEvtId,
+                    ]);
+                    $erpEventId = $existingEvtId;
+                } else {
+                    $ins = $this->erpPdo->prepare("
+                        INSERT INTO prod_worker_ot_events
+                            (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments, evt_pause_id)
+                        VALUES
+                            (:otid, 0, :start_ts, :end_ts, 1, 'pause', :comments, 1)
+                    ");
+                    $ins->execute([
+                        ':otid' => $targetOtId,
+                        ':start_ts' => $startTs,
+                        ':end_ts' => $endTs ?: $startTs,
+                        ':comments' => $comments ?: 'Colación registrada por supervisor',
+                    ]);
+                    $erpEventId = (int)$this->erpPdo->lastInsertId();
+                }
+            }
+        } catch (Throwable) {}
+
+        // 2. Guardar en base local TRZ production_operator_lunch_breaks
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT id FROM production_operator_lunch_breaks
+                WHERE shift_date = :d AND (
+                    (:wrkid > 0 AND worker_id = :wrkid)
+                    OR (:init_id > 0 AND init_id = :init_id)
+                    OR (:wrkid <= 0 AND :init_id <= 0 AND operator_name = :opname)
+                )
+                LIMIT 1
+            ");
+            $stmt->execute([
+                ':d' => $date,
+                ':init_id' => $initId,
+                ':wrkid' => $workerId,
+                ':opname' => $operatorName,
+            ]);
+            $existingBreakId = (int)$stmt->fetchColumn();
+
+            if ($existingBreakId > 0) {
+                $upd = $this->pdo->prepare("
+                    UPDATE production_operator_lunch_breaks
+                    SET start_time = :st, end_time = :et, duration_minutes = :dur,
+                        comments = :comm,
+                        machine_id = COALESCE(:mid, machine_id),
+                        machine_name = COALESCE(:mname, machine_name),
+                        worker_id = COALESCE(:wrkid, worker_id),
+                        init_id = COALESCE(:initid, init_id),
+                        erp_event_id = COALESCE(:erpid, erp_event_id),
+                        created_by = :cby
+                    WHERE id = :id
+                ");
+                $upd->execute([
+                    ':st' => $fullStart,
+                    ':et' => $fullEnd,
+                    ':dur' => $duration,
+                    ':comm' => $comments,
+                    ':mid' => $machineId > 0 ? $machineId : null,
+                    ':mname' => $machineName ?: null,
+                    ':wrkid' => $workerId > 0 ? $workerId : null,
+                    ':initid' => $initId > 0 ? $initId : null,
+                    ':erpid' => $erpEventId,
+                    ':cby' => $createdBy ?: null,
+                    ':id' => $existingBreakId,
+                ]);
+                $savedId = $existingBreakId;
+            } else {
+                $ins = $this->pdo->prepare("
+                    INSERT INTO production_operator_lunch_breaks
+                        (shift_date, init_id, worker_id, operator_name, machine_id, machine_name, start_time, end_time, duration_minutes, erp_event_id, comments, created_by)
+                    VALUES
+                        (:d, :init_id, :wrkid, :opname, :mid, :mname, :st, :et, :dur, :erpid, :comm, :cby)
+                ");
+                $ins->execute([
+                    ':d' => $date,
+                    ':init_id' => $initId > 0 ? $initId : null,
+                    ':wrkid' => $workerId > 0 ? $workerId : null,
+                    ':opname' => $operatorName,
+                    ':mid' => $machineId > 0 ? $machineId : null,
+                    ':mname' => $machineName ?: null,
+                    ':st' => $fullStart,
+                    ':et' => $fullEnd,
+                    ':dur' => $duration,
+                    ':erpid' => $erpEventId,
+                    ':comm' => $comments,
+                    ':cby' => $createdBy ?: null,
+                ]);
+                $savedId = (int)$this->pdo->lastInsertId();
+            }
+
+            return ['ok' => true, 'id' => $savedId, 'erp_event_id' => $erpEventId];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Guarda colación de forma masiva para un conjunto de operarios seleccionados.
+     *
+     * @param array<int, array<string, mixed>> $items Lista de operarios
+     */
+    public function saveBulkOperatorLunchBreaks(
+        array $items,
+        string $date,
+        string $startTime,
+        string $endTime,
+        ?string $comments = null,
+        string $createdBy = ''
+    ): array {
+        $count = 0;
+        $errors = [];
+        foreach ($items as $item) {
+            $opName = trim((string)($item['operator_name'] ?? ''));
+            if ($opName === '') continue;
+            $res = $this->saveOperatorLunchBreak(
+                $date,
+                $opName,
+                $startTime,
+                $endTime,
+                (int)($item['worker_id'] ?? 0),
+                (int)($item['init_id'] ?? 0),
+                (int)($item['machine_id'] ?? 0),
+                (string)($item['machine_name'] ?? ''),
+                $comments,
+                $createdBy
+            );
+            if ($res['ok']) {
+                $count++;
+            } else {
+                $errors[] = $opName . ': ' . ($res['error'] ?? 'Error desconocido');
+            }
+        }
+        return ['ok' => $count > 0, 'updated_count' => $count, 'errors' => $errors];
+    }
+
+    /**
+     * Guarda colación de forma masiva para todos los operarios de una máquina en la fecha.
+     */
+    public function saveMachineLunchBreaks(
+        string $date,
+        string $machineName,
+        string $startTime,
+        string $endTime,
+        ?string $comments = null,
+        string $createdBy = ''
+    ): array {
+        $report = $this->getOperatorLunchReport($date);
+        $machineName = trim($machineName);
+        $targetOps = [];
+        foreach ($report['operators'] as $op) {
+            if (strcasecmp((string)$op['machine_name'], $machineName) === 0) {
+                $targetOps[] = $op;
+            }
+        }
+
+        if (empty($targetOps)) {
+            return ['ok' => false, 'error' => "No se encontraron operarios en la máquina '{$machineName}' para el día {$date}."];
+        }
+
+        return $this->saveBulkOperatorLunchBreaks($targetOps, $date, $startTime, $endTime, $comments, $createdBy);
+    }
+
+    /**
+     * Carga masiva de colaciones para un rango de fechas (Fecha Inicio a Fecha Fin),
+     * ya sea por máquina o por lista de operarios seleccionados.
+     *
+     * REGLAS CRÍTICAS:
+     * 1. Solo se cargará en días donde el operario haya INICIADO TURNO de trabajo efectivamente.
+     *    Si no vino a trabajar o no tiene turno iniciado ese día, no se registra nada.
+     * 2. Solo se cargará si NO tienen colación ya registrada para ese día (no sobreescribe colaciones previas).
+     */
+    public function saveBulkLunchDateRange(
+        array $targetWorkerIds,
+        ?string $targetMachineName,
+        string $startDate,
+        string $endDate,
+        string $startTime,
+        string $endTime,
+        ?string $comments = null,
+        string $currentUser = ''
+    ): array {
+        $this->ensureOperatorLunchBreaksTable();
+
+        $startDate = trim($startDate);
+        $endDate = trim($endDate);
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDate)) {
+            $startDate = date('Y-m-d');
+        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $endDate)) {
+            $endDate = $startDate;
+        }
+        if ($startDate > $endDate) {
+            $tmp = $startDate;
+            $startDate = $endDate;
+            $endDate = $tmp;
+        }
+
+        $startTime = trim($startTime) ?: '12:00';
+        $endTime = trim($endTime) ?: '12:30';
+        $targetMachineName = trim((string)$targetMachineName);
+        if (strcasecmp($targetMachineName, 'Todas las Máquinas') === 0 || strcasecmp($targetMachineName, 'all') === 0) {
+            $targetMachineName = '';
+        }
+
+        $startDt = new DateTime($startDate);
+        $endDt = new DateTime($endDate);
+        $endDt->modify('+1 day');
+        $period = new DatePeriod($startDt, new DateInterval('P1D'), $endDt);
+
+        // Consultar colaciones ya registradas en TRZ dentro del rango para no duplicar ni sobreescribir
+        $existingBreaks = [];
+        try {
+            $stmtTrz = $this->pdo->prepare("
+                SELECT shift_date, worker_id, operator_name 
+                FROM production_operator_lunch_breaks 
+                WHERE shift_date BETWEEN :s AND :e
+            ");
+            $stmtTrz->execute([':s' => $startDate, ':e' => $endDate]);
+            foreach ($stmtTrz->fetchAll(PDO::FETCH_ASSOC) as $eb) {
+                if (!empty($eb['worker_id'])) {
+                    $existingBreaks[$eb['shift_date'] . '_w_' . $eb['worker_id']] = true;
+                }
+                if (!empty($eb['operator_name'])) {
+                    $existingBreaks[$eb['shift_date'] . '_n_' . mb_strtolower(trim((string)$eb['operator_name']))] = true;
+                }
+            }
+        } catch (Throwable) {}
+
+        $targetWorkerIdsMap = [];
+        foreach ($targetWorkerIds as $twid) {
+            $id = (int)$twid;
+            if ($id > 0) $targetWorkerIdsMap[$id] = true;
+        }
+
+        $updatedCount = 0;
+        $daysProcessed = 0;
+        $skippedAlreadyHad = 0;
+
+        foreach ($period as $dt) {
+            $currDate = $dt->format('Y-m-d');
+            $daysProcessed++;
+            $y = (int)$dt->format('Y');
+            $m = (int)$dt->format('m');
+            $d = (int)$dt->format('d');
+
+            // 1. Identificar qué operarios iniciaron turno ese día en SELLADORA
+            $workersOnSelladora = [];
+            try {
+                $stmtSell = $this->erpPdo->prepare("
+                    SELECT wi.win_wrkid, eq.id AS eq_id, eq.equipo_name 
+                    FROM prod_worker_init wi
+                    LEFT JOIN equipo eq ON wi.win_equipoid = eq.id
+                    WHERE wi.win_year = :y AND wi.win_month = :m AND wi.win_day = :d
+                      AND eq.equipo_name LIKE '%SELLADORA%'
+                ");
+                $stmtSell->execute([':y' => $y, ':m' => $m, ':d' => $d]);
+                foreach ($stmtSell->fetchAll(PDO::FETCH_ASSOC) as $sRow) {
+                    $workersOnSelladora[(int)$sRow['win_wrkid']] = [
+                        'machine_id' => (int)$sRow['eq_id'],
+                        'machine_name' => trim((string)$sRow['equipo_name']),
+                    ];
+                }
+            } catch (Throwable) {}
+
+            $dayCandidates = [];
+
+            // 2. Consultar turnos asignados en ERP para este día (turnos_config_assign)
+            try {
+                $stmtAssign = $this->erpPdo->prepare("
+                    SELECT 
+                        0 AS init_id,
+                        a.assign_worker_id AS worker_id,
+                        eq.id AS machine_id,
+                        COALESCE(eq.equipo_name, 'Sin Máquina') AS machine_name,
+                        TRIM(CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, ''))) AS operator_name,
+                        w.wrk_cargoid,
+                        wt.type_name AS cargo_name,
+                        NULL AS ot_id,
+                        NULL AS colacion_evt_id
+                    FROM turnos_config_assign a
+                    JOIN workers w ON a.assign_worker_id = w.id
+                    LEFT JOIN workers_types wt ON w.wrk_cargoid = wt.id
+                    LEFT JOIN equipo eq ON a.assign_equipoaid = eq.id
+                    WHERE a.assign_year = :y AND a.assign_month = :m AND a.assign_day = :d
+                      AND (a.confirm_falta_act IS NULL OR a.confirm_falta_act = 0)
+                      AND (eq.equipo_name IS NULL OR (eq.equipo_name NOT LIKE '%SUPERVISOR%' AND eq.equipo_name NOT LIKE '%MANTENCION%'))
+                      AND (w.wrk_cargoid IS NULL OR w.wrk_cargoid NOT IN (3, 4, 9, 10))
+                      AND (wt.type_name IS NULL OR (wt.type_name NOT LIKE '%Supervisor%' AND wt.type_name NOT LIKE '%Mantenci%' AND wt.type_name NOT LIKE '%Mantenim%'))
+                      AND (a.assign_worker_type IS NULL OR a.assign_worker_type NOT LIKE '%supervisor%')
+                      AND (a.assign_worker_id IS NULL OR a.assign_worker_id NOT IN (27, 68))
+                    ORDER BY a.id ASC
+                ");
+                $stmtAssign->execute([':y' => $y, ':m' => $m, ':d' => $d]);
+                foreach ($stmtAssign->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $wId = (int)$row['worker_id'];
+                    $mName = trim((string)$row['machine_name']);
+                    if (isset($workersOnSelladora[$wId]) && stripos($mName, 'embalaje') !== false) {
+                        $mName = $workersOnSelladora[$wId]['machine_name'];
+                        $row['machine_name'] = $mName;
+                        $row['machine_id'] = $workersOnSelladora[$wId]['machine_id'];
+                    }
+                    $dayCandidates[$wId] = $row;
+                }
+            } catch (Throwable) {}
+
+            // 3. Consultar turnos físicos iniciados en ERP para este día (prod_worker_init)
+            try {
+                $sql = "
+                    SELECT 
+                        wi.id AS init_id,
+                        wi.win_wrkid AS worker_id,
+                        eq.id AS machine_id,
+                        COALESCE(eq.equipo_name, 'Sin Máquina') AS machine_name,
+                        TRIM(CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, ''))) AS operator_name,
+                        w.wrk_cargoid,
+                        wt.type_name AS cargo_name,
+                        ot.id AS ot_id,
+                        ev.id AS colacion_evt_id
+                    FROM prod_worker_init wi
+                    JOIN workers w ON wi.win_wrkid = w.id
+                    LEFT JOIN workers_types wt ON w.wrk_cargoid = wt.id
+                    LEFT JOIN equipo eq ON wi.win_equipoid = eq.id
+                    LEFT JOIN prod_worker_ot ot ON ot.wok_init_id = wi.id
+                    LEFT JOIN prod_worker_ot_events ev ON ev.evt_prod_worker_otid = ot.id 
+                         AND ev.evt_pause_id = 1 AND ev.evt_type = 'pause' AND ev.evt_status > 0
+                    WHERE wi.win_year = :y AND wi.win_month = :m AND wi.win_day = :d
+                      AND (eq.equipo_name IS NULL OR (eq.equipo_name NOT LIKE '%SUPERVISOR%' AND eq.equipo_name NOT LIKE '%MANTENCION%'))
+                      AND (w.wrk_cargoid IS NULL OR w.wrk_cargoid NOT IN (3, 4, 9, 10))
+                      AND (wt.type_name IS NULL OR (wt.type_name NOT LIKE '%Supervisor%' AND wt.type_name NOT LIKE '%Mantenci%' AND wt.type_name NOT LIKE '%Mantenim%'))
+                      AND (wi.win_wrkid IS NULL OR wi.win_wrkid NOT IN (27, 68))
+                    ORDER BY wi.id DESC
+                ";
+                $stmt = $this->erpPdo->prepare($sql);
+                $stmt->execute([':y' => $y, ':m' => $m, ':d' => $d]);
+                foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $wId = (int)$row['worker_id'];
+                    $mName = trim((string)$row['machine_name']);
+
+                    // Regla Selladora vs Embalaje
+                    if (isset($workersOnSelladora[$wId]) && stripos($mName, 'embalaje') !== false) {
+                        $mName = $workersOnSelladora[$wId]['machine_name'];
+                        $row['machine_name'] = $mName;
+                        $row['machine_id'] = $workersOnSelladora[$wId]['machine_id'];
+                    }
+
+                    $dayCandidates[$wId] = $row;
+                }
+            } catch (Throwable) {}
+
+            // 4. Consultar sesiones en TRZ para este día
+            try {
+                $stmtTrzSess = $this->pdo->prepare("
+                    SELECT pss.*, pm.name AS machine_name
+                    FROM production_shift_sessions pss
+                    LEFT JOIN production_machines pm ON pm.id = pss.machine_id
+                    WHERE DATE(pss.started_at) = :d
+                ");
+                $stmtTrzSess->execute([':d' => $currDate]);
+                foreach ($stmtTrzSess->fetchAll(PDO::FETCH_ASSOC) as $sRow) {
+                    $opName = trim((string)$sRow['operator_name']);
+                    if ($opName === '') continue;
+                    $mName = trim((string)$sRow['machine_name']);
+                    if (stripos($mName, 'supervisor') !== false || stripos($mName, 'mantencion') !== false) {
+                        continue;
+                    }
+                    $swId = (int)($sRow['worker_id'] ?? 0);
+                    $trzKey = $swId > 0 ? $swId : ('trz_' . mb_strtolower($opName));
+                    if (!isset($dayCandidates[$trzKey])) {
+                        $dayCandidates[$trzKey] = [
+                            'init_id' => 0,
+                            'worker_id' => $swId,
+                            'machine_id' => (int)($sRow['machine_id'] ?? 0),
+                            'machine_name' => $mName,
+                            'operator_name' => $opName,
+                            'ot_id' => null,
+                            'colacion_evt_id' => null,
+                        ];
+                    }
+                }
+            } catch (Throwable) {}
+
+            // Filtrar y aplicar colación a los candidatos del día que iniciaron turno
+            foreach ($dayCandidates as $cand) {
+                $wId = (int)($cand['worker_id'] ?? 0);
+                $opName = trim((string)$cand['operator_name']);
+                $mName = trim((string)$cand['machine_name']);
+
+                // Si se especificó lista de operarios, comprobar coincidencia
+                if (!empty($targetWorkerIdsMap)) {
+                    if ($wId <= 0 || !isset($targetWorkerIdsMap[$wId])) {
+                        continue;
+                    }
+                }
+
+                // Si se especificó máquina objetivo, comprobar coincidencia
+                if ($targetMachineName !== '') {
+                    if (stripos($mName, $targetMachineName) === false && stripos($targetMachineName, $mName) === false) {
+                        continue;
+                    }
+                }
+
+                // Si NO se especificaron operarios puntuales (ej. asignación a toda la máquina), no sobreescribir si ya tenía colación
+                if (empty($targetWorkerIdsMap)) {
+                    $alreadyTrz = ($wId > 0 && isset($existingBreaks[$currDate . '_w_' . $wId])) ||
+                                  isset($existingBreaks[$currDate . '_n_' . mb_strtolower($opName)]);
+                    $alreadyErp = !empty($cand['colacion_evt_id']);
+                    if ($alreadyTrz || $alreadyErp) {
+                        $skippedAlreadyHad++;
+                        continue;
+                    }
+                }
+
+                // Guardar colación
+                $res = $this->saveOperatorLunchBreak(
+                    $currDate,
+                    $opName,
+                    $startTime,
+                    $endTime,
+                    $wId,
+                    (int)($cand['init_id'] ?? 0),
+                    (int)($cand['machine_id'] ?? 0),
+                    $mName,
+                    $comments,
+                    $currentUser
+                );
+
+                if ($res['ok']) {
+                    $updatedCount++;
+                    if ($wId > 0) {
+                        $existingBreaks[$currDate . '_w_' . $wId] = true;
+                    }
+                    $existingBreaks[$currDate . '_n_' . mb_strtolower($opName)] = true;
+                }
+            }
+        }
+
+        return [
+            'ok' => true,
+            'updated_count' => $updatedCount,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'days_processed' => $daysProcessed,
+            'skipped_already_had' => $skippedAlreadyHad,
+        ];
+    }
 }
+
 
