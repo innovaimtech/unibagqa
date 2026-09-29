@@ -260,18 +260,35 @@ function rollTransferAvailability(array $roll): array
  */
 function renderDatabaseConnectionError(Throwable $e): void
 {
-    $body = '<div class="card">
-        <div style="font-size:18px;font-weight:800;margin-bottom:6px">No hay conexión a la base de datos</div>
-        <div class="muted" style="margin-bottom:10px">Este módulo requiere MySQL configurado mediante variables de entorno o en el archivo <b>.env</b> para ERP y trazabilidad.</div>
-        <div class="err" style="margin-bottom:10px"><div style="font-weight:700;margin-bottom:6px">Detalle</div><div>' . h($e->getMessage()) . '</div></div>
-        <div style="font-weight:700;margin-bottom:6px">Checklist</div>
-        <ul style="margin:0;padding-left:18px">
-          <li>Configurar <b>ERP_DB_*</b> para <b>unibag_unibag</b></li>
-          <li>Configurar <b>TRZ_DB_*</b> para <b>unibag_trazabilidad</b></li>
-          <li>Ejecutar el esquema de trazabilidad en la base <b>TRZ_DB_NAME</b></li>
-        </ul>
-      </div>';
-    render('Sin BD', $body);
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    http_response_code(500);
+    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
+    echo '<title>Error de Conexión - Unibag</title>';
+    echo '<style>
+        *{box-sizing:border-box}
+        body{margin:0;background:#f2f4f7;font-family:Arial,sans-serif;color:#111;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+        .err-card{width:min(600px,100%);background:#fff;border:1px solid #d0d5dd;border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.08);overflow:hidden}
+        .err-header{background:#00A9A6;color:#fff;padding:16px 20px;font-size:18px;font-weight:700}
+        .err-body{padding:20px}
+        .err-box{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px;border-radius:8px;font-size:13px;margin:14px 0;word-break:break-all}
+        .err-list{margin:10px 0 0;padding-left:20px;font-size:13px;color:#374151;line-height:1.6}
+        .btn-retry{display:inline-block;background:#00A9A6;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-weight:700;font-size:13px;margin-top:16px}
+    </style></head><body>';
+    echo '<div class="err-card">';
+    echo '<div class="err-header">No hay conexión a la base de datos</div>';
+    echo '<div class="err-body">';
+    echo '<p style="margin:0 0 10px;font-size:14px;color:#475467">Este módulo requiere MySQL configurado en el archivo <b>.env</b> para ERP y trazabilidad.</p>';
+    echo '<div class="err-box"><b>Detalle del error:</b><br>' . h($e->getMessage()) . '</div>';
+    echo '<div style="font-weight:700;font-size:13px;color:#111">Checklist de configuración (.env):</div>';
+    echo '<ul class="err-list">';
+    echo '<li>Verificar que el archivo <b>.env</b> tenga permisos de lectura (<code>chmod 644 .env</code>).</li>';
+    echo '<li>Configurar <b>ERP_DB_*</b> para <b>unibag_unibag</b> (Host: 149.50.129.154).</li>';
+    echo '<li>Configurar <b>TRZ_DB_*</b> para <b>unibag_trazabilidad</b> (Usuario: unibag_user).</li>';
+    echo '</ul>';
+    echo '<a class="btn-retry" href="/login">Reintentar</a>';
+    echo '</div></div></body></html>';
     exit;
 }
 
