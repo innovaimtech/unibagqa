@@ -105,6 +105,29 @@ chown -R www-data:www-data venv
 
 ---
 
+## 🔒 Configuración de Dominio y Certificado SSL Seguro (HTTPS)
+
+Para conectar el subdominio `unibag.innovaimtech.online` y activar el candado de seguridad SSL (Let's Encrypt gratuito con renovación automática):
+
+```bash
+cd /var/www/innovaimtech/unibagqa
+sudo bash deploy/instalar-ssl.sh
+```
+
+O si prefieres ejecutar los comandos manualmente paso a paso:
+```bash
+# 1. Instalar Certbot y plugin de Nginx
+sudo apt update && sudo apt install -y certbot python3-certbot-nginx
+
+# 2. Permitir puertos en el Firewall
+sudo ufw allow 'Nginx Full'
+
+# 3. Generar certificado e instalar redirección HTTPS automática
+sudo certbot --nginx -d unibag.innovaimtech.online
+```
+
+---
+
 ## 📋 Resumen de Servicios del Servidor
 
 | Acción | Comando |
@@ -114,3 +137,5 @@ chown -R www-data:www-data venv
 | **Ver estado de PHP** | `systemctl status php8.1-fpm` |
 | **Ver estado de Nginx** | `systemctl status nginx` |
 | **Ver estado de MySQL** | `systemctl status mysql` |
+| **Verificar renovación SSL** | `certbot renew --dry-run` |
+
