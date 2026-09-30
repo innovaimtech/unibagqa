@@ -2918,6 +2918,7 @@ function render(string $title, string $body): void
     } elseif ($activeModule === 'reports') {
         $isLunch = str_starts_with($currentPath, '/reports/colaciones') || str_starts_with($currentPath, '/reports/lunch-breaks');
         echo '<a class="subitem' . ($currentPath === '/reports/operator-waste' ? ' active' : '') . '" href="/reports/operator-waste"><span>Merma por Operador</span></a>';
+        echo '<a class="subitem' . ($currentPath === '/reports/despachos' ? ' active' : '') . '" href="/reports/despachos"><span>Despachos</span></a>';
         echo '<a class="subitem' . ($currentPath === '/reports/machine-production' ? ' active' : '') . '" href="/reports/machine-production"><span>Producción Máquinas</span></a>';
         echo '<a class="subitem' . ($currentPath === '/reports/machine-events' ? ' active' : '') . '" href="/reports/machine-events"><span>Eventos de Máquina</span></a>';
         echo '<a class="subitem' . ($isLunch ? ' active' : '') . '" href="/reports/colaciones"><span>Control Colaciones</span></a>';

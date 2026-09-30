@@ -530,12 +530,22 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
 
     $body .= '</tbody></table></div>';
 
-    $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:16px;border-top:1px solid #e2e8f0">
-        <div class="muted" style="font-size:12px">Al guardar, se creará el registro de recuento <code>IR0000XXX</code> en la base de datos ERP.</div>
-        <button class="btn" type="submit"' . ($draftItems === [] ? ' disabled' : '') . ' style="padding:10px 24px;font-size:14px;font-weight:800">
-          Guardar inventario realizado en ERP
-        </button>
-      </div>';
+    $canEdit = unibagCanUserPerformModifications();
+    if ($canEdit) {
+        $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:16px;border-top:1px solid #e2e8f0">
+            <div class="muted" style="font-size:12px">Al guardar, se creará el registro de recuento <code>IR0000XXX</code> en la base de datos ERP.</div>
+            <button class="btn" type="submit"' . ($draftItems === [] ? ' disabled' : '') . ' style="padding:10px 24px;font-size:14px;font-weight:800">
+              Guardar inventario realizado en ERP
+            </button>
+          </div>';
+    } else {
+        $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:16px;border-top:1px solid #e2e8f0">
+            <div class="muted" style="font-size:12px">🔒 La toma y modificación de inventario físico está restringida exclusivamente a HECTOR y JAVIER.</div>
+            <button class="btn secondary" type="button" disabled style="padding:10px 24px;font-size:14px;font-weight:700;color:#94a3b8">
+              🔒 Modificación restringida
+            </button>
+          </div>';
+    }
 
     $body .= '</form>';
 
@@ -573,6 +583,10 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
 {
     if ($path === '/stock/inventory-counts' && $method === 'POST') {
         requireCsrf();
+        if (!unibagCanUserPerformModifications()) {
+            redirectResponse('/stock/inventory-counts?bodega=' . ((int)($_POST['bodega'] ?? 0)) . '&error=' . rawurlencode('Modificaciones restringidas exclusivamente a HECTOR y JAVIER.'));
+            return true;
+        }
         $storehouseId = (int)($_POST['bodega'] ?? 0);
         $storehouseName = trim((string)($_POST['storehouse_name'] ?? ''));
         $annotation = trim((string)($_POST['annotation'] ?? ''));

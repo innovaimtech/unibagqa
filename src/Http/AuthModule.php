@@ -223,6 +223,14 @@ function unibagHandleLoginPost(): void
     if (isset($user['user_name'])) {
         $_SESSION['user_name'] = (string)$user['user_name'];
     }
+    if (isset($user['user_login'])) {
+        $_SESSION['user_login'] = (string)$user['user_login'];
+    } elseif (isset($user['username'])) {
+        $_SESSION['user_login'] = (string)$user['username'];
+    }
+    if (isset($user['user_rut'])) {
+        $_SESSION['user_rut'] = (string)$user['user_rut'];
+    }
     if (isset($user['user_type'])) {
         $_SESSION['user_type'] = (string)$user['user_type'];
     }
@@ -515,3 +523,81 @@ function unibagEnforceAuthenticatedAreaAccess(string $path): void
         redirectResponse(firstAllowedAreaHome($sessionAreaPermissions));
     }
 }
+
+/**
+ * Determina si el usuario autenticado tiene autorización para realizar modificaciones
+ * operativas o administrativas (producción, colaciones y resto de modificaciones).
+ *
+ * Restringido exclusivamente a los usuarios HECTOR y JAVIER.
+ */
+function unibagCanUserPerformModifications(): bool
+{
+    $userId = (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0);
+    $login = strtoupper(trim((string)(
+        $_SESSION['user_login'] 
+        ?? $_SESSION['auth_username'] 
+        ?? $_SESSION['user_name'] 
+        ?? ''
+    )));
+    $email = strtolower(trim((string)($_SESSION['user_mail'] ?? '')));
+    $displayName = strtoupper(trim((string)(
+        $_SESSION['auth_display_name'] 
+        ?? $_SESSION['operator_name'] 
+        ?? ''
+    )));
+    $firstName = strtoupper(trim((string)($_SESSION['user_firstname'] ?? $_SESSION['wrk_firstname'] ?? '')));
+    $lastName = strtoupper(trim((string)($_SESSION['user_lastname'] ?? $_SESSION['wrk_lastname'] ?? '')));
+    $fullName = trim($firstName . ' ' . $lastName);
+    $rut = trim((string)($_SESSION['user_rut'] ?? ''));
+
+    // 1. Verificación por ID de usuario ERP (4077 = Hector Matus, 4129 = Javier Perozo)
+    if ($userId === 4077 || $userId === 4129) {
+        return true;
+    }
+
+    // 2. Verificación por Login
+    if ($login === 'HECTOR' || $login === 'JAVIER') {
+        return true;
+    }
+
+    // 3. Verificación por Email oficial
+    if (in_array($email, ['hector.matus@unibag.cl', 'produccion1@unibag.cl', 'javier.perozo@erp-unibag.cl'], true)) {
+        return true;
+    }
+
+    // 4. Verificación por RUT oficial
+    if (in_array($rut, ['15.199.938-7', '27.343.502-6'], true)) {
+        return true;
+    }
+
+    // 5. Verificación por Nombre o Display Name
+    if (str_starts_with($displayName, 'HECTOR') || str_starts_with($displayName, 'JAVIER')) {
+        return true;
+    }
+    if (str_starts_with($login, 'HECTOR') || str_starts_with($login, 'JAVIER')) {
+        return true;
+    }
+    if (str_contains($fullName, 'HECTOR') || str_contains($fullName, 'JAVIER')) {
+        return true;
+    }
+
+    // 6. Respaldo directo en base de datos si hay user_id
+    if ($userId > 0) {
+        try {
+            $erp = Db::erpPdo();
+            $stmt = $erp->prepare("SELECT user_login, user_firstname FROM user WHERE id = :id LIMIT 1");
+            $stmt->execute([':id' => $userId]);
+            $u = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($u) {
+                $dbLogin = strtoupper(trim((string)($u['user_login'] ?? '')));
+                $dbFirst = strtoupper(trim((string)($u['user_firstname'] ?? '')));
+                if ($dbLogin === 'HECTOR' || $dbLogin === 'JAVIER' || str_starts_with($dbFirst, 'HECTOR') || str_starts_with($dbFirst, 'JAVIER')) {
+                    return true;
+                }
+            }
+        } catch (Throwable) {}
+    }
+
+    return false;
+}
+

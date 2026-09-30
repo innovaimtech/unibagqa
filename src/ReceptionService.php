@@ -11815,6 +11815,271 @@ SQL;
         }
     }
 
+    /**
+     * Informe de Despachos Comerciales por Período o Rango de Fechas.
+     * Con valorización en dinero ($ CLP) y filtros por Cliente, Tipo Doc y Transporte.
+     *
+     * @return array{
+     *     summary: array<string, mixed>,
+     *     rows: array<int, array<string, mixed>>,
+     *     clients: array<int, array{id: int, name: string}>,
+     *     transports: array<int, array{id: int, name: string}>
+     * }
+     */
+    public function getDispatchesPeriodReport(
+        string $startAt,
+        string $endAt,
+        ?int $clientId = null,
+        ?string $docType = null,
+        ?int $transportId = null,
+        ?string $search = null
+    ): array {
+        $result = [
+            'summary' => [
+                'total_dispatches' => 0,
+                'total_items_count' => 0,
+                'total_dispatched_units' => 0.0,
+                'total_dispatched_money' => 0.0,
+                'total_clients_count' => 0,
+                'average_money_per_dispatch' => 0.0,
+                'average_units_per_dispatch' => 0.0,
+                'facturas_count' => 0,
+                'guias_count' => 0,
+            ],
+            'rows' => [],
+            'clients' => [],
+            'transports' => [],
+        ];
+
+        if (!$this->erpTableExists('despacho') || !$this->erpTableExists('detalle_despacho')) {
+            return $result;
+        }
+
+        $startTs = 0;
+        $endTs = 0;
+        try {
+            $tz = new DateTimeZone(date_default_timezone_get());
+            $startTs = (new DateTimeImmutable($startAt, $tz))->getTimestamp();
+            $endTs = (new DateTimeImmutable($endAt, $tz))->getTimestamp();
+        } catch (Throwable) {
+            $startTs = strtotime($startAt) ?: 0;
+            $endTs = strtotime($endAt) ?: 0;
+        }
+
+        $where = ["d.fecha_ingreso BETWEEN :start_ts AND :end_ts"];
+        $params = [
+            ':start_ts' => $startTs,
+            ':end_ts' => $endTs,
+        ];
+
+        if ($clientId !== null && $clientId > 0) {
+            $where[] = "d.id_cliente = :cid";
+            $params[':cid'] = $clientId;
+        }
+
+        if ($docType !== null && $docType !== '' && $docType !== 'all') {
+            $where[] = "d.tipo_documento = :dtype";
+            $params[':dtype'] = strtoupper(trim($docType));
+        }
+
+        if ($transportId !== null && $transportId > 0) {
+            $where[] = "d.id_transporte = :tid";
+            $params[':tid'] = $transportId;
+        }
+
+        if ($search !== null && trim($search) !== '') {
+            $s = '%' . trim($search) . '%';
+            $where[] = "(c.cust_name LIKE :s1 OR c.cust_company LIKE :s2 OR o.req_number LIKE :s3 OR d.numero_documento LIKE :s4 OR od.dlv_docnum LIKE :s5 OR i.item_number_prod LIKE :s6 OR i.item_title LIKE :s7 OR tc.transports_chofer_nombre LIKE :s8 OR tc.transports_chofer_paterno LIKE :s9)";
+            $params[':s1'] = $s;
+            $params[':s2'] = $s;
+            $params[':s3'] = $s;
+            $params[':s4'] = $s;
+            $params[':s5'] = $s;
+            $params[':s6'] = $s;
+            $params[':s7'] = $s;
+            $params[':s8'] = $s;
+            $params[':s9'] = $s;
+        }
+
+        $sql = "
+            SELECT 
+                d.id AS despacho_id,
+                d.fecha_ingreso,
+                d.hora_ingreso,
+                d.hora_salida,
+                d.numero_documento,
+                d.tipo_documento,
+                d.id_cliente,
+                d.id_transporte,
+                d.estado,
+                d.observacion,
+                COALESCE(c.cust_company, c.cust_name, 'Cliente N/D') AS customer_name,
+                o.req_number AS cc_number,
+                od.dlv_docnum AS guia_factura,
+                od.dlv_total_netto,
+                od.dlv_total_brutto,
+                i.item_number_prod,
+                COALESCE(i.item_title, dd.descripcion, 'Producto N/D') AS item_name,
+                dd.salida AS dispatched_units,
+                dd.cantidad AS declared_units,
+                oi.item_sellprice_netto,
+                oi.item_sellprice_netto_dsc,
+                oi.item_amount,
+                i.item_sellprice_netto AS item_catalog_price,
+                t1.trans_name AS transport_company,
+                CONCAT(COALESCE(tc.transports_chofer_nombre, ''), ' ', COALESCE(tc.transports_chofer_paterno, '')) AS driver_name,
+                tv.transports_vh_patente AS vehicle_plate
+            FROM despacho d
+            INNER JOIN detalle_despacho dd ON d.id = dd.id_despacho
+            LEFT JOIN customer c ON c.id = d.id_cliente
+            LEFT JOIN transports_chofer tc ON tc.id = d.id_chofer
+            LEFT JOIN transports_vehiculo tv ON tv.id = d.id_patente
+            LEFT JOIN transports t1 ON t1.id = d.id_transporte
+            LEFT JOIN item i ON i.id = dd.id_item
+            LEFT JOIN orders_delivery od ON d.numero_documento = od.id
+            LEFT JOIN orders o ON o.id = od.dlv_order_id
+            LEFT JOIN orders_items oi ON oi.req_id = o.id AND oi.item_id = dd.id_item
+            WHERE " . implode(" AND ", $where) . "
+            ORDER BY d.fecha_ingreso DESC, d.id DESC, dd.id ASC
+        ";
+
+        $rows = [];
+        $totalUnits = 0.0;
+        $totalMoney = 0.0;
+        $distinctDespachos = [];
+        $distinctClients = [];
+        $usedDeliveryTotals = [];
+        $facturasCount = 0;
+        $guiasCount = 0;
+
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            $rawRows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            foreach ($rawRows as $dr) {
+                $units = (float)($dr['dispatched_units'] ?? $dr['declared_units'] ?? 0);
+                if ($units <= 0 && (float)($dr['declared_units'] ?? 0) > 0) {
+                    $units = (float)$dr['declared_units'];
+                }
+
+                $unitPrice = 0.0;
+                if (!empty($dr['item_sellprice_netto']) && (float)$dr['item_sellprice_netto'] > 0) {
+                    $unitPrice = (float)$dr['item_sellprice_netto'];
+                } elseif (!empty($dr['item_amount']) && (float)$dr['item_amount'] > 0 && !empty($dr['item_sellprice_netto_dsc'])) {
+                    $unitPrice = (float)$dr['item_sellprice_netto_dsc'] / (float)$dr['item_amount'];
+                } elseif (!empty($dr['item_catalog_price']) && (float)$dr['item_catalog_price'] > 0) {
+                    $unitPrice = (float)$dr['item_catalog_price'];
+                }
+
+                $lineMoney = round($units * $unitPrice, 2);
+                if ($lineMoney <= 0 && !empty($dr['dlv_total_netto']) && (float)$dr['dlv_total_netto'] > 0) {
+                    $dlvId = (string)($dr['numero_documento'] ?? '');
+                    if (!isset($usedDeliveryTotals[$dlvId])) {
+                        $lineMoney = (float)$dr['dlv_total_netto'];
+                        $usedDeliveryTotals[$dlvId] = true;
+                        if ($units > 0 && $unitPrice <= 0) {
+                            $unitPrice = round($lineMoney / $units, 2);
+                        }
+                    }
+                }
+
+                $docNum = trim((string)($dr['guia_factura'] ?? ''));
+                if ($docNum === '' || $docNum === '0') {
+                    $docNum = trim((string)($dr['numero_documento'] ?? ''));
+                }
+
+                $fDate = !empty($dr['fecha_ingreso']) ? date('d/m/Y', (int)$dr['fecha_ingreso']) : '—';
+                $fTime = !empty($dr['hora_salida']) && (string)$dr['hora_salida'] !== '00:00:00' ? substr((string)$dr['hora_salida'], 0, 5) : (!empty($dr['hora_ingreso']) ? substr((string)$dr['hora_ingreso'], 0, 5) : '—');
+                $dType = strtoupper(trim((string)($dr['tipo_documento'] ?? 'DESP')));
+
+                $dr['formatted_date'] = $fDate;
+                $dr['departure_time'] = $fTime;
+                $dr['fecha_formateada'] = ($fDate !== '—' ? $fDate : '') . ($fTime !== '—' ? ' ' . $fTime : '');
+                $dr['doc_number'] = $docNum;
+                $dr['numero_documento'] = $docNum;
+                $dr['doc_type_clean'] = $dType;
+                $dr['tipo_documento'] = $dType;
+                $dr['dispatched_units'] = $units;
+                $dr['salida'] = $units;
+                $dr['unit_price'] = $unitPrice;
+                $dr['total_money'] = $lineMoney;
+                $dr['total_amount'] = $lineMoney;
+                $dr['cliente_nombre'] = $dr['customer_name'] ?? '';
+                $dr['cliente_rut'] = $dr['customer_rut'] ?? '';
+                $dr['cost_center'] = $dr['cc_number'] ?? '';
+                $dr['order_number'] = $dr['cc_number'] ?? '';
+                $dr['item_codigo'] = $dr['item_number_prod'] ?? '';
+                $dr['item_nombre'] = $dr['item_name'] ?? '';
+                $dr['observacion'] = $dr['observacion'] ?? '';
+                $dr['transporte_nombre'] = $dr['transport_company'] ?? '';
+                $dr['chofer_nombre'] = $dr['driver_name'] ?? '';
+                $dr['patente'] = $dr['vehicle_plate'] ?? '';
+                $dr['estado_nombre'] = ($dr['estado'] == 1 || $dr['estado'] == '1' || $dr['estado'] === 'EMITIDO') ? 'EMITIDO' : (string)($dr['estado'] ?? 'EMITIDO');
+
+                $rows[] = $dr;
+                $totalUnits += $units;
+                $totalMoney += $lineMoney;
+                $distinctDespachos[(int)$dr['despacho_id']] = true;
+                if (!empty($dr['id_cliente'])) {
+                    $distinctClients[(int)$dr['id_cliente']] = true;
+                }
+
+                if ($dType === 'FA' || str_contains($dType, 'FACT')) {
+                    $facturasCount++;
+                } else {
+                    $guiasCount++;
+                }
+            }
+        } catch (Throwable) {}
+
+        // Catálogos para filtros
+        $clientsList = [];
+        $transportsList = [];
+        try {
+            $stmtC = $this->erpPdo->query("
+                SELECT DISTINCT c.id, COALESCE(c.cust_company, c.cust_name) AS name, COALESCE(c.cust_company, c.cust_name) AS nombre, c.cust_rut AS rut
+                FROM customer c
+                INNER JOIN despacho d ON d.id_cliente = c.id
+                WHERE d.fecha_ingreso >= UNIX_TIMESTAMP('2026-01-01')
+                ORDER BY name ASC
+            ");
+            $clientsList = $stmtC->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {}
+
+        try {
+            $stmtT = $this->erpPdo->query("SELECT id, trans_name AS name, trans_name AS nombre FROM transports ORDER BY trans_name ASC");
+            $transportsList = $stmtT->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {}
+
+        $totDespachos = count($distinctDespachos);
+        $result['summary'] = [
+            'total_dispatches' => $totDespachos,
+            'total_items_count' => count($rows),
+            'total_units' => $totalUnits,
+            'total_dispatched_units' => $totalUnits,
+            'total_amount' => $totalMoney,
+            'total_dispatched_money' => $totalMoney,
+            'clients_count' => count($distinctClients),
+            'total_clients_count' => count($distinctClients),
+            'average_money_per_dispatch' => $totDespachos > 0 ? round($totalMoney / $totDespachos, 2) : 0.0,
+            'avg_money_per_dispatch' => $totDespachos > 0 ? round($totalMoney / $totDespachos, 2) : 0.0,
+            'avg_amount_per_dispatch' => $totDespachos > 0 ? round($totalMoney / $totDespachos, 2) : 0.0,
+            'average_units_per_dispatch' => $totDespachos > 0 ? round($totalUnits / $totDespachos, 1) : 0.0,
+            'avg_units_per_dispatch' => $totDespachos > 0 ? round($totalUnits / $totDespachos, 1) : 0.0,
+            'facturas_count' => $facturasCount,
+            'fa_count' => $facturasCount,
+            'guias_count' => $guiasCount,
+            'gv_count' => $guiasCount,
+        ];
+        $result['rows'] = $rows;
+        $result['dispatches'] = $rows;
+        $result['clients'] = $clientsList;
+        $result['transports'] = $transportsList;
+
+        return $result;
+    }
+
     public function getErpDashboardSummary(): array
     {
         $workOrders = [
@@ -20098,7 +20363,102 @@ SQL;
         // 3. Consultar asistencia y control de colaciones
         $lunchReport = $this->getOperatorLunchReport($date);
 
-        // 4. Procesar y estructurar datos
+        // 4. Consultar despachos comerciales y su valorización en dinero
+        $dispatchRows = [];
+        $totalDispatchedUnits = 0.0;
+        $totalDispatchedMoney = 0.0;
+        $distinctDespachoIds = [];
+        $usedDeliveryTotals = [];
+
+        try {
+            $sqlDisp = "
+                SELECT 
+                    d.id AS despacho_id,
+                    d.numero_documento,
+                    d.tipo_documento,
+                    d.hora_ingreso,
+                    d.hora_salida,
+                    d.estado,
+                    d.observacion,
+                    COALESCE(c.cust_company, c.cust_name, 'Cliente N/D') AS customer_name,
+                    o.req_number AS cc_number,
+                    od.dlv_docnum AS guia_factura,
+                    od.dlv_total_netto,
+                    od.dlv_total_brutto,
+                    i.item_number_prod,
+                    COALESCE(i.item_title, dd.descripcion, 'Producto N/D') AS item_name,
+                    dd.salida AS dispatched_units,
+                    dd.cantidad AS declared_units,
+                    oi.item_sellprice_netto,
+                    oi.item_sellprice_netto_dsc,
+                    oi.item_amount,
+                    i.item_sellprice_netto AS item_catalog_price,
+                    t1.trans_name AS transport_company,
+                    CONCAT(COALESCE(tc.transports_chofer_nombre, ''), ' ', COALESCE(tc.transports_chofer_paterno, '')) AS driver_name,
+                    tv.transports_vh_patente AS vehicle_plate
+                FROM despacho d
+                INNER JOIN detalle_despacho dd ON d.id = dd.id_despacho
+                LEFT JOIN customer c ON c.id = d.id_cliente
+                LEFT JOIN transports_chofer tc ON tc.id = d.id_chofer
+                LEFT JOIN transports_vehiculo tv ON tv.id = d.id_patente
+                LEFT JOIN transports t1 ON t1.id = d.id_transporte
+                LEFT JOIN item i ON i.id = dd.id_item
+                LEFT JOIN orders_delivery od ON d.numero_documento = od.id
+                LEFT JOIN orders o ON o.id = od.dlv_order_id
+                LEFT JOIN orders_items oi ON oi.req_id = o.id AND oi.item_id = dd.id_item
+                WHERE d.fecha_ingreso BETWEEN :s AND :e
+                ORDER BY d.id DESC, dd.id ASC
+            ";
+            $stmtDisp = $this->erpPdo->prepare($sqlDisp);
+            $stmtDisp->execute([':s' => $startTs, ':e' => $endTs]);
+            $rawDisp = $stmtDisp->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            foreach ($rawDisp as $dr) {
+                $units = (float)($dr['dispatched_units'] ?? $dr['declared_units'] ?? 0);
+                if ($units <= 0 && (float)($dr['declared_units'] ?? 0) > 0) {
+                    $units = (float)$dr['declared_units'];
+                }
+
+                $unitPrice = 0.0;
+                if (!empty($dr['item_sellprice_netto']) && (float)$dr['item_sellprice_netto'] > 0) {
+                    $unitPrice = (float)$dr['item_sellprice_netto'];
+                } elseif (!empty($dr['item_amount']) && (float)$dr['item_amount'] > 0 && !empty($dr['item_sellprice_netto_dsc'])) {
+                    $unitPrice = (float)$dr['item_sellprice_netto_dsc'] / (float)$dr['item_amount'];
+                } elseif (!empty($dr['item_catalog_price']) && (float)$dr['item_catalog_price'] > 0) {
+                    $unitPrice = (float)$dr['item_catalog_price'];
+                }
+
+                $lineMoney = round($units * $unitPrice, 2);
+                if ($lineMoney <= 0 && !empty($dr['dlv_total_netto']) && (float)$dr['dlv_total_netto'] > 0) {
+                    $dlvId = (string)($dr['numero_documento'] ?? '');
+                    if (!isset($usedDeliveryTotals[$dlvId])) {
+                        $lineMoney = (float)$dr['dlv_total_netto'];
+                        $usedDeliveryTotals[$dlvId] = true;
+                        if ($units > 0 && $unitPrice <= 0) {
+                            $unitPrice = round($lineMoney / $units, 2);
+                        }
+                    }
+                }
+
+                $docNum = trim((string)($dr['guia_factura'] ?? ''));
+                if ($docNum === '' || $docNum === '0') {
+                    $docNum = trim((string)($dr['numero_documento'] ?? ''));
+                }
+
+                $dr['doc_number'] = $docNum;
+                $dr['dispatched_units'] = $units;
+                $dr['unit_price'] = $unitPrice;
+                $dr['total_money'] = $lineMoney;
+                $dr['departure_time'] = !empty($dr['hora_salida']) && (string)$dr['hora_salida'] !== '00:00:00' ? substr((string)$dr['hora_salida'], 0, 5) : (!empty($dr['hora_ingreso']) ? substr((string)$dr['hora_ingreso'], 0, 5) : '—');
+
+                $dispatchRows[] = $dr;
+                $totalDispatchedUnits += $units;
+                $totalDispatchedMoney += $lineMoney;
+                $distinctDespachoIds[(int)$dr['despacho_id']] = true;
+            }
+        } catch (Throwable) {}
+
+        // 5. Procesar y estructurar datos
         $totalGoodUnits = 0.0;
         $totalWasteUnits = 0.0;
         $totalWasteKg = 0.0;
@@ -20246,6 +20606,9 @@ SQL;
                 'critical_waste_count' => count($criticalWasteOrders),
                 'lunch_compliance_rate' => $lunchComplianceRate,
                 'lunch_missing_count' => $lunchMissingOps,
+                'total_dispatched_units' => $totalDispatchedUnits,
+                'total_dispatched_money' => $totalDispatchedMoney,
+                'total_dispatches_count' => count($distinctDespachoIds),
             ],
             'by_process' => array_values(array_filter($byProcess, static fn($p) => $p['produced'] > 0 || $p['waste'] > 0 || $p['ots_count'] > 0)),
             'by_machine' => array_values($byMachine),
@@ -20254,6 +20617,10 @@ SQL;
             'stops_by_category' => $stopsByCategory,
             'critical_waste_orders' => $criticalWasteOrders,
             'attendance' => $lunchReport,
+            'dispatches_rows' => $dispatchRows,
+            'total_dispatched_money' => $totalDispatchedMoney,
+            'total_dispatched_units' => $totalDispatchedUnits,
+            'total_dispatches_count' => count($distinctDespachoIds),
         ];
     }
 }

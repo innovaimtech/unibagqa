@@ -38,6 +38,16 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
     // -------------------------------------------------------------------------
     if ($method === 'POST') {
         requireCsrf();
+
+        if (!unibagCanUserPerformModifications()) {
+            $postDate = trim((string)($_POST['date'] ?? $date));
+            if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $postDate)) {
+                $postDate = $date;
+            }
+            redirectResponse('/reports/colaciones?date=' . urlencode($postDate) . '&error=' . rawurlencode('Permiso denegado: únicamente los usuarios autorizados (HECTOR y JAVIER) pueden realizar modificaciones en colaciones.'));
+            return;
+        }
+
         $action = trim((string)($_POST['action'] ?? 'save_single'));
         $postDate = trim((string)($_POST['date'] ?? $date));
         if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $postDate)) {
@@ -197,6 +207,7 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
     }
 
     $editOpParam = trim((string)($_GET['edit_op'] ?? ''));
+    $canEdit = unibagCanUserPerformModifications();
 
     ob_start();
     ?>
@@ -352,12 +363,18 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
             </div>
 
             <div class="action-btns">
-                <button type="button" class="btn-modern secondary" onclick="openMachineBulkModal()">
-                    <span>👥</span> Asignar Masivo por Turno de Colación
-                </button>
-                <button type="button" class="btn-modern primary" id="btnBulkSelected" onclick="openSelectionBulkModal()" disabled style="opacity:0.6;">
-                    <span>📝</span> Asignar Masivo a Seleccionados (<span id="selectedCount">0</span>)
-                </button>
+                <?php if ($canEdit): ?>
+                    <button type="button" class="btn-modern secondary" onclick="openMachineBulkModal()">
+                        <span>👥</span> Asignar Masivo por Turno de Colación
+                    </button>
+                    <button type="button" class="btn-modern primary" id="btnBulkSelected" onclick="openSelectionBulkModal()" disabled style="opacity:0.6;">
+                        <span>📝</span> Asignar Masivo a Seleccionados (<span id="selectedCount">0</span>)
+                    </button>
+                <?php else: ?>
+                    <div style="font-size:12px; font-weight:700; color:#475569; background:#f1f5f9; padding:8px 14px; border-radius:8px; border:1px solid #cbd5e1; display:inline-flex; align-items:center; gap:6px;">
+                        🔒 Modificaciones restringidas exclusivamente a HECTOR y JAVIER
+                    </div>
+                <?php endif; ?>
             </div>
         </div>
 
@@ -367,7 +384,11 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
                 <thead>
                     <tr>
                         <th style="width:36px; text-align:center;">
-                            <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" style="cursor:pointer;">
+                            <?php if ($canEdit): ?>
+                                <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" style="cursor:pointer;">
+                            <?php else: ?>
+                                <span style="font-size:11px; color:#94a3b8;">#</span>
+                            <?php endif; ?>
                         </th>
                         <th>Operador</th>
                         <th>Máquina / Puesto</th>
@@ -397,7 +418,11 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
                                 data-machine="<?=htmlspecialchars($op['machine_name'])?>"
                                 data-op='<?=htmlspecialchars(json_encode($op, JSON_HEX_APOS | JSON_HEX_QUOT), ENT_QUOTES, "UTF-8")?>'>
                                 <td style="text-align:center;">
-                                    <input type="checkbox" class="op-checkbox" onchange="updateSelectedCount()" style="cursor:pointer;">
+                                    <?php if ($canEdit): ?>
+                                        <input type="checkbox" class="op-checkbox" onchange="updateSelectedCount()" style="cursor:pointer;">
+                                    <?php else: ?>
+                                        <span style="color:#cbd5e1;">—</span>
+                                    <?php endif; ?>
                                 </td>
                                 <td>
                                     <div style="font-weight:700; color:#0f172a; display:flex; align-items:center; gap:8px;">
@@ -443,9 +468,13 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
                                     <?php endif; ?>
                                 </td>
                                 <td style="text-align:center;">
-                                    <button type="button" class="btn-modern secondary" style="padding:4px 10px; font-size:12px;" onclick='openSingleEditModal(this)'>
-                                        ✏️ <?=!$op['has_lunch'] ? 'Asignar' : 'Editar'?>
-                                    </button>
+                                    <?php if ($canEdit): ?>
+                                        <button type="button" class="btn-modern secondary" style="padding:4px 10px; font-size:12px;" onclick='openSingleEditModal(this)'>
+                                            ✏️ <?=!$op['has_lunch'] ? 'Asignar' : 'Editar'?>
+                                        </button>
+                                    <?php else: ?>
+                                        <span style="font-size:11.5px; font-weight:700; color:#94a3b8;" title="Modificación restringida a HECTOR y JAVIER">🔒 Bloqueado</span>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -455,6 +484,7 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
         </div>
     </div>
 
+    <?php if ($canEdit): ?>
     <!-- MODAL 1: EDICIÓN INDIVIDUAL -->
     <div class="modal-backdrop" id="singleEditModal">
         <div class="modal-card">
@@ -655,6 +685,7 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
             </form>
         </div>
     </div>
+    <?php endif; ?>
 
     <script>
         function filterTable(status, chip) {

@@ -143,6 +143,8 @@ function unibagRenderWarehousesPage(ReceptionService $service): void
         unibagOutputWarehousesExcel($rows, $totalStockUnits);
     }
 
+    $canEdit = unibagCanUserPerformModifications();
+
     $body = '<div class="erp-prod-shell" style="max-width:none;width:100%">
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:14px">
         <div style="background:#fff;padding:14px 16px;border-radius:10px;border:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
@@ -181,7 +183,7 @@ function unibagRenderWarehousesPage(ReceptionService $service): void
               <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
               Descargar Excel
             </a>
-            <a class="btn" href="/warehouses/new">+ Nueva bodega</a>
+            ' . ($canEdit ? '<a class="btn" href="/warehouses/new">+ Nueva bodega</a>' : '<span class="muted" style="font-size:11px;padding:6px 10px;background:#f1f5f9;border-radius:6px" title="Modificaciones permitidas únicamente para HECTOR y JAVIER">🔒 Bloqueado</span>') . '
           </div>
         </div>
         <div class="erp-prod-panel-body" style="padding:14px">';
@@ -291,11 +293,14 @@ function unibagRenderWarehousesPage(ReceptionService $service): void
           <td style="padding:8px 10px;text-align:right">' . $unitsHtml . '</td>
           <td style="padding:8px 10px;text-align:right">' . $stockHtml . '</td>
           <td style="padding:8px 10px;text-align:center;white-space:nowrap">
-            <a class="btn secondary" href="/warehouses/' . (int)$row['id'] . '/edit" style="margin-right:6px">Editar</a>
+            ' . ($canEdit
+                ? '<a class="btn secondary" href="/warehouses/' . (int)$row['id'] . '/edit" style="margin-right:6px">Editar</a>
             <form method="post" action="/warehouses/' . (int)$row['id'] . '/delete" onsubmit="return confirm(\'¿Eliminar bodega ' . (int)$row['code'] . '? Esta acción no se puede deshacer.\')" style="display:inline;margin:0">
               <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
               <button class="btn secondary" type="submit" style="background:#fef2f2;color:#dc2626;border-color:#fecaca">Eliminar</button>
-            </form>
+            </form>'
+                : '<span class="muted" style="font-size:11px" title="Modificaciones permitidas únicamente para HECTOR y JAVIER">🔒 Bloqueado</span>'
+            ) . '
           </td>
         </tr>';
     }
@@ -624,12 +629,20 @@ function handleWarehousesRoutes(string $path, string $method, ReceptionService $
     }
 
     if ($path === '/warehouses/new' && $method === 'GET') {
+        if (!unibagCanUserPerformModifications()) {
+            redirectResponse('/warehouses?error=' . rawurlencode('Modificaciones restringidas exclusivamente a HECTOR y JAVIER.'));
+            return true;
+        }
         unibagRenderWarehouseFormPage($service);
         return true;
     }
 
     if ($path === '/warehouses' && $method === 'POST') {
         requireCsrf();
+        if (!unibagCanUserPerformModifications()) {
+            redirectResponse('/warehouses?error=' . rawurlencode('Modificaciones restringidas exclusivamente a HECTOR y JAVIER.'));
+            return true;
+        }
         $payload = unibagWarehouseParseFormPayload();
         $result = $service->createWarehouse(
             (int)$payload['code'],
@@ -648,12 +661,20 @@ function handleWarehousesRoutes(string $path, string $method, ReceptionService $
     }
 
     if (preg_match('#^/warehouses/(\d+)/edit$#', $path, $matches) === 1 && $method === 'GET') {
+        if (!unibagCanUserPerformModifications()) {
+            redirectResponse('/warehouses?error=' . rawurlencode('Modificaciones restringidas exclusivamente a HECTOR y JAVIER.'));
+            return true;
+        }
         unibagRenderWarehouseFormPage($service, (int)$matches[1]);
         return true;
     }
 
     if (preg_match('#^/warehouses/(\d+)$#', $path, $matches) === 1 && $method === 'POST') {
         requireCsrf();
+        if (!unibagCanUserPerformModifications()) {
+            redirectResponse('/warehouses?error=' . rawurlencode('Modificaciones restringidas exclusivamente a HECTOR y JAVIER.'));
+            return true;
+        }
         $id = (int)$matches[1];
         $payload = unibagWarehouseParseFormPayload();
         $result = $service->updateWarehouse(
@@ -675,6 +696,10 @@ function handleWarehousesRoutes(string $path, string $method, ReceptionService $
 
     if (preg_match('#^/warehouses/(\d+)/delete$#', $path, $matches) === 1 && $method === 'POST') {
         requireCsrf();
+        if (!unibagCanUserPerformModifications()) {
+            redirectResponse('/warehouses?error=' . rawurlencode('Modificaciones restringidas exclusivamente a HECTOR y JAVIER.'));
+            return true;
+        }
         $id = (int)$matches[1];
         $result = $service->deleteWarehouse($id);
         if (!$result['ok']) {
