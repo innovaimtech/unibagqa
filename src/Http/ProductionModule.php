@@ -367,8 +367,9 @@ function handleProductionRoutes(
         $submode = trim((string)($_REQUEST['submode'] ?? ''));
         $eventId = (int)($_REQUEST['refid'] ?? 0);
 
-        if ($eventId > 0 && $submode === 'end') {
-            $prodService->endEvent($eventId, $workerOtId, 0, $comments);
+        if ($eventId > 0) {
+            $isEnd = ($submode === 'end');
+            $prodService->recordEventPause($workerOtId, $pauseId, $comments, $eventId, $isEnd);
         } else {
             $prodService->recordEventPause($workerOtId, $pauseId, $comments);
         }
@@ -3034,6 +3035,20 @@ function renderProductionOperatorConsole(
         </div>
 
     <?php elseif ($mode === 'pause'): ?>
+        <?php
+        $refEvent = null;
+        if ($refId > 0) {
+            foreach ($events as $ev) {
+                if ((int)$ev['id'] === $refId) {
+                    $refEvent = $ev;
+                    break;
+                }
+            }
+        }
+        $selectedPauseId = $refEvent ? (int)($refEvent['evt_pause_id'] ?? 0) : 1; // 1 = Colación por defecto
+        $pauseComments = $refEvent ? (string)($refEvent['evt_comments'] ?? '') : '';
+        $isPauseEnded = $refEvent && !empty($refEvent['evt_enddat']) && (int)$refEvent['evt_enddat'] > 0;
+        ?>
         <!-- SUBFORMULARIO: Pausa (form.pause.php) -->
         <div style="margin-bottom:15px">
             <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
@@ -3042,14 +3057,14 @@ function renderProductionOperatorConsole(
         </div>
         <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
             <div style="font-size:16px;font-weight:bold;color:#666666;margin-bottom:15px">
-                <i class="fa fa-fw fa-coffee"></i> <?=($refId > 0 ? 'Terminar Pausa' : 'Registrar Pausa')?>
+                <i class="fa fa-fw fa-coffee"></i> <?=($refId > 0 ? ($isPauseEnded ? 'Detalle de Pausa' : 'Terminar Pausa') : 'Registrar Pausa')?>
             </div>
             <form method="post" action="/production/work-orders/events/pause">
                 <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
                 <input type="hidden" name="agid" value="<?=$agId?>">
                 <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
                 <input type="hidden" name="refid" value="<?=$refId?>">
-                <input type="hidden" name="submode" id="pause_submode" value="">
+                <input type="hidden" name="submode" id="pause_submode" value="<?=$refId > 0 && !$isPauseEnded ? 'end' : ''?>">
 
                 <table border="0" width="100%" cellpadding="8" cellspacing="0">
                 <colgroup><col width="220"><col></colgroup>
@@ -3059,24 +3074,29 @@ function renderProductionOperatorConsole(
                         <select name="evt_pause_id" class="inptxt" style="width:250px" required>
                             <option value="">Seleccione motivo...</option>
                             <?php foreach ($pauses as $p): ?>
-                                <option value="<?=$p['id']?>"><?=htmlspecialchars((string)$p['pause_name'])?></option>
+                                <option value="<?=$p['id']?>" <?=((int)$p['id'] === $selectedPauseId ? 'selected' : '')?>><?=htmlspecialchars((string)$p['pause_name'])?></option>
                             <?php endforeach; ?>
                         </select>
                     </td>
                 </tr>
                 <tr>
                     <td class="tdleft">Comentarios</td>
-                    <td class="tdnrm"><textarea name="evt_comments" class="inptxt" style="width:100%;height:60px" placeholder="Observaciones..."></textarea></td>
+                    <td class="tdnrm"><textarea name="evt_comments" class="inptxt" style="width:100%;height:60px" placeholder="Observaciones..."><?=htmlspecialchars($pauseComments)?></textarea></td>
                 </tr>
                 <tr>
                     <td class="tdleft">&nbsp;</td>
                     <td class="tdnrm">
-                        <button type="submit" class="btngrey" style="font-size:14px;padding:8px 20px" onclick="document.getElementById('pause_submode').value='start'">
-                            <i class="fa fa-fw fa-pause"></i> Iniciar Pausa
-                        </button>
-                        <?php if ($refId > 0): ?>
-                            <button type="submit" class="btngreen" style="font-size:14px;padding:8px 20px;margin-left:10px" onclick="document.getElementById('pause_submode').value='end'">
+                        <?php if ($refId <= 0): ?>
+                            <button type="submit" class="btngrey" style="font-size:14px;padding:8px 20px" onclick="document.getElementById('pause_submode').value='start'">
+                                <i class="fa fa-fw fa-pause"></i> Iniciar Pausa
+                            </button>
+                        <?php elseif (!$isPauseEnded): ?>
+                            <button type="submit" class="btngreen" style="font-size:14px;padding:8px 20px" onclick="document.getElementById('pause_submode').value='end'">
                                 <i class="fa fa-fw fa-play"></i> Terminar Pausa
+                            </button>
+                        <?php else: ?>
+                            <button type="submit" class="btngreen" style="font-size:14px;padding:8px 20px">
+                                <i class="fa fa-fw fa-save"></i> Guardar Cambios
                             </button>
                         <?php endif; ?>
                     </td>
@@ -3377,8 +3397,8 @@ function renderProductionOperatorConsole(
                     $evttype = match($ev['evt_type']) {
                         'prod', 'prodsericolor' => ((int)($ev['overrideembalaje_act'] ?? 0) === 1 ? 'Prod. Embalaje' : 'Producción'),
                         'apertura' => 'Alistamiento',
-                        'mantencion' => 'Mantención',
-                        'pause' => 'Pausa',
+                        'mantencion' => !empty($ev['repair_name']) ? 'Mantención: ' . htmlspecialchars((string)$ev['repair_name']) : 'Mantención',
+                        'pause' => !empty($ev['pause_name']) ? 'Pausa: ' . htmlspecialchars((string)$ev['pause_name']) : 'Pausa',
                         default => ucfirst((string)$ev['evt_type'])
                     };
 

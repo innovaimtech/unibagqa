@@ -1119,6 +1119,39 @@ final class ProductionService
     }
 
     /**
+     * Finaliza cualquier evento abierto (`evt_enddat = time()`).
+     */
+    public function endEvent(int $eventId, int $workerOtId, float $amount = 0, string $comments = ''): array
+    {
+        if ($eventId <= 0) {
+            return ['ok' => false, 'error' => 'ID de evento inválido.'];
+        }
+        $now = time();
+        $sql = "UPDATE prod_worker_ot_events 
+                SET evt_enddat = :enddat"
+                . ($comments !== '' ? ", evt_comments = :comments" : "")
+                . ($amount > 0 ? ", evt_amount = :amount" : "")
+                . " WHERE id = :id";
+        $params = [
+            ':enddat' => $now,
+            ':id' => $eventId,
+        ];
+        if ($comments !== '') {
+            $params[':comments'] = $comments;
+        }
+        if ($amount > 0) {
+            $params[':amount'] = $amount;
+        }
+        try {
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
      * Registra evento de Mantención o falla de máquina (`evt_type = 'mantencion'`).
      */
     public function recordEventMantencion(

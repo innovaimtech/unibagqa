@@ -19417,15 +19417,32 @@ SQL;
                 LEFT JOIN prod_worker_ot ot ON ot.wok_init_id = wi.id
                 LEFT JOIN prod_worker_ot_events ev ON ev.evt_prod_worker_otid = ot.id 
                      AND ev.evt_pause_id = 1 AND ev.evt_type = 'pause' AND ev.evt_status > 0
-                WHERE wi.win_day = :day AND wi.win_month = :month AND wi.win_year = :year
+                     AND ev.evt_crtdat BETWEEN :start_ts AND :end_ts
+                WHERE (
+                    (wi.win_day = :day AND wi.win_month = :month AND wi.win_year = :year)
+                    OR (wi.win_status = 1 AND wi.win_crtdat >= (:start_ts - 86400) AND wi.win_crtdat <= :end_ts)
+                    OR (wi.win_status = 1 AND EXISTS (
+                        SELECT 1 FROM prod_worker_ot ot_act 
+                        JOIN prod_worker_ot_events ev_act ON ev_act.evt_prod_worker_otid = ot_act.id 
+                        WHERE ot_act.wok_init_id = wi.id AND ev_act.evt_crtdat BETWEEN :start_ts AND :end_ts
+                    ))
+                  )
                   AND (eq.equipo_name IS NULL OR (eq.equipo_name NOT LIKE '%SUPERVISOR%' AND eq.equipo_name NOT LIKE '%MANTENCION%'))
                   AND (w.wrk_cargoid IS NULL OR w.wrk_cargoid NOT IN (3, 4, 9, 10))
                   AND (wt.type_name IS NULL OR (wt.type_name NOT LIKE '%Supervisor%' AND wt.type_name NOT LIKE '%Mantenci%' AND wt.type_name NOT LIKE '%Mantenim%'))
                   AND (wi.win_wrkid IS NULL OR wi.win_wrkid NOT IN (27, 68))
                 ORDER BY wi.id ASC, ev.id DESC
             ";
+            $dayStartTs = strtotime($date . ' 00:00:00');
+            $dayEndTs = strtotime($date . ' 23:59:59');
             $stmt = $this->erpPdo->prepare($sqlInit);
-            $stmt->execute([':day' => (int)$day, ':month' => (int)$month, ':year' => (int)$year]);
+            $stmt->execute([
+                ':day' => (int)$day,
+                ':month' => (int)$month,
+                ':year' => (int)$year,
+                ':start_ts' => $dayStartTs,
+                ':end_ts' => $dayEndTs
+            ]);
             $rawRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             foreach ($rawRows as $r) {
@@ -19496,6 +19513,91 @@ SQL;
                         $operators[$key]['lunch_status'] = 'COMPLETADA';
                     } else {
                         $operators[$key]['lunch_status'] = 'EN_CURSO';
+                    }
+                }
+            }
+        } catch (Throwable) {}
+
+        // 4b. Vincular directamente TODOS los eventos de colación registrados en prod_worker_ot_events para esta fecha específica
+        // Esto garantiza que cualquier operario que haya marcado colación en la máquina aparezca con su horario,
+        // incluso si su turno en prod_worker_init viene abierto desde el día anterior o turno noche.
+        try {
+            $dayStartTs = strtotime($date . ' 00:00:00');
+            $dayEndTs = strtotime($date . ' 23:59:59');
+            $sqlEvents = "
+                SELECT 
+                    ev.id AS colacion_evt_id,
+                    ev.evt_prod_worker_otid AS ot_id,
+                    ev.evt_crtdat AS colacion_inicio_ts,
+                    ev.evt_enddat AS colacion_fin_ts,
+                    ev.evt_status AS colacion_status,
+                    ev.evt_comments AS colacion_comments,
+                    wi.id AS init_id,
+                    wi.win_wrkid AS worker_id,
+                    wi.win_equipoid AS machine_id,
+                    COALESCE(eq.equipo_name, 'Sin Máquina') AS machine_name,
+                    TRIM(CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, ''))) AS operator_name
+                FROM prod_worker_ot_events ev
+                INNER JOIN prod_worker_ot ot ON ev.evt_prod_worker_otid = ot.id
+                INNER JOIN prod_worker_init wi ON ot.wok_init_id = wi.id
+                LEFT JOIN workers w ON wi.win_wrkid = w.id
+                LEFT JOIN equipo eq ON wi.win_equipoid = eq.id
+                WHERE ev.evt_type = 'pause'
+                  AND ev.evt_pause_id = 1
+                  AND ev.evt_status > 0
+                  AND ev.evt_crtdat BETWEEN :start_ts AND :end_ts
+                ORDER BY ev.id ASC
+            ";
+            $stmtEvts = $this->erpPdo->prepare($sqlEvents);
+            $stmtEvts->execute([':start_ts' => $dayStartTs, ':end_ts' => $dayEndTs]);
+            foreach ($stmtEvts->fetchAll(PDO::FETCH_ASSOC) as $eRow) {
+                $wId = (int)$eRow['worker_id'];
+                $key = 'W_' . $wId;
+                if (!isset($operators[$key])) {
+                    $mId = (int)$eRow['machine_id'];
+                    $mName = trim((string)$eRow['machine_name']) ?: ($allMachines[$mId] ?? 'Sin Máquina');
+                    $opName = trim((string)$eRow['operator_name']) ?: ('Operario #' . $wId);
+                    $operators[$key] = [
+                        'key' => $key,
+                        'source' => 'ERP_EVENT',
+                        'init_id' => (int)$eRow['init_id'],
+                        'worker_id' => $wId,
+                        'operator_name' => $opName,
+                        'machine_id' => $mId,
+                        'machine_name' => $mName,
+                        'shift_start' => '07:10',
+                        'shift_end' => 'En curso',
+                        'shift_status' => 'ACTIVO',
+                        'has_lunch' => true,
+                        'lunch_event_id' => (int)$eRow['colacion_evt_id'],
+                        'lunch_start' => date('H:i', (int)$eRow['colacion_inicio_ts']),
+                        'lunch_end' => !empty($eRow['colacion_fin_ts']) ? date('H:i', (int)$eRow['colacion_fin_ts']) : '',
+                        'duration_minutes' => (!empty($eRow['colacion_fin_ts']) && $eRow['colacion_fin_ts'] > $eRow['colacion_inicio_ts'])
+                            ? (int)round(($eRow['colacion_fin_ts'] - $eRow['colacion_inicio_ts']) / 60)
+                            : 0,
+                        'lunch_status' => !empty($eRow['colacion_fin_ts']) ? 'COMPLETADA' : 'EN_CURSO',
+                        'comments' => (string)($eRow['colacion_comments'] ?? ''),
+                        'latest_ot_id' => (int)$eRow['ot_id'],
+                    ];
+                } else {
+                    $operators[$key]['has_lunch'] = true;
+                    $operators[$key]['lunch_event_id'] = (int)$eRow['colacion_evt_id'];
+                    $operators[$key]['lunch_start'] = date('H:i', (int)$eRow['colacion_inicio_ts']);
+                    $operators[$key]['lunch_end'] = !empty($eRow['colacion_fin_ts']) ? date('H:i', (int)$eRow['colacion_fin_ts']) : '';
+                    if (!empty($eRow['colacion_fin_ts']) && $eRow['colacion_fin_ts'] > $eRow['colacion_inicio_ts']) {
+                        $operators[$key]['duration_minutes'] = (int)round(($eRow['colacion_fin_ts'] - $eRow['colacion_inicio_ts']) / 60);
+                        $operators[$key]['lunch_status'] = 'COMPLETADA';
+                    } else {
+                        $operators[$key]['lunch_status'] = 'EN_CURSO';
+                    }
+                    if (!empty($eRow['colacion_comments'])) {
+                        $operators[$key]['comments'] = (string)$eRow['colacion_comments'];
+                    }
+                    if ((int)$eRow['ot_id'] > 0) {
+                        $operators[$key]['latest_ot_id'] = (int)$eRow['ot_id'];
+                    }
+                    if (empty($operators[$key]['init_id']) && (int)$eRow['init_id'] > 0) {
+                        $operators[$key]['init_id'] = (int)$eRow['init_id'];
                     }
                 }
             }
