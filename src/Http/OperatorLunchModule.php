@@ -294,7 +294,7 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
         <div class="lunch-header">
             <div class="lunch-title-group">
                 <h1><span>🍱</span> Control de Horario de Colación</h1>
-                <p>Gestión y supervisión de colaciones para operarios con turno iniciado en planta.</p>
+                <p>Gestión y supervisión de colaciones para maquinistas de producción con turno en máquina (excluye embalaje, ayudantes y puestos sin máquina).</p>
             </div>
 
             <div class="date-nav">
@@ -312,7 +312,7 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
         <!-- Tarjetas de KPIs -->
         <div class="lunch-kpis">
             <div class="kpi-box total">
-                <div class="label">Operarios en Turno</div>
+                <div class="label">Maquinistas en Turno</div>
                 <div class="val"><?=(int)$report['total_operators']?></div>
                 <div class="sub">Jornada <?=date('d/m/Y', strtotime($date))?></div>
             </div>
@@ -338,7 +338,7 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
             <div class="kpi-box machines">
                 <div class="label">Máquinas Activas</div>
                 <div class="val"><?=count($report['machines'])?></div>
-                <div class="sub">Puestos de trabajo con turno</div>
+                <div class="sub">Máquinas de producción activas</div>
             </div>
         </div>
 
@@ -390,8 +390,8 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
                                 <span style="font-size:11px; color:#94a3b8;">#</span>
                             <?php endif; ?>
                         </th>
-                        <th>Operador</th>
-                        <th>Máquina / Puesto</th>
+                        <th>Maquinista</th>
+                        <th>Máquina de Producción</th>
                         <th style="text-align:center;">Horario Turno</th>
                         <th style="text-align:center;">Inicio Colación</th>
                         <th style="text-align:center;">Fin Colación</th>
@@ -405,7 +405,7 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
                         <tr>
                             <td colspan="9" style="text-align:center; padding:40px; color:#64748b;">
                                 <div style="font-size:32px; margin-bottom:10px;">📋</div>
-                                <strong>No hay operarios con turno iniciado en la fecha seleccionada (<?=htmlspecialchars($date)?>).</strong>
+                                <strong>No hay maquinistas con turno iniciado en máquina en la fecha seleccionada (<?=htmlspecialchars($date)?>).</strong>
                             </td>
                         </tr>
                     <?php else: ?>

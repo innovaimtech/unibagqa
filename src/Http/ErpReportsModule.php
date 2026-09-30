@@ -282,8 +282,8 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
         $body .= '<div style="display:flex; align-items:center; gap:12px;">';
         $body .= '<div style="width:42px; height:42px; border-radius:50%; background:#ffedd5; color:#c2410c; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; flex-shrink:0;">🍱</div>';
         $body .= '<div>';
-        $body .= '<div style="font-size:16px; font-weight:800; color:#9a3412;">Panel de Faltas: ' . $missingLunchCount . ' Operadores con Turno Iniciado sin Registro de Colación (Límite 14:00)</div>';
-        $body .= '<div style="font-size:12.5px; color:#64748b; margin-top:2px;">Jornada del día ' . date('d/m/Y', strtotime($evalDate)) . ': Operarios que iniciaron turno en planta y pasadas las 14:00 hrs aún no registran horario de almuerzo.</div>';
+        $body .= '<div style="font-size:16px; font-weight:800; color:#9a3412;">Alerta de Colaciones: ' . $missingLunchCount . ' Maquinistas sin Registro de Colación (Límite 14:00)</div>';
+        $body .= '<div style="font-size:12.5px; color:#64748b; margin-top:2px;">Jornada del día ' . date('d/m/Y', strtotime($evalDate)) . ': Maquinistas con turno iniciado en máquina que pasadas las 14:00 hrs no registran horario de almuerzo (excluye embalaje, ayudantes y puestos sin máquina).</div>';
         $body .= '</div>';
         $body .= '</div>';
         $body .= '<div style="display:flex; align-items:center; gap:10px;">';
