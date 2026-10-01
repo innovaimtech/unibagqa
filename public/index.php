@@ -2246,12 +2246,16 @@ function renderLoginPage(?string $error = null, array $state = []): void
     http_response_code(200);
     $companies = authCompanyDefinitions();
     $plants = authPlantDefinitions();
-    $areas = erpAreaDefinitions();
+    // Excluir 'RECEPTION' de la pantalla de inicio de sesión ya que se gestiona directamente en el ERP
+    $areas = array_filter(erpAreaDefinitions(), static fn($a) => (string)$a['id'] !== 'RECEPTION');
     $companyId = isset($state['user_company_id']) ? (int)$state['user_company_id'] : 20010;
     $userLogin = (string)($state['user_login'] ?? '');
     $erpArea = normalizeErpArea((string)($state['erp_area'] ?? 'ERP'));
+    if ($erpArea === 'RECEPTION') {
+        $erpArea = 'ERP';
+    }
 
-    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
+    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">';
     echo '<title>Ingreso ERP</title>';
     echo '<style>
         *{box-sizing:border-box}
@@ -2481,53 +2485,70 @@ function render(string $title, string $body): void
         .fold summary::-webkit-details-marker{display:none}
         .fold .fold-body{padding:12px;border-top:1px solid #eef2f7}
         .table-compact th,.table-compact td{padding:7px 8px;font-size:12px}
-        @media (max-width: 900px){
-          main{padding:12px}
+        @media (max-width: 1024px){
+          main{padding:12px; max-width:100% !important; margin:0}
           .grid{grid-template-columns:1fr}
           .row.nowrap{flex-wrap:wrap}
           .bonus-filter-form{grid-template-columns:1fr !important}
           .trace-grid{grid-template-columns:1fr}
           .dashboard-grid{grid-template-columns:1fr}
           .dashboard-shell{grid-template-columns:1fr}
-          .dashboard-filters-grid{grid-template-columns:1fr}
+          .dashboard-filters-grid{grid-template-columns:repeat(auto-fit, minmax(180px, 1fr))}
           .dashboard-field-button .btn{width:100%}
-          .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+          .kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
           .ot-stage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
           .ot-request-grid{grid-template-columns:1fr}
           .prod-shell{flex-direction:column}
+          .topbar .inner,.subbar .inner{padding:8px 12px;gap:8px}
+          .menu,.submenu{width:100%;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;padding-bottom:4px;gap:6px;scrollbar-width:none}
+          .menu::-webkit-scrollbar,.submenu::-webkit-scrollbar{display:none}
+          .menu a,.subitem{white-space:nowrap;flex:none}
+          .top-right{width:100%;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;justify-content:flex-start}
+          .top-right .pill,.top-right select{white-space:nowrap;flex:none}
+          .card,.panel,.legacy-sheet-card,.legacy-form-card,.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+          .card > table,.panel > table,.legacy-sheet-card > table,.legacy-form-card > table{min-width:600px}
         }
         @media (max-width: 640px){
-          main{padding:10px}
-          .card,.panel,.legacy-sheet-card,.legacy-form-card,.kpi-card{padding:10px}
+          main{padding:8px; max-width:100% !important}
+          .card,.panel,.legacy-sheet-card,.legacy-form-card,.kpi-card{padding:10px; border-radius:8px}
           .row{gap:8px}
-          .row > *{flex:1 1 100% !important;min-width:0 !important}
-          .btn,.legacy-primary-btn,.legacy-placeholder-btn{width:100%;max-width:100%}
+          .row > *{flex:1 1 100% !important;min-width:0 !important;max-width:100% !important}
+          .btn,.legacy-primary-btn,.legacy-placeholder-btn{width:100%;max-width:100%;justify-content:center}
           .trace-roll-meta,.ot-meta-grid,.ot-tasks{grid-template-columns:1fr}
-          .kpi-grid{grid-template-columns:1fr}
+          .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+          .kpi-card{padding:8px}
+          .kpi-value{font-size:20px}
           .ot-stage-grid{grid-template-columns:1fr}
-          .topbar .inner,.subbar .inner{padding:8px 10px}
-          .menu,.submenu,.top-right{width:100%;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;padding-bottom:4px}
-          .menu a,.subitem,.top-right .pill{white-space:nowrap;flex:none}
+          .dashboard-filters-grid{grid-template-columns:1fr}
+          .topbar .inner,.subbar .inner{padding:6px 10px}
+          .menu a{font-size:12.5px;padding:6px 8px}
+          .subitem{font-size:12px}
           .prod-sidebar{width:min(300px,86vw)}
           .prod-topbar{align-items:flex-start}
           .prod-topbar-title{width:100%}
           .prod-topbar-right{width:100%;justify-content:flex-start}
-          .prod-topbar-brand{font-size:22px}
-          .prod-main{padding:12px}
+          .prod-topbar-brand{font-size:20px}
+          .prod-main{padding:10px}
           .legacy-actionbar{align-items:stretch}
           .legacy-sheet-card,.legacy-form-card,.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
           .card > table,.panel > table,.legacy-sheet-card > table,.legacy-form-card > table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
-          .legacy-sheet-table{min-width:520px}
+          .legacy-sheet-table{min-width:480px}
           .legacy-label-cell,.legacy-value-cell{width:auto}
           .trace-table{min-width:480px}
           .trace-roll-link{white-space:normal}
           th,td{padding:6px;vertical-align:top}
           iframe{max-width:100%}
-          #label_preview{height:320px}
+          #label_preview{height:300px}
+          .modal-backdrop{padding:8px}
+          .modal-card{width:calc(100vw - 16px);max-height:calc(100vh - 16px);border-radius:10px}
+          input,select,textarea{font-size:14px;padding:8px}
+        }
+        @media (max-width: 420px){
+          .kpi-grid{grid-template-columns:1fr}
         }
         table{width:100%;border-collapse:collapse}
         th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;font-size:13px}
-        .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+        .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%}
         .trace-table{min-width:640px}
         .err{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px;border-radius:10px}
         .muted{color:#6b7280;font-size:12px}
@@ -2933,16 +2954,20 @@ function render(string $title, string $body): void
         echo '<a class="subitem' . ($bonusView === 'bonoayudante' ? ' active' : '') . '" href="/bonificaciones?view=bonoayudante"><span>Bono ayudante</span></a>';
         echo '<a class="subitem' . ($bonusView === 'configuracion' ? ' active' : '') . '" href="/bonificaciones?view=configuracion"><span>Configuración</span></a>';
     } elseif ($activeModule === 'warehouses') {
-        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts');
+        $isTrzEntry = str_starts_with($currentPath, '/stock/traceability-entry') || str_starts_with($currentPath, '/stock/ingreso-trazable');
+        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry;
         $isWh = str_starts_with($currentPath, '/warehouses');
         echo '<a class="subitem' . ($isStock ? ' active' : '') . '" href="/stock"><span>Consulta de stock</span></a>';
+        echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso con Trazabilidad</span></a>';
         echo '<a class="subitem' . ($isWh ? ' active' : '') . '" href="/warehouses"><span>Configuración de bodega</span></a>';
         echo '<a class="subitem' . (str_starts_with($currentPath, '/purchase-orders') ? ' active' : '') . '" href="/purchase-orders?status=active&supplier_type=NATIONAL"><span>Recepción de bobinas (OC)</span></a>';
     } elseif ($activeModule === 'inventory') {
         $isInvReport = str_starts_with($currentPath, '/reports/inventory');
         $isInvCount = str_starts_with($currentPath, '/stock/inventory-counts');
+        $isTrzEntry = str_starts_with($currentPath, '/stock/traceability-entry') || str_starts_with($currentPath, '/stock/ingreso-trazable');
         echo '<a class="subitem' . ($isInvReport ? ' active' : '') . '" href="/reports/inventory"><span>Informe de inventario</span></a>';
         echo '<a class="subitem' . ($isInvCount ? ' active' : '') . '" href="/stock/inventory-counts"><span>Toma de inventario</span></a>';
+        echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso Trazable</span></a>';
     } elseif ($activeModule === 'scale') {
         echo '<a class="subitem" href="/scale/sealing-waste"><span>Merma Selladora</span></a>';
     } elseif ($activeModule === 'production') {

@@ -20671,6 +20671,546 @@ SQL;
             'total_dispatches_count' => count($distinctDespachoIds),
         ];
     }
+
+    // =========================================================================
+    // SECCIÓN 12: INGRESO DE PRODUCTOS EN BODEGA CON CÓDIGO DE TRAZABILIDAD
+    // =========================================================================
+
+    /**
+     * Asegura la existencia de la tabla traceability_warehouse_entries en la BD TRZ.
+     */
+    public function ensureTraceabilityWarehouseEntriesTable(): void
+    {
+        static $done = false;
+        if ($done) return;
+
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS traceability_warehouse_entries (
+                    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                    traceability_code VARCHAR(60) NOT NULL,
+                    entity_type ENUM('PALLET', 'BOX', 'ROLL', 'PRODUCT') NOT NULL DEFAULT 'PRODUCT',
+                    entity_id BIGINT UNSIGNED NULL,
+                    warehouse_id INT UNSIGNED NOT NULL,
+                    warehouse_name VARCHAR(100) NOT NULL,
+                    item_id INT UNSIGNED NULL,
+                    item_code VARCHAR(60) NOT NULL,
+                    item_description VARCHAR(255) NOT NULL,
+                    quantity DECIMAL(12, 3) NOT NULL DEFAULT 1.000,
+                    unit_name VARCHAR(30) NOT NULL DEFAULT 'UNID',
+                    box_count INT UNSIGNED NULL,
+                    weight_kg DECIMAL(10, 3) NULL,
+                    width_mm INT UNSIGNED NULL,
+                    microns INT UNSIGNED NULL,
+                    meters DECIMAL(12, 2) NULL,
+                    lot_number VARCHAR(80) NULL,
+                    location_ref VARCHAR(80) NULL,
+                    order_ref VARCHAR(80) NULL,
+                    operator_name VARCHAR(120) NOT NULL,
+                    comments TEXT NULL,
+                    status VARCHAR(30) NOT NULL DEFAULT 'IN_WAREHOUSE',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uq_code (traceability_code),
+                    INDEX idx_wh (warehouse_id),
+                    INDEX idx_sku (item_code),
+                    INDEX idx_created (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            ");
+            // Asegurar columnas de número de bulto y total de bultos
+            try {
+                @$this->pdo->exec("ALTER TABLE traceability_warehouse_entries ADD COLUMN package_number INT UNSIGNED NULL DEFAULT 1 AFTER box_count");
+            } catch (Throwable) {}
+            try {
+                @$this->pdo->exec("ALTER TABLE traceability_warehouse_entries ADD COLUMN total_packages INT UNSIGNED NULL DEFAULT 1 AFTER package_number");
+            } catch (Throwable) {}
+            // Asegurar que pallets y boxes permitan ingresos directos de bodega sin bobina origen
+            @$this->pdo->exec("ALTER TABLE pallets MODIFY source_roll_id BIGINT UNSIGNED NULL DEFAULT NULL");
+            @$this->pdo->exec("ALTER TABLE pallets MODIFY destination_mode VARCHAR(20) NOT NULL DEFAULT 'BODEGA'");
+            @$this->pdo->exec("ALTER TABLE boxes MODIFY source_roll_id BIGINT UNSIGNED NULL DEFAULT NULL");
+            @$this->pdo->exec("ALTER TABLE boxes MODIFY destination_mode VARCHAR(20) NOT NULL DEFAULT 'BODEGA'");
+            $done = true;
+        } catch (Throwable) {}
+    }
+
+    /**
+     * Genera un código de trazabilidad único con prefijo según el tipo de bulto y fecha actual.
+     */
+    public function generateTraceabilityCode(string $type = 'PRODUCT'): string
+    {
+        $prefix = match (strtoupper(trim($type))) {
+            'PALLET' => 'PL',
+            'BOX' => 'BX',
+            'ROLL' => 'RB',
+            default => 'TRZ',
+        };
+        $date = date('Ymd');
+        $rand = strtoupper(bin2hex(random_bytes(3)));
+        return $prefix . '-' . $date . '-' . $rand;
+    }
+
+    /**
+     * Registra el ingreso a bodega de un producto/bulto con código de trazabilidad.
+     * Impacta TRZ (pallets/boxes/rolls + movements + traceability_warehouse_entries).
+     *
+     * @param array<string, mixed> $data
+     * @return array{ok: bool, error?: string, entry_id?: int, code?: string, codes?: list<string>, count?: int, entries?: list<array<string, mixed>>}
+     */
+    public function registerWarehouseTraceabilityEntry(array $data): array
+    {
+        $this->ensureTraceabilityWarehouseEntriesTable();
+
+        $code = strtoupper(trim((string)($data['traceability_code'] ?? '')));
+        $entityType = strtoupper(trim((string)($data['entity_type'] ?? 'PRODUCT')));
+        if (!in_array($entityType, ['PALLET', 'BOX', 'ROLL', 'PRODUCT'], true)) {
+            $entityType = 'PRODUCT';
+        }
+
+        if ($code === '') {
+            $code = $this->generateTraceabilityCode($entityType);
+        }
+
+        $warehouseId = (int)($data['warehouse_id'] ?? ($data['storehouse_id'] ?? 0));
+        $warehouseName = trim((string)($data['warehouse_name'] ?? ($data['storehouse_name'] ?? '')));
+        $itemCode = trim((string)($data['item_code'] ?? ($data['sku'] ?? '')));
+        $itemDesc = trim((string)($data['item_description'] ?? ($data['product_name'] ?? '')));
+        $itemId = isset($data['item_id']) && (int)$data['item_id'] > 0 ? (int)$data['item_id'] : null;
+        
+        $packagingMode = strtoupper(trim((string)($data['packaging_mode'] ?? 'UNITARY')));
+        $rawCount = (int)($data['package_count'] ?? 1);
+        $rawQty = (float)($data['quantity'] ?? 1);
+
+        if ($packagingMode === 'UNITARY') {
+            // Modo unitario: 1 etiqueta por cada producto/bulto individual (ej. 10 bobinas = 10 etiquetas de 1 BOB)
+            // Si el usuario puso package_count > 1, son esa cantidad de bultos unitarios
+            // Si el usuario puso package_count = 1 pero quantity > 1, interpretamos que son N productos individuales de 1 unidad
+            if ($rawCount > 1) {
+                $packageCount = max(1, min(200, $rawCount));
+                $qty = 1.0;
+            } elseif ($rawQty > 1) {
+                $packageCount = max(1, min(200, (int)round($rawQty)));
+                $qty = 1.0;
+            } else {
+                $packageCount = 1;
+                $qty = max(0.001, $rawQty);
+            }
+        } else {
+            // Modo agrupado: N bultos con M unidades cada uno (ej. 5 cajas de 500 bolsas c/u)
+            $packageCount = max(1, min(200, $rawCount));
+            $qty = max(0.001, $rawQty);
+        }
+
+        $unitName = trim((string)($data['unit_name'] ?? 'UNID')) ?: 'UNID';
+        $boxCount = isset($data['box_count']) ? (int)$data['box_count'] : null;
+        $weightKg = isset($data['weight_kg']) ? (float)$data['weight_kg'] : null;
+        $widthMm = isset($data['width_mm']) ? (int)$data['width_mm'] : null;
+        $microns = isset($data['microns']) ? (int)$data['microns'] : null;
+        $meters = isset($data['meters']) ? (float)$data['meters'] : null;
+        $lotNumber = trim((string)($data['lot_number'] ?? ''));
+        $locationRef = trim((string)($data['location_ref'] ?? ''));
+        $orderRef = trim((string)($data['order_ref'] ?? ''));
+        $operatorName = trim((string)($data['operator_name'] ?? '')) ?: 'Operador Bodega';
+        $comments = trim((string)($data['comments'] ?? ''));
+
+        if ($warehouseId <= 0) {
+            return ['ok' => false, 'error' => 'Debe seleccionar una bodega válida.'];
+        }
+        if ($itemCode === '') {
+            return ['ok' => false, 'error' => 'Debe especificar el código o SKU del producto.'];
+        }
+        if ($qty <= 0) {
+            return ['ok' => false, 'error' => 'La cantidad por bulto debe ser mayor a cero.'];
+        }
+
+        // Si no se pasó nombre de bodega, obtenerlo
+        if ($warehouseName === '') {
+            $whList = $this->listErpStorehouses();
+            foreach ($whList as $w) {
+                if ((int)$w['id'] === $warehouseId) {
+                    $warehouseName = (string)$w['name'];
+                    break;
+                }
+            }
+            if ($warehouseName === '') {
+                $warehouseName = 'Bodega #' . $warehouseId;
+            }
+        }
+
+        // Para rollo, resolver o insertar sku_id en tabla skus una sola vez
+        $skuId = null;
+        if ($entityType === 'ROLL') {
+            if ($itemCode !== '') {
+                $stmtSku = $this->pdo->prepare('SELECT id FROM skus WHERE code = :c LIMIT 1');
+                $stmtSku->execute([':c' => $itemCode]);
+                $skuId = $stmtSku->fetchColumn();
+                if (!$skuId) {
+                    $stmtInsSku = $this->pdo->prepare('INSERT INTO skus (code, description, is_active, created_at) VALUES (:c, :d, 1, NOW())');
+                    $stmtInsSku->execute([':c' => $itemCode, ':d' => $itemDesc !== '' ? $itemDesc : $itemCode]);
+                    $skuId = (int)$this->pdo->lastInsertId();
+                } else {
+                    $skuId = (int)$skuId;
+                }
+            }
+            if (!$skuId || $skuId <= 0) {
+                $skuId = 1;
+            }
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $createdEntries = [];
+
+            for ($i = 0; $i < $packageCount; $i++) {
+                if ($packageCount === 1 && $code !== '') {
+                    $entryCode = $code;
+                } else {
+                    $entryCode = $this->generateTraceabilityCode($entityType);
+                    // Asegurar código único
+                    usleep(1500);
+                }
+
+                $packageNumber = $i + 1;
+                $entityId = null;
+
+                // 1. Crear en tabla específica de entidad física si aplica
+                if ($entityType === 'PALLET') {
+                    $stmtPallet = $this->pdo->prepare('
+                        INSERT INTO pallets (pallet_code, final_sku, warehouse_id, box_count, customer_order_ref, operator_name, destination_mode, status, created_at)
+                        VALUES (:code, :sku, :wh, :boxes, :ord, :op, :dest, :st, NOW())
+                    ');
+                    $stmtPallet->execute([
+                        ':code' => $entryCode,
+                        ':sku' => $itemCode . ' - ' . $itemDesc,
+                        ':wh' => $warehouseId,
+                        ':boxes' => $boxCount ?: (int)$qty,
+                        ':ord' => $orderRef !== '' ? $orderRef : null,
+                        ':op' => $operatorName,
+                        ':dest' => 'BODEGA',
+                        ':st' => 'RECEIVED',
+                    ]);
+                    $entityId = (int)$this->pdo->lastInsertId();
+                } elseif ($entityType === 'BOX') {
+                    $stmtBox = $this->pdo->prepare('
+                        INSERT INTO boxes (box_code, final_sku, units_qty, warehouse_id, customer_order_ref, operator_name, destination_mode, status, created_at)
+                        VALUES (:code, :sku, :qty, :wh, :ord, :op, :dest, :st, NOW())
+                    ');
+                    $stmtBox->execute([
+                        ':code' => $entryCode,
+                        ':sku' => $itemCode . ' - ' . $itemDesc,
+                        ':qty' => $qty,
+                        ':wh' => $warehouseId,
+                        ':ord' => $orderRef !== '' ? $orderRef : null,
+                        ':op' => $operatorName,
+                        ':dest' => 'BODEGA',
+                        ':st' => 'RECEIVED',
+                    ]);
+                    $entityId = (int)$this->pdo->lastInsertId();
+                } elseif ($entityType === 'ROLL') {
+                    $stmtRoll = $this->pdo->prepare('
+                        INSERT INTO rolls (roll_code, sku_id, warehouse_id, weight_kg, received_qty, width_mm, microns, meters, reception_mode, status, created_at)
+                        VALUES (:code, :skuid, :wh, :wkg, :rqty, :wmm, :mic, :met, :mode, :st, NOW())
+                    ');
+                    $stmtRoll->execute([
+                        ':code' => $entryCode,
+                        ':skuid' => $skuId,
+                        ':wh' => $warehouseId,
+                        ':wkg' => $weightKg ?: $qty,
+                        ':rqty' => $qty,
+                        ':wmm' => $widthMm,
+                        ':mic' => $microns,
+                        ':met' => $meters,
+                        ':mode' => 'WAREHOUSE_STOCK',
+                        ':st' => 'RECEIVED',
+                    ]);
+                    $entityId = (int)$this->pdo->lastInsertId();
+                }
+
+                // 2. Registrar movimiento de entrada (RECEIPT)
+                $stmtMov = $this->pdo->prepare('
+                    INSERT INTO movements (entity_type, entity_id, movement_type, to_warehouse_id, payload, created_at)
+                    VALUES (:etype, :eid, :mtype, :towh, :payload, NOW())
+                ');
+                $movPayload = json_encode([
+                    'traceability_code' => $entryCode,
+                    'entity_type' => $entityType,
+                    'entity_id' => $entityId,
+                    'item_code' => $itemCode,
+                    'item_description' => $itemDesc,
+                    'quantity' => $qty,
+                    'unit' => $unitName,
+                    'package_number' => $packageNumber,
+                    'total_packages' => $packageCount,
+                    'operator' => $operatorName,
+                    'comments' => $comments,
+                ], JSON_UNESCAPED_UNICODE);
+
+                $stmtMov->execute([
+                    ':etype' => $entityType,
+                    ':eid' => $entityId ?: 0,
+                    ':mtype' => 'RECEIPT',
+                    ':towh' => $warehouseId,
+                    ':payload' => $movPayload,
+                ]);
+
+                // 3. Registrar entrada detallada en traceability_warehouse_entries
+                $stmtEntry = $this->pdo->prepare('
+                    INSERT INTO traceability_warehouse_entries 
+                    (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name, item_id, item_code, item_description, 
+                     quantity, unit_name, box_count, package_number, total_packages, weight_kg, width_mm, microns, meters, lot_number, location_ref, order_ref, 
+                     operator_name, comments, status, created_at)
+                    VALUES 
+                    (:code, :etype, :eid, :wh, :whname, :itemid, :itemcode, :itemdesc,
+                     :qty, :unit, :boxcnt, :pkgnum, :totpkg, :wkg, :wmm, :mic, :met, :lot, :loc, :ord,
+                     :op, :comments, :st, NOW())
+                ');
+                $stmtEntry->execute([
+                    ':code' => $entryCode,
+                    ':etype' => $entityType,
+                    ':eid' => $entityId,
+                    ':wh' => $warehouseId,
+                    ':whname' => $warehouseName,
+                    ':itemid' => $itemId,
+                    ':itemcode' => $itemCode,
+                    ':itemdesc' => $itemDesc,
+                    ':qty' => $qty,
+                    ':unit' => $unitName,
+                    ':boxcnt' => $boxCount,
+                    ':pkgnum' => $packageNumber,
+                    ':totpkg' => $packageCount,
+                    ':wkg' => $weightKg,
+                    ':wmm' => $widthMm,
+                    ':mic' => $microns,
+                    ':met' => $meters,
+                    ':lot' => $lotNumber !== '' ? $lotNumber : null,
+                    ':loc' => $locationRef !== '' ? $locationRef : null,
+                    ':ord' => $orderRef !== '' ? $orderRef : null,
+                    ':op' => $operatorName,
+                    ':comments' => $comments !== '' ? $comments : null,
+                    ':st' => 'IN_WAREHOUSE',
+                ]);
+
+                $entryId = (int)$this->pdo->lastInsertId();
+
+                $createdEntries[] = [
+                    'entry_id' => $entryId,
+                    'code' => $entryCode,
+                    'traceability_code' => $entryCode,
+                    'entity_type' => $entityType,
+                    'entity_id' => $entityId,
+                    'warehouse_name' => $warehouseName,
+                    'item_code' => $itemCode,
+                    'item_description' => $itemDesc,
+                    'quantity' => $qty,
+                    'unit_name' => $unitName,
+                    'package_number' => $packageNumber,
+                    'total_packages' => $packageCount,
+                    'operator_name' => $operatorName,
+                    'created_at' => date('Y-m-d H:i:s'),
+                ];
+            }
+
+            $this->pdo->commit();
+
+            return [
+                'ok' => true,
+                'count' => count($createdEntries),
+                'entry_id' => $createdEntries[0]['entry_id'] ?? 0,
+                'code' => $createdEntries[0]['code'] ?? $code,
+                'codes' => array_column($createdEntries, 'code'),
+                'entries' => $createdEntries,
+                'entity_type' => $entityType,
+                'entity_id' => $createdEntries[0]['entity_id'] ?? null,
+            ];
+        } catch (Throwable $e) {
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return ['ok' => false, 'error' => 'Error al guardar ingreso trazable: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Elimina un registro de ingreso trazable a bodega y sus entidades generadas (por error humano u operativo).
+     *
+     * @return array{ok: bool, error?: string, code?: string}
+     */
+    public function deleteWarehouseTraceabilityEntry(int $entryId): array
+    {
+        $this->ensureTraceabilityWarehouseEntriesTable();
+        if ($entryId <= 0) {
+            return ['ok' => false, 'error' => 'ID de registro inválido.'];
+        }
+
+        try {
+            $stmt = $this->pdo->prepare('SELECT * FROM traceability_warehouse_entries WHERE id = :id LIMIT 1');
+            $stmt->execute([':id' => $entryId]);
+            $entry = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$entry) {
+                return ['ok' => false, 'error' => 'El registro no existe o ya fue eliminado.'];
+            }
+
+            $code = (string)$entry['traceability_code'];
+            $entityType = strtoupper((string)$entry['entity_type']);
+            $entityId = (int)($entry['entity_id'] ?? 0);
+
+            $this->pdo->beginTransaction();
+
+            if ($entityType === 'PALLET' && $entityId > 0) {
+                $stmtDel = $this->pdo->prepare('DELETE FROM pallets WHERE id = :id OR pallet_code = :c');
+                $stmtDel->execute([':id' => $entityId, ':c' => $code]);
+            } elseif ($entityType === 'BOX' && $entityId > 0) {
+                $stmtDel = $this->pdo->prepare('DELETE FROM boxes WHERE id = :id OR box_code = :c');
+                $stmtDel->execute([':id' => $entityId, ':c' => $code]);
+            } elseif ($entityType === 'ROLL' && $entityId > 0) {
+                $stmtDel = $this->pdo->prepare('DELETE FROM rolls WHERE id = :id OR roll_code = :c');
+                $stmtDel->execute([':id' => $entityId, ':c' => $code]);
+            }
+
+            $stmtDelMov = $this->pdo->prepare('DELETE FROM movements WHERE payload LIKE :c');
+            $stmtDelMov->execute([':c' => '%' . $code . '%']);
+
+            $stmtDelEnt = $this->pdo->prepare('DELETE FROM traceability_warehouse_entries WHERE id = :id');
+            $stmtDelEnt->execute([':id' => $entryId]);
+
+            $this->pdo->commit();
+            return ['ok' => true, 'code' => $code];
+        } catch (Throwable $e) {
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return ['ok' => false, 'error' => 'Error al eliminar ingreso trazable: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Obtiene el acumulado de cantidades ya registradas con código de trazabilidad por artículo en una bodega.
+     *
+     * @return array<string, float>
+     */
+    public function getWarehouseTraceabilityTaggedQuantities(int $warehouseId): array
+    {
+        $this->ensureTraceabilityWarehouseEntriesTable();
+        if ($warehouseId <= 0) {
+            return [];
+        }
+
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT item_code, COALESCE(item_id, 0) AS item_id, SUM(quantity) AS tagged_qty
+                FROM traceability_warehouse_entries
+                WHERE warehouse_id = :wh AND status != 'CANCELLED'
+                GROUP BY item_code, item_id
+            ");
+            $stmt->execute([':wh' => $warehouseId]);
+            $map = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $code = strtoupper(trim((string)$r['item_code']));
+                $id = (int)$r['item_id'];
+                $qty = (float)$r['tagged_qty'];
+                if ($id > 0) {
+                    $map['id_' . $id] = ($map['id_' . $id] ?? 0.0) + $qty;
+                }
+                if ($code !== '') {
+                    $map['code_' . $code] = ($map['code_' . $code] ?? 0.0) + $qty;
+                }
+            }
+            return $map;
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Obtiene registros de trazabilidad en bodega según una lista de códigos específicos.
+     *
+     * @param list<string> $codes
+     * @return list<array<string, mixed>>
+     */
+    public function getWarehouseTraceabilityEntriesByCodes(array $codes): array
+    {
+        $this->ensureTraceabilityWarehouseEntriesTable();
+        $cleanCodes = array_values(array_filter(array_map('strval', $codes)));
+        if ($cleanCodes === []) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($cleanCodes), '?'));
+        try {
+            $stmt = $this->pdo->prepare("SELECT * FROM traceability_warehouse_entries WHERE traceability_code IN ({$placeholders}) ORDER BY id ASC");
+            $stmt->execute($cleanCodes);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Lista los ingresos recientes con código de trazabilidad realizados en bodega.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function listWarehouseTraceabilityEntries(?int $warehouseId = null, ?string $search = null, int $limit = 50): array
+    {
+        $this->ensureTraceabilityWarehouseEntriesTable();
+
+        $params = [];
+        $where = [];
+
+        if ($warehouseId !== null && $warehouseId > 0) {
+            $where[] = 'warehouse_id = :wh';
+            $params[':wh'] = $warehouseId;
+        }
+
+        if ($search !== null && trim($search) !== '') {
+            $where[] = '(traceability_code LIKE :q OR item_code LIKE :q OR item_description LIKE :q OR lot_number LIKE :q OR order_ref LIKE :q OR location_ref LIKE :q)';
+            $params[':q'] = '%' . trim($search) . '%';
+        }
+
+        $whereSql = $where !== [] ? 'WHERE ' . implode(' AND ', $where) : '';
+        $sql = "SELECT * FROM traceability_warehouse_entries {$whereSql} ORDER BY id DESC LIMIT " . max(1, min(200, $limit));
+
+        try {
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->execute($params);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Elimina todos los registros de trazabilidad de un artículo específico en una bodega (para corrección en masa).
+     *
+     * @return array{ok: bool, deleted_count: int, error?: string}
+     */
+    public function deleteWarehouseTraceabilityEntriesByItem(int $warehouseId, string $itemCode): array
+    {
+        $this->ensureTraceabilityWarehouseEntriesTable();
+        $itemCode = trim($itemCode);
+        if ($warehouseId <= 0 || $itemCode === '') {
+            return ['ok' => false, 'deleted_count' => 0, 'error' => 'Parámetros inválidos.'];
+        }
+
+        try {
+            $stmt = $this->pdo->prepare('SELECT id FROM traceability_warehouse_entries WHERE warehouse_id = :wh AND UPPER(item_code) = :sku');
+            $stmt->execute([':wh' => $warehouseId, ':sku' => strtoupper($itemCode)]);
+            $entries = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            if ($entries === []) {
+                return ['ok' => true, 'deleted_count' => 0];
+            }
+
+            $count = 0;
+            foreach ($entries as $e) {
+                $delRes = $this->deleteWarehouseTraceabilityEntry((int)$e['id']);
+                if (!empty($delRes['ok'])) {
+                    $count++;
+                }
+            }
+
+            return ['ok' => true, 'deleted_count' => $count];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'deleted_count' => 0, 'error' => $e->getMessage()];
+        }
+    }
 }
 
 

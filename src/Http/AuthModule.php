@@ -127,6 +127,9 @@ function unibagHandleLoginPost(): void
     $password = (string)($_POST['user_pass'] ?? '');
     $companyId = isset($_POST['user_company_id']) ? (int)$_POST['user_company_id'] : 20010;
     $erpArea = normalizeErpArea((string)($_POST['erp_area'] ?? 'ERP'));
+    if ($erpArea === 'RECEPTION') {
+        $erpArea = 'ERP';
+    }
     $appMode = isset($_POST['appmode']) ? (int)$_POST['appmode'] : 0;
     $plantId = isset($_POST['user_planta_id']) ? (int)$_POST['user_planta_id'] : 0;
     if ($appMode === 0 && $erpArea !== 'ERP') {

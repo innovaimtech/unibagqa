@@ -250,21 +250,21 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
         .btn-modern.blue { background: #0284c7; color: #ffffff; }
         .btn-modern.blue:hover { background: #0369a1; }
 
-        .table-wrap { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.03); }
-        .table-lunch { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
-        .table-lunch thead th { background: #f8fafc; padding: 12px 16px; font-size: 11.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #475569; border-bottom: 1px solid #e2e8f0; }
+        .table-wrap { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; overflow-x: auto; -webkit-overflow-scrolling: touch; box-shadow: 0 4px 16px rgba(0,0,0,0.03); width: 100%; }
+        .table-lunch { width: 100%; min-width: 720px; border-collapse: collapse; text-align: left; font-size: 13px; }
+        .table-lunch thead th { background: #f8fafc; padding: 12px 16px; font-size: 11.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; color: #475569; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }
         .table-lunch tbody td { padding: 14px 16px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
         .table-lunch tbody tr:hover { background: #f8fafc; }
         .table-lunch tbody tr.row-alert { background: #fffaf5; }
         .table-lunch tbody tr.row-alert:hover { background: #fff5eb; }
 
-        .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 800; }
+        .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 800; white-space: nowrap; }
         .status-badge.alert { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
         .status-badge.pending { background: #fef3c7; color: #b45309; border: 1px solid #fde68a; }
         .status-badge.progress { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
         .status-badge.success { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
 
-        .preset-btn { padding: 4px 10px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; font-weight: 700; color: #334155; cursor: pointer; transition: all 0.15s; }
+        .preset-btn { padding: 4px 10px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; font-weight: 700; color: #334155; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
         .preset-btn:hover { background: #e2e8f0; color: #0f172a; }
 
         .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65); backdrop-filter: blur(4px); z-index: 99999; align-items: center; justify-content: center; padding: 12px; }
@@ -280,6 +280,33 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
         .form-row label { display: block; font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 4px; }
         .form-control { width: 100%; padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12.5px; color: #0f172a; box-sizing: border-box; }
         .form-control:focus { outline: none; border-color: #ea580c; box-shadow: 0 0 0 3px rgba(234,88,12,0.15); }
+
+        @media (max-width: 900px) {
+            .lunch-page-wrap { padding: 12px; }
+            .lunch-header { flex-direction: column; align-items: stretch; gap: 14px; margin-bottom: 16px; }
+            .date-nav { width: 100%; justify-content: space-between; box-sizing: border-box; }
+            .lunch-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+            .toolbar { flex-direction: column; align-items: stretch; gap: 12px; padding: 12px 14px; }
+            .action-btns { width: 100%; justify-content: stretch; }
+            .action-btns .btn-modern { flex: 1 1 auto; justify-content: center; }
+        }
+
+        @media (max-width: 640px) {
+            .lunch-page-wrap { padding: 8px; }
+            .lunch-title-group h1 { font-size: 19px; }
+            .lunch-title-group p { font-size: 12.5px; }
+            .lunch-kpis { grid-template-columns: 1fr; gap: 10px; }
+            .kpi-box { padding: 14px 16px; }
+            .kpi-box .val { font-size: 24px; }
+            .filter-chips { width: 100%; overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; padding-bottom: 4px; scrollbar-width: none; }
+            .filter-chips::-webkit-scrollbar { display: none; }
+            .filter-chip { white-space: nowrap; flex: none; font-size: 11.5px; padding: 5px 12px; }
+            .action-btns { flex-direction: column; width: 100%; }
+            .action-btns .btn-modern { width: 100%; justify-content: center; padding: 10px 14px; font-size: 13px; }
+            .modal-card { width: calc(100vw - 20px); max-height: 92vh; border-radius: 12px; }
+            .modal-footer { flex-direction: column; }
+            .modal-footer .btn-modern { width: 100%; justify-content: center; }
+        }
     </style>
 
     <div class="lunch-page-wrap">
