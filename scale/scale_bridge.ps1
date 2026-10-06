@@ -1,14 +1,14 @@
 param(
   [ValidateSet('stub','serial')]
-  [string]$Mode = 'stub',
-  [string]$ComPort = 'COM3',
+  [string]$Mode = 'serial',
+  [string]$ComPort = 'AUTO',
   [int]$BaudRate = 9600,
   [ValidateSet('None','Odd','Even','Mark','Space')]
   [string]$Parity = 'None',
   [int]$DataBits = 8,
   [ValidateSet('One','Two','OnePointFive')]
   [string]$StopBits = 'One',
-  [int]$ReadTimeoutMs = 1200,
+  [int]$ReadTimeoutMs = 1500,
   [string]$Listen = 'http://localhost:8765/',
   [string]$RequestCommand = ''
 )
@@ -18,28 +18,49 @@ $ErrorActionPreference = 'Stop'
 
 $script:stubWeight = $null
 $script:stubUntil = $null
+$script:serial = $null
+$script:activeComPort = $ComPort
+$script:lastRawReading = ''
+$script:lastParsedWeight = $null
 
 function New-JsonResponse([object]$obj) {
   return ($obj | ConvertTo-Json -Depth 5 -Compress)
+}
+
+function Resolve-ComPort() {
+  if ($ComPort -ne 'AUTO' -and -not [string]::IsNullOrWhiteSpace($ComPort)) {
+    return $ComPort
+  }
+  $ports = [System.IO.Ports.SerialPort]::GetPortNames()
+  if ($ports.Count -gt 0) {
+    return $ports[0]
+  }
+  return $null
 }
 
 function Parse-WeightKg([string]$raw) {
   if ([string]::IsNullOrWhiteSpace($raw)) {
     return $null
   }
-  $m = [regex]::Match($raw, '[-+]?\d+(?:[.,]\d+)?')
+  # Dividir por saltos de linea y tomar la ultima linea no vacia
+  $lines = $raw -split "[\r\n]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  $target = if ($lines.Count -gt 0) { $lines[-1] } else { $raw }
+
+  # Extraer numeros con signo opcional y decimales (. o ,)
+  $m = [regex]::Match($target, '[-+]?\s*(\d+(?:[.,]\d+)?)')
   if (-not $m.Success) {
     return $null
   }
-  $s = $m.Value.Replace(',', '.')
-  $v = 0.0
-  if (-not [double]::TryParse($s, [ref]$v)) {
+  $s = $m.Groups[1].Value.Replace(',', '.')
+  try {
+    $v = [double]::Parse($s, [System.Globalization.CultureInfo]::InvariantCulture)
+    if ($v -lt 0) {
+      return $null
+    }
+    return [Math]::Round($v, 3)
+  } catch {
     return $null
   }
-  if ($v -lt 0) {
-    return $null
-  }
-  return [Math]::Round($v, 3)
 }
 
 function Read-WeightKgStub() {
@@ -67,19 +88,24 @@ function Read-WeightKgStub() {
     error = $null
     model = 'LP-7516'
     source = 'stub'
+    com_port = 'STUB'
   }
 }
 
-$serial = $null
-
 function Ensure-SerialOpen() {
-  if ($Mode -ne 'serial') { return }
-  if ($script:serial -ne $null -and $script:serial.IsOpen) { return }
+  if ($Mode -ne 'serial') { return $true }
+  if ($script:serial -ne $null -and $script:serial.IsOpen) { return $true }
+
+  $targetPort = Resolve-ComPort
+  if ([string]::IsNullOrWhiteSpace($targetPort)) {
+    throw "No se encontro ningun puerto COM conectado en Windows. Conecta el cable USB del conversor RS-232."
+  }
+  $script:activeComPort = $targetPort
 
   $p = [System.IO.Ports.Parity]::$Parity
   $s = [System.IO.Ports.StopBits]::$StopBits
 
-  $sp = New-Object System.IO.Ports.SerialPort $ComPort, $BaudRate, $p, $DataBits, $s
+  $sp = New-Object System.IO.Ports.SerialPort $targetPort, $BaudRate, $p, $DataBits, $s
   $sp.NewLine = "`r`n"
   $sp.ReadTimeout = $ReadTimeoutMs
   $sp.WriteTimeout = 800
@@ -87,10 +113,24 @@ function Ensure-SerialOpen() {
   $sp.RtsEnable = $true
   $sp.Open()
   $script:serial = $sp
+  Write-Host ("[SERIAL] Puerto {0} abierto correctamente a {1} baudios (8-{2}-{3})." -f $targetPort, $BaudRate, $Parity[0], $StopBits) -ForegroundColor Green
+  return $true
 }
 
 function Read-WeightKgSerial() {
-  Ensure-SerialOpen
+  try {
+    [void](Ensure-SerialOpen)
+  } catch {
+    return @{
+      ok = $false
+      weight_kg = $null
+      raw = $null
+      error = $_.Exception.Message
+      model = 'LP-7516'
+      source = 'serial'
+      com_port = $script:activeComPort
+    }
+  }
 
   $raw = ''
   try {
@@ -98,14 +138,17 @@ function Read-WeightKgSerial() {
       $script:serial.Write($RequestCommand)
     }
 
-    Start-Sleep -Milliseconds 120
+    Start-Sleep -Milliseconds 80
 
     if ($script:serial.BytesToRead -gt 0) {
       $raw = $script:serial.ReadExisting()
     } else {
       $raw = $script:serial.ReadLine()
     }
+    $script:lastRawReading = $raw
   } catch {
+    try { if ($script:serial -ne $null) { $script:serial.Close() } } catch {}
+    $script:serial = $null
     return @{
       ok = $false
       weight_kg = $null
@@ -113,6 +156,7 @@ function Read-WeightKgSerial() {
       error = $_.Exception.Message
       model = 'LP-7516'
       source = 'serial'
+      com_port = $script:activeComPort
     }
   }
 
@@ -122,19 +166,22 @@ function Read-WeightKgSerial() {
       ok = $false
       weight_kg = $null
       raw = $raw
-      error = 'No se pudo parsear el peso desde la lectura serial.'
+      error = "Trama serial recibida pero sin peso numerico valido: '$raw'"
       model = 'LP-7516'
       source = 'serial'
+      com_port = $script:activeComPort
     }
   }
 
+  $script:lastParsedWeight = $w
   return @{
     ok = $true
     weight_kg = $w
-    raw = $raw
+    raw = $raw.Trim()
     error = $null
     model = 'LP-7516'
     source = 'serial'
+    com_port = $script:activeComPort
   }
 }
 
@@ -149,7 +196,20 @@ $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add($Listen)
 $listener.Start()
 
-Write-Host ("Scale bridge running: {0}  Mode={1}  Model=LP-7516" -f $Listen, $Mode)
+Write-Host "==========================================================" -ForegroundColor Cyan
+Write-Host "     PUENTE DE BALANZA RS-232 / USB (UNIBAG LP-7516)      " -ForegroundColor Cyan
+Write-Host "==========================================================" -ForegroundColor Cyan
+Write-Host ("Servidor HTTP activo en: {0}" -f $Listen) -ForegroundColor Green
+Write-Host ("Modo: {0} | Puerto COM configurado: {1} | Baudios: {2}" -f $Mode, $ComPort, $BaudRate) -ForegroundColor Yellow
+$initialPorts = [System.IO.Ports.SerialPort]::GetPortNames()
+if ($initialPorts.Count -eq 0) {
+    Write-Host "AVISO: No se detecta ningun puerto COM conectado en Windows todavia." -ForegroundColor Magenta
+    Write-Host "Conecta el cable RS-232 a USB y el puente lo detectara automaticamente al solicitar peso." -ForegroundColor Magenta
+} else {
+    Write-Host ("Puertos COM detectados: {0}" -f ($initialPorts -join ', ')) -ForegroundColor Green
+}
+Write-Host "Esperando peticiones desde el sistema de recepcion..." -ForegroundColor Gray
+Write-Host "----------------------------------------------------------" -ForegroundColor DarkGray
 
 try {
   while ($true) {
@@ -157,7 +217,41 @@ try {
     $req = $ctx.Request
     $res = $ctx.Response
 
+    # Habilitar CORS
+    $res.AddHeader('Access-Control-Allow-Origin', '*')
+    $res.AddHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+    $res.AddHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+    if ($req.HttpMethod -eq 'OPTIONS') {
+      $res.StatusCode = 200
+      $res.OutputStream.Close()
+      continue
+    }
+
     $path = $req.Url.AbsolutePath
+    if ($path -eq '/health') {
+      $isOpen = ($script:serial -ne $null -and $script:serial.IsOpen)
+      $ports = [System.IO.Ports.SerialPort]::GetPortNames()
+      $healthObj = @{
+        ok = $true
+        status = 'running'
+        service = 'Unibag Scale Bridge'
+        mode = $Mode
+        configured_com = $ComPort
+        active_com = $script:activeComPort
+        serial_open = $isOpen
+        detected_ports = $ports
+        last_weight = $script:lastParsedWeight
+      }
+      $res.StatusCode = 200
+      $payload = New-JsonResponse $healthObj
+      $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+      $res.ContentType = 'application/json; charset=utf-8'
+      $res.OutputStream.Write($bytes, 0, $bytes.Length)
+      $res.OutputStream.Close()
+      continue
+    }
+
     if ($path -ne '/weight') {
       $res.StatusCode = 404
       $payload = New-JsonResponse @{ ok = $false; error = 'Not found'; path = $path }
@@ -174,8 +268,10 @@ try {
 
     if ($result.ok -eq $true) {
       $res.StatusCode = 200
+      Write-Host ("[{0}] Peso leido: {1} Kg (COM: {2})" -f (Get-Date -Format 'HH:mm:ss'), $result.weight_kg, $result.com_port) -ForegroundColor Green
     } else {
-      $res.StatusCode = 502
+      $res.StatusCode = 200
+      Write-Host ("[{0}] Esperando balanza: {1}" -f (Get-Date -Format 'HH:mm:ss'), $result.error) -ForegroundColor Yellow
     }
 
     $res.ContentType = 'application/json; charset=utf-8'
@@ -185,5 +281,5 @@ try {
 } finally {
   try { $listener.Stop() } catch {}
   try { $listener.Close() } catch {}
-  try { if ($serial -ne $null -and $serial.IsOpen) { $serial.Close() } } catch {}
+  try { if ($script:serial -ne $null -and $script:serial.IsOpen) { $script:serial.Close() } } catch {}
 }

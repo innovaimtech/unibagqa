@@ -63,8 +63,17 @@ final class ScaleService
         }
 
         $data = json_decode((string)$raw, true);
-        if (!is_array($data) || !isset($data['weight_kg'])) {
-            return ['ok' => false, 'weight_kg' => null, 'raw' => (string)$raw, 'error' => 'Respuesta inválida de balanza (se esperaba JSON con weight_kg).'];
+        if (!is_array($data)) {
+            return ['ok' => false, 'weight_kg' => null, 'raw' => (string)$raw, 'error' => 'Respuesta no válida de balanza (se esperaba JSON).'];
+        }
+
+        if (isset($data['ok']) && $data['ok'] === false) {
+            $errorMsg = !empty($data['error']) ? (string)$data['error'] : 'Error en lectura de balanza.';
+            return ['ok' => false, 'weight_kg' => null, 'raw' => (string)$raw, 'error' => $errorMsg];
+        }
+
+        if (!array_key_exists('weight_kg', $data) || $data['weight_kg'] === null) {
+            return ['ok' => false, 'weight_kg' => null, 'raw' => (string)$raw, 'error' => (string)($data['error'] ?? 'Sin lectura de peso disponible.')];
         }
 
         $weight = (float)$data['weight_kg'];
