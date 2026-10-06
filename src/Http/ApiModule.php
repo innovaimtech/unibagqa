@@ -132,10 +132,15 @@ function handleApiRoutes(
             }
         }
 
+        $rollCode = is_array($roll) ? (string)($roll['roll_code'] ?? '') : '';
+
         echo json_encode([
             'ok' => true,
             'id' => $rollId,
-            'label_url' => '/rolls/' . $rollId . '/label?auto_print=1',
+            'roll_code' => $rollCode !== '' ? $rollCode : ('#' . $rollId),
+            'label_url' => '/rolls/' . $rollId . '/label',
+            'print_url' => '/rolls/' . $rollId . '/label?auto_print=1',
+            'server_print_url' => '/rolls/' . $rollId . '/label?server_print=1',
             'printed' => $printed,
             'print_error' => $printError,
         ], JSON_UNESCAPED_UNICODE);

@@ -2,7 +2,10 @@
 
 ## ▶️ 1. Iniciar el servidor PHP local
 
-### Opción A — Usando router.php (recomendado para rutas limpias)
+### Opción A — Con un solo clic (Servidor + Puente de Impresora)
+Ejecuta el archivo [iniciar_proyecto.bat](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/iniciar_proyecto.bat) en la raíz del proyecto. Levantará automáticamente el servidor PHP (puerto 8000) y el puente de impresión térmica (puerto 8767).
+
+### Opción B — Usando router.php (Manual)
 ```powershell
 # Desde la raíz del proyecto:
 cd "C:\Users\Axiliarmu\Desktop\unibag proyecto"
@@ -10,24 +13,11 @@ C:\xampp\php\php.exe -S localhost:8000 router.php
 ```
 > ✅ **PHP detectado en este equipo:** `C:\xampp\php\php.exe` (PHP 8.0.30 — XAMPP)
 
-### Opción B — Apuntando directo a /public
+### Opción C — Iniciar el Puente de Impresión Térmica (Puerto 8767)
+Si vas a imprimir etiquetas físicas directamente (`PRINT_MODE=http`):
 ```powershell
-cd "C:\Users\Axiliarmu\Desktop\unibag proyecto"
-C:\xampp\php\php.exe -S localhost:8000 -t public
+powershell -ExecutionPolicy Bypass -File print\print_bridge.ps1
 ```
-
-> 💡 Si `php` no está en el PATH, usa la ruta completa al ejecutable.
-> Ejemplos comunes:
-> ```powershell
-> # XAMPP
-> C:\xampp\php\php.exe -S localhost:8000 router.php
->
-> # Laragon
-> C:\laragon\bin\php\php-8.x.x\php.exe -S localhost:8000 router.php
->
-> # PHP standalone instalado en C:\php
-> C:\php\php.exe -S localhost:8000 router.php
-> ```
 
 ---
 
@@ -78,7 +68,16 @@ SCALE_HTTP_URL=http://localhost:8765/weight
 # Impresion
 PRINT_MODE=none                          # "none" | "http" | "direct"
 PRINT_HTTP_URL=http://localhost:8767/print
+PRINT_PRINTER_NAME=Barpos
 PRINT_COPIES=1
+PRINT_LANGUAGE=tspl                      # "zpl" para Zebra / "tspl" para Barpos y compatibles
+PRINT_DPI=203
+PRINT_LABEL_WIDTH_MM=100
+PRINT_LABEL_HEIGHT_MM=70
+PRINT_LABEL_GAP_MM=3
+PRINT_DIRECTION=0                        # cambia a 1 si la etiqueta sale invertida
+PRINT_REF_X_DOTS=0
+PRINT_REF_Y_DOTS=0
 ```
 
 ---

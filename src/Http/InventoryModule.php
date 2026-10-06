@@ -729,12 +729,18 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         }
     }
 
-    if ($preItemId > 0 && ($preSku === '' || $preDesc === '')) {
+    $preWidth = 0.0;
+    $preMicrons = 0.0;
+    $preMeters = 0.0;
+    if ($preItemId > 0 || $preSku !== '') {
         foreach ($items as $it) {
-            if ((int)$it['item_id'] === $preItemId) {
-                $preSku = (string)$it['item_number_prod'];
-                $preDesc = (string)$it['item_title'];
-                $preUnit = (string)$it['unit_name'] ?: 'UNID';
+            if (($preItemId > 0 && (int)$it['item_id'] === $preItemId) || ($preSku !== '' && strcasecmp((string)$it['item_number_prod'], $preSku) === 0)) {
+                if ($preSku === '') $preSku = (string)$it['item_number_prod'];
+                if ($preDesc === '') $preDesc = (string)$it['item_title'];
+                if ($preUnit === 'UNID' && !empty($it['unit_name'])) $preUnit = (string)$it['unit_name'];
+                $preWidth = (float)($it['item_reg_width'] ?? 0);
+                $preMicrons = (float)($it['item_reg_gsm'] ?? 0);
+                $preMeters = (float)($it['item_reg_length'] ?? 0);
                 break;
             }
         }
@@ -838,7 +844,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap">';
     $body .= '<a class="btn secondary" href="/stock?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">← Volver a Stock</a>';
     $body .= '<a class="btn secondary" href="/stock/inventory-counts?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">Toma de Inventario</a>';
-    $body .= '<a class="btn" href="/production/traceability" style="background:#0f766e;display:inline-flex;align-items:center;gap:6px">🌳 Árbol Trazabilidad</a>';
+    $body .= '<a class="btn" href="/stock/traceability?bodega=' . $storehouseId . '" style="background:#0f766e;display:inline-flex;align-items:center;gap:6px">🌳 Árbol Trazabilidad</a>';
     $body .= '</div>';
     $body .= '</div>';
 
@@ -925,8 +931,11 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         $itUnit = trim((string)$it['unit_name']) ?: 'UNID';
         $itStock = (float)($it['iss_inventory'] ?? 0);
         $itPending = (float)($it['pending_qty'] ?? $itStock);
+        $itWidth = (float)($it['item_reg_width'] ?? 0);
+        $itMicrons = (float)($it['item_reg_gsm'] ?? 0);
+        $itMeters = (float)($it['item_reg_length'] ?? 0);
         $sel = ($itId === $preItemId || ($preSku !== '' && strcasecmp($itSku, $preSku) === 0)) ? ' selected' : '';
-        $body .= '<option value="' . $itId . '" data-sku="' . h($itSku) . '" data-desc="' . h($itTitle) . '" data-unit="' . h($itUnit) . '" data-pending="' . $itPending . '"' . $sel . '>';
+        $body .= '<option value="' . $itId . '" data-sku="' . h($itSku) . '" data-desc="' . h($itTitle) . '" data-unit="' . h($itUnit) . '" data-pending="' . $itPending . '" data-width="' . $itWidth . '" data-microns="' . $itMicrons . '" data-meters="' . $itMeters . '"' . $sel . '>';
         $body .= h($itSku . ' · ' . $itTitle . ' (Pendiente: ' . number_format($itPending, 1, ',', '.') . ' ' . $itUnit . ' / Total: ' . number_format($itStock, 1, ',', '.') . ')');
         $body .= '</option>';
     }
@@ -980,24 +989,27 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<strong>📊 Resumen de rotulación:</strong> Se generará <strong id="lbl_calc_packages">1</strong> etiqueta única (1 por producto) para un total de <strong id="lbl_calc_total">1.00</strong> unidades de producto.';
     $body .= '</div>';
 
-    $body .= '<div class="trz-fields-2col">';
+    // Cajas por pallet (solo cuando se selecciona modalidad PALLET)
     $body .= '<div class="form-group" id="group_box_count" style="display:none">';
     $body .= '<label>Cajas contenidas por Pallet</label>';
     $body .= '<input type="number" min="1" name="box_count" class="form-control" placeholder="Ej: 50 cajas">';
     $body .= '</div>';
-    $body .= '<div class="form-group" id="group_weight_kg" style="display:none">';
-    $body .= '<label>Peso por Bulto (Kg)</label>';
-    $body .= '<input type="number" step="0.01" min="0.01" name="weight_kg" class="form-control" placeholder="Ej: 250.5">';
-    $body .= '</div>';
-    $body .= '</div>';
 
-    // Campos adicionales de bobina (ocultos por defecto)
-    $body .= '<div id="roll_fields" style="display:none;background:#f8fafc;padding:10px;border-radius:10px;border:1px solid #e2e8f0;margin-bottom:14px">';
-    $body .= '<div class="trz-fields-3col">';
-    $body .= '<div><label style="font-size:11px">Ancho (mm)</label><input type="number" name="width_mm" class="form-control" placeholder="mm"></div>';
-    $body .= '<div><label style="font-size:11px">Micras</label><input type="number" name="microns" class="form-control" placeholder="µm"></div>';
-    $body .= '<div><label style="font-size:11px">Metros</label><input type="number" step="0.1" name="meters" class="form-control" placeholder="m"></div>';
-    $body .= '</div>';
+    // Campos ocultos para datos técnicos rescatados del sistema (Ancho, Micras, Metros)
+    // El usuario no necesita ingresarlos uno a uno, y el peso para productos del inventario no se toma en cuenta
+    $body .= '<input type="hidden" name="width_mm" id="input_width_mm" value="' . ($preWidth > 0 ? (int)round($preWidth) : '') . '">';
+    $body .= '<input type="hidden" name="microns" id="input_microns" value="' . ($preMicrons > 0 ? (int)round($preMicrons) : '') . '">';
+    $body .= '<input type="hidden" name="meters" id="input_meters" value="' . ($preMeters > 0 ? $preMeters : '') . '">';
+
+    $preSpecsArr = [];
+    if ($preWidth > 0) $preSpecsArr[] = 'Ancho: ' . (int)round($preWidth) . ' mm';
+    if ($preMicrons > 0) $preSpecsArr[] = 'Micras: ' . (int)round($preMicrons) . ' µm';
+    if ($preMeters > 0) $preSpecsArr[] = 'Largo: ' . number_format($preMeters, 1, ',', '.') . ' m';
+    $hasPreSpecs = $preSpecsArr !== [];
+
+    $body .= '<div id="erp_specs_badge" style="display:' . ($hasPreSpecs ? 'block' : 'none') . ';background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;color:#0f766e">';
+    $body .= '<strong>📐 Especificaciones técnicas (rescatadas del catálogo):</strong> ';
+    $body .= '<span id="erp_specs_text" style="font-weight:700">' . h(implode(' · ', $preSpecsArr)) . '</span>';
     $body .= '</div>';
 
     // Operador Responsable
@@ -1070,7 +1082,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
         $body .= '<tr class="trz-entry-row" style="border-bottom:1px solid #f1f5f9" data-text="' . h(mb_strtolower($eCode . ' ' . $eSku . ' ' . $eDesc . ' ' . $eWh . ' ' . $eOp)) . '">';
         $body .= '<td style="padding:10px 12px;white-space:nowrap">';
-        $body .= '<a class="trz-tag-code" href="/production/traceability?query=' . rawurlencode($eCode) . '" target="_blank" title="Ver árbol de trazabilidad 360°">' . h($eCode) . ' ↗</a>';
+        $body .= '<button type="button" class="trz-tag-code" style="cursor:pointer;border:1px solid #ccfbf1" onclick="openTraceabilityTreeModal(' . h(json_encode($eCode)) . ')" title="Ver árbol de trazabilidad 360° en vivo">' . h($eCode) . ' 🔍</button>';
+        $body .= ' <a href="/stock/traceability?q=' . rawurlencode($eCode) . '" target="_blank" style="font-size:11.5px;color:#0f766e;text-decoration:none;font-weight:700" title="Abrir en pantalla completa">↗</a>';
         if ($totPkg > 1) {
             $body .= '<div style="font-size:10.5px;color:#0f766e;font-weight:700;margin-top:2px">Bulto ' . $pkgNum . ' / ' . $totPkg . '</div>';
         }
@@ -1132,10 +1145,59 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '</div>';
     $body .= '</div>';
 
+    // MODAL DE ÁRBOL DE TRAZABILIDAD 360° (Directo en inventario)
+    $body .= '<div class="print-modal" id="traceabilityTreeModal" onclick="if(event.target===this)closeTraceabilityTreeModal()">';
+    $body .= '<div class="print-card" style="width:min(900px, 96vw);max-height:92vh;overflow-y:auto;padding:24px">';
+    $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;border-bottom:1px solid #e2e8f0;padding-bottom:12px">';
+    $body .= '<div style="font-weight:900;font-size:18px;color:#0f172a;display:flex;align-items:center;gap:8px">';
+    $body .= '<span>🌳</span> Árbol de Trazabilidad 360° <span id="trz_modal_code_title" style="font-size:14px;color:#00A9A6;font-family:monospace"></span>';
+    $body .= '</div>';
+    $body .= '<button type="button" onclick="closeTraceabilityTreeModal()" style="border:none;background:none;font-size:24px;cursor:pointer;color:#64748b">&times;</button>';
+    $body .= '</div>';
+    $body .= '<div id="trzTreeModalContent">';
+    $body .= '<div style="text-align:center;padding:30px;color:#64748b">Cargando árbol de trazabilidad...</div>';
+    $body .= '</div>';
+    $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:20px;border-top:1px solid #e2e8f0;padding-top:14px">';
+    $body .= '<a id="btn_modal_fullscreen_tree" href="#" target="_blank" class="btn secondary" style="font-size:12px">Ver en Pantalla Completa ↗</a>';
+    $body .= '<button type="button" class="btn" style="background:#64748b;color:#fff" onclick="closeTraceabilityTreeModal()">Cerrar</button>';
+    $body .= '</div>';
+    $body .= '</div>';
+    $body .= '</div>';
+
     // JAVASCRIPT INTERACTIVO
     $body .= '<script>
         var autoPrintData = ' . json_encode($autoPrintEntries, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) . ';
         var currentEntryForSplit = null;
+
+        function openTraceabilityTreeModal(code) {
+            var modal = document.getElementById("traceabilityTreeModal");
+            var title = document.getElementById("trz_modal_code_title");
+            var content = document.getElementById("trzTreeModalContent");
+            var fsBtn = document.getElementById("btn_modal_fullscreen_tree");
+            if (!modal) return;
+            modal.classList.add("open");
+            title.textContent = code;
+            fsBtn.href = "/stock/traceability?q=" + encodeURIComponent(code);
+            content.innerHTML = "<div style=\"text-align:center;padding:40px;color:#64748b\"><div style=\"font-size:32px;margin-bottom:10px\">⏳</div>Cargando trazabilidad 360°...</div>";
+
+            fetch("/stock/traceability/json?q=" + encodeURIComponent(code))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.ok && data.html) {
+                        content.innerHTML = data.html;
+                    } else {
+                        content.innerHTML = "<div class=\"err\" style=\"padding:16px;border-radius:10px\">⚠️ " + escapeHtml(data.error || "No se encontraron registros de trazabilidad para este código.") + "</div>";
+                    }
+                })
+                .catch(function() {
+                    content.innerHTML = "<div class=\"err\" style=\"padding:16px;border-radius:10px\">⚠️ Error al conectar con el servidor.</div>";
+                });
+        }
+
+        function closeTraceabilityTreeModal() {
+            var modal = document.getElementById("traceabilityTreeModal");
+            if (modal) modal.classList.remove("open");
+        }
 
         function changeWarehouse(whId) {
             window.location.href = "/stock/traceability-entry?bodega=" + encodeURIComponent(whId);
@@ -1171,11 +1233,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                 b.classList.toggle("active", b.getAttribute("data-type") === type);
             });
             var isPallet = (type === "PALLET");
-            var isBox = (type === "BOX");
-            var isRoll = (type === "ROLL");
-            document.getElementById("group_box_count").style.display = isPallet ? "block" : "none";
-            document.getElementById("group_weight_kg").style.display = isRoll ? "block" : "none";
-            document.getElementById("roll_fields").style.display = isRoll ? "block" : "none";
+            var groupBox = document.getElementById("group_box_count");
+            if (groupBox) groupBox.style.display = isPallet ? "block" : "none";
             autoGenerateCode();
         }
 
@@ -1252,6 +1311,32 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             document.getElementById("input_item_desc").value = desc;
             document.getElementById("input_unit_name").value = unit;
 
+            // Rescatar especificaciones técnicas directamente del ERP (Ancho, Micras, Metros)
+            var width = parseFloat(opt.getAttribute("data-width") || "0");
+            var microns = parseFloat(opt.getAttribute("data-microns") || "0");
+            var meters = parseFloat(opt.getAttribute("data-meters") || "0");
+            var inputWidth = document.getElementById("input_width_mm");
+            var inputMicrons = document.getElementById("input_microns");
+            var inputMeters = document.getElementById("input_meters");
+            if (inputWidth) inputWidth.value = width > 0 ? Math.round(width) : "";
+            if (inputMicrons) inputMicrons.value = microns > 0 ? Math.round(microns) : "";
+            if (inputMeters) inputMeters.value = meters > 0 ? meters : "";
+
+            var specsBox = document.getElementById("erp_specs_badge");
+            var specsText = document.getElementById("erp_specs_text");
+            var specsArr = [];
+            if (width > 0) specsArr.push("Ancho: " + Math.round(width) + " mm");
+            if (microns > 0) specsArr.push("Micras: " + Math.round(microns) + " µm");
+            if (meters > 0) specsArr.push("Largo: " + meters.toLocaleString("es-CL") + " m");
+            if (specsBox && specsText) {
+                if (specsArr.length > 0) {
+                    specsText.textContent = specsArr.join(" · ");
+                    specsBox.style.display = "block";
+                } else {
+                    specsBox.style.display = "none";
+                }
+            }
+
             // Detección automática de tipo y modalidad según nombre y unidad
             var upper = (desc + " " + unit).toUpperCase();
             if (upper.indexOf("BOB") !== -1 || upper.indexOf("ROLL") !== -1) {
@@ -1307,6 +1392,12 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                 ? ("<div style=\"font-size:12.5px;font-weight:900;color:#0f766e;margin-bottom:4px;background:#f0fdfa;border:1px solid #ccfbf1;padding:2px 8px;border-radius:6px;display:inline-block\">BULTO " + (data.package_number || (idx + 1)) + " DE " + (data.total_packages || totalCount) + "</div>")
                 : "";
 
+            var specsArr = [];
+            if (data.width_mm && parseFloat(data.width_mm) > 0) specsArr.push("Ancho: " + Math.round(data.width_mm) + " mm");
+            if (data.microns && parseFloat(data.microns) > 0) specsArr.push("Micras: " + Math.round(data.microns) + " µm");
+            if (data.meters && parseFloat(data.meters) > 0) specsArr.push("Largo: " + parseFloat(data.meters).toLocaleString("es-CL") + " m");
+            var specsHtml = specsArr.length > 0 ? ("<div style=\"font-size:11px;font-weight:700;color:#0f766e;margin-bottom:4px\">📐 " + escapeHtml(specsArr.join(" · ")) + "</div>") : "";
+
             return "<div class=\"printable-label printable-label-page\" style=\"margin-top:" + (idx > 0 ? "14px" : "0") + "\">" +
                 "<div style=\"font-size:16px;font-weight:900;color:#00A9A6;letter-spacing:1px;margin-bottom:2px\">UNIBAG CHILE</div>" +
                 "<div style=\"font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;margin-bottom:6px\">" + escapeHtml(wh) + "</div>" +
@@ -1317,6 +1408,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                 "<div style=\"border-top:1px dashed #cbd5e1;padding-top:8px;text-align:left;font-size:12px\">" +
                     "<div style=\"font-weight:800;font-size:13px;color:#0f172a\">" + escapeHtml(sku) + "</div>" +
                     "<div style=\"color:#475569;margin-bottom:6px\">" + escapeHtml(desc) + "</div>" +
+                    specsHtml +
                     "<div style=\"display:flex;justify-content:space-between;font-weight:800;font-size:14px;color:#0f172a\">" +
                         "<span>CANTIDAD:</span>" +
                         "<span style=\"color:#0f766e\">" + escapeHtml(qty) + "</span>" +
@@ -1395,13 +1487,14 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             var printable = document.getElementById("printableArea").innerHTML;
             var win = window.open("", "_blank", "width=520,height=700");
             win.document.write("<!doctype html><html><head><title>Imprimir Etiquetas</title><style>" +
-                "@page { size: auto; margin: 4mm; }" +
-                "body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #fff; color: #000; text-align: center; }" +
-                ".barcode-visual { height: 48px; margin: 8px auto; background: repeating-linear-gradient(90deg,#000 0,#000 2px,#fff 2px,#fff 4px,#000 4px,#000 7px,#fff 7px,#fff 9px); width: 85%; }" +
-                ".printable-label { border: 2px solid #000; border-radius: 8px; padding: 14px; margin: 0 auto 12px auto; max-width: 440px; box-sizing: border-box; page-break-inside: avoid; break-inside: avoid; }" +
+                "@page { size: 100mm 70mm; margin: 0; }" +
+                "* { box-sizing: border-box; }" +
+                "body { font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; margin: 0; padding: 0; background: #fff; color: #000; text-align: center; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
+                ".barcode-visual { height: 36px; margin: 4px auto; background: repeating-linear-gradient(90deg,#000 0,#000 2px,#fff 2px,#fff 4px,#000 4px,#000 7px,#fff 7px,#fff 9px); width: 85%; }" +
+                ".printable-label { width: 100mm; height: 70mm; max-width: 100mm; max-height: 70mm; border: 1.5pt solid #000; border-radius: 4px; padding: 2.5mm 3.5mm; margin: 0 auto 10px auto; box-sizing: border-box; page-break-inside: avoid; break-inside: avoid; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; }" +
                 "@media print {" +
-                    "body { margin: 0; padding: 0; }" +
-                    ".printable-label-page { page-break-after: always !important; break-after: page !important; page-break-inside: avoid !important; break-inside: avoid !important; margin: 0 auto 8mm auto !important; border: 2px solid #000 !important; }" +
+                    "body { margin: 0 !important; padding: 0 !important; width: 100mm !important; height: 70mm !important; }" +
+                    ".printable-label-page { width: 100mm !important; height: 70mm !important; margin: 0 !important; padding: 2.5mm 3.5mm !important; page-break-after: always !important; break-after: page !important; page-break-inside: avoid !important; break-inside: avoid !important; border: none !important; }" +
                     ".printable-label-page:last-child { page-break-after: auto !important; break-after: auto !important; margin-bottom: 0 !important; }" +
                 "}" +
             "</style></head><body>" + printable + "</body></html>");
@@ -1446,9 +1539,291 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 }
 
 /**
+ * Genera el HTML del árbol genealógico de trazabilidad 360° para visualización en inventario.
+ *
+ * @param array<string, mixed> $treeData
+ */
+function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false): string
+{
+    $query = (string)($treeData['query'] ?? '');
+    $whEntry = $treeData['warehouse_entry'] ?? null;
+    $roll = $treeData['roll'] ?? null;
+    $pallet = $treeData['pallet'] ?? null;
+    $box = $treeData['box'] ?? null;
+    $po = $treeData['purchase_order'] ?? null;
+    $supplier = $treeData['supplier'] ?? null;
+    $wo = $treeData['work_order'] ?? null;
+    $events = (array)($treeData['events'] ?? []);
+    $childRolls = (array)($treeData['child_rolls'] ?? []);
+    $boxes = (array)($treeData['boxes'] ?? []);
+    $movements = (array)($treeData['movements'] ?? []);
+
+    $code = (string)($whEntry['traceability_code'] ?? $roll['roll_code'] ?? $box['box_code'] ?? $pallet['pallet_code'] ?? $query);
+    $type = strtoupper((string)($whEntry['entity_type'] ?? ($roll ? 'ROLL' : ($box ? 'BOX' : ($pallet ? 'PALLET' : 'PRODUCT')))));
+    $sku = (string)($whEntry['item_code'] ?? $roll['sku_code'] ?? $box['final_sku'] ?? $pallet['final_sku'] ?? '-');
+    $desc = (string)($whEntry['item_description'] ?? $roll['sku_desc'] ?? '-');
+    $qty = (float)($whEntry['quantity'] ?? $roll['received_qty'] ?? $box['units_qty'] ?? 1);
+    $unit = (string)($whEntry['unit_name'] ?? 'UNID');
+    $whName = (string)($whEntry['warehouse_name'] ?? $roll['warehouse_name'] ?? 'Bodega');
+    $date = !empty($whEntry['created_at']) ? date('d/m/Y H:i', strtotime((string)$whEntry['created_at'])) : (!empty($roll['created_at']) ? date('d/m/Y H:i', strtotime((string)$roll['created_at'])) : '-');
+    $operator = (string)($whEntry['operator_name'] ?? $roll['operator_name'] ?? '-');
+
+    $width = !empty($whEntry['width_mm']) ? (float)$whEntry['width_mm'] : (!empty($roll['width_mm']) ? (float)$roll['width_mm'] : 0);
+    $microns = !empty($whEntry['microns']) ? (float)$whEntry['microns'] : (!empty($roll['microns']) ? (float)$roll['microns'] : 0);
+    $meters = !empty($whEntry['meters']) ? (float)$whEntry['meters'] : (!empty($roll['meters']) ? (float)$roll['meters'] : 0);
+
+    $html = '<div class="tree-flow-wrap" style="font-family:inherit">';
+
+    // Banner de identificación
+    $html .= '<div style="background:linear-gradient(135deg, #0f172a, #1e293b);color:#fff;padding:16px 20px;border-radius:12px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">';
+    $html .= '<div>';
+    $html .= '<div style="font-size:11px;font-weight:700;color:#38bdf8;text-transform:uppercase;letter-spacing:.05em">Consulta de Trazabilidad 360°</div>';
+    $html .= '<div style="font-family:monospace;font-size:20px;font-weight:900;color:#fff;letter-spacing:1px;margin-top:2px">' . h($code) . '</div>';
+    $html .= '<div style="font-size:12.5px;color:#94a3b8;margin-top:2px">' . h($sku) . ' · ' . h($desc) . '</div>';
+    $html .= '</div>';
+    $html .= '<div style="display:flex;gap:8px;align-items:center">';
+    $html .= '<span class="badge-type ' . h($type) . '" style="font-size:12px;padding:5px 12px">' . h($type) . '</span>';
+    $statusText = (string)($whEntry['status'] ?? $roll['status'] ?? 'EN BODEGA');
+    $html .= '<span style="font-size:11.5px;font-weight:800;background:#00A9A6;color:#fff;padding:5px 10px;border-radius:6px">' . h($statusText) . '</span>';
+    $html .= '</div>';
+    $html .= '</div>';
+
+    $html .= '<div style="display:flex;flex-direction:column;gap:14px">';
+
+    // NODO 1: Origen / Compra
+    $html .= '<div class="trz-card" style="padding:16px;background:#fff">';
+    $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+    $html .= '<span style="font-size:11.5px;font-weight:800;color:#0369a1;background:#e0f2fe;border:1px solid #bae6fd;padding:3px 10px;border-radius:6px">🏢 1. Origen & Adquisición</span>';
+    if ($po && !empty($po['date'])) {
+        $html .= '<span style="font-size:11.5px;font-weight:700;color:#64748b">📅 ' . h((string)$po['date']) . '</span>';
+    }
+    $html .= '</div>';
+
+    if ($po || $supplier) {
+        $html .= '<div style="font-size:14px;font-weight:800;color:#0f172a">' . h((string)($supplier['name'] ?? 'Proveedor Nacional')) . '</div>';
+        $html .= '<div style="font-size:12px;color:#64748b;margin-top:2px">RUT: <strong>' . h((string)($supplier['rut'] ?? '-')) . '</strong> · País: <strong>' . h((string)($supplier['country'] ?? 'Chile')) . '</strong></div>';
+        if ($po && !empty($po['po_code'])) {
+            $html .= '<div style="margin-top:8px;font-size:12.5px;color:#0369a1;background:#f0f9ff;padding:5px 10px;border-radius:6px;font-weight:700;display:inline-block">📄 Orden de Compra ERP: ' . h((string)$po['po_code']) . '</div>';
+        }
+    } else {
+        $html .= '<div style="font-size:12.5px;color:#475569">Ingreso directo a existencias en bodega / Catálogo ERP (sin orden de compra importada asociada).</div>';
+    }
+    $html .= '</div>';
+
+    // Conector
+    $html .= '<div style="text-align:center;color:#00A9A6;font-size:18px;margin:-8px 0;user-select:none">⬇</div>';
+
+    // NODO 2: Existencia FÍSICA en Bodega (Tarjeta Principal)
+    $html .= '<div class="trz-card" style="padding:18px;border:2px solid #00A9A6;background:#fcfefe">';
+    $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">';
+    $html .= '<span style="font-size:11.5px;font-weight:800;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;padding:3px 10px;border-radius:6px">📦 2. Bulto / Existencia Física en Bodega</span>';
+    $html .= '<span style="font-size:12px;font-weight:700;color:#0f766e">📍 ' . h($whName) . '</span>';
+    $html .= '</div>';
+
+    $html .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">';
+    $html .= '<div style="flex:1;min-width:240px">';
+    $html .= '<div style="font-family:monospace;font-size:17px;font-weight:900;color:#0f766e">' . h($code) . '</div>';
+    $html .= '<div style="font-size:14px;font-weight:800;color:#0f172a;margin-top:2px">' . h($sku) . '</div>';
+    $html .= '<div style="font-size:12.5px;color:#475569;margin-top:2px">' . h($desc) . '</div>';
+    $html .= '</div>';
+    $html .= '<div style="text-align:right">';
+    $html .= '<div style="font-size:20px;font-weight:900;color:#0f172a">' . number_format($qty, 2, ',', '.') . ' <span style="font-size:12px;color:#64748b">' . h($unit) . '</span></div>';
+    $html .= '<div style="font-size:11px;color:#64748b;margin-top:2px">Cantidad rotulada</div>';
+    $html .= '</div>';
+    $html .= '</div>';
+
+    if ($width > 0 || $microns > 0 || $meters > 0) {
+        $html .= '<div style="margin-top:12px;background:#f0fdfa;border:1px dashed #99f6e4;padding:8px 12px;border-radius:8px;font-size:12px;color:#0f766e;display:flex;gap:12px;flex-wrap:wrap">';
+        $html .= '<span>📐 <strong>Especificaciones Técnicas:</strong></span>';
+        if ($width > 0) $html .= '<span>Ancho: <strong>' . (int)round($width) . ' mm</strong></span>';
+        if ($microns > 0) $html .= '<span>Micras: <strong>' . (int)round($microns) . ' µm</strong></span>';
+        if ($meters > 0) $html .= '<span>Largo: <strong>' . number_format($meters, 1, ',', '.') . ' m</strong></span>';
+        $html .= '</div>';
+    }
+
+    $comments = trim((string)($whEntry['comments'] ?? ''));
+    if ($comments !== '') {
+        $html .= '<div style="margin-top:10px;font-size:12px;color:#64748b;background:#f8fafc;padding:6px 10px;border-radius:6px">💬 Observaciones: ' . h($comments) . '</div>';
+    }
+
+    $html .= '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;font-size:11.5px;color:#64748b">';
+    $html .= '<span>👤 Operador Responsable: <strong>' . h($operator) . '</strong></span>';
+    $html .= '<span>📅 Fecha de Ingreso: <strong>' . h($date) . '</strong></span>';
+    $html .= '</div>';
+    $html .= '</div>';
+
+    // Conector
+    $html .= '<div style="text-align:center;color:#00A9A6;font-size:18px;margin:-8px 0;user-select:none">⬇</div>';
+
+    // NODO 3: Transformación en Planta / OT
+    $html .= '<div class="trz-card" style="padding:16px;background:#fff">';
+    $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+    $html .= '<span style="font-size:11.5px;font-weight:800;color:#b45309;background:#fffbeb;border:1px solid #fde68a;padding:3px 10px;border-radius:6px">⚙️ 3. Procesamiento en Planta (OT)</span>';
+    if ($wo) {
+        $html .= '<span style="font-size:12px;font-weight:800;color:#b45309">OT #' . h((string)($wo['prd_number'] ?? '')) . '</span>';
+    } else {
+        $html .= '<span style="font-size:11.5px;font-weight:700;color:#0f766e">✅ En Stock Bodega</span>';
+    }
+    $html .= '</div>';
+
+    if ($wo) {
+        $html .= '<div style="font-size:13.5px;font-weight:800;color:#0f172a">Máquina: ' . h((string)($wo['equipo_name'] ?? '')) . ' <span style="font-size:12px;color:#64748b">(' . h((string)($wo['type_ant_title'] ?? '')) . ')</span></div>';
+        $html .= '<div style="font-size:12px;color:#475569;margin-top:2px">Operador OT: <strong>' . h((string)(($wo['wrk_firstname'] ?? '') . ' ' . ($wo['wrk_lastname'] ?? ''))) . '</strong></div>';
+        if ($events !== []) {
+            $html .= '<div style="margin-top:10px;background:#f8fafc;border-radius:8px;padding:8px 12px;font-size:11.5px">';
+            $html .= '<div style="font-weight:700;color:#334155;margin-bottom:4px">Historial de eventos de máquina:</div>';
+            foreach ($events as $ev) {
+                $evTime = !empty($ev['evt_startdat']) ? date('H:i d/m', strtotime((string)$ev['evt_startdat'])) : '';
+                $html .= '<div style="color:#64748b;margin-bottom:2px">⏱️ ' . h($evTime) . ' · ' . h((string)($ev['evt_desc'] ?? '')) . '</div>';
+            }
+            $html .= '</div>';
+        }
+    } else {
+        $html .= '<div style="font-size:12.5px;color:#64748b">Bulto en estado de inventario disponible para uso o despacho (no ha sido transformado en máquina aún).</div>';
+    }
+    $html .= '</div>';
+
+    // NODO 4: Bultos Hijos Resultantes (si aplica)
+    if ($childRolls !== [] || $boxes !== []) {
+        $html .= '<div style="text-align:center;color:#00A9A6;font-size:18px;margin:-8px 0;user-select:none">⬇</div>';
+        $html .= '<div class="trz-card" style="padding:16px;background:#fff">';
+        $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+        $html .= '<span style="font-size:11.5px;font-weight:800;color:#6d28d9;background:#f5f3ff;border:1px solid #ddd6fe;padding:3px 10px;border-radius:6px">📦 4. Bultos Hijos Resultantes</span>';
+        $html .= '<span style="font-size:11.5px;font-weight:700;color:#6d28d9">' . (count($childRolls) + count($boxes)) . ' generados</span>';
+        $html .= '</div>';
+        $html .= '<div style="display:flex;flex-direction:column;gap:6px">';
+        foreach ($childRolls as $cRoll) {
+            $html .= '<div style="background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;font-size:12px">';
+            $html .= '<div><span style="font-weight:800;color:#6d28d9">🌀 Bobina Hija: ' . h((string)$cRoll['roll_code']) . '</span> <span style="color:#64748b">(' . h((string)($cRoll['sku_code'] ?? '')) . ')</span></div>';
+            $html .= '<div style="font-weight:800;color:#0f172a">' . number_format((float)($cRoll['received_qty'] ?? 1), 2, ',', '.') . '</div>';
+            $html .= '</div>';
+        }
+        foreach ($boxes as $bx) {
+            $html .= '<div style="background:#fffbeb;border:1px solid #fef3c7;border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;font-size:12px">';
+            $html .= '<div><span style="font-weight:800;color:#b45309">📦 Caja: ' . h((string)$bx['box_code']) . '</span> <span style="color:#64748b">(' . h((string)($bx['final_sku'] ?? '')) . ')</span></div>';
+            $html .= '<div style="font-weight:800;color:#0f172a">' . number_format((float)($bx['units_qty'] ?? 1), 0, ',', '.') . ' un</div>';
+            $html .= '</div>';
+        }
+        $html .= '</div>';
+        $html .= '</div>';
+    }
+
+    // NODO 5: Auditoría de Movimientos
+    if ($movements !== []) {
+        $html .= '<div style="text-align:center;color:#00A9A6;font-size:18px;margin:-8px 0;user-select:none">⬇</div>';
+        $html .= '<div class="trz-card" style="padding:16px;background:#fff">';
+        $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
+        $html .= '<span style="font-size:11.5px;font-weight:800;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;padding:3px 10px;border-radius:6px">📜 5. Cadena de Custodia & Movimientos</span>';
+        $html .= '<span style="font-size:11.5px;font-weight:700;color:#64748b">' . count($movements) . ' registros</span>';
+        $html .= '</div>';
+        $html .= '<div style="display:flex;flex-direction:column;gap:6px">';
+        foreach ($movements as $m) {
+            $mDate = !empty($m['created_at']) ? date('d/m/Y H:i', strtotime((string)$m['created_at'])) : '-';
+            $mType = (string)($m['movement_type'] ?? 'MOVIMIENTO');
+            $toWh = (int)($m['to_warehouse_id'] ?? 0);
+            $html .= '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;font-size:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">';
+            $html .= '<div><strong style="color:#0f766e">' . h($mType) . '</strong>' . ($toWh > 0 ? (' <span style="color:#64748b">→ Bodega #' . $toWh . '</span>') : '') . '</div>';
+            $html .= '<div style="font-size:11px;color:#94a3b8">📅 ' . h($mDate) . '</div>';
+            $html .= '</div>';
+        }
+        $html .= '</div>';
+        $html .= '</div>';
+    }
+
+    $html .= '</div>'; // Fin flex column
+    $html .= '</div>'; // Fin tree-flow-wrap
+
+    return $html;
+}
+
+/**
+ * Renderiza la pantalla del Árbol de Trazabilidad 360° dentro del módulo de Inventario.
+ */
+function unibagRenderStockTraceabilityTreePage(ReceptionService $service, ?ProductionService $prodService, string $currentOperatorName): void
+{
+    $service->ensureTraceabilityWarehouseEntriesTable();
+    $bodegaId = isset($_GET['bodega']) ? (int)$_GET['bodega'] : 0;
+    $query = trim((string)($_GET['q'] ?? ($_GET['query'] ?? '')));
+
+    $treeData = null;
+    $error = '';
+    if ($query !== '') {
+        if ($prodService !== null) {
+            $treeData = $prodService->getTraceabilityTree($query);
+        }
+        if ($treeData === null || ($treeData['warehouse_entry'] === null && $treeData['roll'] === null && $treeData['box'] === null && $treeData['pallet'] === null && $treeData['work_order'] === null && $treeData['purchase_order'] === null)) {
+            $error = 'No se encontraron registros de trazabilidad para "' . $query . '". Verifique el código ingresado.';
+        }
+    }
+
+    $recentEntries = $service->listWarehouseTraceabilityEntries($bodegaId > 0 ? $bodegaId : null, null, 15);
+
+    $body = '<div class="trz-shell">';
+
+    // Header
+    $body .= '<div class="trz-header">';
+    $body .= '<div>';
+    $body .= '<div class="trz-title"><span>🌳</span> Árbol Genealógico de Trazabilidad 360°</div>';
+    $body .= '<div class="trz-sub">Auditoría completa e integral de existencias: origen en OC, rotulación en bodega, transformaciones en máquinas y bultos resultantes.</div>';
+    $body .= '</div>';
+    $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+    $body .= '<a class="btn secondary" href="/stock' . ($bodegaId > 0 ? ('?bodega=' . $bodegaId) : '') . '">← Volver a Stock</a>';
+    $body .= '<a class="btn secondary" href="/stock/traceability-entry' . ($bodegaId > 0 ? ('?bodega=' . $bodegaId) : '') . '">📦 Ingreso Trazable</a>';
+    $body .= '<a class="btn secondary" href="/stock/inventory-counts' . ($bodegaId > 0 ? ('?bodega=' . $bodegaId) : '') . '">Toma de Inventario</a>';
+    $body .= '</div>';
+    $body .= '</div>';
+
+    // Buscador
+    $body .= '<div class="trz-card" style="margin-bottom:20px;background:#f8fafc">';
+    $body .= '<form method="get" action="/stock/traceability" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
+    if ($bodegaId > 0) {
+        $body .= '<input type="hidden" name="bodega" value="' . $bodegaId . '">';
+    }
+    $body .= '<div style="flex:1;min-width:280px">';
+    $body .= '<input type="text" name="q" class="form-control" style="font-size:14px;background:#fff;border-color:#99f6e4" value="' . h($query) . '" placeholder="🔍 Ingrese código trazable (TRZ-...), bobina (ROLL-...), caja (BOX-...), pallet (PL-...), OT u OC..." required autofocus>';
+    $body .= '</div>';
+    $body .= '<button type="submit" class="btn" style="background:#00A9A6;color:#fff;padding:0 20px;height:42px;font-weight:700">🔍 Rastrear 360°</button>';
+    if ($query !== '') {
+        $body .= '<a class="btn secondary" href="/stock/traceability' . ($bodegaId > 0 ? ('?bodega=' . $bodegaId) : '') . '" style="height:42px;display:inline-flex;align-items:center">Limpiar</a>';
+    }
+    $body .= '</form>';
+
+    // Chips de accesos rápidos recientes
+    if ($recentEntries !== []) {
+        $body .= '<div style="margin-top:14px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">';
+        $body .= '<span style="font-size:11.5px;font-weight:700;color:#64748b">Bultos recientes en bodega:</span>';
+        foreach (array_slice($recentEntries, 0, 8) as $re) {
+            $rCode = (string)$re['traceability_code'];
+            $rSku = (string)$re['item_code'];
+            $body .= '<a href="/stock/traceability?q=' . rawurlencode($rCode) . ($bodegaId > 0 ? ('&bodega=' . $bodegaId) : '') . '" class="trz-tag-code" style="font-size:11.5px;padding:2px 8px" title="' . h($rSku) . '">' . h($rCode) . '</a>';
+        }
+        $body .= '</div>';
+    }
+    $body .= '</div>';
+
+    // Alertas o Resultados
+    if ($error !== '') {
+        $body .= '<div class="err" style="margin-bottom:20px;padding:16px 20px;border-radius:12px;font-weight:700">⚠️ ' . h($error) . '</div>';
+    } elseif ($query !== '' && $treeData !== null) {
+        $body .= unibagBuildTraceabilityTreeHtml($treeData, false);
+    } else {
+        // Pantalla vacía con guía
+        $body .= '<div class="trz-card" style="text-align:center;padding:48px 20px">';
+        $body .= '<div style="font-size:48px;margin-bottom:12px">🌳</div>';
+        $body .= '<div style="font-size:18px;font-weight:800;color:#0f172a;margin-bottom:6px">Consulta de Trazabilidad 360°</div>';
+        $body .= '<div style="font-size:13.5px;color:#64748b;max-width:540px;margin:0 auto 16px">Ingrese cualquier código de trazabilidad de bodega, bobina, caja, pallet, orden de trabajo u orden de compra para auditar el origen, medidas, operador y movimientos.</div>';
+        $body .= '</div>';
+    }
+
+    $body .= '</div>'; // Fin trz-shell
+
+    render('Árbol de Trazabilidad · Bodega', $body);
+}
+
+/**
  * Router de rutas de inventario.
  */
-function handleInventoryRoutes(string $path, string $method, ReceptionService $service, string $currentOperatorName): bool
+function handleInventoryRoutes(string $path, string $method, ReceptionService $service, string $currentOperatorName, ?ProductionService $prodService = null): bool
 {
     // AJAX: Sugerir código de trazabilidad
     if ($path === '/stock/traceability-code-suggest' && $method === 'GET') {
@@ -1517,6 +1892,26 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
     // GET: Pantalla de ingreso a bodega con código de trazabilidad
     if (($path === '/stock/traceability-entry' || $path === '/stock/ingreso-trazable') && $method === 'GET') {
         unibagRenderTraceabilityEntryPage($service, $currentOperatorName);
+        return true;
+    }
+
+    // AJAX: Modal árbol de trazabilidad en inventario
+    if ($path === '/stock/traceability/json' && $method === 'GET') {
+        header('Content-Type: application/json; charset=utf-8');
+        $code = trim((string)($_GET['q'] ?? ($_GET['code'] ?? '')));
+        if ($code === '' || $prodService === null) {
+            echo json_encode(['ok' => false, 'error' => 'Código no proporcionado o servicio de producción no disponible']);
+            return true;
+        }
+        $treeData = $prodService->getTraceabilityTree($code);
+        $html = unibagBuildTraceabilityTreeHtml($treeData, true);
+        echo json_encode(['ok' => true, 'html' => $html, 'tree' => $treeData]);
+        return true;
+    }
+
+    // GET: Pantalla completa del Árbol de Trazabilidad 360° en Inventario / Bodega
+    if (($path === '/stock/traceability' || $path === '/stock/arbol-trazabilidad') && $method === 'GET') {
+        unibagRenderStockTraceabilityTreePage($service, $prodService, $currentOperatorName);
         return true;
     }
 

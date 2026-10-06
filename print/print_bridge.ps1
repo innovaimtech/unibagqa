@@ -1,5 +1,5 @@
 param(
-  [string]$Listen = 'http://localhost:8766/',
+  [string]$Listen = 'http://localhost:8767/',
   [string]$DefaultPrinter = ''
 )
 
@@ -35,7 +35,7 @@ public class RawPrinterHelper {
   [DllImport("winspool.Drv", SetLastError=true)]
   public static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, int dwCount, out int dwWritten);
 
-  public static void SendStringToPrinter(string printerName, string zpl, string docName) {
+  public static void SendStringToPrinter(string printerName, string content, string docName) {
     IntPtr hPrinter;
     if (!OpenPrinter(printerName, out hPrinter, IntPtr.Zero)) {
       throw new Exception("No se pudo abrir la impresora: " + printerName);
@@ -52,7 +52,7 @@ public class RawPrinterHelper {
           throw new Exception("StartPagePrinter falló.");
         }
         try {
-          byte[] bytes = System.Text.Encoding.UTF8.GetBytes(zpl);
+          byte[] bytes = System.Text.Encoding.UTF8.GetBytes(content);
           IntPtr pUnmanagedBytes = Marshal.AllocCoTaskMem(bytes.Length);
           try {
             Marshal.Copy(bytes, 0, pUnmanagedBytes, bytes.Length);
@@ -89,6 +89,16 @@ try {
     $res = $ctx.Response
 
     $path = $req.Url.AbsolutePath
+    if ($path -eq '/' -or $path -eq '/health') {
+      $res.StatusCode = 200
+      $payload = New-JsonResponse @{ ok = $true; service = 'Unibag Print Bridge'; status = 'running' }
+      $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+      $res.ContentType = 'application/json; charset=utf-8'
+      $res.OutputStream.Write($bytes, 0, $bytes.Length)
+      $res.OutputStream.Close()
+      continue
+    }
+
     if ($path -ne '/print') {
       $res.StatusCode = 404
       $payload = New-JsonResponse @{ ok = $false; error = 'Not found'; path = $path }
@@ -127,13 +137,22 @@ try {
       continue
     }
 
+    $propNames = @()
+    if ($null -ne $data -and $null -ne $data.PSObject -and $null -ne $data.PSObject.Properties) {
+      $propNames = @($data.PSObject.Properties | ForEach-Object { $_.Name })
+    }
+
     $printer = ''
-    if ($data.PSObject.Properties.Name -contains 'printer') { $printer = [string]$data.printer }
+    if ($propNames -contains 'printer') { $printer = [string]$data.printer }
     if ([string]::IsNullOrWhiteSpace($printer)) { $printer = $DefaultPrinter }
-    $zpl = ''
-    if ($data.PSObject.Properties.Name -contains 'zpl') { $zpl = [string]$data.zpl }
+    $language = 'zpl'
+    if ($propNames -contains 'language') { $language = ([string]$data.language).ToLowerInvariant() }
+    if ([string]::IsNullOrWhiteSpace($language)) { $language = 'zpl' }
+    $content = ''
+    if ($propNames -contains 'content') { $content = [string]$data.content }
+    if ([string]::IsNullOrWhiteSpace($content) -and ($propNames -contains 'zpl')) { $content = [string]$data.zpl }
     $copies = 1
-    if ($data.PSObject.Properties.Name -contains 'copies') { $copies = [int]$data.copies }
+    if ($propNames -contains 'copies') { $copies = [int]$data.copies }
     if ($copies -le 0) { $copies = 1 }
 
     if ([string]::IsNullOrWhiteSpace($printer)) {
@@ -145,9 +164,9 @@ try {
       $res.OutputStream.Close()
       continue
     }
-    if ([string]::IsNullOrWhiteSpace($zpl)) {
+    if ([string]::IsNullOrWhiteSpace($content)) {
       $res.StatusCode = 422
-      $payload = New-JsonResponse @{ ok = $false; error = 'Falta zpl.'}
+      $payload = New-JsonResponse @{ ok = $false; error = 'Falta content.'}
       $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
       $res.ContentType = 'application/json; charset=utf-8'
       $res.OutputStream.Write($bytes, 0, $bytes.Length)
@@ -157,10 +176,10 @@ try {
 
     try {
       for ($i=0; $i -lt $copies; $i++) {
-        [RawPrinterHelper]::SendStringToPrinter($printer, $zpl, "UNIBAG_LABEL")
+        [RawPrinterHelper]::SendStringToPrinter($printer, $content, ("UNIBAG_LABEL_" + $language.ToUpperInvariant()))
       }
       $res.StatusCode = 200
-      $payload = New-JsonResponse @{ ok = $true }
+      $payload = New-JsonResponse @{ ok = $true; language = $language }
     } catch {
       $res.StatusCode = 502
       $payload = New-JsonResponse @{ ok = $false; error = $_.Exception.Message }
@@ -175,4 +194,3 @@ try {
   try { $listener.Stop() } catch {}
   try { $listener.Close() } catch {}
 }
-

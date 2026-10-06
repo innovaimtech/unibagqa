@@ -2,6 +2,16 @@
 
 declare(strict_types=1);
 
+// Servidor integrado de PHP (php -S): servir recursos estáticos existentes directamente
+if (PHP_SAPI === 'cli-server') {
+    $reqUri = $_SERVER['REQUEST_URI'] ?? '';
+    $reqPath = parse_url($reqUri, PHP_URL_PATH) ?? '';
+    $staticFile = __DIR__ . $reqPath;
+    if ($reqPath !== '' && $reqPath !== '/' && is_file($staticFile)) {
+        return false;
+    }
+}
+
 // =============================================================================
 // Front Controller · Router principal (public/index.php)
 //
@@ -120,6 +130,139 @@ function redirectResponse(string $location, int $statusCode = 303): void
     exit;
 }
 
+/**
+ * Sirve y almacena en caché local las imágenes y documentos adjuntos del ERP (diseños, montajes, fotos).
+ * Soporta: /docs/order/{hash}, /docs/prod/{hash}, /docs.order/{hash}, /docs.prod/{hash}, /docs/{hash}.
+ */
+function unibagServeErpDocument(string $path): bool
+{
+    $folder = null;
+    $hash = null;
+
+    if (preg_match('#^/docs/order/([a-zA-Z0-9_\-\.]+)$#i', $path, $m) === 1 || preg_match('#^/docs\.order/([a-zA-Z0-9_\-\.]+)$#i', $path, $m) === 1) {
+        $folder = 'docs.order';
+        $hash = $m[1];
+    } elseif (preg_match('#^/docs/prod/([a-zA-Z0-9_\-\.]+)$#i', $path, $m) === 1 || preg_match('#^/docs\.prod/([a-zA-Z0-9_\-\.]+)$#i', $path, $m) === 1) {
+        $folder = 'docs.prod';
+        $hash = $m[1];
+    } elseif (preg_match('#^/docs/([a-zA-Z0-9_\-\.]+)$#i', $path, $m) === 1) {
+        $hash = $m[1];
+        $folder = str_starts_with($hash, 'VER_') ? 'docs.order' : 'auto';
+    } elseif ($path === '/production/design-image' || $path === '/api/document' || $path === '/doc') {
+        $hash = trim((string)($_GET['hash'] ?? ''));
+        $fReq = trim((string)($_GET['folder'] ?? 'docs.order'));
+        $folder = ($fReq === 'prod' || $fReq === 'docs.prod') ? 'docs.prod' : 'docs.order';
+    }
+
+    if ($hash === null || $hash === '' || $hash === 'dummy') {
+        return false;
+    }
+
+    $cacheBase = __DIR__ . '/docs_cache';
+    if (!is_dir($cacheBase)) {
+        @mkdir($cacheBase, 0777, true);
+    }
+
+    $ext = strtolower(pathinfo($hash, PATHINFO_EXTENSION));
+    $mimeMap = [
+        'jpg'  => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png'  => 'image/png',
+        'gif'  => 'image/gif',
+        'webp' => 'image/webp',
+        'svg'  => 'image/svg+xml',
+        'pdf'  => 'application/pdf',
+    ];
+    $contentType = $mimeMap[$ext] ?? 'application/octet-stream';
+
+    $cachedFile = $cacheBase . '/' . $hash;
+    if (file_exists($cachedFile) && filesize($cachedFile) > 0) {
+        if ($folder === 'docs.order') {
+            $orderStatic = __DIR__ . '/docs/order/' . $hash;
+            if (!file_exists($orderStatic)) {
+                $orderDir = __DIR__ . '/docs/order';
+                if (!is_dir($orderDir)) @mkdir($orderDir, 0777, true);
+                @copy($cachedFile, $orderStatic);
+            }
+        } elseif ($folder === 'docs.prod') {
+            $prodStatic = __DIR__ . '/docs/prod/' . $hash;
+            if (!file_exists($prodStatic)) {
+                $prodDir = __DIR__ . '/docs/prod';
+                if (!is_dir($prodDir)) @mkdir($prodDir, 0777, true);
+                @copy($cachedFile, $prodStatic);
+            }
+        }
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+        header('Content-Type: ' . $contentType);
+        header('Content-Length: ' . filesize($cachedFile));
+        header('Cache-Control: public, max-age=604800');
+        readfile($cachedFile);
+        exit;
+    }
+
+    $remoteFolders = ($folder === 'auto') ? ['docs.order', 'docs.prod'] : [$folder];
+    $downloadedData = null;
+
+    foreach ($remoteFolders as $f) {
+        $remoteUrl = 'https://www.erp-unibag.cl/' . $f . '/' . rawurlencode($hash);
+        $ch = curl_init($remoteUrl);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+        $result = curl_exec($ch);
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $remoteMime = (string)curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+        curl_close($ch);
+
+        if ($httpCode === 200 && is_string($result) && strlen($result) > 0) {
+            $downloadedData = $result;
+            if ($remoteMime !== '' && !str_contains($remoteMime, 'text/html')) {
+                $contentType = explode(';', $remoteMime)[0];
+            }
+            break;
+        }
+    }
+
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+
+    if ($downloadedData !== null) {
+        @file_put_contents($cachedFile, $downloadedData);
+        if ($folder === 'docs.order') {
+            $orderDir = __DIR__ . '/docs/order';
+            if (!is_dir($orderDir)) @mkdir($orderDir, 0777, true);
+            @file_put_contents($orderDir . '/' . $hash, $downloadedData);
+        } elseif ($folder === 'docs.prod') {
+            $prodDir = __DIR__ . '/docs/prod';
+            if (!is_dir($prodDir)) @mkdir($prodDir, 0777, true);
+            @file_put_contents($prodDir . '/' . $hash, $downloadedData);
+        }
+        header('Content-Type: ' . $contentType);
+        header('Content-Length: ' . strlen($downloadedData));
+        header('Cache-Control: public, max-age=604800');
+        echo $downloadedData;
+        exit;
+    }
+
+    http_response_code(404);
+    header('Content-Type: image/svg+xml; charset=utf-8');
+    echo '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="150" viewBox="0 0 300 150">
+        <rect width="100%" height="100%" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="2" rx="8"/>
+        <text x="50%" y="45%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="bold" fill="#64748b">Imagen no disponible</text>
+        <text x="50%" y="65%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-size="11" fill="#94a3b8">' . htmlspecialchars($hash) . '</text>
+    </svg>';
+    exit;
+}
+
+if (unibagServeErpDocument($path)) {
+    exit;
+}
+
 if (handleAuthRoutes($path, $method)) {
     exit;
 }
@@ -142,7 +285,7 @@ if (handleApiRoutes($path, $method, $service, $scale, $printer, $currentOperator
     exit;
 }
 
-if (handleInventoryRoutes($path, $method, $service, $currentOperatorName)) {
+if (handleInventoryRoutes($path, $method, $service, $currentOperatorName, $prodService)) {
     exit;
 }
 
@@ -1219,6 +1362,69 @@ function code39Svg(string $data, int $height = 70, int $narrow = 2, int $wide = 
     $totalW = $x + 10;
 
     return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" role="img" aria-label="código de barras">' . implode('', $bars) . '</svg>';
+}
+
+/**
+ * Genera un código de barras en formato Code 128 (Juego B) en SVG.
+ * Alta densidad, ideal para impresoras térmicas de 203 DPI (Barpos Z220T).
+ */
+function code128Svg(string $text, int $height = 42, float $moduleWidth = 1.35): string
+{
+    $text = trim($text);
+    if ($text === '') {
+        return '';
+    }
+
+    $patterns = [
+        '212222','222122','222221','121223','121322','131222','122213','122312','132212','221213',
+        '221312','231212','112232','122132','122231','113222','123122','123221','223211','221132',
+        '221231','213212','223112','312131','311222','321122','321221','312212','322112','322211',
+        '212123','212321','232121','111323','131123','131321','112313','132113','132311','211313',
+        '231113','231311','112133','112331','132131','113123','113321','133121','313121','211331',
+        '231131','213113','213311','213131','311123','311321','331121','312113','312311','332111',
+        '314111','221411','431111','111224','111422','121124','121421','141122','141221','112214',
+        '112412','122114','122411','142112','142211','241211','221114','413111','241112','134111',
+        '111242','121142','121241','114212','124112','124211','411212','421112','421211','212141',
+        '214121','412121','111143','111341','131141','114113','114311','411113','411311','113141',
+        '114131','311141','411131','211412','211214','211232','2331112'
+    ];
+
+    $startCode = 104; // Start Code B
+    $chars = [$startCode];
+    $checkSum = $startCode;
+
+    for ($i = 0; $i < strlen($text); $i++) {
+        $val = ord($text[$i]) - 32;
+        if ($val < 0 || $val > 95) {
+            return '';
+        }
+        $chars[] = $val;
+        $checkSum += $val * ($i + 1);
+    }
+
+    $chars[] = $checkSum % 103;
+    $chars[] = 106; // Stop Code
+
+    $bars = [];
+    $x = 8.0;
+    foreach ($chars as $code) {
+        $pat = $patterns[$code] ?? '';
+        if ($pat === '') {
+            return '';
+        }
+        $isBar = true;
+        for ($p = 0; $p < strlen($pat); $p++) {
+            $w = (int)$pat[$p] * $moduleWidth;
+            if ($isBar) {
+                $bars[] = '<rect x="' . round($x, 2) . '" y="0" width="' . round($w, 2) . '" height="' . $height . '" fill="#000"/>';
+            }
+            $x += $w;
+            $isBar = !$isBar;
+        }
+    }
+    $totalW = (int)ceil($x + 8.0);
+
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" role="img" aria-label="' . htmlspecialchars($text, ENT_QUOTES, 'UTF-8') . '">' . implode('', $bars) . '</svg>';
 }
 
 /**
@@ -2955,19 +3161,23 @@ function render(string $title, string $body): void
         echo '<a class="subitem' . ($bonusView === 'configuracion' ? ' active' : '') . '" href="/bonificaciones?view=configuracion"><span>Configuración</span></a>';
     } elseif ($activeModule === 'warehouses') {
         $isTrzEntry = str_starts_with($currentPath, '/stock/traceability-entry') || str_starts_with($currentPath, '/stock/ingreso-trazable');
-        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry;
+        $isTrzTree = str_starts_with($currentPath, '/stock/traceability') && !$isTrzEntry;
+        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry && !$isTrzTree;
         $isWh = str_starts_with($currentPath, '/warehouses');
         echo '<a class="subitem' . ($isStock ? ' active' : '') . '" href="/stock"><span>Consulta de stock</span></a>';
         echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso con Trazabilidad</span></a>';
+        echo '<a class="subitem' . ($isTrzTree ? ' active' : '') . '" href="/stock/traceability"><span>🌳 Árbol Trazabilidad</span></a>';
         echo '<a class="subitem' . ($isWh ? ' active' : '') . '" href="/warehouses"><span>Configuración de bodega</span></a>';
         echo '<a class="subitem' . (str_starts_with($currentPath, '/purchase-orders') ? ' active' : '') . '" href="/purchase-orders?status=active&supplier_type=NATIONAL"><span>Recepción de bobinas (OC)</span></a>';
     } elseif ($activeModule === 'inventory') {
         $isInvReport = str_starts_with($currentPath, '/reports/inventory');
         $isInvCount = str_starts_with($currentPath, '/stock/inventory-counts');
         $isTrzEntry = str_starts_with($currentPath, '/stock/traceability-entry') || str_starts_with($currentPath, '/stock/ingreso-trazable');
+        $isTrzTree = str_starts_with($currentPath, '/stock/traceability') && !$isTrzEntry;
         echo '<a class="subitem' . ($isInvReport ? ' active' : '') . '" href="/reports/inventory"><span>Informe de inventario</span></a>';
         echo '<a class="subitem' . ($isInvCount ? ' active' : '') . '" href="/stock/inventory-counts"><span>Toma de inventario</span></a>';
         echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso Trazable</span></a>';
+        echo '<a class="subitem' . ($isTrzTree ? ' active' : '') . '" href="/stock/traceability"><span>🌳 Árbol Trazabilidad</span></a>';
     } elseif ($activeModule === 'scale') {
         echo '<a class="subitem" href="/scale/sealing-waste"><span>Merma Selladora</span></a>';
     } elseif ($activeModule === 'production') {
@@ -3442,6 +3652,160 @@ function renderWorkOrderMachineHeaderCard(
  *
  * Also shows optional flash messages (success/error).
  */
+/**
+ * Resuelve las medidas técnicas, cliente y materialidad de una OT combinando datos directos del ERP y texto descriptivo.
+ *
+ * @return array{width: string, height: string, gusset: string, material: string, client: string}
+ */
+function unibagResolveWorkOrderDimensionsAndClient(array $ot, string $sheetText = ''): array
+{
+    if ($sheetText === '') {
+        $sheetText = trim((string)($ot['erp_plan_desc'] ?? '') . ' ' . (string)($ot['sku_final'] ?? ''));
+    }
+
+    $widthLabel = '-';
+    $heightLabel = '-';
+    $gussetLabel = '-';
+    if (!empty($ot['fab_med_width']) && (float)$ot['fab_med_width'] > 0) {
+        $widthLabel = (string)(float)$ot['fab_med_width'] . ' cm';
+    }
+    if (!empty($ot['fab_med_height']) && (float)$ot['fab_med_height'] > 0) {
+        $heightLabel = (string)(float)$ot['fab_med_height'] . ' cm';
+    }
+    if (isset($ot['fab_med_fuelle'])) {
+        $gussetVal = (float)$ot['fab_med_fuelle'];
+        $gussetLabel = $gussetVal > 0 ? ((string)$gussetVal . ' cm') : '0 cm';
+    }
+    if ($widthLabel === '-' && preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dm) === 1) {
+        $widthLabel = $dm[1] . ' cm';
+        $heightLabel = $dm[2] . ' cm';
+        $gussetLabel = trim((string)($dm[3] ?? '')) !== '' ? ($dm[3] . ' cm') : '-';
+    }
+
+    $materialLabel = trim((string)($ot['fab_type'] ?? ''));
+    if ($materialLabel === '') {
+        foreach (['PLA', 'BOPP', 'PP', 'PEBD', 'PEAD', 'PE'] as $mk) {
+            if (stripos($sheetText, $mk) !== false) {
+                $materialLabel = $mk;
+                break;
+            }
+        }
+        if ($materialLabel === '') {
+            $materialLabel = '-';
+        }
+    }
+
+    $clientLabel = trim((string)($ot['cust_name'] ?? $ot['erp_customer_name'] ?? ''));
+    if ($clientLabel === '') {
+        $clientLabel = '-';
+    }
+
+    return [
+        'width' => $widthLabel,
+        'height' => $heightLabel,
+        'gusset' => $gussetLabel,
+        'material' => $materialLabel,
+        'client' => $clientLabel,
+    ];
+}
+
+/**
+ * Genera la matriz de filas para la tabla "Información Cliente" de órdenes de trabajo.
+ * Rescata cliente, diseño, medidas técnicas, fechas de cliché e imágenes reales descargadas del ERP.
+ */
+function unibagBuildLegacyClientRows(
+    array $ot,
+    array $colorSlots,
+    string $materialLabel,
+    string $widthLabel,
+    string $heightLabel,
+    string $gussetLabel,
+    string $targetQtyLabel,
+    string $stationLabel
+): array {
+    $clientLabel = trim((string)($ot['cust_name'] ?? $ot['erp_customer_name'] ?? ''));
+    if ($clientLabel === '') {
+        $clientLabel = '-';
+    }
+
+    $clicheSolicLabel = !empty($ot['req_cliche_peli_solic_dat']) && (int)$ot['req_cliche_peli_solic_dat'] > 0
+        ? date('d.m.Y', (int)$ot['req_cliche_peli_solic_dat'])
+        : '-';
+    $clicheRecepLabel = !empty($ot['req_cliche_peli_recep_dat']) && (int)$ot['req_cliche_peli_recep_dat'] > 0
+        ? date('d.m.Y', (int)$ot['req_cliche_peli_recep_dat'])
+        : '-';
+
+    // Imagen Diseño
+    $designImageHash = trim((string)($ot['fab_design_imagehash'] ?? ''));
+    if ($designImageHash !== '' && $designImageHash !== 'dummy') {
+        $imgUrl = '/docs/order/' . rawurlencode($designImageHash);
+        $designHtml = '<div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">'
+            . '<a href="' . h($imgUrl) . '" target="_blank" title="Clic para ampliar foto de diseño">'
+            . '<img src="' . h($imgUrl) . '" alt="Diseño" style="max-height:75px;max-width:115px;object-fit:contain;border:1px solid #cbd5e1;border-radius:6px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.12)">'
+            . '</a>'
+            . '<a class="btn" href="' . h($imgUrl) . '" target="_blank" style="padding:5px 12px;font-size:12px;font-weight:700;background:#00A9A6;color:#fff;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:5px">'
+            . '🔍 Ver Foto Completa'
+            . '</a>'
+            . '</div>';
+    } else {
+        $designHtml = '<span style="color:#94a3b8;font-size:12px">Sin imagen de diseño</span>';
+    }
+
+    // Adjuntos de producción (req_prod_adjfile_0 a 4)
+    $attachments = [];
+    for ($x = 0; $x < 5; $x++) {
+        $adj = trim((string)($ot["req_prod_adjfile_{$x}"] ?? ''));
+        if ($adj !== '') {
+            $comment = trim((string)($ot["req_prod_adjcomments_{$x}"] ?? ''));
+            $adjUrl = '/docs/prod/' . rawurlencode($adj);
+            $isImg = preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $adj) === 1;
+            $btnText = $isImg ? '📷 Ver Adjunto #' . ($x + 1) : '📄 Descargar #' . ($x + 1);
+
+            $adjHtml = '<div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">';
+            if ($isImg) {
+                $adjHtml .= '<a href="' . h($adjUrl) . '" target="_blank" title="Clic para ampliar">'
+                    . '<img src="' . h($adjUrl) . '" alt="Adjunto ' . ($x + 1) . '" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #cbd5e1;border-radius:4px;background:#fff;vertical-align:middle">'
+                    . '</a>';
+            }
+            $adjHtml .= '<a class="btn secondary" href="' . h($adjUrl) . '" target="_blank" style="padding:4px 10px;font-size:12px;text-decoration:none;border-radius:4px">'
+                . h($btnText) . '</a>';
+            if ($comment !== '') {
+                $adjHtml .= '<span style="font-size:11.5px;color:#475569">(' . h($comment) . ')</span>';
+            }
+            $adjHtml .= '</div>';
+            $attachments[] = ['label' => 'Imagen #' . ($x + 1), 'html' => $adjHtml];
+        }
+    }
+
+    $firstAdjLabel = 'Imagen #5';
+    $firstAdjHtml = '<span style="color:#94a3b8;font-size:12px">-</span>';
+    if ($attachments !== []) {
+        $first = array_shift($attachments);
+        $firstAdjLabel = $first['label'];
+        $firstAdjHtml = $first['html'];
+    }
+
+    $rows = [
+        ['N° OT', h((string)$ot['ot_code']), 'Color N° 1', h((string)$colorSlots[0])],
+        ['Cliente', h($clientLabel), 'Color N° 2', h((string)$colorSlots[1])],
+        ['N° CC', trim((string)($ot['erp_req_id'] ?? '')) !== '' ? h((string)$ot['erp_req_id']) : '-', 'Color N° 3', h((string)$colorSlots[2])],
+        ['Diseño', trim((string)($ot['erp_plan_desc'] ?? '')) !== '' ? h((string)$ot['erp_plan_desc']) : '-', 'Color N° 4', h((string)$colorSlots[3])],
+        ['Producto', h((string)$ot['sku_final']), 'Color N° 5', h((string)$colorSlots[4])],
+        ['Materialidad', h($materialLabel), 'Color N° 6', h((string)$colorSlots[5])],
+        ['Ancho', h($widthLabel), 'Alto', h($heightLabel)],
+        ['Fuelle', h($gussetLabel), 'Cantidad de Bolsas', h($targetQtyLabel)],
+        ['Fecha de Entrega', trim((string)($ot['erp_plan_date'] ?? '')) !== '' ? h(formatLabelDate((string)$ot['erp_plan_date'])) : '-', 'Maquina', h($stationLabel)],
+        ['Fecha de solicitud de cliché', h($clicheSolicLabel), 'Fecha de recepción de cliché', h($clicheRecepLabel)],
+        ['Imagen Diseño', $designHtml, $firstAdjLabel, $firstAdjHtml],
+    ];
+
+    foreach ($attachments as $att) {
+        $rows[] = [$att['label'], $att['html'], '', ''];
+    }
+
+    return $rows;
+}
+
 function renderWorkOrderSetupScreen(
     array $ot,
     ?array $activeShiftSession,
@@ -3497,22 +3861,18 @@ function renderWorkOrderSetupScreen(
     $targetQtyLabel = trim((string)($ot['erp_target_qty'] ?? '')) !== ''
         ? (string)$ot['erp_target_qty']
         : (trim((string)($ot['target_qty'] ?? '')) !== '' ? (string)$ot['target_qty'] : '-');
-    $widthLabel = '-';
-    $heightLabel = '-';
-    $gussetLabel = '-';
-    if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dimensionMatch) === 1) {
-        $widthLabel = $dimensionMatch[1];
-        $heightLabel = $dimensionMatch[2];
-        $gussetLabel = trim((string)($dimensionMatch[3] ?? '')) !== '' ? (string)$dimensionMatch[3] : '-';
-    }
-    $materialLabel = '-';
-    foreach (['PLA', 'BOPP', 'PP', 'PEBD', 'PEAD', 'PE'] as $materialKeyword) {
-        if (stripos($sheetText, $materialKeyword) !== false) {
-            $materialLabel = $materialKeyword;
-            break;
+    $dim = unibagResolveWorkOrderDimensionsAndClient($ot, $sheetText);
+    $widthLabel = $dim['width'];
+    $heightLabel = $dim['height'];
+    $gussetLabel = $dim['gusset'];
+    $materialLabel = $dim['material'];
+    $detectedColors = [];
+    for ($c = 1; $c <= 6; $c++) {
+        $cd = trim((string)($ot["fab_print_colordesc_{$c}"] ?? ''));
+        if ($cd !== '' && !in_array($cd, $detectedColors, true)) {
+            $detectedColors[] = $cd;
         }
     }
-    $detectedColors = [];
     foreach ([trim((string)($currentRoll['color'] ?? '')), trim((string)($outputRoll['color'] ?? ''))] as $colorValue) {
         if ($colorValue !== '' && !in_array($colorValue, $detectedColors, true)) {
             $detectedColors[] = $colorValue;
@@ -3613,20 +3973,16 @@ function renderWorkOrderSetupScreen(
             'value' => '-',
         ];
     }
-    $imagePlaceholder = '<span class="legacy-placeholder-btn">Mostrar imagen</span>';
-    $legacyClientRows = [
-        ['N° OT', h((string)$ot['ot_code']), 'Color N° 1', h((string)$colorSlots[0])],
-        ['Cliente', '-', 'Color N° 2', h((string)$colorSlots[1])],
-        ['N° CC', trim((string)($ot['erp_req_id'] ?? '')) !== '' ? h((string)$ot['erp_req_id']) : '-', 'Color N° 3', h((string)$colorSlots[2])],
-        ['Diseño', trim((string)($ot['erp_plan_desc'] ?? '')) !== '' ? h((string)$ot['erp_plan_desc']) : '-', 'Color N° 4', h((string)$colorSlots[3])],
-        ['Producto', h((string)$ot['sku_final']), 'Color N° 5', h((string)$colorSlots[4])],
-        ['Materialidad', h($materialLabel), 'Color N° 6', h((string)$colorSlots[5])],
-        ['Ancho', h($widthLabel), 'Alto', h($heightLabel)],
-        ['Fuelle', h($gussetLabel), 'Cantidad de Bolsas', h($targetQtyLabel)],
-        ['Fecha de Entrega', trim((string)($ot['erp_plan_date'] ?? '')) !== '' ? h(formatLabelDate((string)$ot['erp_plan_date'])) : '-', 'Maquina', h($stationLabel)],
-        ['Fecha de solicitud de cliché', '-', 'Fecha de recepción de cliché', '-'],
-        ['Imagen Diseño', $imagePlaceholder, 'Imagen #5', $imagePlaceholder],
-    ];
+    $legacyClientRows = unibagBuildLegacyClientRows(
+        $ot,
+        $colorSlots,
+        $materialLabel,
+        $widthLabel,
+        $heightLabel,
+        $gussetLabel,
+        $targetQtyLabel,
+        $stationLabel
+    );
     $legacyFabricationRows = [
         ['Rodillo a utilizar', h($primarySelectedAniloxLabel), $topUnitRows[0]['label'], $topUnitRows[0]['value']],
         ['Corte de bolsa', h($heightLabel !== '-' ? ($heightLabel . ' mtrs') : '-'), $topUnitRows[1]['label'], $topUnitRows[1]['value']],
@@ -4179,22 +4535,18 @@ function renderWorkOrderRequestMaterialsScreen(
     $stationLabel = trim((string)($sessionForDisplay['machine_name'] ?? '')) !== ''
         ? (string)$sessionForDisplay['machine_name']
         : (trim((string)($ot['erp_machine_label'] ?? '')) !== '' ? (string)$ot['erp_machine_label'] : 'Sin máquina asignada');
-    $widthLabel = '-';
-    $heightLabel = '-';
-    $gussetLabel = '-';
-    if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dimensionMatch) === 1) {
-        $widthLabel = $dimensionMatch[1];
-        $heightLabel = $dimensionMatch[2];
-        $gussetLabel = trim((string)($dimensionMatch[3] ?? '')) !== '' ? (string)$dimensionMatch[3] : '-';
-    }
-    $materialLabel = '-';
-    foreach (['PLA', 'BOPP', 'PP', 'PEBD', 'PEAD', 'PE'] as $materialKeyword) {
-        if (stripos($sheetText, $materialKeyword) !== false) {
-            $materialLabel = $materialKeyword;
-            break;
+    $dim = unibagResolveWorkOrderDimensionsAndClient($ot, $sheetText);
+    $widthLabel = $dim['width'];
+    $heightLabel = $dim['height'];
+    $gussetLabel = $dim['gusset'];
+    $materialLabel = $dim['material'];
+    $detectedColors = [];
+    for ($c = 1; $c <= 6; $c++) {
+        $cd = trim((string)($ot["fab_print_colordesc_{$c}"] ?? ''));
+        if ($cd !== '' && !in_array($cd, $detectedColors, true)) {
+            $detectedColors[] = $cd;
         }
     }
-    $detectedColors = [];
     foreach ([trim((string)($currentRoll['color'] ?? '')), trim((string)($outputRoll['color'] ?? ''))] as $colorValue) {
         if ($colorValue !== '' && !in_array($colorValue, $detectedColors, true)) {
             $detectedColors[] = $colorValue;
@@ -4289,20 +4641,16 @@ function renderWorkOrderRequestMaterialsScreen(
             'value' => '-',
         ];
     }
-    $imagePlaceholder = '<span class="legacy-placeholder-btn">Mostrar imagen</span>';
-    $legacyClientRows = [
-        ['N° OT', h((string)$ot['ot_code']), 'Color N° 1', h((string)$colorSlots[0])],
-        ['Cliente', '-', 'Color N° 2', h((string)$colorSlots[1])],
-        ['N° CC', trim((string)($ot['erp_req_id'] ?? '')) !== '' ? h((string)$ot['erp_req_id']) : '-', 'Color N° 3', h((string)$colorSlots[2])],
-        ['Diseño', trim((string)($ot['erp_plan_desc'] ?? '')) !== '' ? h((string)$ot['erp_plan_desc']) : '-', 'Color N° 4', h((string)$colorSlots[3])],
-        ['Producto', h((string)$ot['sku_final']), 'Color N° 5', h((string)$colorSlots[4])],
-        ['Materialidad', h($materialLabel), 'Color N° 6', h((string)$colorSlots[5])],
-        ['Ancho', h($widthLabel), 'Alto', h($heightLabel)],
-        ['Fuelle', h($gussetLabel), 'Cantidad de Bolsas', h($targetQtyLabel)],
-        ['Fecha de Entrega', trim((string)($ot['erp_plan_date'] ?? '')) !== '' ? h(formatLabelDate((string)$ot['erp_plan_date'])) : '-', 'Maquina', h($stationLabel)],
-        ['Fecha de solicitud de cliché', '-', 'Fecha de recepción de cliché', '-'],
-        ['Imagen Diseño', $imagePlaceholder, 'Imagen #5', $imagePlaceholder],
-    ];
+    $legacyClientRows = unibagBuildLegacyClientRows(
+        $ot,
+        $colorSlots,
+        $materialLabel,
+        $widthLabel,
+        $heightLabel,
+        $gussetLabel,
+        $targetQtyLabel,
+        $stationLabel
+    );
     $legacyFabricationRows = [
         ['Rodillo a utilizar', h($primarySelectedAniloxLabel), $topUnitRows[0]['label'], $topUnitRows[0]['value']],
         ['Corte de bolsa', h($heightLabel !== '-' ? ($heightLabel . ' mtrs') : '-'), $topUnitRows[1]['label'], $topUnitRows[1]['value']],
@@ -4570,14 +4918,10 @@ function renderWorkOrderInProgressScreen(
     $stationLabel = trim((string)($sessionForDisplay['machine_name'] ?? '')) !== ''
         ? (string)$sessionForDisplay['machine_name']
         : (trim((string)($ot['erp_machine_label'] ?? '')) !== '' ? (string)$ot['erp_machine_label'] : 'Sin máquina asignada');
-    $widthLabel = '-';
-    $heightLabel = '-';
-    $gussetLabel = '-';
-    if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dimensionMatch) === 1) {
-        $widthLabel = $dimensionMatch[1];
-        $heightLabel = $dimensionMatch[2];
-        $gussetLabel = trim((string)($dimensionMatch[3] ?? '')) !== '' ? (string)$dimensionMatch[3] : '-';
-    }
+    $dim = unibagResolveWorkOrderDimensionsAndClient($ot, $sheetText);
+    $widthLabel = $dim['width'];
+    $heightLabel = $dim['height'];
+    $gussetLabel = $dim['gusset'];
     $detectedColors = [];
     foreach ([trim((string)($currentRoll['color'] ?? '')), trim((string)($outputRoll['color'] ?? ''))] as $colorValue) {
         if ($colorValue !== '' && !in_array($colorValue, $detectedColors, true)) {
@@ -4598,7 +4942,7 @@ function renderWorkOrderInProgressScreen(
     }
     $colorSlots = array_values(array_filter(array_pad(array_slice($detectedColors, 0, 6), 6, ''), static fn(string $value): bool => trim($value) !== ''));
     $productLabel = trim((string)($ot['erp_plan_desc'] ?? '')) !== '' ? (string)$ot['erp_plan_desc'] : (string)$ot['sku_final'];
-    $clientLabel = trim((string)($ot['erp_customer_name'] ?? '')) !== '' ? (string)$ot['erp_customer_name'] : '-';
+    $clientLabel = $dim['client'];
     $reqLabel = trim((string)($ot['erp_req_id'] ?? '')) !== '' ? (string)$ot['erp_req_id'] : '-';
     $measuresLabel = ($widthLabel !== '-' || $heightLabel !== '-') ? trim($widthLabel . ' x ' . $heightLabel) : '-';
     $fabricLabel = trim((string)($currentRoll['color'] ?? '')) !== '' ? (string)$currentRoll['color'] : '-';
@@ -4787,14 +5131,10 @@ function renderWorkOrderSetupApprovalScreen(
     $stationLabel = trim((string)($sessionForDisplay['machine_name'] ?? '')) !== ''
         ? (string)$sessionForDisplay['machine_name']
         : (trim((string)($ot['erp_machine_label'] ?? '')) !== '' ? (string)$ot['erp_machine_label'] : 'Sin máquina asignada');
-    $widthLabel = '-';
-    $heightLabel = '-';
-    $gussetLabel = '-';
-    if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dimensionMatch) === 1) {
-        $widthLabel = $dimensionMatch[1];
-        $heightLabel = $dimensionMatch[2];
-        $gussetLabel = trim((string)($dimensionMatch[3] ?? '')) !== '' ? (string)$dimensionMatch[3] : '-';
-    }
+    $dim = unibagResolveWorkOrderDimensionsAndClient($ot, $sheetText);
+    $widthLabel = $dim['width'];
+    $heightLabel = $dim['height'];
+    $gussetLabel = $dim['gusset'];
     $detectedColors = [];
     foreach ([trim((string)($currentRoll['color'] ?? '')), trim((string)($outputRoll['color'] ?? ''))] as $colorValue) {
         if ($colorValue !== '' && !in_array($colorValue, $detectedColors, true)) {
@@ -5117,19 +5457,15 @@ function buildWorkOrderSealingDisplayData(
     $targetQtyLabel = trim((string)($ot['erp_target_qty'] ?? '')) !== ''
         ? (string)$ot['erp_target_qty']
         : (trim((string)($ot['target_qty'] ?? '')) !== '' ? (string)$ot['target_qty'] : '-');
-    $clientLabel = trim((string)($ot['erp_customer_name'] ?? '')) !== '' ? (string)$ot['erp_customer_name'] : '-';
+    $dim = unibagResolveWorkOrderDimensionsAndClient($ot, $sheetText);
+    $clientLabel = $dim['client'];
     $requestLabel = trim((string)($ot['erp_req_id'] ?? '')) !== '' ? (string)$ot['erp_req_id'] : '-';
     $stationLabel = trim((string)($sessionForDisplay['machine_name'] ?? '')) !== ''
         ? (string)$sessionForDisplay['machine_name']
         : (trim((string)($ot['erp_machine_label'] ?? '')) !== '' ? (string)$ot['erp_machine_label'] : 'Pendiente');
-    $widthLabel = '-';
-    $heightLabel = '-';
-    $gussetLabel = '-';
-    if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dimensionMatch) === 1) {
-        $widthLabel = (string)$dimensionMatch[1];
-        $heightLabel = (string)$dimensionMatch[2];
-        $gussetLabel = trim((string)($dimensionMatch[3] ?? '')) !== '' ? (string)$dimensionMatch[3] : '-';
-    }
+    $widthLabel = $dim['width'];
+    $heightLabel = $dim['height'];
+    $gussetLabel = $dim['gusset'];
     $materialLabel = '-';
     foreach (['PLA', 'BOPP', 'PP', 'PEBD', 'PEAD', 'PE'] as $materialKeyword) {
         if (stripos($sheetText, $materialKeyword) !== false) {
@@ -6680,22 +7016,18 @@ function renderWorkOrderMaterialUsageScreen(
     $stationLabel = trim((string)($sessionForDisplay['machine_name'] ?? '')) !== ''
         ? (string)$sessionForDisplay['machine_name']
         : (trim((string)($ot['erp_machine_label'] ?? '')) !== '' ? (string)$ot['erp_machine_label'] : 'Sin máquina asignada');
-    $widthLabel = '-';
-    $heightLabel = '-';
-    $gussetLabel = '-';
-    if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dimensionMatch) === 1) {
-        $widthLabel = $dimensionMatch[1];
-        $heightLabel = $dimensionMatch[2];
-        $gussetLabel = trim((string)($dimensionMatch[3] ?? '')) !== '' ? (string)$dimensionMatch[3] : '-';
-    }
-    $materialLabel = '-';
-    foreach (['PLA', 'BOPP', 'PP', 'PEBD', 'PEAD', 'PE'] as $materialKeyword) {
-        if (stripos($sheetText, $materialKeyword) !== false) {
-            $materialLabel = $materialKeyword;
-            break;
+    $dim = unibagResolveWorkOrderDimensionsAndClient($ot, $sheetText);
+    $widthLabel = $dim['width'];
+    $heightLabel = $dim['height'];
+    $gussetLabel = $dim['gusset'];
+    $materialLabel = $dim['material'];
+    $detectedColors = [];
+    for ($c = 1; $c <= 6; $c++) {
+        $cd = trim((string)($ot["fab_print_colordesc_{$c}"] ?? ''));
+        if ($cd !== '' && !in_array($cd, $detectedColors, true)) {
+            $detectedColors[] = $cd;
         }
     }
-    $detectedColors = [];
     foreach ([trim((string)($currentRoll['color'] ?? '')), trim((string)($outputRoll['color'] ?? ''))] as $colorValue) {
         if ($colorValue !== '' && !in_array($colorValue, $detectedColors, true)) {
             $detectedColors[] = $colorValue;
@@ -6791,20 +7123,16 @@ function renderWorkOrderMaterialUsageScreen(
             'value' => '-',
         ];
     }
-    $imagePlaceholder = '<span class="legacy-placeholder-btn">Mostrar imagen</span>';
-    $legacyClientRows = [
-        ['N° OT', h((string)$ot['ot_code']), 'Color N° 1', h((string)$colorSlots[0])],
-        ['Cliente', '-', 'Color N° 2', h((string)$colorSlots[1])],
-        ['N° CC', trim((string)($ot['erp_req_id'] ?? '')) !== '' ? h((string)$ot['erp_req_id']) : '-', 'Color N° 3', h((string)$colorSlots[2])],
-        ['Diseño', trim((string)($ot['erp_plan_desc'] ?? '')) !== '' ? h((string)$ot['erp_plan_desc']) : '-', 'Color N° 4', h((string)$colorSlots[3])],
-        ['Producto', h((string)$ot['sku_final']), 'Color N° 5', h((string)$colorSlots[4])],
-        ['Materialidad', h($materialLabel), 'Color N° 6', h((string)$colorSlots[5])],
-        ['Ancho', h($widthLabel), 'Alto', h($heightLabel)],
-        ['Fuelle', h($gussetLabel), 'Cantidad de Bolsas', h($targetQtyLabel)],
-        ['Fecha de Entrega', trim((string)($ot['erp_plan_date'] ?? '')) !== '' ? h(formatLabelDate((string)$ot['erp_plan_date'])) : '-', 'Maquina', h($stationLabel)],
-        ['Fecha de solicitud de cliché', '-', 'Fecha de recepción de cliché', '-'],
-        ['Imagen Diseño', $imagePlaceholder, 'Imagen #5', $imagePlaceholder],
-    ];
+    $legacyClientRows = unibagBuildLegacyClientRows(
+        $ot,
+        $colorSlots,
+        $materialLabel,
+        $widthLabel,
+        $heightLabel,
+        $gussetLabel,
+        $targetQtyLabel,
+        $stationLabel
+    );
     $legacyFabricationRows = [
         ['Rodillo a utilizar', h($primarySelectedAniloxLabel), $topUnitRows[0]['label'], $topUnitRows[0]['value']],
         ['Corte de bolsa', h($heightLabel !== '-' ? ($heightLabel . ' mtrs') : '-'), $topUnitRows[1]['label'], $topUnitRows[1]['value']],
@@ -7631,22 +7959,18 @@ function renderWorkOrderStartScreen(
     $outputRollLabel = $outputRoll !== null
         ? (string)$outputRoll['roll_code'] . ' (' . (string)$outputRoll['weight_kg'] . ' Kg)'
         : '-';
-    $widthLabel = '-';
-    $heightLabel = '-';
-    $gussetLabel = '-';
-    if (preg_match('/(\d+(?:[.,]\d+)?)\s*[xX]\s*(\d+(?:[.,]\d+)?)(?:\s*[xX]\s*(\d+(?:[.,]\d+)?))?/', $sheetText, $dimensionMatch) === 1) {
-        $widthLabel = $dimensionMatch[1];
-        $heightLabel = $dimensionMatch[2];
-        $gussetLabel = trim((string)($dimensionMatch[3] ?? '')) !== '' ? (string)$dimensionMatch[3] : '-';
-    }
-    $materialLabel = '-';
-    foreach (['PLA', 'BOPP', 'PP', 'PEBD', 'PEAD', 'PE'] as $materialKeyword) {
-        if (stripos($sheetText, $materialKeyword) !== false) {
-            $materialLabel = $materialKeyword;
-            break;
+    $dim = unibagResolveWorkOrderDimensionsAndClient($ot, $sheetText);
+    $widthLabel = $dim['width'];
+    $heightLabel = $dim['height'];
+    $gussetLabel = $dim['gusset'];
+    $materialLabel = $dim['material'];
+    $detectedColors = [];
+    for ($c = 1; $c <= 6; $c++) {
+        $cd = trim((string)($ot["fab_print_colordesc_{$c}"] ?? ''));
+        if ($cd !== '' && !in_array($cd, $detectedColors, true)) {
+            $detectedColors[] = $cd;
         }
     }
-    $detectedColors = [];
     foreach ([
         trim((string)($currentRoll['color'] ?? '')),
         trim((string)($outputRoll['color'] ?? '')),
@@ -7757,20 +8081,16 @@ function renderWorkOrderStartScreen(
             'value' => '-',
         ];
     }
-    $imagePlaceholder = '<span class="legacy-placeholder-btn">Mostrar imagen</span>';
-    $legacyClientRows = [
-        ['N° OT', h((string)$ot['ot_code']), 'Color N° 1', h((string)$colorSlots[0])],
-        ['Cliente', '-', 'Color N° 2', h((string)$colorSlots[1])],
-        ['N° CC', trim((string)($ot['erp_req_id'] ?? '')) !== '' ? h((string)$ot['erp_req_id']) : '-', 'Color N° 3', h((string)$colorSlots[2])],
-        ['Diseño', trim((string)($ot['erp_plan_desc'] ?? '')) !== '' ? h((string)$ot['erp_plan_desc']) : '-', 'Color N° 4', h((string)$colorSlots[3])],
-        ['Producto', h((string)$ot['sku_final']), 'Color N° 5', h((string)$colorSlots[4])],
-        ['Materialidad', h($materialLabel), 'Color N° 6', h((string)$colorSlots[5])],
-        ['Ancho', h($widthLabel), 'Alto', h($heightLabel)],
-        ['Fuelle', h($gussetLabel), 'Cantidad de Bolsas', h($targetQtyLabel)],
-        ['Fecha de Entrega', trim((string)($ot['erp_plan_date'] ?? '')) !== '' ? h(formatLabelDate((string)$ot['erp_plan_date'])) : '-', 'Maquina', h($stationLabel)],
-        ['Fecha de solicitud de cliché', '-', 'Fecha de recepción de cliché', '-'],
-        ['Imagen Diseño', $imagePlaceholder, 'Imagen #5', $imagePlaceholder],
-    ];
+    $legacyClientRows = unibagBuildLegacyClientRows(
+        $ot,
+        $colorSlots,
+        $materialLabel,
+        $widthLabel,
+        $heightLabel,
+        $gussetLabel,
+        $targetQtyLabel,
+        $stationLabel
+    );
     $legacyFabricationRows = [
         ['Rodillo a utilizar', h($primarySelectedAniloxLabel), $topUnitRows[0]['label'], $topUnitRows[0]['value']],
         ['Corte de bolsa', h($heightLabel !== '-' ? ($heightLabel . ' mtrs') : '-'), $topUnitRows[1]['label'], $topUnitRows[1]['value']],
@@ -13865,12 +14185,13 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
         $body .= '<td>' . $ordered . '</td>';
         $body .= '<td>' . $received . '</td>';
         $body .= '<td>' . $pending . '</td>';
+        $testLabelBtn = '<a class="btn secondary" style="padding:4px 9px;font-size:11.5px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;display:inline-flex;align-items:center;gap:4px" href="/reception/test-label?type=import&line=' . (int)$ln['import_container_item_id'] . '" target="_blank" title="Ver diseño 10x7 e imprimir prueba física sin recepcionar">🏷️ Probar Etiqueta</a>';
         if ((string)$container['status'] === 'COMPLETE') {
-            $body .= '<td style="text-align:right"><span class="rec-badge rec-badge-complete">Finalizada</span></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<span class="rec-badge rec-badge-complete">Finalizada</span></div></td>';
         } elseif ($lineSummary['pending'] <= 0) {
-            $body .= '<td style="text-align:right"><span class="rec-badge rec-badge-complete">Completa</span></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<span class="rec-badge rec-badge-complete">Completa</span></div></td>';
         } else {
-            $body .= '<td style="text-align:right"><a class="btn" style="padding:5px 12px;font-size:12px" href="/import-containers/' . $containerId . '/receive?line=' . (int)$ln['import_container_item_id'] . '">Recepcionar</a></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<a class="btn" style="padding:5px 12px;font-size:12px" href="/import-containers/' . $containerId . '/receive?line=' . (int)$ln['import_container_item_id'] . '">Recepcionar</a></div></td>';
         }
         $body .= '</tr>';
     }
@@ -13939,26 +14260,92 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
     }
 
     $cCode = trim((string)($line['container_code'] ?: ('#' . $containerId)));
-    $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div style="font-size:18px;font-weight:700">Recepcionar producto importado</div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <button type="button" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-size:12px;padding:6px 14px;font-weight:600;display:inline-flex;align-items:center;gap:6px" onclick="openCloseReceptionModal()"><span>🔒</span> Cerrar Recepción (Faltantes)</button>
-          <a class="btn secondary" href="/import-containers/' . $containerId . '">Volver</a>
+    $previewUrl = '/reception/test-label?type=import&line=' . (int)$containerItemId;
+    $savedRollId = isset($_GET['saved_roll_id']) ? (int)$_GET['saved_roll_id'] : 0;
+    $printedParam = isset($_GET['printed']) ? (string)$_GET['printed'] : '';
+    $latestRoll = $savedRollId > 0 ? $service->getRoll($savedRollId) : ($recent !== [] ? $recent[0] : null);
+    $activeCardRollId = $latestRoll ? (int)$latestRoll['id'] : 0;
+    $hasReceivedRoll = $activeCardRollId > 0;
+    $cardIframeSrc = $hasReceivedRoll ? ('/rolls/' . $activeCardRollId . '/label') : $previewUrl;
+    $printLangName = strtoupper($printer->getConfiguredPrintLanguage());
+
+    $body = '<div class="rec-header-card" style="margin-bottom:14px">
+        <div class="rec-title-group">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+            <h1>Recepcionar Producto Importado</h1>
+            <span class="rec-badge" style="background:#e0f2fe;color:#0284c7;border:1px solid #bae6fd">Cargamento Internacional</span>
+          </div>
+          <p>Contenedor: <strong>' . h($cCode) . '</strong> · OC: <strong>' . h((string)$line['po_code']) . '</strong> · Proveedor: <strong>' . h((string)$line['supplier_name']) . '</strong></p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12.5px;padding:7px 15px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="' . h($previewUrl) . '&auto_print=1" target="_blank" title="Imprimir una muestra física de prueba sin registrar datos en BD">
+            <span>🏷️</span> Probar Impresión de Etiqueta (Sin Guardar)
+          </a>
+          <button type="button" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-size:12px;padding:7px 14px;font-weight:600;display:inline-flex;align-items:center;gap:6px;border-radius:8px" onclick="openCloseReceptionModal()">
+            <span>🔒</span> Cerrar Recepción (Faltantes)
+          </button>
+          <a class="rec-btn-clear" style="padding:7px 14px;border-radius:8px" href="/import-containers/' . $containerId . '">
+            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+            Volver
+          </a>
         </div>
       </div>';
 
-    $body .= '<div class="card" style="margin-bottom:12px">
-        <div class="row">
-          <div style="flex:1;min-width:220px"><div class="muted">Contenedor</div><div style="font-weight:800">' . h((string)($line['container_code'] ?: ('#' . $containerId))) . '</div></div>
-          <div style="flex:1;min-width:220px"><div class="muted">OC</div><div style="font-weight:800">' . h((string)$line['po_code']) . '</div></div>
-          <div style="flex:1;min-width:260px"><div class="muted">Proveedor</div><div style="font-weight:800">' . h((string)$line['supplier_name']) . '</div></div>
-          <div style="flex:1;min-width:260px"><div class="muted">SKU</div><div style="font-weight:800">' . h((string)$line['sku_code']) . ' - ' . h((string)$line['sku_description']) . '</div></div>
+    if ($savedRollId > 0) {
+        $savedRoll = $service->getRoll($savedRollId);
+        $savedRollCode = is_array($savedRoll) ? (string)($savedRoll['roll_code'] ?? ('#' . $savedRollId)) : ('#' . $savedRollId);
+        $body .= '<div class="alert-box alert-ok" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">';
+        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito.</strong> ';
+        if ($printedParam === '1') {
+            $body .= 'Etiqueta física emitida en la impresora <strong>' . h($printer->getConfiguredPrinterName()) . '</strong>.';
+        } elseif ($printer->isEnabled()) {
+            $body .= 'Impresora configurada: <strong>' . h($printer->getConfiguredPrinterName()) . '</strong>.';
+        }
+        $body .= '</div>';
+        $body .= '<div style="display:flex;gap:6px">';
+        if ($printer->isEnabled()) {
+            $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:5px 12px;font-size:12px;border-radius:6px;font-weight:700" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank">⚡ Re-imprimir ' . h($printLangName) . '</a>';
+        }
+        $body .= '<a class="btn secondary" style="padding:5px 12px;font-size:12px;border-radius:6px;font-weight:700" href="/rolls/' . $savedRollId . '/label" target="_blank">👁️ Ver Etiqueta</a>';
+        $body .= '</div></div>';
+    }
+
+    $body .= '<div class="card" style="margin-bottom:14px;border-radius:12px;border:1px solid #e2e8f0;padding:16px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;border-bottom:1px solid #f1f5f9;padding-bottom:12px;margin-bottom:14px">
+          <div>
+            <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.04em">Artículo a Recepcionar</div>
+            <div style="font-size:17px;font-weight:800;color:#0f172a;margin-top:2px">
+              <span style="color:#00A9A6">' . h((string)$line['sku_code']) . '</span> — ' . h((string)$line['sku_description']) . '
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="rec-badge" style="background:#f1f5f9;color:#334155;border:1px solid #cbd5e1">Modo: ' . h(receptionModeLabel((string)$line['reception_mode'])) . '</span>
+            <a class="btn secondary" style="padding:4px 10px;font-size:12px;color:#0284c7;background:#f0f9ff;border-color:#bae6fd;display:inline-flex;align-items:center;gap:4px" href="' . h($previewUrl) . '" target="_blank">
+              <span>👁️</span> Ver Etiqueta 10x7
+            </a>
+          </div>
         </div>
-        <div class="row" style="margin-top:10px">
-          <div style="flex:1;min-width:180px"><div class="muted">Recepción</div><div style="font-weight:800">' . h(receptionModeLabel((string)$line['reception_mode'])) . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Ordenado contenedor</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'ordered') . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Recibido contenedor</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'received') . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Pendiente</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'pending') . '</div></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px">
+          <div style="background:#f8fafc;padding:10px 14px;border-radius:8px;border:1px solid #e2e8f0">
+            <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase">Ordenado Contenedor</div>
+            <div style="font-size:15px;font-weight:800;color:#0f172a;margin-top:3px">' . formatReceptionDual($lineSummary, 'ordered') . '</div>
+          </div>
+          <div style="background:#ecfdf5;padding:10px 14px;border-radius:8px;border:1px solid #a7f3d0">
+            <div style="font-size:11px;font-weight:700;color:#047857;text-transform:uppercase">Recibido Hasta Ahora</div>
+            <div style="font-size:15px;font-weight:800;color:#065f46;margin-top:3px">' . formatReceptionDual($lineSummary, 'received') . '</div>
+          </div>
+          <div style="background:' . ($lineSummary['pending'] > 0 ? '#fff7ed' : '#ecfdf5') . ';padding:10px 14px;border-radius:8px;border:1px solid ' . ($lineSummary['pending'] > 0 ? '#fed7aa' : '#a7f3d0') . '">
+            <div style="font-size:11px;font-weight:700;color:' . ($lineSummary['pending'] > 0 ? '#c2410c' : '#047857') . ';text-transform:uppercase">Pendiente de Ingreso</div>
+            <div style="font-size:15px;font-weight:800;color:' . ($lineSummary['pending'] > 0 ? '#9a3412' : '#065f46') . ';margin-top:3px">' . formatReceptionDual($lineSummary, 'pending') . '</div>
+          </div>
+          <div style="background:#f8fafc;padding:10px 14px;border-radius:8px;border:1px solid #e2e8f0">
+            <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase">Ficha Técnica</div>
+            <div style="font-size:13px;font-weight:700;color:#334155;margin-top:3px">
+              ' . h((string)($line['width_mm'] ? round((float)$line['width_mm']) . 'mm' : '-')) . ' · ' .
+              h((string)($line['grams'] ? round((float)$line['grams']) . 'g' : '-')) . ' · ' .
+              h((string)($line['meters'] ? number_format((float)$line['meters'], 0, ',', '.') . 'm' : '-')) . '
+            </div>
+          </div>
         </div>
       </div>';
 
@@ -13966,104 +14353,160 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         $orderedUnits = (int)$lineSummary['ordered_rolls'];
         $receivedUnits = (int)$lineSummary['received_rolls'];
         $pendingUnits = (int)$lineSummary['pending_rolls'];
-        $body .= '<div class="card" style="background:#f8fafc;border:1px solid #cbd5e1;margin-bottom:12px">
+        $body .= '<div class="card" style="background:#f0fdfa;border:1px solid #ccfbf1;border-radius:12px;padding:12px 18px;margin-bottom:14px">
             <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
               <div>
-                <span style="font-weight:800;font-size:14px">📦 Control de Unidades / Bobinas a ingresar:</span>
-                <span style="margin-left:8px;color:#475569">Cada pesaje registra <strong>1 bobina/unidad</strong> con su peso individual en balanza.</span>
+                <span style="font-weight:800;font-size:13.5px;color:#0f766e">📦 Control de Unidades / Bobinas a ingresar:</span>
+                <span style="margin-left:8px;color:#334155;font-size:13px">Cada pesaje registra <strong>1 bobina/unidad</strong> con su peso real en balanza e imprime su etiqueta 10x7 cm.</span>
               </div>
               <div style="display:flex;gap:16px;font-size:13px">
                 <div>Total ordenadas: <strong>' . number_format($orderedUnits, 0, ',', '.') . ' Unid.</strong></div>
                 <div>Recibidas: <strong style="color:#16a34a">' . number_format($receivedUnits, 0, ',', '.') . ' Unid.</strong></div>
-                <div>Pendientes por ingresar: <strong style="color:' . ($pendingUnits > 0 ? '#ea580c' : '#16a34a') . '">' . number_format($pendingUnits, 0, ',', '.') . ' Unid.</strong></div>
+                <div>Pendientes: <strong style="color:' . ($pendingUnits > 0 ? '#ea580c' : '#16a34a') . '">' . number_format($pendingUnits, 0, ',', '.') . ' Unid.</strong></div>
               </div>
             </div>
         </div>';
     }
 
-    $body .= '<div class="card">
+    $body .= '<div class="card" style="border-radius:12px;border:1px solid #e2e8f0;padding:18px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+        <div style="font-weight:800;font-size:15px;color:#0f172a;margin-bottom:12px;display:flex;align-items:center;gap:6px">
+          <span>⚖️</span> Registro de Recepción y Balanza
+        </div>
         <form method="post" id="receive_form" action="/import-containers/' . $containerId . '/receive">
           <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
           <input type="hidden" name="import_container_item_id" value="' . (int)$containerItemId . '">
           <input type="hidden" name="reception_mode" id="reception_mode" value="' . h((string)$lineSummary['mode']) . '">
           <input type="hidden" id="received_qty" name="received_qty" value="1">
           <input type="hidden" id="server_print_enabled" value="' . ($printer->isEnabled() ? '1' : '0') . '">
-          <div class="row" style="align-items:end">
-            <div style="flex:1;min-width:220px">
-              <label>Operador</label>
-              <div class="panel" style="padding:10px 12px;font-weight:700">' . h($currentOperatorName) . '</div>
+          <div class="row" style="align-items:end;gap:12px">
+            <div style="flex:1;min-width:200px">
+              <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">👤 Operador</label>
+              <div class="panel" style="padding:9px 12px;font-weight:700;border-radius:8px;background:#f8fafc;border:1px solid #cbd5e1">' . h($currentOperatorName) . '</div>
             </div>
-            <div style="flex:1;min-width:220px">
-              <label>Modo recepción</label>
-              <select id="reception_mode_selector">
+            <div style="flex:1;min-width:200px">
+              <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚙️ Modo recepción</label>
+              <select id="reception_mode_selector" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
                 <option value="WEIGHT"' . ($isWeightMode ? ' selected' : '') . '>Por peso</option>
                 <option value="QUANTITY"' . (!$isWeightMode ? ' selected' : '') . '>Por unidades</option>
               </select>
             </div>
             <div style="flex:1;min-width:220px">
-              <label>Bodega</label>
-              <select name="warehouse_id" required>
-                <option value="">Seleccionar</option>';
+              <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🏭 Bodega de Destino *</label>
+              <select name="warehouse_id" required style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
+                <option value="">Seleccionar bodega</option>';
     foreach ($warehouses as $w) {
         $body .= '<option value="' . (int)$w['id'] . '">' . h((string)$w['code']) . ' - ' . h((string)$w['name']) . '</option>';
     }
     $body .= '</select>
             </div>
-            <div id="weight_field_wrapper" style="flex:1;min-width:220px">
-              <label id="primary_value_label">Peso real (Kg)</label>
-              <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="0" value=""' . ($pendingInputMax !== '' ? ' max="' . h($pendingInputMax) . '"' : '') . '>
+            <div id="weight_field_wrapper" style="flex:1;min-width:200px">
+              <label id="primary_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚖️ Peso real (Kg)</label>
+              <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="0" value=""' . ($pendingInputMax !== '' ? ' max="' . h($pendingInputMax) . '"' : '') . ' placeholder="0.000" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:15px;font-weight:700;color:#0f172a">
             </div>
-            <div id="qty_field_wrapper" style="flex:1;min-width:220px">
-              <label id="qty_value_label">Cantidad recibida (Unid.)</label>
-              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1">
+            <div id="qty_field_wrapper" style="flex:1;min-width:200px">
+              <label id="qty_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🔢 Cantidad recibida (Unid.)</label>
+              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:14px;font-weight:700">
             </div>
-            <div id="action_buttons_wrapper" style="flex:0 0 ' . ($isWeightMode ? '300px' : '190px') . ';display:flex;flex-direction:row;gap:8px;align-items:flex-end;justify-content:flex-end;flex-wrap:nowrap">';
-    $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . (!$isWeightMode ? ' style="display:none"' : '') . '>Activar balanza</button>
-              <button class="btn" type="button" id="save_print"' . (!$isWeightMode ? ' style="display:none"' : '') . ' disabled>Guardar e imprimir</button>
-              <button class="btn" type="submit" id="submit_primary"' . ($isWeightMode ? ' style="display:none"' : '') . '>Guardar e imprimir</button></div>
+            <div id="action_buttons_wrapper" style="flex:0 0 ' . ($isWeightMode ? '310px' : '200px') . ';display:flex;flex-direction:row;gap:8px;align-items:flex-end;justify-content:flex-end;flex-wrap:nowrap">';
+    $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . (!$isWeightMode ? ' style="display:none"' : '') . ' style="height:38px;padding:0 14px;border-radius:8px;font-weight:700">Activar balanza</button>
+              <button class="btn" type="button" id="save_print"' . (!$isWeightMode ? ' style="display:none"' : '') . ' disabled style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button>
+              <button class="btn" type="submit" id="submit_primary"' . ($isWeightMode ? ' style="display:none"' : '') . ' style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button></div>
           </div>
-          <div class="row" id="scale_status_row" style="margin-top:6px' . ($isWeightMode ? '' : ';display:none') . '">
-            <div style="flex:1;min-width:220px"></div>
-            <div style="flex:1;min-width:220px"></div>
-            <div style="flex:1;min-width:220px"><div class="muted" id="scale_status">Balanza: inactiva · Máximo pendiente ' . h(formatReceptionValue((float)$lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit) . '</div></div>
-            <div id="scale_status_spacer" style="flex:0 0 ' . ($isWeightMode ? '300px' : '190px') . '"></div>
-          </div>
-
-          <div class="panel" style="margin-top:12px">
-            <div style="font-weight:800;margin-bottom:6px">Especificación</div>
-            <div class="row">
-              <div style="flex:1;min-width:160px"><label>Gramos</label><input type="text" value="' . h((string)($line['grams'] ?? '')) . '" disabled></div>
-              <div style="flex:1;min-width:160px"><label>Ancho (mm)</label><input type="text" value="' . h((string)($line['width_mm'] ?? '')) . '" disabled></div>
-              <div style="flex:1;min-width:220px"><label>Color</label><input type="text" value="' . h((string)($line['color'] ?? '')) . '" disabled></div>
-              <div style="flex:1;min-width:220px"><label>Metros lineales</label><input type="text" value="' . h((string)($line['meters'] ?? '')) . '" disabled></div>
+          <div class="row" id="scale_status_row" style="margin-top:8px' . ($isWeightMode ? '' : ';display:none') . ';align-items:center">
+            <div style="flex:1"></div>
+            <div style="flex:2;text-align:right">
+              <span class="muted" id="scale_status" style="font-size:12.5px;font-weight:600;background:#f8fafc;border:1px solid #e2e8f0;padding:4px 12px;border-radius:20px;display:inline-block">Balanza: inactiva · Máximo pendiente ' . h(formatReceptionValue((float)$lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit) . '</span>
             </div>
           </div>
-
         </form>
       </div>';
 
-    $body .= '<div class="card" style="margin-top:12px">
-        <div style="font-weight:800;margin-bottom:8px">Últimas recepciones del contenedor</div>
-        <table><thead><tr><th>Código</th><th>Bodega</th><th>Unidades</th><th>Peso (Kg)</th><th>Fecha</th><th></th></tr></thead><tbody id="recent_tbody">';
+    $body .= '<div class="card" style="margin-top:14px;border-radius:12px;border:1px solid #e2e8f0;padding:16px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+        <div style="font-weight:800;font-size:15px;color:#0f172a;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between">
+          <span>📋 Últimas recepciones de este contenedor</span>
+          <span style="font-size:12px;color:#64748b;font-weight:600">Historial reciente</span>
+        </div>
+        <div class="rec-table-wrap">
+        <table class="rec-table"><thead><tr><th>Código Bobina</th><th>Bodega</th><th>Unidades</th><th>Peso (Kg)</th><th>Fecha Registro</th><th style="text-align:right">Etiqueta 10x7</th></tr></thead><tbody id="recent_tbody">';
     foreach ($recent as $r) {
         $recentValue = formatReceptionValue((float)($r['received_qty'] ?? 1), 'Unid.') . ' Unid.';
         $recentWeight = formatReceptionValue((float)($r['weight_kg'] ?? 0), 'Kg');
         $body .= '<tr>';
-        $body .= '<td>' . h((string)$r['roll_code']) . '</td>';
-        $body .= '<td>' . h((string)$r['warehouse_code']) . '</td>';
+        $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-size:13px">' . h((string)$r['roll_code']) . '</span></td>';
+        $body .= '<td><span class="wh-badge" style="font-size:11px;padding:2px 6px">' . h((string)$r['warehouse_code']) . '</span></td>';
         $body .= '<td>' . h($recentValue) . '</td>';
-        $body .= '<td>' . h($recentWeight) . '</td>';
-        $body .= '<td>' . h((string)$r['created_at']) . '</td>';
-        $body .= '<td><a class="btn secondary" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a></td>';
+        $body .= '<td><strong>' . h($recentWeight) . ' Kg</strong></td>';
+        $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)$r['created_at']) . '</span></td>';
+        if ($printer->isEnabled()) {
+            $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
+            $body .= '<a class="btn" style="padding:4px 9px;font-size:11.5px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo a ' . h($printer->getConfiguredPrinterName()) . '">⚡ ' . h($printLangName) . '</a>';
+            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño o imprimir con navegador">👁️ Ver</a>';
+            $body .= '</div></td>';
+        } else {
+            $body .= '<td style="text-align:right"><a class="btn secondary" style="padding:4px 10px;font-size:12px;border-radius:6px;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a></td>';
+        }
         $body .= '</tr>';
     }
     if ($recent === []) {
-        $body .= '<tr><td colspan="6" class="muted">Sin recepciones aún.</td></tr>';
+        $body .= '<tr><td colspan="6"><div class="rec-empty" style="padding:18px"><div class="rec-empty-icon" style="font-size:24px">📦</div><div style="font-weight:700">Sin recepciones registradas aún para esta línea.</div><div style="font-size:12px">Pesa la primera bobina para registrar e imprimir automáticamente.</div></div></td></tr>';
     }
-    $body .= '</tbody></table></div>';
-    $body .= '<div class="card" style="margin-top:12px">
-        <div style="font-weight:800;margin-bottom:8px">Vista previa última etiqueta</div>
-        <iframe id="label_preview" title="Vista previa etiqueta" style="width:100%;height:420px;border:1px solid #e5e7eb;border-radius:8px;background:#fff"></iframe>
+    $body .= '</tbody></table></div></div>';
+
+    // Sección destacada de Vista Previa y Prueba de Etiqueta 10x7 cm
+    $cardTitle = $hasReceivedRoll
+        ? ('Última Etiqueta Generada: <span style="color:#00A9A6;font-family:monospace">' . h((string)($latestRoll['roll_code'] ?: ('#' . $activeCardRollId))) . '</span>')
+        : 'Vista Previa y Prueba de Etiqueta 10x7 cm';
+    $cardBadge = $hasReceivedRoll ? ('Bobina #' . $activeCardRollId) : 'Muestra sin guardar';
+
+    $body .= '<div class="card" style="margin-top:14px;border-radius:12px;border:1px solid #e2e8f0;background:#fff;padding:16px 20px;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px;border-bottom:1px solid #f1f5f9;padding-bottom:10px">
+          <div>
+            <div style="font-weight:800;font-size:15px;color:#0f172a;display:flex;align-items:center;gap:8px">
+              <span style="font-size:18px">🏷️</span> ' . $cardTitle . '
+              <span style="font-size:11px;font-weight:800;background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:12px">' . h($cardBadge) . '</span>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px">' .
+              ($hasReceivedRoll
+                ? 'Etiqueta de la bobina recepcionada. Puedes re-imprimir directamente o descargar el comando ' . h($printLangName) . '.'
+                : 'Visualiza el diseño físico o imprime una muestra de prueba directamente a tu impresora térmica sin registrar datos.') . '
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+
+    if ($hasReceivedRoll) {
+        if ($printer->isEnabled()) {
+            $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?server_print=1" target="_blank">
+              ⚡ Imprimir ' . h($printLangName) . ' Directo
+            </a>';
+        } else {
+            $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?auto_print=1" target="_blank">
+              🖨️ Imprimir Navegador
+            </a>';
+        }
+        $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1" download>
+          <span>⬇️</span> Comando ' . h($printLangName) . '
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label" target="_blank">
+          <span>🔍</span> Abrir Ampliada
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '" target="_blank" title="Ver muestra sin datos reales">
+          <span>🧪</span> Muestra sin Guardar
+        </a>';
+    } else {
+        $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="' . h($previewUrl) . '&auto_print=1" target="_blank">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
+          Imprimir Muestra de Prueba
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '&download_zpl=1" download>
+          <span>⬇️</span> Comando ' . h($printLangName) . '
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '" target="_blank">
+          <span>🔍</span> Abrir Ampliada
+        </a>';
+    }
+
+    $body .= '</div></div>
+        <iframe id="label_preview" src="' . h($cardIframeSrc) . '" title="Vista previa etiqueta" style="width:100%;height:380px;border:1px solid #f1f5f9;border-radius:8px;background:#f8fafc"></iframe>
       </div>';
 
     $body .= '<script>
@@ -14110,6 +14553,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           var el = document.getElementById("server_print_enabled");
           return !!(el && String(el.value) === "1");
         })();
+        var serverPrinterName = ' . json_encode($printer->getConfiguredPrinterName()) . ';
+        var printLangLabel = ' . json_encode(strtoupper($printer->getConfiguredPrintLanguage())) . ';
 
         function setStatus(text) { status.textContent = text; }
 
@@ -14343,45 +14788,74 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               var dt = now.toISOString().slice(0, 19).replace("T", " ");
 
               var td1 = document.createElement("td");
-              td1.textContent = "#" + data.id;
+              td1.innerHTML = "<span class=\"rec-code-link\" style=\"font-family:monospace;font-size:13px\">" + (data.roll_code ? ("#" + data.roll_code) : ("#" + data.id)) + "</span>";
               var td2 = document.createElement("td");
-              td2.textContent = whCode;
+              td2.innerHTML = "<span class=\"wh-badge\" style=\"font-size:11px;padding:2px 6px\">" + whCode + "</span>";
               var td3 = document.createElement("td");
               td3.textContent = "1 Unid.";
               var td4 = document.createElement("td");
-              td4.textContent = weightToSave.toFixed(3);
+              td4.innerHTML = "<strong>" + weightToSave.toFixed(3) + " Kg</strong>";
               var td5 = document.createElement("td");
-              td5.textContent = dt;
+              td5.innerHTML = "<span style=\"color:#64748b;font-size:12px\">" + dt + "</span>";
               var td6 = document.createElement("td");
-              var a = document.createElement("a");
-              a.className = "btn secondary";
-              a.target = "_blank";
-              a.rel = "noopener";
-              a.href = labelHref;
-              a.textContent = "Etiqueta";
-              td6.appendChild(a);
+              td6.style.textAlign = "right";
+
+              var divActions = document.createElement("div");
+              divActions.style.display = "flex";
+              divActions.style.gap = "5px";
+              divActions.style.justifyContent = "flex-end";
+              divActions.style.alignItems = "center";
+
+              if (serverPrintEnabled) {
+                var btnDirect = document.createElement("a");
+                btnDirect.className = "btn";
+                btnDirect.style.padding = "4px 9px";
+                btnDirect.style.fontSize = "11.5px";
+                btnDirect.style.borderRadius = "6px";
+                btnDirect.style.background = "#0284c7";
+                btnDirect.style.borderColor = "#0284c7";
+                btnDirect.style.color = "#fff";
+                btnDirect.target = "_blank";
+                btnDirect.rel = "noopener";
+                btnDirect.href = data.server_print_url || ("/rolls/" + data.id + "/label?server_print=1");
+                btnDirect.textContent = "⚡ " + (printLangLabel || "Imprimir");
+                divActions.appendChild(btnDirect);
+              }
+
+              var btnView = document.createElement("a");
+              btnView.className = "btn secondary";
+              btnView.style.padding = "4px 8px";
+              btnView.style.fontSize = "11.5px";
+              btnView.style.borderRadius = "6px";
+              btnView.target = "_blank";
+              btnView.rel = "noopener";
+              btnView.href = data.label_url || ("/rolls/" + data.id + "/label");
+              btnView.textContent = "👁️ Ver";
+              divActions.appendChild(btnView);
+
+              td6.appendChild(divActions);
 
               tr.appendChild(td1);
               tr.appendChild(td2);
               tr.appendChild(td3);
               tr.appendChild(td4);
               tr.appendChild(td5);
-              tr.appendChild(td5);
               tr.appendChild(td6);
               tbody.prepend(tr);
             }
 
             if (preview) {
-              preview.src = labelHref;
+              preview.src = data.label_url || ("/rolls/" + data.id + "/label");
             }
 
             if (data.printed === true) {
-              setStatus("Balanza: activa (impreso)");
+              setStatus("Balanza: activa (etiqueta emitida en " + (serverPrinterName || "impresora") + ")");
             } else {
+              var printTarget = data.print_url || (labelHref + "?auto_print=1");
               if (active) {
-                enqueuePrint(labelHref);
-              } else if (labelHref) {
-                window.open(labelHref, "_blank", "noopener");
+                enqueuePrint(printTarget);
+              } else {
+                window.open(printTarget, "_blank", "noopener");
                 setStatus("Recepción guardada e impresión lista");
               }
             }
@@ -14444,11 +14918,25 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           }
         }
 
+        var previewDebounce = null;
+        var sampleBaseUrl = ' . json_encode($previewUrl) . ';
+        function updatePreviewWeight(wVal) {
+          if (!preview || !sampleBaseUrl) return;
+          clearTimeout(previewDebounce);
+          previewDebounce = setTimeout(function() {
+            var n = Number(wVal);
+            if (Number.isFinite(n) && n > 0) {
+              preview.src = sampleBaseUrl + "&weight=" + encodeURIComponent(n.toFixed(2));
+            }
+          }, 600);
+        }
+
         weight.addEventListener("input", function () {
           if (getMode() === "WEIGHT" && !active) {
             setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
           }
           syncWeightSaveButton();
+          updatePreviewWeight(weight.value);
         });
         if (modeSelector) {
           modeSelector.addEventListener("change", function () {
@@ -14496,7 +14984,18 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
 
     $result = $service->createRollFromImportContainerLine($containerItemId, $warehouseId, $weight, $currentOperatorName, $receivedQty, $receptionMode);
     if ($result['ok'] === true) {
-        header('Location: /import-containers/' . $containerId);
+        $rollId = (int)($result['id'] ?? 0);
+        $printed = '0';
+        if ($rollId > 0 && $printer->isEnabled()) {
+            $roll = $service->getRoll($rollId);
+            if (is_array($roll)) {
+                $p = $printer->printRollLabel($roll);
+                if (($p['ok'] ?? false) === true) {
+                    $printed = '1';
+                }
+            }
+        }
+        header('Location: /import-containers/' . $containerId . '/receive?line=' . $containerItemId . '&saved_roll_id=' . $rollId . '&printed=' . $printed);
         exit;
     }
 
@@ -14592,12 +15091,13 @@ if (preg_match('#^/purchase-orders/(\\d+)$#', $path, $m) === 1 && $method === 'G
         $body .= '<td>' . $ordered . '</td>';
         $body .= '<td>' . $received . '</td>';
         $body .= '<td>' . $pending . '</td>';
+        $testLabelBtn = '<a class="btn secondary" style="padding:4px 9px;font-size:11.5px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;display:inline-flex;align-items:center;gap:4px" href="/reception/test-label?type=po&line=' . (int)$ln['id'] . '" target="_blank" title="Ver diseño 10x7 e imprimir prueba física sin recepcionar">🏷️ Probar Etiqueta</a>';
         if ($isComplete) {
-            $body .= '<td style="text-align:right"><span class="rec-badge rec-badge-complete">Finalizada</span></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<span class="rec-badge rec-badge-complete">Finalizada</span></div></td>';
         } elseif ($lineSummary['pending'] <= 0) {
-            $body .= '<td style="text-align:right"><span class="rec-badge rec-badge-complete">Completa</span></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<span class="rec-badge rec-badge-complete">Completa</span></div></td>';
         } else {
-            $body .= '<td style="text-align:right"><a class="btn" style="padding:5px 12px;font-size:12px" href="/purchase-orders/' . (int)$poId . '/receive?line=' . (int)$ln['id'] . '">Recepcionar</a></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<a class="btn" style="padding:5px 12px;font-size:12px" href="/purchase-orders/' . (int)$poId . '/receive?line=' . (int)$ln['id'] . '">Recepcionar</a></div></td>';
         }
         $body .= '</tr>';
     }
@@ -14665,26 +15165,92 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         $poPendingUnits += max(0, (int)($sm['pending_rolls'] ?? 0));
     }
 
-    $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
-        <div style="font-size:18px;font-weight:700">Recepcionar producto</div>
-        <div style="display:flex;gap:8px;align-items:center">
-          <button type="button" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-size:12px;padding:6px 14px;font-weight:600;display:inline-flex;align-items:center;gap:6px" onclick="openCloseReceptionModal()"><span>🔒</span> Cerrar Recepción (Faltantes)</button>
-          <a class="btn secondary" href="/purchase-orders/' . (int)$poId . '">Volver</a>
+    $previewUrl = '/reception/test-label?type=po&line=' . (int)$lineId;
+    $savedRollId = isset($_GET['saved_roll_id']) ? (int)$_GET['saved_roll_id'] : 0;
+    $printedParam = isset($_GET['printed']) ? (string)$_GET['printed'] : '';
+    $latestRoll = $savedRollId > 0 ? $service->getRoll($savedRollId) : ($recent !== [] ? $recent[0] : null);
+    $activeCardRollId = $latestRoll ? (int)$latestRoll['id'] : 0;
+    $hasReceivedRoll = $activeCardRollId > 0;
+    $cardIframeSrc = $hasReceivedRoll ? ('/rolls/' . $activeCardRollId . '/label') : $previewUrl;
+    $printLangName = strtoupper($printer->getConfiguredPrintLanguage());
+
+    $body = '<div class="rec-header-card" style="margin-bottom:14px">
+        <div class="rec-title-group">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+            <h1>Recepcionar Producto Nacional</h1>
+            <span class="rec-badge" style="background:#e0f2fe;color:#0284c7;border:1px solid #bae6fd">Orden de Compra</span>
+          </div>
+          <p>OC: <strong>' . h((string)$line['po_code']) . '</strong> · Proveedor: <strong>' . h((string)$line['supplier_name']) . '</strong> · Tipo: <strong>' . h(((string)($line['supplier_type'] ?? 'NATIONAL')) === 'IMPORT' ? 'Importación' : 'Nacional') . '</strong></p>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12.5px;padding:7px 15px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="' . h($previewUrl) . '&auto_print=1" target="_blank" title="Imprimir una muestra física de prueba sin registrar datos en BD">
+            <span>🏷️</span> Probar Impresión de Etiqueta (Sin Guardar)
+          </a>
+          <button type="button" class="btn" style="background:#dc2626;border-color:#dc2626;color:#fff;font-size:12px;padding:7px 14px;font-weight:600;display:inline-flex;align-items:center;gap:6px;border-radius:8px" onclick="openCloseReceptionModal()">
+            <span>🔒</span> Cerrar Recepción (Faltantes)
+          </button>
+          <a class="rec-btn-clear" style="padding:7px 14px;border-radius:8px" href="/purchase-orders/' . (int)$poId . '">
+            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+            Volver
+          </a>
         </div>
       </div>';
 
-    $body .= '<div class="card" style="margin-bottom:12px">
-        <div class="row">
-          <div style="flex:1;min-width:260px"><div class="muted">OC</div><div style="font-weight:800">' . h((string)$line['po_code']) . '</div></div>
-          <div style="flex:1;min-width:260px"><div class="muted">Proveedor</div><div style="font-weight:800">' . h((string)$line['supplier_name']) . '</div></div>
-          <div style="flex:1;min-width:260px"><div class="muted">SKU</div><div style="font-weight:800">' . h((string)$line['sku_code']) . ' - ' . h((string)$line['sku_description']) . '</div></div>
-          <div style="flex:1;min-width:220px"><div class="muted">Recepción</div><div style="font-weight:800">' . h(receptionModeLabel((string)$line['reception_mode'])) . '</div></div>
+    if ($savedRollId > 0) {
+        $savedRoll = $service->getRoll($savedRollId);
+        $savedRollCode = is_array($savedRoll) ? (string)($savedRoll['roll_code'] ?? ('#' . $savedRollId)) : ('#' . $savedRollId);
+        $body .= '<div class="alert-box alert-ok" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">';
+        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito.</strong> ';
+        if ($printedParam === '1') {
+            $body .= 'Etiqueta física emitida en la impresora <strong>' . h($printer->getConfiguredPrinterName()) . '</strong>.';
+        } elseif ($printer->isEnabled()) {
+            $body .= 'Impresora configurada: <strong>' . h($printer->getConfiguredPrinterName()) . '</strong>.';
+        }
+        $body .= '</div>';
+        $body .= '<div style="display:flex;gap:6px">';
+        if ($printer->isEnabled()) {
+            $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:5px 12px;font-size:12px;border-radius:6px;font-weight:700" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank">⚡ Re-imprimir ' . h($printLangName) . '</a>';
+        }
+        $body .= '<a class="btn secondary" style="padding:5px 12px;font-size:12px;border-radius:6px;font-weight:700" href="/rolls/' . $savedRollId . '/label" target="_blank">👁️ Ver Etiqueta</a>';
+        $body .= '</div></div>';
+    }
+
+    $body .= '<div class="card" style="margin-bottom:14px;border-radius:12px;border:1px solid #e2e8f0;padding:16px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;border-bottom:1px solid #f1f5f9;padding-bottom:12px;margin-bottom:14px">
+          <div>
+            <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.04em">Artículo a Recepcionar</div>
+            <div style="font-size:17px;font-weight:800;color:#0f172a;margin-top:2px">
+              <span style="color:#00A9A6">' . h((string)$line['sku_code']) . '</span> — ' . h((string)$line['sku_description']) . '
+            </div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <span class="rec-badge" style="background:#f1f5f9;color:#334155;border:1px solid #cbd5e1">Modo: ' . h(receptionModeLabel((string)$line['reception_mode'])) . '</span>
+            <a class="btn secondary" style="padding:4px 10px;font-size:12px;color:#0284c7;background:#f0f9ff;border-color:#bae6fd;display:inline-flex;align-items:center;gap:4px" href="' . h($previewUrl) . '" target="_blank">
+              <span>👁️</span> Ver Etiqueta 10x7
+            </a>
+          </div>
         </div>
-        <div class="row" style="margin-top:10px">
-          <div style="flex:1;min-width:180px"><div class="muted">Ordenado</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'ordered') . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Recibido</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'received') . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Pendiente</div><div style="font-weight:800">' . formatReceptionDual($lineSummary, 'pending') . '</div></div>
-          <div style="flex:1;min-width:180px"><div class="muted">Tipo proveedor</div><div style="font-weight:800">' . h(((string)($line['supplier_type'] ?? 'NATIONAL')) === 'IMPORT' ? 'Importación' : 'Nacional') . '</div></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px">
+          <div style="background:#f8fafc;padding:10px 14px;border-radius:8px;border:1px solid #e2e8f0">
+            <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase">Ordenado OC</div>
+            <div style="font-size:15px;font-weight:800;color:#0f172a;margin-top:3px">' . formatReceptionDual($lineSummary, 'ordered') . '</div>
+          </div>
+          <div style="background:#ecfdf5;padding:10px 14px;border-radius:8px;border:1px solid #a7f3d0">
+            <div style="font-size:11px;font-weight:700;color:#047857;text-transform:uppercase">Recibido Hasta Ahora</div>
+            <div style="font-size:15px;font-weight:800;color:#065f46;margin-top:3px">' . formatReceptionDual($lineSummary, 'received') . '</div>
+          </div>
+          <div style="background:' . ($lineSummary['pending'] > 0 ? '#fff7ed' : '#ecfdf5') . ';padding:10px 14px;border-radius:8px;border:1px solid ' . ($lineSummary['pending'] > 0 ? '#fed7aa' : '#a7f3d0') . '">
+            <div style="font-size:11px;font-weight:700;color:' . ($lineSummary['pending'] > 0 ? '#c2410c' : '#047857') . ';text-transform:uppercase">Pendiente de Ingreso</div>
+            <div style="font-size:15px;font-weight:800;color:' . ($lineSummary['pending'] > 0 ? '#9a3412' : '#065f46') . ';margin-top:3px">' . formatReceptionDual($lineSummary, 'pending') . '</div>
+          </div>
+          <div style="background:#f8fafc;padding:10px 14px;border-radius:8px;border:1px solid #e2e8f0">
+            <div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase">Ficha Técnica</div>
+            <div style="font-size:13px;font-weight:700;color:#334155;margin-top:3px">
+              ' . h((string)($line['width_mm'] ? round((float)$line['width_mm']) . 'mm' : '-')) . ' · ' .
+              h((string)($line['grams'] ? round((float)$line['grams']) . 'g' : '-')) . ' · ' .
+              h((string)($line['meters'] ? number_format((float)$line['meters'], 0, ',', '.') . 'm' : '-')) . '
+            </div>
+          </div>
         </div>
       </div>';
 
@@ -14692,104 +15258,160 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         $orderedUnits = (int)$lineSummary['ordered_rolls'];
         $receivedUnits = (int)$lineSummary['received_rolls'];
         $pendingUnits = (int)$lineSummary['pending_rolls'];
-        $body .= '<div class="card" style="background:#f8fafc;border:1px solid #cbd5e1;margin-bottom:12px">
+        $body .= '<div class="card" style="background:#f0fdfa;border:1px solid #ccfbf1;border-radius:12px;padding:12px 18px;margin-bottom:14px">
             <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
               <div>
-                <span style="font-weight:800;font-size:14px">📦 Control de Unidades / Bobinas a ingresar:</span>
-                <span style="margin-left:8px;color:#475569">Cada pesaje registra <strong>1 bobina/unidad</strong> con su peso individual en balanza.</span>
+                <span style="font-weight:800;font-size:13.5px;color:#0f766e">📦 Control de Unidades / Bobinas a ingresar:</span>
+                <span style="margin-left:8px;color:#334155;font-size:13px">Cada pesaje registra <strong>1 bobina/unidad</strong> con su peso real en balanza e imprime su etiqueta 10x7 cm.</span>
               </div>
               <div style="display:flex;gap:16px;font-size:13px">
                 <div>Total ordenadas: <strong>' . number_format($orderedUnits, 0, ',', '.') . ' Unid.</strong></div>
                 <div>Recibidas: <strong style="color:#16a34a">' . number_format($receivedUnits, 0, ',', '.') . ' Unid.</strong></div>
-                <div>Pendientes por ingresar: <strong style="color:' . ($pendingUnits > 0 ? '#ea580c' : '#16a34a') . '">' . number_format($pendingUnits, 0, ',', '.') . ' Unid.</strong></div>
+                <div>Pendientes: <strong style="color:' . ($pendingUnits > 0 ? '#ea580c' : '#16a34a') . '">' . number_format($pendingUnits, 0, ',', '.') . ' Unid.</strong></div>
               </div>
             </div>
         </div>';
     }
 
-    $body .= '<div class="card">
+    $body .= '<div class="card" style="border-radius:12px;border:1px solid #e2e8f0;padding:18px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+        <div style="font-weight:800;font-size:15px;color:#0f172a;margin-bottom:12px;display:flex;align-items:center;gap:6px">
+          <span>⚖️</span> Registro de Recepción y Balanza
+        </div>
         <form method="post" id="receive_form" action="/purchase-orders/' . (int)$poId . '/receive">
           <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
           <input type="hidden" name="purchase_order_line_id" value="' . (int)$lineId . '">
           <input type="hidden" name="reception_mode" id="reception_mode" value="' . h((string)$lineSummary['mode']) . '">
           <input type="hidden" id="received_qty" name="received_qty" value="1">
           <input type="hidden" id="server_print_enabled" value="' . ($printer->isEnabled() ? '1' : '0') . '">
-          <div class="row" style="align-items:end">
-            <div style="flex:1;min-width:220px">
-              <label>Operador</label>
-              <div class="panel" style="padding:10px 12px;font-weight:700">' . h($currentOperatorName) . '</div>
+          <div class="row" style="align-items:end;gap:12px">
+            <div style="flex:1;min-width:200px">
+              <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">👤 Operador</label>
+              <div class="panel" style="padding:9px 12px;font-weight:700;border-radius:8px;background:#f8fafc;border:1px solid #cbd5e1">' . h($currentOperatorName) . '</div>
             </div>
-            <div style="flex:1;min-width:220px">
-              <label>Modo recepción</label>
-              <select id="reception_mode_selector">
+            <div style="flex:1;min-width:200px">
+              <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚙️ Modo recepción</label>
+              <select id="reception_mode_selector" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
                 <option value="WEIGHT"' . ($isWeightMode ? ' selected' : '') . '>Por peso</option>
                 <option value="QUANTITY"' . (!$isWeightMode ? ' selected' : '') . '>Por unidades</option>
               </select>
             </div>
             <div style="flex:1;min-width:220px">
-              <label>Bodega</label>
-              <select name="warehouse_id" required>
-                <option value="">Seleccionar</option>';
+              <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🏭 Bodega de Destino *</label>
+              <select name="warehouse_id" required style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
+                <option value="">Seleccionar bodega</option>';
     foreach ($warehouses as $w) {
         $body .= '<option value="' . (int)$w['id'] . '">' . h((string)$w['code']) . ' - ' . h((string)$w['name']) . '</option>';
     }
     $body .= '</select>
             </div>
-            <div id="weight_field_wrapper" style="flex:1;min-width:220px">
-              <label id="primary_value_label">Peso real (Kg)</label>
-              <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="0" value=""' . ($pendingInputMax !== '' ? ' max="' . h($pendingInputMax) . '"' : '') . '>
+            <div id="weight_field_wrapper" style="flex:1;min-width:200px">
+              <label id="primary_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚖️ Peso real (Kg)</label>
+              <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="0" value=""' . ($pendingInputMax !== '' ? ' max="' . h($pendingInputMax) . '"' : '') . ' placeholder="0.000" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:15px;font-weight:700;color:#0f172a">
             </div>
-            <div id="qty_field_wrapper" style="flex:1;min-width:220px">
-              <label id="qty_value_label">Cantidad recibida (Unid.)</label>
-              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1">
+            <div id="qty_field_wrapper" style="flex:1;min-width:200px">
+              <label id="qty_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🔢 Cantidad recibida (Unid.)</label>
+              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:14px;font-weight:700">
             </div>
-            <div id="action_buttons_wrapper" style="flex:0 0 ' . ($isWeightMode ? '300px' : '190px') . ';display:flex;flex-direction:row;gap:8px;align-items:flex-end;justify-content:flex-end;flex-wrap:nowrap">';
-    $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . (!$isWeightMode ? ' style="display:none"' : '') . '>Activar balanza</button>
-              <button class="btn" type="button" id="save_print"' . (!$isWeightMode ? ' style="display:none"' : '') . ' disabled>Guardar e imprimir</button>
-              <button class="btn" type="submit" id="submit_primary"' . ($isWeightMode ? ' style="display:none"' : '') . '>Guardar e imprimir</button></div>
+            <div id="action_buttons_wrapper" style="flex:0 0 ' . ($isWeightMode ? '310px' : '200px') . ';display:flex;flex-direction:row;gap:8px;align-items:flex-end;justify-content:flex-end;flex-wrap:nowrap">';
+    $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . (!$isWeightMode ? ' style="display:none"' : '') . ' style="height:38px;padding:0 14px;border-radius:8px;font-weight:700">Activar balanza</button>
+              <button class="btn" type="button" id="save_print"' . (!$isWeightMode ? ' style="display:none"' : '') . ' disabled style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button>
+              <button class="btn" type="submit" id="submit_primary"' . ($isWeightMode ? ' style="display:none"' : '') . ' style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button></div>
           </div>
-          <div class="row" id="scale_status_row" style="margin-top:6px' . ($isWeightMode ? '' : ';display:none') . '">
-            <div style="flex:1;min-width:220px"></div>
-            <div style="flex:1;min-width:220px"></div>
-            <div style="flex:1;min-width:220px"><div class="muted" id="scale_status">Balanza: inactiva · Máximo pendiente ' . h(formatReceptionValue((float)$lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit) . '</div></div>
-            <div id="scale_status_spacer" style="flex:0 0 ' . ($isWeightMode ? '300px' : '190px') . '"></div>
-          </div>
-
-          <div class="panel" style="margin-top:12px">
-            <div style="font-weight:800;margin-bottom:6px">Especificación</div>
-            <div class="row">
-              <div style="flex:1;min-width:160px"><label>Gramos</label><input type="text" value="' . h((string)($line['grams'] ?? '')) . '" disabled></div>
-              <div style="flex:1;min-width:160px"><label>Ancho (mm)</label><input type="text" value="' . h((string)($line['width_mm'] ?? '')) . '" disabled></div>
-              <div style="flex:1;min-width:220px"><label>Color</label><input type="text" value="' . h((string)($line['color'] ?? '')) . '" disabled></div>
-              <div style="flex:1;min-width:220px"><label>Metros lineales</label><input type="text" value="' . h((string)($line['meters'] ?? '')) . '" disabled></div>
+          <div class="row" id="scale_status_row" style="margin-top:8px' . ($isWeightMode ? '' : ';display:none') . ';align-items:center">
+            <div style="flex:1"></div>
+            <div style="flex:2;text-align:right">
+              <span class="muted" id="scale_status" style="font-size:12.5px;font-weight:600;background:#f8fafc;border:1px solid #e2e8f0;padding:4px 12px;border-radius:20px;display:inline-block">Balanza: inactiva · Máximo pendiente ' . h(formatReceptionValue((float)$lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit) . '</span>
             </div>
           </div>
-
         </form>
       </div>';
 
-    $body .= '<div class="card" style="margin-top:12px">
-        <div style="font-weight:800;margin-bottom:8px">Últimas recepciones</div>
-        <table><thead><tr><th>Código</th><th>Bodega</th><th>Unidades</th><th>Peso (Kg)</th><th>Fecha</th><th></th></tr></thead><tbody id="recent_tbody">';
+    $body .= '<div class="card" style="margin-top:14px;border-radius:12px;border:1px solid #e2e8f0;padding:16px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+        <div style="font-weight:800;font-size:15px;color:#0f172a;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between">
+          <span>📋 Últimas recepciones de esta Orden de Compra</span>
+          <span style="font-size:12px;color:#64748b;font-weight:600">Historial reciente</span>
+        </div>
+        <div class="rec-table-wrap">
+        <table class="rec-table"><thead><tr><th>Código Bobina</th><th>Bodega</th><th>Unidades</th><th>Peso (Kg)</th><th>Fecha Registro</th><th style="text-align:right">Etiqueta 10x7</th></tr></thead><tbody id="recent_tbody">';
     foreach ($recent as $r) {
         $recentValue = formatReceptionValue((float)($r['received_qty'] ?? 1), 'Unid.') . ' Unid.';
         $recentWeight = formatReceptionValue((float)($r['weight_kg'] ?? 0), 'Kg');
         $body .= '<tr>';
-        $body .= '<td>' . h((string)$r['roll_code']) . '</td>';
-        $body .= '<td>' . h((string)$r['warehouse_code']) . '</td>';
+        $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-size:13px">' . h((string)$r['roll_code']) . '</span></td>';
+        $body .= '<td><span class="wh-badge" style="font-size:11px;padding:2px 6px">' . h((string)$r['warehouse_code']) . '</span></td>';
         $body .= '<td>' . h($recentValue) . '</td>';
-        $body .= '<td>' . h($recentWeight) . '</td>';
-        $body .= '<td>' . h((string)$r['created_at']) . '</td>';
-        $body .= '<td><a class="btn secondary" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a></td>';
+        $body .= '<td><strong>' . h($recentWeight) . ' Kg</strong></td>';
+        $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)$r['created_at']) . '</span></td>';
+        if ($printer->isEnabled()) {
+            $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
+            $body .= '<a class="btn" style="padding:4px 9px;font-size:11.5px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo a ' . h($printer->getConfiguredPrinterName()) . '">⚡ ' . h($printLangName) . '</a>';
+            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño o imprimir con navegador">👁️ Ver</a>';
+            $body .= '</div></td>';
+        } else {
+            $body .= '<td style="text-align:right"><a class="btn secondary" style="padding:4px 10px;font-size:12px;border-radius:6px;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a></td>';
+        }
         $body .= '</tr>';
     }
     if ($recent === []) {
-        $body .= '<tr><td colspan="6" class="muted">Sin recepciones aún.</td></tr>';
+        $body .= '<tr><td colspan="6"><div class="rec-empty" style="padding:18px"><div class="rec-empty-icon" style="font-size:24px">📦</div><div style="font-weight:700">Sin recepciones registradas aún para esta línea.</div><div style="font-size:12px">Pesa la primera bobina para registrar e imprimir automáticamente.</div></div></td></tr>';
     }
-    $body .= '</tbody></table></div>';
-    $body .= '<div class="card" style="margin-top:12px">
-        <div style="font-weight:800;margin-bottom:8px">Vista previa última etiqueta</div>
-        <iframe id="label_preview" title="Vista previa etiqueta" style="width:100%;height:420px;border:1px solid #e5e7eb;border-radius:8px;background:#fff"></iframe>
+    $body .= '</tbody></table></div></div>';
+
+    // Sección destacada de Vista Previa y Prueba de Etiqueta 10x7 cm
+    $cardTitle = $hasReceivedRoll
+        ? ('Última Etiqueta Generada: <span style="color:#00A9A6;font-family:monospace">' . h((string)($latestRoll['roll_code'] ?: ('#' . $activeCardRollId))) . '</span>')
+        : 'Vista Previa y Prueba de Etiqueta 10x7 cm';
+    $cardBadge = $hasReceivedRoll ? ('Bobina #' . $activeCardRollId) : 'Muestra sin guardar';
+
+    $body .= '<div class="card" style="margin-top:14px;border-radius:12px;border:1px solid #e2e8f0;background:#fff;padding:16px 20px;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px;border-bottom:1px solid #f1f5f9;padding-bottom:10px">
+          <div>
+            <div style="font-weight:800;font-size:15px;color:#0f172a;display:flex;align-items:center;gap:8px">
+              <span style="font-size:18px">🏷️</span> ' . $cardTitle . '
+              <span style="font-size:11px;font-weight:800;background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:12px">' . h($cardBadge) . '</span>
+            </div>
+            <div style="font-size:12px;color:#64748b;margin-top:2px">' .
+              ($hasReceivedRoll
+                ? 'Etiqueta de la bobina recepcionada. Puedes re-imprimir directamente o descargar el comando ' . h($printLangName) . '.'
+                : 'Visualiza el diseño físico o imprime una muestra de prueba directamente a tu impresora térmica sin registrar datos.') . '
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+
+    if ($hasReceivedRoll) {
+        if ($printer->isEnabled()) {
+            $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?server_print=1" target="_blank">
+              ⚡ Imprimir ' . h($printLangName) . ' Directo
+            </a>';
+        } else {
+            $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?auto_print=1" target="_blank">
+              🖨️ Imprimir Navegador
+            </a>';
+        }
+        $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1" download>
+          <span>⬇️</span> Comando ' . h($printLangName) . '
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label" target="_blank">
+          <span>🔍</span> Abrir Ampliada
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '" target="_blank" title="Ver muestra sin datos reales">
+          <span>🧪</span> Muestra sin Guardar
+        </a>';
+    } else {
+        $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="' . h($previewUrl) . '&auto_print=1" target="_blank">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
+          Imprimir Muestra de Prueba
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '&download_zpl=1" download>
+          <span>⬇️</span> Comando ' . h($printLangName) . '
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '" target="_blank">
+          <span>🔍</span> Abrir Ampliada
+        </a>';
+    }
+
+    $body .= '</div></div>
+        <iframe id="label_preview" src="' . h($cardIframeSrc) . '" title="Vista previa etiqueta" style="width:100%;height:380px;border:1px solid #f1f5f9;border-radius:8px;background:#f8fafc"></iframe>
       </div>';
 
     $body .= '<script>
@@ -14836,6 +15458,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           var el = document.getElementById("server_print_enabled");
           return !!(el && String(el.value) === "1");
         })();
+        var serverPrinterName = ' . json_encode($printer->getConfiguredPrinterName()) . ';
+        var printLangLabel = ' . json_encode(strtoupper($printer->getConfiguredPrintLanguage())) . ';
 
         function setStatus(text) { status.textContent = text; }
 
@@ -14985,7 +15609,6 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
             }
 
             if (!saving && armed && hasWarehouse && w >= TRIGGER_ON_KG) {
-              var now = Date.now();
               if (intervalOk) {
                 armed = false;
                 setStatus("Balanza: activa (guardando...)");
@@ -15079,45 +15702,74 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               var dt = now.toISOString().slice(0, 19).replace("T", " ");
 
               var td1 = document.createElement("td");
-              td1.textContent = "#" + data.id;
+              td1.innerHTML = "<span class=\"rec-code-link\" style=\"font-family:monospace;font-size:13px\">" + (data.roll_code ? ("#" + data.roll_code) : ("#" + data.id)) + "</span>";
               var td2 = document.createElement("td");
-              td2.textContent = whCode;
+              td2.innerHTML = "<span class=\"wh-badge\" style=\"font-size:11px;padding:2px 6px\">" + whCode + "</span>";
               var td3 = document.createElement("td");
               td3.textContent = "1 Unid.";
               var td4 = document.createElement("td");
-              td4.textContent = weightToSave.toFixed(3);
+              td4.innerHTML = "<strong>" + weightToSave.toFixed(3) + " Kg</strong>";
               var td5 = document.createElement("td");
-              td5.textContent = dt;
+              td5.innerHTML = "<span style=\"color:#64748b;font-size:12px\">" + dt + "</span>";
               var td6 = document.createElement("td");
-              var a = document.createElement("a");
-              a.className = "btn secondary";
-              a.target = "_blank";
-              a.rel = "noopener";
-              a.href = labelHref;
-              a.textContent = "Etiqueta";
-              td6.appendChild(a);
+              td6.style.textAlign = "right";
+
+              var divActions = document.createElement("div");
+              divActions.style.display = "flex";
+              divActions.style.gap = "5px";
+              divActions.style.justifyContent = "flex-end";
+              divActions.style.alignItems = "center";
+
+              if (serverPrintEnabled) {
+                var btnDirect = document.createElement("a");
+                btnDirect.className = "btn";
+                btnDirect.style.padding = "4px 9px";
+                btnDirect.style.fontSize = "11.5px";
+                btnDirect.style.borderRadius = "6px";
+                btnDirect.style.background = "#0284c7";
+                btnDirect.style.borderColor = "#0284c7";
+                btnDirect.style.color = "#fff";
+                btnDirect.target = "_blank";
+                btnDirect.rel = "noopener";
+                btnDirect.href = data.server_print_url || ("/rolls/" + data.id + "/label?server_print=1");
+                btnDirect.textContent = "⚡ " + (printLangLabel || "Imprimir");
+                divActions.appendChild(btnDirect);
+              }
+
+              var btnView = document.createElement("a");
+              btnView.className = "btn secondary";
+              btnView.style.padding = "4px 8px";
+              btnView.style.fontSize = "11.5px";
+              btnView.style.borderRadius = "6px";
+              btnView.target = "_blank";
+              btnView.rel = "noopener";
+              btnView.href = data.label_url || ("/rolls/" + data.id + "/label");
+              btnView.textContent = "👁️ Ver";
+              divActions.appendChild(btnView);
+
+              td6.appendChild(divActions);
 
               tr.appendChild(td1);
               tr.appendChild(td2);
               tr.appendChild(td3);
               tr.appendChild(td4);
               tr.appendChild(td5);
-              tr.appendChild(td5);
               tr.appendChild(td6);
               tbody.prepend(tr);
             }
 
             if (preview) {
-              preview.src = labelHref;
+              preview.src = data.label_url || ("/rolls/" + data.id + "/label");
             }
 
             if (data.printed === true) {
-              setStatus("Balanza: activa (impreso)");
+              setStatus("Balanza: activa (etiqueta emitida en " + (serverPrinterName || "impresora") + ")");
             } else {
+              var printTarget = data.print_url || (labelHref + "?auto_print=1");
               if (active) {
-                enqueuePrint(labelHref);
-              } else if (labelHref) {
-                window.open(labelHref, "_blank", "noopener");
+                enqueuePrint(printTarget);
+              } else {
+                window.open(printTarget, "_blank", "noopener");
                 setStatus("Recepción guardada e impresión lista");
               }
             }
@@ -15219,11 +15871,25 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           }
         }
 
+        var previewDebounce = null;
+        var sampleBaseUrl = ' . json_encode($previewUrl) . ';
+        function updatePreviewWeight(wVal) {
+          if (!preview || !sampleBaseUrl) return;
+          clearTimeout(previewDebounce);
+          previewDebounce = setTimeout(function() {
+            var n = Number(wVal);
+            if (Number.isFinite(n) && n > 0) {
+              preview.src = sampleBaseUrl + "&weight=" + encodeURIComponent(n.toFixed(2));
+            }
+          }, 600);
+        }
+
         weight.addEventListener("input", function () {
           if (getMode() === "WEIGHT" && !active) {
             setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
           }
           syncWeightSaveButton();
+          updatePreviewWeight(weight.value);
         });
         if (modeSelector) {
           modeSelector.addEventListener("change", function () {
@@ -15271,7 +15937,18 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
 
     $result = $service->createRollFromPurchaseOrderLine($lineId, $warehouseId, $weight, $currentOperatorName, $receivedQty, $receptionMode);
     if ($result['ok'] === true) {
-        header('Location: /purchase-orders/' . $poId);
+        $rollId = (int)($result['id'] ?? 0);
+        $printed = '0';
+        if ($rollId > 0 && $printer->isEnabled()) {
+            $roll = $service->getRoll($rollId);
+            if (is_array($roll)) {
+                $p = $printer->printRollLabel($roll);
+                if (($p['ok'] ?? false) === true) {
+                    $printed = '1';
+                }
+            }
+        }
+        header('Location: /purchase-orders/' . $poId . '/receive?line=' . $lineId . '&saved_roll_id=' . $rollId . '&printed=' . $printed);
         exit;
     }
 
@@ -20331,7 +21008,7 @@ if ($path === '/cut/process' && $method === 'POST') {
         . count((array)($result['pallet_ids'] ?? []))
         . ' pallets.';
     if ($printer->isEnabled()) {
-        $message .= ' Impresión Zebra: '
+        $message .= ' Impresión de etiquetas: '
             . $printedBoxes
             . ' cajas y '
             . $printedPallets
@@ -20359,7 +21036,7 @@ if (preg_match('#^/boxes/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Caja ' . h((string)$box['box_code']) . '</div>
-        <div class="row"><a class="btn secondary" href="' . h($boxBackUrl) . '">' . h(inventoryNavigationContext() ? 'Volver a inventario' : 'Volver') . '</a><a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$box['source_roll_id'], $boxNavParams)) . '">Bobina origen</a><a class="btn" href="/boxes/' . (int)$box['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a><a class="btn secondary" href="/boxes/' . (int)$box['id'] . '/label?server_print=1" target="_blank" rel="noopener">Imprimir Zebra</a></div>
+        <div class="row"><a class="btn secondary" href="' . h($boxBackUrl) . '">' . h(inventoryNavigationContext() ? 'Volver a inventario' : 'Volver') . '</a><a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$box['source_roll_id'], $boxNavParams)) . '">Bobina origen</a><a class="btn" href="/boxes/' . (int)$box['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a><a class="btn secondary" href="/boxes/' . (int)$box['id'] . '/label?server_print=1" target="_blank" rel="noopener">Imprimir etiqueta</a></div>
       </div>';
     $body .= '<div class="card"><div class="row">
         <div style="flex:1;min-width:180px"><div class="muted">OT</div><div style="font-weight:800">' . h((string)($box['ot_code'] ?? '-')) . '</div></div>
@@ -20563,7 +21240,7 @@ if (preg_match('#^/pallets/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Pallet ' . h((string)$pallet['pallet_code']) . '</div>
-        <div class="row"><a class="btn secondary" href="' . h($palletBackUrl) . '">' . h(inventoryNavigationContext() ? 'Volver a inventario' : 'Volver') . '</a>' . $maquilaAction . '<a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$pallet['source_roll_id'], $palletNavParams)) . '">Bobina origen</a><a class="btn" href="/pallets/' . (int)$pallet['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a><a class="btn secondary" href="/pallets/' . (int)$pallet['id'] . '/label?server_print=1" target="_blank" rel="noopener">Imprimir Zebra</a></div>
+        <div class="row"><a class="btn secondary" href="' . h($palletBackUrl) . '">' . h(inventoryNavigationContext() ? 'Volver a inventario' : 'Volver') . '</a>' . $maquilaAction . '<a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$pallet['source_roll_id'], $palletNavParams)) . '">Bobina origen</a><a class="btn" href="/pallets/' . (int)$pallet['id'] . '/label?auto_print=1" target="_blank" rel="noopener">Etiqueta</a><a class="btn secondary" href="/pallets/' . (int)$pallet['id'] . '/label?server_print=1" target="_blank" rel="noopener">Imprimir etiqueta</a></div>
       </div>';
     if ($palletMessage !== '') {
         $body .= '<div class="ok" style="margin-bottom:12px">' . h($palletMessage) . '</div>';
@@ -21208,6 +21885,733 @@ if (preg_match('#^/cliches/(\d+)/return$#', $path, $m) === 1 && $method === 'POS
     exit;
 }
 
+function renderReceptionThermalLabel(array $data): void
+{
+    $skuCode = trim((string)($data['sku_code'] ?? '-'));
+    $skuDescription = trim((string)($data['sku_description'] ?? '-'));
+    $arrivalDate = trim((string)($data['arrival_date'] ?? '-'));
+    $warehouseCode = trim((string)($data['warehouse_code'] ?? '-'));
+    $warehouseName = trim((string)($data['warehouse_name'] ?? ''));
+    $weightStr = trim((string)($data['weight_str'] ?? '0.00 Kg'));
+    $metersStr = trim((string)($data['meters_str'] ?? '-'));
+    $specsStr = trim((string)($data['specs_str'] ?? '-'));
+    $color = trim((string)($data['color'] ?? '-'));
+    $poCode = trim((string)($data['po_code'] ?? '-'));
+    $containerCode = trim((string)($data['container_code'] ?? '-'));
+    $supplierName = trim((string)($data['supplier_name'] ?? '-'));
+    $barcodeValue = trim((string)($data['barcode_value'] ?? ''));
+    $stageBadge = trim((string)($data['stage_badge'] ?? 'MATERIA PRIMA'));
+    $footerText = trim((string)($data['footer_text'] ?? 'CONTROL DE CALIDAD UNIBAG'));
+    $isSample = !empty($data['is_sample']);
+    $autoPrint = !empty($data['auto_print']);
+    $downloadZplUrl = (string)($data['download_zpl_url'] ?? '');
+    $rawZplUrl = (string)($data['raw_zpl_url'] ?? '');
+    $serverPrintAllowed = !empty($data['server_print_allowed']);
+    $serverPrintUrl = (string)($data['server_print_url'] ?? '');
+    $serverPrintResult = $data['server_print_result'] ?? null;
+    $printLanguage = strtolower(trim((string)($data['print_language'] ?? 'zpl')));
+    if (!in_array($printLanguage, ['zpl', 'tspl', 'epl'], true)) {
+        $printLanguage = 'zpl';
+    }
+    $commandLabel = strtoupper($printLanguage);
+    $configuredPrinterName = trim((string)($data['printer_name'] ?? ''));
+    $title = (string)($data['title'] ?? ('Etiqueta 10x7 - ' . $barcodeValue));
+
+    // Código de barras vectorial Code 128 nítido y compacto de 28px de alto para 100% garantía de 1 etiqueta
+    $barcodeSvg = code128Svg($barcodeValue, 28, 1.25);
+    if ($barcodeSvg === '') {
+        $barcodeSvg = code39Svg($barcodeValue, 28, 1.05, 3);
+    }
+
+    echo '<!doctype html><html lang="es"><head><meta charset="utf-8">';
+    echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
+    echo '<title>' . h($title) . '</title>';
+    echo '<style id="page_rule">
+      @page {
+        size: 100mm 70mm;
+        margin: 0 !important;
+      }
+    </style>';
+    echo '<style>
+      * {
+        box-sizing: border-box;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: #0f172a;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        color: #000;
+        -webkit-font-smoothing: antialiased;
+      }
+      .no-print-toolbar {
+        padding: 10px 16px;
+        background: #1e293b;
+        color: #fff;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 13px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        position: relative;
+        z-index: 20;
+        border-bottom: 1px solid #334155;
+      }
+      .no-print-toolbar .actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .btn-tb {
+        border-radius: 6px;
+        padding: 7px 14px;
+        font-size: 12.5px;
+        font-weight: 700;
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid transparent;
+        transition: all 0.15s ease;
+      }
+      .btn-tb-print {
+        background: #00A9A6;
+        color: #fff;
+        border-color: #00A9A6;
+        font-size: 14px;
+        font-weight: 900;
+        padding: 8px 20px;
+        box-shadow: 0 2px 8px rgba(0, 169, 166, 0.4);
+      }
+      .btn-tb-print:hover {
+        background: #0d9488;
+      }
+      .btn-tb-sec {
+        background: #334155;
+        color: #fff;
+        border-color: #475569;
+      }
+      .btn-tb-sec:hover {
+        background: #475569;
+      }
+      .btn-height-preset {
+        padding: 5px 9px;
+        font-size: 11.5px;
+        font-weight: 800;
+        background: #0f172a;
+        color: #94a3b8;
+        border: 1px solid #334155;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .btn-height-preset:hover {
+        background: #334155;
+        color: #fff;
+      }
+      .btn-height-preset.active {
+        background: #10b981;
+        color: #fff;
+        border-color: #10b981;
+        font-weight: 900;
+      }
+      .scale-badge {
+        background: #0f172a;
+        border: 1px solid #334155;
+        color: #94a3b8;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .scale-badge strong {
+        color: #38bdf8;
+      }
+      .print-guide-banner {
+        background: #ecfdf5;
+        border-bottom: 2px solid #10b981;
+        padding: 10px 18px;
+        font-size: 12.5px;
+        color: #065f46;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .print-guide-banner .guide-steps {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+      }
+      .guide-step {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .guide-num {
+        background: #059669;
+        color: #fff;
+        width: 19px;
+        height: 19px;
+        border-radius: 50%;
+        font-size: 11px;
+        font-weight: 900;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+      .preview-stage {
+        padding: 24px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: calc(100vh - 140px);
+        background: #0f172a;
+      }
+      .alert-box {
+        margin: 10px 24px 0;
+        padding: 10px 14px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .alert-ok { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
+      .alert-err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+
+      /* Envoltorio de la tarjeta en pantalla */
+      .label-rot-wrap {
+        width: 100mm;
+        height: 70mm;
+        display: block;
+        position: relative;
+      }
+
+      /* Contenedor exacto de la tarjeta de etiqueta: 100mm x 70mm */
+      .label-card {
+        background: #fff;
+        border: 1.5pt solid #000;
+        border-radius: 3px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        box-sizing: border-box;
+        overflow: hidden;
+        page-break-inside: avoid;
+        page-break-after: avoid;
+        break-inside: avoid;
+        width: 100mm;
+        height: 70mm;
+        max-width: 100mm;
+        max-height: 70mm;
+        padding: 1.8mm 2.5mm;
+      }
+
+      /* ========================================================
+         ELEMENTOS INTERNOS COMPACTOS (CABEN EN 54 MM)
+         ======================================================== */
+      .header-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1.2pt solid #000;
+        padding-bottom: 0.6mm;
+        line-height: 1;
+      }
+      .brand-title {
+        font-size: 12pt;
+        font-weight: 900;
+        letter-spacing: 0.4px;
+      }
+      .sub-title {
+        font-size: 6pt;
+        font-weight: 800;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        margin-top: 1px;
+      }
+      .header-meta {
+        text-align: right;
+        line-height: 1.15;
+      }
+      .wh-badge {
+        background: #000;
+        color: #fff;
+        font-weight: 900;
+        font-size: 7.5pt;
+        padding: 1px 5px;
+        border-radius: 2px;
+        display: inline-block;
+        letter-spacing: 0.3px;
+      }
+      .date-str {
+        font-size: 6.2pt;
+        font-weight: 800;
+        margin-top: 1px;
+      }
+      .sku-box {
+        border-bottom: 1pt solid #000;
+        padding-bottom: 0.6mm;
+        margin-top: 0.4mm;
+      }
+      .sku-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+      .sku-label {
+        font-size: 7pt;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+      .sku-val {
+        font-size: 14pt;
+        font-weight: 900;
+        letter-spacing: 0.5px;
+      }
+      .stage-tag {
+        font-size: 6.5pt;
+        font-weight: 800;
+        border: 0.8pt solid #000;
+        padding: 1px 4px;
+        border-radius: 2px;
+        text-transform: uppercase;
+      }
+      .sku-desc {
+        font-size: 7.2pt;
+        font-weight: 700;
+        line-height: 1.15;
+        margin-top: 1px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .grid-specs {
+        display: grid;
+        grid-template-columns: 1.35fr 1fr 1.25fr 0.95fr;
+        gap: 1.5mm;
+        border-bottom: 1pt solid #000;
+        padding: 0.6mm 0;
+        margin-top: 0.2mm;
+      }
+      .spec-col {
+        border-right: 0.8pt solid #bbb;
+        padding-right: 1mm;
+      }
+      .spec-col:last-child {
+        border-right: none;
+        padding-right: 0;
+      }
+      .spec-k {
+        font-size: 5.5pt;
+        font-weight: 800;
+        text-transform: uppercase;
+        color: #222;
+        line-height: 1;
+      }
+      .spec-v {
+        font-size: 8pt;
+        font-weight: 900;
+        line-height: 1.1;
+        margin-top: 1px;
+      }
+      .spec-v-lg {
+        font-size: 10.5pt;
+        font-weight: 900;
+      }
+      .trace-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 0.8pt solid #000;
+        padding: 0.6mm 0;
+        font-size: 6.5pt;
+        font-weight: 700;
+        line-height: 1.1;
+      }
+      .trace-item {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .barcode-section {
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding-top: 0.4mm;
+      }
+      .barcode-svg-wrap {
+        width: 95%;
+        max-width: 90mm;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+      }
+      .barcode-svg-wrap svg {
+        max-width: 100%;
+        height: 100%;
+      }
+      .code-text {
+        font-family: "Consolas", "Courier New", monospace;
+        font-size: 8.5pt;
+        font-weight: 900;
+        letter-spacing: 1.4px;
+        line-height: 1.1;
+        margin-top: 1px;
+      }
+      .footer-text {
+        font-size: 5pt;
+        font-weight: 800;
+        color: #222;
+        letter-spacing: 0.2px;
+        margin-top: 1px;
+      }
+
+      /* ========================================================
+         REGLAS DE IMPRESIÓN: ESTRICTAMENTE 1 SOLA ETIQUETA
+         ======================================================== */
+      @media print {
+        @page {
+          size: 100mm 70mm;
+          margin: 0 !important;
+        }
+        html, body {
+          background: #fff !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          width: 100mm !important;
+          height: 70mm !important;
+          max-width: 100mm !important;
+          max-height: 70mm !important;
+          overflow: hidden !important;
+          -webkit-print-color-adjust: exact !important;
+          print-color-adjust: exact !important;
+          page-break-inside: avoid !important;
+          page-break-after: avoid !important;
+          page-break-before: avoid !important;
+          break-inside: avoid !important;
+        }
+        .no-print, .no-print-toolbar, .print-guide-banner, .alert-box {
+          display: none !important;
+        }
+        .preview-stage {
+          padding: 0 !important;
+          margin: 0 !important;
+          width: 100mm !important;
+          height: 70mm !important;
+          max-width: 100mm !important;
+          max-height: 70mm !important;
+          display: block !important;
+          background: none !important;
+          min-height: 0 !important;
+          overflow: hidden !important;
+        }
+        .label-rot-wrap {
+          width: 100mm !important;
+          height: 70mm !important;
+          max-width: 100mm !important;
+          max-height: 70mm !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          overflow: hidden !important;
+        }
+        .label-card {
+          width: 100mm !important;
+          height: 70mm !important;
+          max-width: 100mm !important;
+          max-height: 70mm !important;
+          box-sizing: border-box !important;
+          border: 1.5pt solid #000 !important;
+          box-shadow: none !important;
+          padding: 1.8mm 2.5mm !important;
+          margin: 0 !important;
+          overflow: hidden !important;
+          page-break-inside: avoid !important;
+          page-break-after: avoid !important;
+          break-inside: avoid !important;
+          display: flex !important;
+          flex-direction: column !important;
+          justify-content: space-between !important;
+        }
+      }
+    </style></head><body>';
+
+    // Barra de herramientas superior
+    echo '<div class="no-print-toolbar">';
+    echo '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+    $headerPrinterDisplay = $configuredPrinterName !== '' ? $configuredPrinterName : 'Impresora Térmica';
+    echo '<span style="font-weight:900;font-size:15px;color:#fff">🖨️ ' . h($headerPrinterDisplay) . '</span>';
+    echo '<div class="scale-badge">Formato: <strong>100 × 70 mm exactos</strong></div>';
+    echo '</div>';
+
+    echo '<div class="actions">';
+    if ($serverPrintAllowed && $serverPrintUrl !== '') {
+        echo '<a class="btn-tb btn-tb-print" href="' . h($serverPrintUrl) . '">⚡ Imprimir ' . h($commandLabel) . ' directo</a>';
+    }
+    echo '<button type="button" class="btn-tb ' . ($serverPrintAllowed ? 'btn-tb-sec' : 'btn-tb-print') . '" onclick="window.print()">🖨️ Imprimir Navegador</button>';
+
+    echo '<div style="display:flex;align-items:center;gap:4px;background:#0f172a;padding:3px 8px;border-radius:6px;border:1px solid #334155">';
+    echo '<span style="font-size:11px;color:#94a3b8;font-weight:800">Modo:</span>';
+    echo '<span style="font-size:11px;color:#fff;font-weight:900">Etiqueta completa 100 × 70 mm</span>';
+    echo '</div>';
+
+    if ($downloadZplUrl !== '') {
+        echo '<a class="btn-tb btn-tb-sec" href="' . h($downloadZplUrl) . '" download title="Descarga comando nativo 100x70mm para la impresora configurada">⬇️ ' . h($commandLabel) . ' 100x70</a>';
+    }
+    if ($rawZplUrl !== '') {
+        echo '<a class="btn-tb btn-tb-sec" href="' . h($rawZplUrl) . '" target="_blank">📄 Ver ' . h($commandLabel) . '</a>';
+    }
+    echo '<button type="button" class="btn-tb btn-tb-sec" onclick="toggleGuide()">❓ Ayuda</button>';
+    echo '</div>';
+    echo '</div>';
+
+    // Banner de Ayuda Directa
+    echo '<div class="print-guide-banner" id="print_guide">';
+    echo '<div class="guide-steps">';
+    echo '<div style="font-weight:900;display:flex;align-items:center;gap:6px"><span>✅ CONFIGURACIÓN EXACTA PARA 1 SOLA ETIQUETA:</span></div>';
+    echo '<div class="guide-step"><span class="guide-num">1</span> Esta vista imprime la etiqueta usando el tamaño real completo de <strong>100 × 70 mm</strong>.</div>';
+    echo '<div class="guide-step"><span class="guide-num">2</span> <strong>En Chrome o Edge (Ctrl+P):</strong> usa <strong>Márgenes: Ninguno</strong> y <strong>Escala: 100%</strong>.</div>';
+    echo '</div>';
+    echo '</div>';
+
+    if (is_array($serverPrintResult)) {
+        if (($serverPrintResult['ok'] ?? false) === true) {
+            echo '<div class="alert-box alert-ok">✅ Etiqueta enviada con éxito a la impresora ' . h($headerPrinterDisplay) . '.</div>';
+        } else {
+            echo '<div class="alert-box alert-err">❌ Error al enviar a impresora: ' . h((string)($serverPrintResult['error'] ?? 'Error desconocido')) . '</div>';
+        }
+    } elseif (!$serverPrintAllowed) {
+        echo '<div class="alert-box alert-err">⚠️ La impresión directa está deshabilitada (PRINT_MODE=none). Puedes usar el botón "Imprimir Navegador".</div>';
+    }
+
+    echo '<div class="preview-stage">';
+    echo '<div class="label-rot-wrap" id="label_rot_wrap">';
+    echo '<div class="label-card" id="label_card">';
+
+    // 1. Encabezado UNIBAG + Bodega y Fecha
+    echo '<div class="header-row">';
+    echo '<div>';
+    echo '<div class="brand-title">UNIBAG</div>';
+    echo '<div class="sub-title">RECEPCIÓN MATERIA PRIMA</div>';
+    echo '</div>';
+    echo '<div class="header-meta">';
+    echo '<div class="wh-badge">BOD: ' . h($warehouseCode) . '</div>';
+    echo '<div class="date-str">FECHA: ' . h($arrivalDate) . '</div>';
+    echo '</div>';
+    echo '</div>';
+
+    // 2. SKU y Descripción (1 línea para no ocupar altura)
+    echo '<div class="sku-box">';
+    echo '<div class="sku-header">';
+    echo '<div><span class="sku-label">SKU: </span><span class="sku-val">' . h($skuCode) . '</span></div>';
+    echo '<div class="stage-tag">' . h($stageBadge) . '</div>';
+    echo '</div>';
+    echo '<div class="sku-desc" title="' . h($skuDescription) . '">' . h($skuDescription) . '</div>';
+    echo '</div>';
+
+    // 3. Cuadrícula de Especificaciones Técnicas y Peso (4 columnas alineadas)
+    echo '<div class="grid-specs">';
+    echo '<div class="spec-col"><div class="spec-k">Peso Real</div><div class="spec-v spec-v-lg">' . h($weightStr) . '</div></div>';
+    echo '<div class="spec-col"><div class="spec-k">Metros</div><div class="spec-v">' . h($metersStr) . '</div></div>';
+    echo '<div class="spec-col"><div class="spec-k">Ancho / Gr</div><div class="spec-v">' . h($specsStr) . '</div></div>';
+    echo '<div class="spec-col"><div class="spec-k">Color</div><div class="spec-v">' . h($color) . '</div></div>';
+    echo '</div>';
+
+    // 4. Datos de Compra y Proveedor (Trazabilidad en 1 fila)
+    echo '<div class="trace-row">';
+    echo '<div class="trace-item"><span>OC: </span><b>' . h($poCode) . '</b></div>';
+    echo '<div class="trace-item"><span>CONT: </span><b>' . h($containerCode) . '</b></div>';
+    echo '<div class="trace-item" style="max-width:40%"><span>PROV: </span><b>' . h($supplierName) . '</b></div>';
+    echo '</div>';
+
+    // 5. Código de Barras y Código de Bobina
+    echo '<div class="barcode-section">';
+    if ($barcodeSvg !== '') {
+        echo '<div class="barcode-svg-wrap">' . $barcodeSvg . '</div>';
+    }
+    echo '<div class="code-text">' . h($barcodeValue) . '</div>';
+    echo '<div class="footer-text">' . h($footerText) . '</div>';
+    echo '</div>';
+
+    echo '</div>'; // .label-card
+    echo '</div>'; // .label-rot-wrap
+    echo '</div>'; // .preview-stage
+
+    echo '<script>
+      (function(){
+        var wrap = document.getElementById("label_rot_wrap");
+        var card = document.getElementById("label_card");
+        if (wrap) {
+          wrap.style.width = "100mm";
+          wrap.style.height = "70mm";
+        }
+        if (card) {
+          card.style.width = "100mm";
+          card.style.height = "70mm";
+          card.style.maxWidth = "100mm";
+          card.style.maxHeight = "70mm";
+        }
+
+        window.toggleGuide = function() {
+          var el = document.getElementById("print_guide");
+          if (el) el.style.display = (el.style.display === "none" || !el.style.display) ? "flex" : "none";
+        };
+
+        ' . ($autoPrint ? '
+        function doPrint(){
+          try { window.focus(); } catch(e) {}
+          try { window.print(); } catch(e) {}
+        }
+        setTimeout(doPrint, 500);
+        ' : '') . '
+      })();
+    </script>';
+    echo '</body></html>';
+    exit;
+}
+
+if ($path === '/reception/test-label' && $method === 'GET') {
+    $type = (string)($_GET['type'] ?? 'po'); // 'po' | 'import'
+    $lineId = (int)($_GET['line'] ?? 0);
+    $weightParam = isset($_GET['weight']) && (float)$_GET['weight'] > 0 ? (float)$_GET['weight'] : null;
+    $whId = isset($_GET['warehouse_id']) ? (int)$_GET['warehouse_id'] : 0;
+
+    $line = null;
+    if ($type === 'import' && $lineId > 0) {
+        $line = $service->getImportContainerLine($lineId);
+    } elseif ($lineId > 0) {
+        $line = $service->getPurchaseOrderLine($lineId);
+    }
+
+    $skuCode = trim((string)($line['sku_code'] ?? 'TEL0044'));
+    $skuDescription = trim((string)($line['sku_description'] ?? 'PP/BLANCO/W80/100X80X1100'));
+    $poCode = trim((string)($line['po_code'] ?? 'OC0000003'));
+    $containerCode = trim((string)($line['container_code'] ?? ($type === 'import' ? 'HLBU9654413' : '-')));
+    $supplierName = trim((string)($line['supplier_name'] ?? 'Proveedor Unibag'));
+    $grams = trim((string)($line['grams'] ?? $line['microns'] ?? '35'));
+    $widthMm = (float)($line['width_mm'] ?? 450);
+    $color = trim((string)($line['color'] ?? 'Blanco'));
+    $metersVal = (float)($line['meters'] ?? 2200);
+    $arrivalDate = formatLabelDate((string)($line['arrival_date'] ?? date('Y-m-d')));
+
+    $warehouseCode = '100';
+    $warehouseName = 'BODEGA 100';
+    if ($whId > 0) {
+        $whList = $service->listWarehousesForReception();
+        foreach ($whList as $w) {
+            if ((int)$w['id'] === $whId) {
+                $warehouseCode = (string)$w['code'];
+                $warehouseName = (string)$w['name'];
+                break;
+            }
+        }
+    }
+
+    $weightKg = $weightParam ?? (round((float)($line['ordered_weight_kg'] ?? 0), 2) ?: 120.00);
+    $weightStr = $weightKg > 0 ? number_format($weightKg, 2, ',', '.') . ' Kg' : '1 Unid.';
+    $metersStr = $metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' m' : '-';
+
+    $specsStr = '';
+    if ($widthMm > 0) {
+        $specsStr .= round($widthMm) . ' mm';
+    }
+    if ($grams !== '' && (float)$grams > 0) {
+        $specsStr .= ($specsStr !== '' ? ' · ' : '') . round((float)$grams) . ' g';
+    }
+    if ($specsStr === '') {
+        $specsStr = '-';
+    }
+
+    $sampleRollCode = 'MUESTRA-' . ($skuCode !== '' ? $skuCode : '10X7');
+    $sampleRoll = [
+        'id' => 0,
+        'roll_code' => $sampleRollCode,
+        'sku_code' => $skuCode,
+        'sku_description' => $skuDescription,
+        'warehouse_code' => $warehouseCode,
+        'warehouse_name' => $warehouseName,
+        'weight_kg' => $weightKg,
+        'received_qty' => 1.0,
+        'reception_mode' => ($line['reception_mode'] ?? 'WEIGHT'),
+        'grams' => $grams,
+        'width_mm' => $widthMm,
+        'color' => $color,
+        'meters' => $metersVal,
+        'arrival_date' => $arrivalDate,
+        'created_at' => date('Y-m-d H:i:s'),
+        'po_code' => $poCode,
+        'container_code' => $containerCode,
+        'supplier_name' => $supplierName,
+        'process_stage' => 'RAW',
+        'is_sample' => true,
+    ];
+    $printLanguage = $printer->getConfiguredPrintLanguage();
+    $printExtension = in_array($printLanguage, ['tspl', 'epl', 'zpl'], true) ? $printLanguage : 'zpl';
+    if (isset($_GET['zpl']) && (string)$_GET['zpl'] === '1') {
+        header('Content-Type: text/plain; charset=utf-8');
+        echo $printer->getRollPrintCommand($sampleRoll);
+        exit;
+    }
+    if (isset($_GET['download_zpl']) && (string)$_GET['download_zpl'] === '1') {
+        $filename = 'etiqueta_muestra_10x7_' . $skuCode . '.' . $printExtension;
+        header('Content-Type: text/plain; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        echo $printer->getRollPrintCommand($sampleRoll);
+        exit;
+    }
+
+    $serverPrint = isset($_GET['server_print']) && (string)($_GET['server_print']) === '1';
+    $serverPrintResult = null;
+    if ($serverPrint && $printer->isEnabled()) {
+        $serverPrintResult = $printer->printRollLabel($sampleRoll);
+    }
+
+if (isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1') {
+    $autoPrint = true;
+} else {
+    $autoPrint = false;
+}
+
+renderReceptionThermalLabel([
+    'sku_code' => $skuCode,
+    'sku_description' => $skuDescription,
+    'arrival_date' => $arrivalDate,
+    'warehouse_code' => $warehouseCode,
+    'warehouse_name' => $warehouseName,
+    'weight_str' => $weightStr,
+    'meters_str' => $metersStr,
+    'specs_str' => $specsStr,
+    'color' => $color,
+    'po_code' => $poCode,
+    'container_code' => $containerCode,
+    'supplier_name' => $supplierName,
+    'barcode_value' => $sampleRollCode,
+    'stage_badge' => 'MUESTRA / TEST',
+    'footer_text' => 'ETIQUETA DE MUESTRA SIN REGISTRO · CONTROL DE CALIDAD',
+    'is_sample' => true,
+    'auto_print' => $autoPrint,
+    'print_language' => $printLanguage,
+    'printer_name' => $printer->getConfiguredPrinterName(),
+    'server_print_allowed' => $printer->isEnabled(),
+    'server_print_url' => '?server_print=1&type=' . urlencode($type) . '&line=' . $lineId,
+    'server_print_result' => $serverPrintResult,
+    'download_zpl_url' => '?download_zpl=1&type=' . urlencode($type) . '&line=' . $lineId,
+    'raw_zpl_url' => '?zpl=1&type=' . urlencode($type) . '&line=' . $lineId,
+    'title' => 'Etiqueta de Prueba 10x7 - ' . $skuCode,
+]);
+exit;
+}
+
 if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') {
     $id = (int)$m[1];
     $roll = $service->getRoll($id);
@@ -21217,81 +22621,102 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
         exit;
     }
 
+    $printLanguage = $printer->getConfiguredPrintLanguage();
+    $printExtension = in_array($printLanguage, ['tspl', 'epl', 'zpl'], true) ? $printLanguage : 'zpl';
+    if (isset($_GET['zpl']) && (string)$_GET['zpl'] === '1') {
+        header('Content-Type: text/plain; charset=utf-8');
+        echo $printer->getRollPrintCommand($roll);
+        exit;
+    }
+    if (isset($_GET['download_zpl']) && (string)$_GET['download_zpl'] === '1') {
+        $filename = 'etiqueta_bobina_' . ($roll['roll_code'] ?: $id) . '.' . $printExtension;
+        header('Content-Type: text/plain; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        echo $printer->getRollPrintCommand($roll);
+        exit;
+    }
+
     $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
-
-    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
-    echo '<title>Etiqueta</title>';
-    echo '<style>
-      *{box-sizing:border-box}
-      body{font-family:Arial,sans-serif;margin:0;background:#fff;color:#111}
-      .wrap{padding:10px}
-      .label{border:2px solid #111;padding:12px;max-width:620px}
-      .head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
-      .brand{font-weight:900;letter-spacing:1px;font-size:24px;line-height:1}
-      .title{margin-top:2px;font-size:13px;font-weight:700;letter-spacing:.5px}
-      .sku{margin-top:10px;border:2px solid #111;padding:8px 10px}
-      .sku .k{font-size:11px;color:#444;text-transform:uppercase}
-      .sku .v{font-size:22px;font-weight:900;line-height:1.1}
-      .desc{margin-top:8px;border:1px solid #111;padding:8px 10px}
-      .grid{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:8px;border-top:1px solid #111;border-left:1px solid #111}
-      .cell{border-right:1px solid #111;border-bottom:1px solid #111;padding:7px 8px;min-height:56px}
-      .k{font-size:11px;color:#444;text-transform:uppercase}
-      .v{font-size:16px;font-weight:800;line-height:1.15;margin-top:2px;word-break:break-word}
-      .v-sm{font-size:14px}
-      .bottom{margin-top:10px;border:2px solid #111;padding:10px 8px;display:flex;flex-direction:column;align-items:center;justify-content:center}
-      .barcode{margin:6px 0 4px}
-      .idtxt{font-size:18px;font-weight:900;letter-spacing:.5px}
-      @media print{
-        body{margin:0}
-        .wrap{padding:0}
-        .label{border:none}
-      }
-    </style></head><body><div class="wrap"><div class="label">';
-
-    $barcodeValue = (string)(int)$roll['id'];
-    $barcodeSvg = code39Svg($barcodeValue, 70, 2, 5);
-    $arrivalDate = formatLabelDate((string)($roll['arrival_date'] ?? $roll['created_at'] ?? ''));
-    $containerCode = trim((string)($roll['container_code'] ?? ''));
-    $grams = trim((string)($roll['grams'] ?? ''));
-    $meters = trim((string)($roll['meters'] ?? ''));
-
-    echo '<div class="head"><div><div class="brand">UNIBAG</div><div class="title">ETIQUETA RECEPCION</div></div></div>';
-    echo '<div class="sku"><div class="k">SKU</div><div class="v">' . h((string)($roll['sku_code'] ?? '-')) . '</div></div>';
-    echo '<div class="desc"><div class="k">Descripcion</div><div class="v v-sm">' . h((string)($roll['sku_description'] ?? '-')) . '</div></div>';
-    echo '<div class="grid">';
-    echo '<div class="cell"><div class="k">Fecha de arribo</div><div class="v">' . h($arrivalDate) . '</div></div>';
-    echo '<div class="cell"><div class="k">Serial contenedor</div><div class="v">' . h($containerCode !== '' ? $containerCode : '-') . '</div></div>';
-    echo '<div class="cell"><div class="k">Unidad de medida</div><div class="v">Gramos / Metro</div></div>';
-    echo '<div class="cell"><div class="k">Codigo bulto</div><div class="v">' . h($barcodeValue) . '</div></div>';
-    echo '<div class="cell"><div class="k">Gramos</div><div class="v">' . h($grams !== '' ? $grams : '-') . '</div></div>';
-    echo '<div class="cell"><div class="k">Metro</div><div class="v">' . h($meters !== '' ? $meters : '-') . '</div></div>';
-    echo '</div>';
-
-    echo '<div class="bottom">';
-    echo '<div class="k" style="color:#111;font-weight:700">Codigo bulto</div>';
-    if ($barcodeSvg !== '') {
-        echo '<div class="barcode">' . $barcodeSvg . '</div>';
+    $serverPrint = isset($_GET['server_print']) && (string)$_GET['server_print'] === '1';
+    if ($autoPrint && $printer->isEnabled() && !isset($_GET['browser_only'])) {
+        $serverPrint = true;
     }
-    echo '<div class="idtxt">' . h($barcodeValue) . '</div>';
-    echo '</div>';
-
-    echo '</div></div>';
-    if ($autoPrint) {
-        echo '<script>
-          (function(){
-            function doPrint(){
-              try { window.focus(); } catch(e) {}
-              try { window.print(); } catch(e) {}
-            }
-            function schedule(){
-              try { setTimeout(doPrint, 800); } catch(e) {}
-            }
-            if (document.readyState === "complete") schedule();
-            else window.addEventListener("load", schedule);
-          })();
-        </script>';
+    $serverPrintResult = null;
+    if ($serverPrint && $printer->isEnabled()) {
+        $serverPrintResult = $printer->printRollLabel($roll);
+        if (($serverPrintResult['ok'] ?? false) === true) {
+            $autoPrint = false;
+        }
     }
-    echo '</body></html>';
+
+    // Datos formateados para la etiqueta física de 10 x 7 cm (100mm x 70mm)
+    $rollCode = trim((string)($roll['roll_code'] ?? ''));
+    $barcodeValue = $rollCode !== '' ? $rollCode : (string)(int)$roll['id'];
+
+    $skuCode = trim((string)($roll['sku_code'] ?? '-'));
+    $skuDescription = trim((string)($roll['sku_description'] ?? '-'));
+    $rawDate = trim((string)($roll['arrival_date'] ?? ''));
+    if ($rawDate === '' || $rawDate === '-') {
+        $rawDate = trim((string)($roll['created_at'] ?? ''));
+    }
+    $arrivalDate = formatLabelDate($rawDate !== '' ? $rawDate : date('Y-m-d'));
+
+    $warehouseCode = trim((string)($roll['warehouse_code'] ?? '-'));
+    $warehouseName = trim((string)($roll['warehouse_name'] ?? ''));
+
+    $weightKg = round((float)($roll['weight_kg'] ?? 0), 2);
+    $weightStr = $weightKg > 0 ? number_format($weightKg, 2, ',', '.') . ' Kg' : '1 Unid.';
+
+    $metersVal = (float)($roll['meters'] ?? 0);
+    $metersStr = $metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' m' : '-';
+
+    $widthMm = (float)($roll['width_mm'] ?? 0);
+    $gramsVal = (float)($roll['grams'] ?? $roll['microns'] ?? 0);
+    $specsStr = '';
+    if ($widthMm > 0) {
+        $specsStr .= round($widthMm) . ' mm';
+    }
+    if ($gramsVal > 0) {
+        $specsStr .= ($specsStr !== '' ? ' · ' : '') . round($gramsVal) . ' g';
+    }
+    if ($specsStr === '') {
+        $specsStr = '-';
+    }
+
+    $color = trim((string)($roll['color'] ?? '')) ?: '-';
+    $poCode = trim((string)($roll['po_code'] ?? '')) ?: '-';
+    $containerCode = trim((string)($roll['container_code'] ?? '')) ?: '-';
+    $supplierName = trim((string)($roll['supplier_name'] ?? '')) ?: '-';
+    $stage = strtoupper(trim((string)($roll['process_stage'] ?? 'RAW')));
+    $stageBadge = $stage === 'PRINTED' ? 'IMPRESA' : ($stage === 'CUT' ? 'CORTADA' : 'MATERIA PRIMA');
+
+    renderReceptionThermalLabel([
+        'sku_code' => $skuCode,
+        'sku_description' => $skuDescription,
+        'arrival_date' => $arrivalDate,
+        'warehouse_code' => $warehouseCode,
+        'warehouse_name' => $warehouseName,
+        'weight_str' => $weightStr,
+        'meters_str' => $metersStr,
+        'specs_str' => $specsStr,
+        'color' => $color,
+        'po_code' => $poCode,
+        'container_code' => $containerCode,
+        'supplier_name' => $supplierName,
+        'barcode_value' => $barcodeValue,
+        'stage_badge' => $stageBadge,
+        'footer_text' => 'ID #' . (int)$id . ($warehouseName !== '' ? ' · ' . $warehouseName : '') . ' · CONTROL DE CALIDAD UNIBAG',
+        'is_sample' => false,
+        'auto_print' => $autoPrint,
+        'print_language' => $printLanguage,
+        'printer_name' => $printer->getConfiguredPrinterName(),
+        'server_print_allowed' => $printer->isEnabled(),
+        'server_print_url' => '/rolls/' . (int)$id . '/label?server_print=1',
+        'server_print_result' => $serverPrintResult,
+        'download_zpl_url' => '/rolls/' . (int)$id . '/label?download_zpl=1',
+        'raw_zpl_url' => '/rolls/' . (int)$id . '/label?zpl=1',
+        'title' => 'Etiqueta 10x7 - ' . $barcodeValue,
+    ]);
     exit;
 }
 
@@ -21344,7 +22769,7 @@ if (preg_match('#^/boxes/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     </style></head><body><div class="wrap">';
     if (is_array($serverPrintResult)) {
         if (($serverPrintResult['ok'] ?? false) === true) {
-            echo '<div class="ok">Etiqueta enviada a impresora Zebra.</div>';
+            echo '<div class="ok">Etiqueta enviada a la impresora.</div>';
         } else {
             echo '<div class="err">No se pudo imprimir: ' . h((string)($serverPrintResult['error'] ?? 'Error desconocido.')) . '</div>';
         }
@@ -21442,7 +22867,7 @@ if (preg_match('#^/pallets/(\d+)/label$#', $path, $m) === 1 && $method === 'GET'
     </style></head><body><div class="wrap">';
     if (is_array($serverPrintResult)) {
         if (($serverPrintResult['ok'] ?? false) === true) {
-            echo '<div class="ok">Etiqueta enviada a impresora Zebra.</div>';
+            echo '<div class="ok">Etiqueta enviada a la impresora.</div>';
         } else {
             echo '<div class="err">No se pudo imprimir: ' . h((string)($serverPrintResult['error'] ?? 'Error desconocido.')) . '</div>';
         }

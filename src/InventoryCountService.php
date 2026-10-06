@@ -486,6 +486,7 @@ final class InventoryCountService
 
         $sql = 'SELECT iss.item_id, iss.st_id, iss.iss_inventory, iss.iss_inventory_reserved, iss.iss_inventory_min,
                        it.item_number_prod, it.item_title,
+                       it.item_reg_width, it.item_reg_gsm, it.item_reg_length, it.item_reg_kg,
                        COALESCE(u.unit_name, "UNID") AS unit_name,
                        (iss.iss_inventory - iss.iss_inventory_reserved) AS available_qty
                 FROM item_shops_storehouses iss
@@ -527,6 +528,10 @@ final class InventoryCountService
                 'iss_inventory_reserved' => $res,
                 'iss_inventory_min' => $min,
                 'available_qty' => $inv - $res,
+                'item_reg_width' => (float)($r['item_reg_width'] ?? 0),
+                'item_reg_gsm' => (float)($r['item_reg_gsm'] ?? 0),
+                'item_reg_length' => (float)($r['item_reg_length'] ?? 0),
+                'item_reg_kg' => (float)($r['item_reg_kg'] ?? 0),
             ];
         }
 

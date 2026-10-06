@@ -49,7 +49,7 @@ El sistema opera con dos conexiones de base de datos simultáneas gestionadas a 
 ├── database/             # Esquemas SQL iniciales y migraciones versionadas
 │   ├── migrations/       # Migraciones incrementales
 │   └── schema.sql        # Esquema inicial TRZ
-├── print/                # Scripts puente para impresoras térmicas de etiquetas (Zebra/Argox)
+├── print/                # Scripts puente para impresoras térmicas de etiquetas (Zebra/Argox/Barpos)
 ├── public/               # Raíz pública del servidor web
 │   ├── index.php         # Router central HTTP y layout maestro
 │   └── js/               # Librerías estáticas (Chart.js)

@@ -5136,6 +5136,71 @@ function unibagOutputColacionExcel(ReceptionService $service): void
 }
 
 /**
+ * Exporta a Excel el informe de eventos de máquina sin producción.
+ */
+function unibagOutputMachineStandbyExcel(ReceptionService $service): void
+{
+    if (!userCanAccessArea('ERP', sessionAreaPermissions())) {
+        redirectResponse(firstAllowedAreaHome(sessionAreaPermissions()));
+    }
+
+    $filters = unibagResolveProductionDashboardFilters();
+    $start = $filters['start'];
+    $end = $filters['end'];
+    $activeFilterLabel = (string)$filters['active_filter_label'];
+
+    $plantaId = isset($_GET['planta_id']) && is_numeric($_GET['planta_id']) ? (int)$_GET['planta_id'] : null;
+    $equipoTypeId = isset($_GET['equipo_type_id']) && is_numeric($_GET['equipo_type_id']) ? (int)$_GET['equipo_type_id'] : null;
+    $equipoId = isset($_GET['equipo_id']) && is_numeric($_GET['equipo_id']) ? (int)$_GET['equipo_id'] : null;
+    $reason = isset($_GET['reason']) ? trim((string)$_GET['reason']) : null;
+    $search = isset($_GET['q']) ? trim((string)$_GET['q']) : null;
+
+    $report = $service->getMachineStandbyReport(
+        $start->format('Y-m-d H:i:s'),
+        $end->format('Y-m-d H:i:s'),
+        $plantaId,
+        $equipoTypeId,
+        $equipoId,
+        $reason,
+        $search
+    );
+
+    $rows = $report['rows'];
+    $filename = 'informe-sin-produccion-' . date('Ymd-His') . '.xlsx';
+    ob_start();
+
+    echo '<html><head><meta charset="UTF-8"><style>
+        body{font-family:Arial,sans-serif;font-size:12px;color:#0f172a}
+        table{border-collapse:collapse;width:100%}
+        th,td{border:1px solid #cbd5e1;padding:6px 8px}
+        th{background:#0f172a;color:#fff;font-weight:700;text-align:center}
+        tr:nth-child(even){background:#f8fafc}
+    </style></head><body>';
+    echo '<h2>Informe de Eventos Sin Producción</h2>';
+    echo '<p>Filtro: ' . h($activeFilterLabel) . ' · Generado: ' . date('d/m/Y H:i') . '</p>';
+    echo '<table>';
+    echo '<tr><th>Fecha</th><th>Hora Inicio</th><th>Hora Fin</th><th>Duración Minutos</th><th>Duración</th><th>Motivo Sin Producción</th><th>Máquina</th><th>Operario</th><th>Estado</th><th>Observaciones</th></tr>';
+    foreach ($rows as $r) {
+        echo '<tr>';
+        echo '<td align="center">' . h($r['date']) . '</td>';
+        echo '<td align="center">' . h($r['start_time']) . '</td>';
+        echo '<td align="center">' . h($r['end_time']) . '</td>';
+        echo '<td align="right">' . $r['duration_minutes'] . '</td>';
+        echo '<td align="right">' . h($r['duration_str']) . '</td>';
+        echo '<td>' . h($r['reason']) . '</td>';
+        echo '<td>' . h($r['machine_name']) . '</td>';
+        echo '<td>' . h($r['operator_name']) . '</td>';
+        echo '<td align="center">' . h($r['status']) . '</td>';
+        echo '<td>' . h($r['comments']) . '</td>';
+        echo '</tr>';
+    }
+    echo '</table></body></html>';
+    $html = ob_get_clean();
+
+    SimpleXlsx::streamHtml($filename, $html, 'SinProduccion');
+}
+
+/**
  * Renderiza el Informe de Detenciones.
  * Adaptado y corregido de: libs/modules/stats/detencion/detencion.php
  */
@@ -5734,43 +5799,57 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
     $activeFilterLabel = (string)$filters['active_filter_label'];
 
     $activeTab = strtolower(trim((string)($_GET['tab'] ?? 'detencion')));
-    if (!in_array($activeTab, ['detencion', 'colacion', 'setup'], true)) {
+    if (!in_array($activeTab, ['detencion', 'sin-produccion', 'standby', 'colacion', 'setup'], true)) {
         if ($activeTab === 'cambio-configuracion') {
             $activeTab = 'setup';
         } else {
             $activeTab = 'detencion';
         }
     }
+    if ($activeTab === 'standby') {
+        $activeTab = 'sin-produccion';
+    }
 
     $plantaId = isset($_GET['planta_id']) && is_numeric($_GET['planta_id']) ? (int)$_GET['planta_id'] : null;
     $equipoTypeId = isset($_GET['equipo_type_id']) && is_numeric($_GET['equipo_type_id']) ? (int)$_GET['equipo_type_id'] : null;
     $equipoId = isset($_GET['equipo_id']) && is_numeric($_GET['equipo_id']) ? (int)$_GET['equipo_id'] : null;
     $pauseId = isset($_GET['pause_id']) && is_numeric($_GET['pause_id']) ? (int)$_GET['pause_id'] : null;
+    $reason = isset($_GET['reason']) ? trim((string)$_GET['reason']) : null;
     $search = isset($_GET['q']) ? trim((string)$_GET['q']) : null;
 
     $startStr = $start->format('Y-m-d H:i:s');
     $endStr = $end->format('Y-m-d H:i:s');
 
     // Cargar reporte según pestaña activa y obtener conteos para las pestañas
-    if ($activeTab === 'detencion') {
+    if ($activeTab === 'sin-produccion') {
+        $standbyReport = $service->getMachineStandbyReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $reason, $search);
+        $detencionReport = $service->getMachineStopsReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, null, $search);
+        $colacionReport = $service->getMachineBreaksReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $search);
+        $setupReport = $service->getMachineSetupReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $search);
+    } elseif ($activeTab === 'detencion') {
         $detencionReport = $service->getMachineStopsReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $pauseId, $search);
+        $standbyReport = $service->getMachineStandbyReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, null, $search);
         $colacionReport = $service->getMachineBreaksReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $search);
         $setupReport = $service->getMachineSetupReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $search);
     } elseif ($activeTab === 'colacion') {
         $colacionReport = $service->getMachineBreaksReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $search);
+        $standbyReport = $service->getMachineStandbyReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, null, $search);
         $detencionReport = $service->getMachineStopsReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, null, $search);
         $setupReport = $service->getMachineSetupReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $search);
     } else { // setup
         $setupReport = $service->getMachineSetupReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $search);
+        $standbyReport = $service->getMachineStandbyReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, null, $search);
         $detencionReport = $service->getMachineStopsReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, null, $search);
         $colacionReport = $service->getMachineBreaksReport($startStr, $endStr, $plantaId, $equipoTypeId, $equipoId, $search);
     }
 
     $detencionCount = (int)($detencionReport['summary']['total_stops'] ?? count($detencionReport['rows'] ?? []));
+    $standbyCount = (int)($standbyReport['summary']['total_records'] ?? count($standbyReport['rows'] ?? []));
     $colacionCount = (int)($colacionReport['summary']['total_records'] ?? count($colacionReport['rows'] ?? []));
     $setupCount = (int)($setupReport['summary']['total_setups'] ?? count($setupReport['rows'] ?? []));
 
     $currentReport = match($activeTab) {
+        'sin-produccion' => $standbyReport,
         'colacion' => $colacionReport,
         'setup' => $setupReport,
         default => $detencionReport,
@@ -5783,7 +5862,7 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
     }
 
     // Helper URLs
-    $buildUrl = static function (array $overrides) use ($defaultFilterType, $periodYm, $rangeStartInput, $rangeEndInput, $plantaId, $equipoTypeId, $equipoId, $pauseId, $search, $activeTab): string {
+    $buildUrl = static function (array $overrides) use ($defaultFilterType, $periodYm, $rangeStartInput, $rangeEndInput, $plantaId, $equipoTypeId, $equipoId, $pauseId, $reason, $search, $activeTab): string {
         $params = [
             'tab' => $activeTab,
             'filter_type' => $defaultFilterType,
@@ -5794,6 +5873,7 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
             'equipo_type_id' => $equipoTypeId,
             'equipo_id' => $equipoId,
             'pause_id' => $pauseId,
+            'reason' => $reason,
             'q' => $search,
         ];
         foreach ($overrides as $k => $v) {
@@ -5816,6 +5896,7 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
         'equipo_type_id' => $equipoTypeId,
         'equipo_id' => $equipoId,
         'pause_id' => $pauseId,
+        'reason' => $reason,
         'q' => $search,
     ], static fn($v) => $v !== null && $v !== ''));
 
@@ -5866,10 +5947,12 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
     
     $tabTitles = [
         'detencion' => 'Detenciones registradas',
+        'sin-produccion' => 'Eventos de máquina sin producción',
         'colacion' => 'Colaciones registradas',
         'setup' => 'Cambios de configuración (Setup)',
     ];
     $activeTabCount = match($activeTab) {
+        'sin-produccion' => $standbyCount,
         'colacion' => $colacionCount,
         'setup' => $setupCount,
         default => $detencionCount,
@@ -5886,6 +5969,7 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
     $body .= '<div class="report-tabs" style="margin:2px 0 0 0">';
     $tabsDef = [
         'detencion' => ['label' => 'Detención', 'count' => $detencionCount],
+        'sin-produccion' => ['label' => 'Sin Producción', 'count' => $standbyCount],
         'colacion' => ['label' => 'Colación', 'count' => $colacionCount],
         'setup' => ['label' => 'Cambio de Configuración', 'count' => $setupCount],
     ];
@@ -5947,6 +6031,16 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
             $body .= '<option value="' . $ptid . '"' . ($pauseId === $ptid ? ' selected' : '') . '>' . h($ptname) . '</option>';
         }
         $body .= '</select></div>';
+    } elseif ($activeTab === 'sin-produccion') {
+        $body .= '<div class="erp-filter-field" style="min-width:180px">';
+        $body .= '<label for="reason_evt">Motivo Sin Producción</label>';
+        $body .= '<select id="reason_evt" name="reason">';
+        $body .= '<option value="">Todos los motivos</option>';
+        $reasons = $standbyReport['reasons'] ?? [];
+        foreach ($reasons as $rs) {
+            $body .= '<option value="' . h($rs) . '"' . ($reason === $rs ? ' selected' : '') . '>' . h($rs) . '</option>';
+        }
+        $body .= '</select></div>';
     }
 
     $body .= '<div class="erp-filter-field" style="flex:1;min-width:220px">';
@@ -5956,7 +6050,7 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
 
     $body .= '<div style="display:flex;gap:8px;align-items:flex-end">';
     $body .= '<button class="btn-filter-apply" type="submit">🔍 Aplicar Filtros</button>';
-    if ($search !== null && $search !== '') {
+    if (($search !== null && $search !== '') || ($reason !== null && $reason !== '')) {
         $body .= '<a class="btn-filter-secondary" href="/reports/machine-events?tab=' . h($activeTab) . '" title="Limpiar">✕ Limpiar</a>';
     }
     $body .= '</div>';
@@ -5995,6 +6089,15 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
         $body .= '<div class="kpi-card"><div class="kpi-label">Horas Detenidas</div><div class="kpi-value" style="color:#b91c1c">' . number_format($summary['total_hours'], 1, ',', '.') . ' h</div></div>';
         $body .= '<div class="kpi-card"><div class="kpi-label">Minutos Totales</div><div class="kpi-value">' . number_format($summary['total_minutes'], 0, ',', '.') . ' min</div></div>';
         $body .= '<div class="kpi-card"><div class="kpi-label">Promedio por Parada</div><div class="kpi-value">' . number_format($summary['avg_minutes'], 1, ',', '.') . ' min</div></div>';
+        $body .= '</div>';
+    } elseif ($activeTab === 'sin-produccion') {
+        $summary = $standbyReport['summary'];
+        $body .= '<div class="kpi-grid" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-top:14px">';
+        $body .= '<div class="kpi-card"><div class="kpi-label">Total Registros</div><div class="kpi-value">' . number_format($summary['total_records'], 0, ',', '.') . '</div></div>';
+        $body .= '<div class="kpi-card"><div class="kpi-label">Terminadas</div><div class="kpi-value" style="color:#16a34a">' . number_format($summary['completed_records'], 0, ',', '.') . '</div></div>';
+        $body .= '<div class="kpi-card"><div class="kpi-label">En Curso</div><div class="kpi-value" style="color:#d97706">' . number_format($summary['in_progress_records'], 0, ',', '.') . '</div></div>';
+        $body .= '<div class="kpi-card"><div class="kpi-label">Total Horas Detenido</div><div class="kpi-value" style="color:#b91c1c">' . number_format($summary['total_hours'], 1, ',', '.') . ' h</div></div>';
+        $body .= '<div class="kpi-card"><div class="kpi-label">Promedio Duración</div><div class="kpi-value">' . number_format($summary['avg_minutes'], 1, ',', '.') . ' min</div></div>';
         $body .= '</div>';
     } elseif ($activeTab === 'colacion') {
         $summary = $colacionReport['summary'];
@@ -6040,6 +6143,36 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
                 $body .= '<td>' . h($r['worker_name']) . ($r['worker_rut'] !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">' . h($r['worker_rut']) . '</span>' : '') . '</td>';
                 $body .= '<td class="text-center">' . ($r['ot_number'] !== '' ? 'OT ' . h($r['ot_number']) : '-') . ($r['cc_number'] !== '' ? '<br><span class="erp-prod-muted" style="font-size:10px">CC ' . h($r['cc_number']) . '</span>' : '') . '</td>';
                 $body .= '<td style="font-size:11px">' . h($r['comments']) . '</td>';
+                $body .= '</tr>';
+            }
+            $body .= '</tbody></table></div>';
+        }
+    } elseif ($activeTab === 'sin-produccion') {
+        $rows = $standbyReport['rows'];
+        if (empty($rows)) {
+            $body .= '<div class="erp-prod-empty text-center">No se encontraron eventos de máquina sin producción para los filtros seleccionados.</div>';
+        } else {
+            $body .= '<div class="erp-prod-table-wrap"><table class="erp-prod-table table-compact">';
+            $body .= '<thead><tr>';
+            $body .= '<th>Fecha</th><th>Hora Inicio</th><th>Hora Fin</th><th class="text-right">Duración</th><th>Motivo Sin Producción</th><th>Máquina</th><th>Operario</th><th class="text-center">Estado</th><th>Observaciones</th>';
+            $body .= '</tr></thead><tbody>';
+            foreach ($rows as $r) {
+                $statusBadge = $r['is_active']
+                    ? '<span style="background:#fef3c7;color:#b45309;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:#d97706;display:inline-block"></span> En curso</span>'
+                    : '<span style="background:#dcfce7;color:#166534;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700">Terminado</span>';
+
+                $durColor = $r['is_active'] ? '#b45309' : '#0f766e';
+
+                $body .= '<tr>';
+                $body .= '<td class="text-center">' . h($r['date']) . '</td>';
+                $body .= '<td class="text-center" style="font-size:11.5px;font-weight:600">' . h($r['start_time']) . '</td>';
+                $body .= '<td class="text-center" style="font-size:11.5px;font-weight:600">' . h($r['end_time']) . '</td>';
+                $body .= '<td class="text-right" style="font-weight:700;color:' . $durColor . '">' . h($r['duration_str']) . '</td>';
+                $body .= '<td><strong style="color:#0f172a">' . h($r['reason']) . '</strong></td>';
+                $body .= '<td class="text-center"><strong>' . h($r['machine_name']) . '</strong></td>';
+                $body .= '<td>' . h($r['operator_name']) . '</td>';
+                $body .= '<td class="text-center">' . $statusBadge . '</td>';
+                $body .= '<td style="font-size:11.5px;color:#334155">' . (!empty($r['comments']) ? h($r['comments']) : '<span style="color:#94a3b8">-</span>') . '</td>';
                 $body .= '</tr>';
             }
             $body .= '</tbody></table></div>';
@@ -6115,7 +6248,9 @@ function unibagRenderMachineEventsReportPage(ReceptionService $service): void
 function unibagOutputMachineEventsExcel(ReceptionService $service): void
 {
     $tab = strtolower(trim((string)($_GET['tab'] ?? 'detencion')));
-    if ($tab === 'colacion') {
+    if ($tab === 'sin-produccion' || $tab === 'standby') {
+        unibagOutputMachineStandbyExcel($service);
+    } elseif ($tab === 'colacion') {
         unibagOutputColacionExcel($service);
     } elseif ($tab === 'setup' || $tab === 'cambio-configuracion') {
         unibagOutputCambioConfiguracionExcel($service);

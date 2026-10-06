@@ -516,6 +516,16 @@ function unibagEnforceAuthenticatedAreaAccess(string $path): void
         return;
     }
 
+    if (
+        str_starts_with($path, '/docs/')
+        || str_starts_with($path, '/docs.order/')
+        || str_starts_with($path, '/docs.prod/')
+        || $path === '/reception/test-label'
+        || preg_match('#^/rolls/\\d+/label#', $path) === 1
+    ) {
+        return;
+    }
+
     if (!unibagIsAuthenticated()) {
         redirectResponse('/login');
     }
