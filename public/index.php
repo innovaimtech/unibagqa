@@ -14294,19 +14294,13 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
     if ($savedRollId > 0) {
         $savedRoll = $service->getRoll($savedRollId);
         $savedRollCode = is_array($savedRoll) ? (string)($savedRoll['roll_code'] ?? ('#' . $savedRollId)) : ('#' . $savedRollId);
-        $body .= '<div class="alert-box alert-ok" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">';
-        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito.</strong> ';
-        if ($printedParam === '1') {
-            $body .= 'Etiqueta física emitida en la impresora <strong>' . h($printer->getConfiguredPrinterName()) . '</strong>.';
-        } elseif ($printer->isEnabled()) {
-            $body .= 'Impresora configurada: <strong>' . h($printer->getConfiguredPrinterName()) . '</strong>.';
-        }
-        $body .= '</div>';
+        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito.</strong></div>';
         $body .= '<div style="display:flex;gap:6px">';
+        $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:12.5px;border-radius:6px;font-weight:700;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $savedRollId . '/label?auto_print=1" target="_blank">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:5px 12px;font-size:12px;border-radius:6px;font-weight:700" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank">⚡ Re-imprimir ' . h($printLangName) . '</a>';
+            $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank" title="Imprimir directo vía comando térmico">⚡ ' . h($printLangName) . '</a>';
         }
-        $body .= '<a class="btn secondary" style="padding:5px 12px;font-size:12px;border-radius:6px;font-weight:700" href="/rolls/' . $savedRollId . '/label" target="_blank">👁️ Ver Etiqueta</a>';
+        $body .= '<a class="btn secondary" style="padding:6px 12px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label" target="_blank">👁️ Ver</a>';
         $body .= '</div></div>';
     }
 
@@ -14437,14 +14431,13 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         $body .= '<td>' . h($recentValue) . '</td>';
         $body .= '<td><strong>' . h($recentWeight) . ' Kg</strong></td>';
         $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)$r['created_at']) . '</span></td>';
+        $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
+        $body .= '<a class="btn" style="padding:4px 10px;font-size:12px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
-            $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
-            $body .= '<a class="btn" style="padding:4px 9px;font-size:11.5px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo a ' . h($printer->getConfiguredPrinterName()) . '">⚡ ' . h($printLangName) . '</a>';
-            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño o imprimir con navegador">👁️ Ver</a>';
-            $body .= '</div></td>';
-        } else {
-            $body .= '<td style="text-align:right"><a class="btn secondary" style="padding:4px 10px;font-size:12px;border-radius:6px;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a></td>';
+            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo térmico">⚡ ' . h($printLangName) . '</a>';
         }
+        $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño">👁️ Ver</a>';
+        $body .= '</div></td>';
         $body .= '</tr>';
     }
     if ($recent === []) {
@@ -14474,13 +14467,12 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
 
     if ($hasReceivedRoll) {
+        $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?auto_print=1" target="_blank">
+          🖨️ Imprimir Etiqueta 10x7
+        </a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?server_print=1" target="_blank">
-              ⚡ Imprimir ' . h($printLangName) . ' Directo
-            </a>';
-        } else {
-            $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?auto_print=1" target="_blank">
-              🖨️ Imprimir Navegador
+            $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?server_print=1" target="_blank">
+              ⚡ ' . h($printLangName) . ' Directo
             </a>';
         }
         $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1" download>
@@ -15199,19 +15191,13 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
     if ($savedRollId > 0) {
         $savedRoll = $service->getRoll($savedRollId);
         $savedRollCode = is_array($savedRoll) ? (string)($savedRoll['roll_code'] ?? ('#' . $savedRollId)) : ('#' . $savedRollId);
-        $body .= '<div class="alert-box alert-ok" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">';
-        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito.</strong> ';
-        if ($printedParam === '1') {
-            $body .= 'Etiqueta física emitida en la impresora <strong>' . h($printer->getConfiguredPrinterName()) . '</strong>.';
-        } elseif ($printer->isEnabled()) {
-            $body .= 'Impresora configurada: <strong>' . h($printer->getConfiguredPrinterName()) . '</strong>.';
-        }
-        $body .= '</div>';
+        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito.</strong></div>';
         $body .= '<div style="display:flex;gap:6px">';
+        $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:12.5px;border-radius:6px;font-weight:700;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $savedRollId . '/label?auto_print=1" target="_blank">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:5px 12px;font-size:12px;border-radius:6px;font-weight:700" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank">⚡ Re-imprimir ' . h($printLangName) . '</a>';
+            $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank" title="Imprimir directo vía comando térmico">⚡ ' . h($printLangName) . '</a>';
         }
-        $body .= '<a class="btn secondary" style="padding:5px 12px;font-size:12px;border-radius:6px;font-weight:700" href="/rolls/' . $savedRollId . '/label" target="_blank">👁️ Ver Etiqueta</a>';
+        $body .= '<a class="btn secondary" style="padding:6px 12px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label" target="_blank">👁️ Ver</a>';
         $body .= '</div></div>';
     }
 
@@ -15342,14 +15328,13 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         $body .= '<td>' . h($recentValue) . '</td>';
         $body .= '<td><strong>' . h($recentWeight) . ' Kg</strong></td>';
         $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)$r['created_at']) . '</span></td>';
+        $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
+        $body .= '<a class="btn" style="padding:4px 10px;font-size:12px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
-            $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
-            $body .= '<a class="btn" style="padding:4px 9px;font-size:11.5px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo a ' . h($printer->getConfiguredPrinterName()) . '">⚡ ' . h($printLangName) . '</a>';
-            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño o imprimir con navegador">👁️ Ver</a>';
-            $body .= '</div></td>';
-        } else {
-            $body .= '<td style="text-align:right"><a class="btn secondary" style="padding:4px 10px;font-size:12px;border-radius:6px;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a></td>';
+            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo térmico">⚡ ' . h($printLangName) . '</a>';
         }
+        $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño">👁️ Ver</a>';
+        $body .= '</div></td>';
         $body .= '</tr>';
     }
     if ($recent === []) {
@@ -15379,13 +15364,12 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
 
     if ($hasReceivedRoll) {
+        $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?auto_print=1" target="_blank">
+          🖨️ Imprimir Etiqueta 10x7
+        </a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?server_print=1" target="_blank">
-              ⚡ Imprimir ' . h($printLangName) . ' Directo
-            </a>';
-        } else {
-            $body .= '<a class="btn" style="background:#0284c7;border-color:#0284c7;color:#fff;font-size:12px;padding:6px 14px;font-weight:700;display:inline-flex;align-items:center;gap:6px;border-radius:8px" href="/rolls/' . $activeCardRollId . '/label?auto_print=1" target="_blank">
-              🖨️ Imprimir Navegador
+            $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?server_print=1" target="_blank">
+              ⚡ ' . h($printLangName) . ' Directo
             </a>';
         }
         $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1" download>
@@ -22355,10 +22339,10 @@ function renderReceptionThermalLabel(array $data): void
     echo '</div>';
 
     echo '<div class="actions">';
+    echo '<button type="button" class="btn-tb btn-tb-print" onclick="window.print()">🖨️ Imprimir Directo 10×7</button>';
     if ($serverPrintAllowed && $serverPrintUrl !== '') {
-        echo '<a class="btn-tb btn-tb-print" href="' . h($serverPrintUrl) . '">⚡ Imprimir ' . h($commandLabel) . ' directo</a>';
+        echo '<a class="btn-tb btn-tb-sec" href="' . h($serverPrintUrl) . '" title="Imprimir directo vía comando físico">⚡ Comando ' . h($commandLabel) . '</a>';
     }
-    echo '<button type="button" class="btn-tb ' . ($serverPrintAllowed ? 'btn-tb-sec' : 'btn-tb-print') . '" onclick="window.print()">🖨️ Imprimir Navegador</button>';
 
     echo '<div style="display:flex;align-items:center;gap:4px;background:#0f172a;padding:3px 8px;border-radius:6px;border:1px solid #334155">';
     echo '<span style="font-size:11px;color:#94a3b8;font-weight:800">Modo:</span>';
@@ -22638,9 +22622,6 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
 
     $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
     $serverPrint = isset($_GET['server_print']) && (string)$_GET['server_print'] === '1';
-    if ($autoPrint && $printer->isEnabled() && !isset($_GET['browser_only'])) {
-        $serverPrint = true;
-    }
     $serverPrintResult = null;
     if ($serverPrint && $printer->isEnabled()) {
         $serverPrintResult = $printer->printRollLabel($roll);
