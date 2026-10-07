@@ -1205,8 +1205,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         .print-modal { display: none; position: fixed; inset: 0; background: rgba(15,23,42,.6); backdrop-filter: blur(4px); z-index: 99999; align-items: center; justify-content: center; padding: 14px; }
         .print-modal.open { display: flex; }
         .print-card { background: #fff; border-radius: 16px; width: min(560px, 96vw); max-height: 90vh; overflow-y: auto; padding: 22px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.3); }
-        .printable-label { background: #fff; border: 2px solid #0f172a; border-radius: 8px; padding: 16px; text-align: center; color: #0f172a; margin-bottom: 16px; font-family: Arial, sans-serif; }
-        .barcode-visual { height: 50px; margin: 10px auto; background: repeating-linear-gradient(90deg, #111 0, #111 2px, #fff 2px, #fff 4px, #111 4px, #111 7px, #fff 7px, #fff 9px); width: 85%; }
+        .printable-label { background: #fff; border: 3px solid #000; border-radius: 8px; padding: 14px; text-align: center; color: #000; margin-bottom: 16px; font-family: Arial, sans-serif; }
+        .barcode-visual { height: 72px; margin: 10px auto 8px auto; background: repeating-linear-gradient(90deg, #000 0, #000 4px, #fff 4px, #fff 5px, #000 5px, #000 9px, #fff 9px, #fff 11px, #000 11px, #000 13px, #fff 13px, #fff 14px); width: 96%; border-top: 2px solid #000; border-bottom: 2px solid #000; }
 
         .trz-fields-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
         .trz-fields-3col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
@@ -1784,31 +1784,31 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             var qty = (parseFloat(data.quantity) || 1).toLocaleString("es-CL", {minimumFractionDigits: 1, maximumFractionDigits: 2}) + " " + (data.unit_name || "UNID");
             var meta = (data.created_at || "") + " · Op: " + (data.operator_name || "");
             var bultoBadge = (totalCount > 1 || (data.total_packages && data.total_packages > 1))
-                ? ("<div style=\"font-size:12.5px;font-weight:900;color:#0f766e;margin-bottom:4px;background:#f0fdfa;border:1px solid #ccfbf1;padding:2px 8px;border-radius:6px;display:inline-block\">BULTO " + (data.package_number || (idx + 1)) + " DE " + (data.total_packages || totalCount) + "</div>")
+                ? ("<div style=\"font-size:13px;font-weight:900;color:#000;margin-bottom:5px;background:#fff;border:2px solid #000;padding:3px 10px;border-radius:6px;display:inline-block\">BULTO " + (data.package_number || (idx + 1)) + " DE " + (data.total_packages || totalCount) + "</div>")
                 : "";
 
             var specsArr = [];
             if (data.width_mm && parseFloat(data.width_mm) > 0) specsArr.push("Ancho: " + Math.round(data.width_mm) + " mm");
             if (data.microns && parseFloat(data.microns) > 0) specsArr.push("Micras: " + Math.round(data.microns) + " µm");
             if (data.meters && parseFloat(data.meters) > 0) specsArr.push("Largo: " + parseFloat(data.meters).toLocaleString("es-CL") + " m");
-            var specsHtml = specsArr.length > 0 ? ("<div style=\"font-size:11px;font-weight:700;color:#0f766e;margin-bottom:4px\">📐 " + escapeHtml(specsArr.join(" · ")) + "</div>") : "";
+            var specsHtml = specsArr.length > 0 ? ("<div style=\"font-size:12px;font-weight:900;color:#000;margin-bottom:6px\">ESPEC.: " + escapeHtml(specsArr.join(" · ")) + "</div>") : "";
 
             return "<div class=\"printable-label printable-label-page\" style=\"margin-top:" + (idx > 0 ? "14px" : "0") + "\">" +
-                "<div style=\"font-size:16px;font-weight:900;color:#00A9A6;letter-spacing:1px;margin-bottom:2px\">UNIBAG CHILE</div>" +
-                "<div style=\"font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;margin-bottom:6px\">" + escapeHtml(wh) + "</div>" +
+                "<div style=\"font-size:18px;font-weight:900;color:#000;letter-spacing:1px;margin-bottom:2px\">UNIBAG CHILE</div>" +
+                "<div style=\"font-size:12px;font-weight:900;color:#000;text-transform:uppercase;margin-bottom:8px\">" + escapeHtml(wh) + "</div>" +
                 bultoBadge +
                 "<div class=\"barcode-visual\"></div>" +
-                "<div style=\"font-family:monospace;font-size:20px;font-weight:900;color:#0f172a;letter-spacing:2px;margin:4px 0 8px\">" + escapeHtml(code) + "</div>" +
-                "<div style=\"display:inline-block;padding:3px 10px;border-radius:6px;font-size:12px;font-weight:800;margin-bottom:8px;background:#00A9A6;color:#fff\">" + escapeHtml(type) + "</div>" +
-                "<div style=\"border-top:1px dashed #cbd5e1;padding-top:8px;text-align:left;font-size:12px\">" +
-                    "<div style=\"font-weight:800;font-size:13px;color:#0f172a\">" + escapeHtml(sku) + "</div>" +
-                    "<div style=\"color:#475569;margin-bottom:6px\">" + escapeHtml(desc) + "</div>" +
+                "<div style=\"font-family:monospace;font-size:24px;font-weight:900;color:#000;letter-spacing:2px;margin:4px 0 10px\">" + escapeHtml(code) + "</div>" +
+                "<div style=\"display:inline-block;padding:4px 12px;border-radius:6px;font-size:13px;font-weight:900;margin-bottom:10px;background:#000;color:#fff;border:2px solid #000\">" + escapeHtml(type) + "</div>" +
+                "<div style=\"border-top:2px solid #000;padding-top:10px;text-align:left;font-size:12.5px\">" +
+                    "<div style=\"font-weight:900;font-size:14px;color:#000;margin-bottom:4px\">" + escapeHtml(sku) + "</div>" +
+                    "<div style=\"color:#000;margin-bottom:8px;font-size:12.5px;font-weight:800;line-height:1.25\">" + escapeHtml(desc) + "</div>" +
                     specsHtml +
-                    "<div style=\"display:flex;justify-content:space-between;font-weight:800;font-size:14px;color:#0f172a\">" +
+                    "<div style=\"display:flex;justify-content:space-between;font-weight:900;font-size:15px;color:#000\">" +
                         "<span>CANTIDAD:</span>" +
-                        "<span style=\"color:#0f766e\">" + escapeHtml(qty) + "</span>" +
+                        "<span style=\"color:#000\">" + escapeHtml(qty) + "</span>" +
                     "</div>" +
-                    "<div style=\"font-size:10px;color:#94a3b8;margin-top:8px;text-align:center\">" + escapeHtml(meta) + "</div>" +
+                    "<div style=\"font-size:10.5px;color:#000;margin-top:10px;text-align:center;font-weight:800\">" + escapeHtml(meta) + "</div>" +
                 "</div>" +
             "</div>";
         }
@@ -1885,11 +1885,11 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                 "@page { size: 100mm 70mm; margin: 0; }" +
                 "* { box-sizing: border-box; }" +
                 "body { font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; margin: 0; padding: 0; background: #fff; color: #000; text-align: center; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
-                ".barcode-visual { height: 36px; margin: 4px auto; background: repeating-linear-gradient(90deg,#000 0,#000 2px,#fff 2px,#fff 4px,#000 4px,#000 7px,#fff 7px,#fff 9px); width: 85%; }" +
-                ".printable-label { width: 100mm; height: 70mm; max-width: 100mm; max-height: 70mm; border: 1.5pt solid #000; border-radius: 4px; padding: 2.5mm 3.5mm; margin: 0 auto 10px auto; box-sizing: border-box; page-break-inside: avoid; break-inside: avoid; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; }" +
+                ".barcode-visual { height: 16mm; margin: 1.5mm auto 1.5mm auto; background: repeating-linear-gradient(90deg,#000 0,#000 1.1mm,#fff 1.1mm,#fff 1.35mm,#000 1.35mm,#000 2.55mm,#fff 2.55mm,#fff 3mm,#000 3mm,#000 3.7mm,#fff 3.7mm,#fff 4mm); width: 96%; border-top: 0.5mm solid #000; border-bottom: 0.5mm solid #000; }" +
+                ".printable-label { width: 100mm; height: 70mm; max-width: 100mm; max-height: 70mm; border: 1.2mm solid #000; border-radius: 0; padding: 2.2mm 3mm; margin: 0 auto 10px auto; box-sizing: border-box; page-break-inside: avoid; break-inside: avoid; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; color:#000 !important; }" +
                 "@media print {" +
                     "body { margin: 0 !important; padding: 0 !important; width: 100mm !important; height: 70mm !important; }" +
-                    ".printable-label-page { width: 100mm !important; height: 70mm !important; margin: 0 !important; padding: 2.5mm 3.5mm !important; page-break-after: always !important; break-after: page !important; page-break-inside: avoid !important; break-inside: avoid !important; border: none !important; }" +
+                    ".printable-label-page { width: 100mm !important; height: 70mm !important; margin: 0 !important; padding: 2.2mm 3mm !important; page-break-after: always !important; break-after: page !important; page-break-inside: avoid !important; break-inside: avoid !important; border: none !important; color:#000 !important; }" +
                     ".printable-label-page:last-child { page-break-after: auto !important; break-after: auto !important; margin-bottom: 0 !important; }" +
                 "}" +
             "</style></head><body>" + printable + "</body></html>");
