@@ -284,6 +284,30 @@ final class PrintService
         return (int)($this->env['PRINT_REF_Y_DOTS'] ?? 0);
     }
 
+    private function getTsplDensity(): int
+    {
+        $value = (int)($this->env['PRINT_TSPL_DENSITY'] ?? 12);
+        return max(0, min(15, $value));
+    }
+
+    private function getTsplSpeed(): float
+    {
+        $value = (float)($this->env['PRINT_TSPL_SPEED'] ?? 3.0);
+        return max(1.0, min(6.0, $value));
+    }
+
+    private function getEplDensity(): int
+    {
+        $value = (int)($this->env['PRINT_EPL_DENSITY'] ?? 14);
+        return max(0, min(15, $value));
+    }
+
+    private function getZplDarkness(): int
+    {
+        $value = (int)($this->env['PRINT_ZPL_DARKNESS'] ?? 20);
+        return max(0, min(30, $value));
+    }
+
     private function formatLabelDate(?string $value): string
     {
         $value = trim((string)$value);
@@ -410,71 +434,73 @@ final class PrintService
 
         return "^XA
 ^CI28
-^PW800
+^PW812
 ^LL560
 ^LH0,0
+^PR3
+^MD" . $this->getZplDarkness() . "
 
-^CF0,28
+^CF0,30
 ^FO25,20^FDUNIBAG CHILE^FS
-^CF0,18
-^FO25,52^FDRECEPCION MATERIA PRIMA^FS
-
 ^CF0,20
-^FO440,20^FDBODEGA: {$warehouseCode}^FS
-^CF0,18
-^FO440,48^FDFECHA: {$arrivalDate}^FS
-
-^FO25,74^GB750,2,2^FS
-
-^CF0,20
-^FO25,86^FDSKU:^FS
-^CF0,36
-^FO90,80^FD{$sku}^FS
+^FO25,56^FDRECEPCION MATERIA PRIMA^FS
 
 ^CF0,22
-^FO25,124^FB750,2,2,L,0^FD{$product}^FS
+^FO440,20^FDBODEGA: {$warehouseCode}^FS
+^CF0,20
+^FO440,52^FDFECHA: {$arrivalDate}^FS
 
-^FO25,182^GB750,1,1^FS
+^FO18,80^GB776,2,2^FS
 
-^CF0,16
-^FO25,192^FDPESO REAL:^FS
+^CF0,22
+^FO24,92^FDSKU:^FS
+^CF0,42
+^FO102,86^FD{$sku}^FS
+
+^CF0,24
+^FO24,134^FB770,2,3,L,0^FD{$product}^FS
+
+^FO18,196^GB776,1,1^FS
+
+^CF0,18
+^FO24,206^FDPESO REAL:^FS
+^CF0,34
+^FO24,228^FD{$weightStr}^FS
+
+^CF0,18
+^FO278,206^FDMETROS:^FS
 ^CF0,28
-^FO25,212^FD{$weightStr}^FS
+^FO278,230^FD{$metersStr}^FS
 
-^CF0,16
-^FO240,192^FDMETROS:^FS
+^CF0,18
+^FO500,206^FDANCHO / GR:^FS
+^CF0,28
+^FO500,230^FD{$specsStr}^FS
+
+^CF0,18
+^FO666,206^FDCOLOR:^FS
 ^CF0,26
-^FO240,214^FD{$metersStr}^FS
+^FO666,230^FD{$color}^FS
 
-^CF0,16
-^FO440,192^FDANCHO / GR:^FS
-^CF0,24
-^FO440,214^FD{$specsStr}^FS
+^FO18,272^GB776,1,1^FS
 
-^CF0,16
-^FO640,192^FDCOLOR:^FS
-^CF0,24
-^FO640,214^FD{$color}^FS
+^CF0,18
+^FO24,282^FDORDEN COMPRA: {$poCode}^FS
+^CF0,18
+^FO392,282^FDCONTENEDOR: {$containerCode}^FS
+^CF0,17
+^FO24,308^FB770,1,0,L,0^FDPROVEEDOR: {$supplierName}^FS
 
-^FO25,250^GB750,1,1^FS
+^FO18,336^GB776,1,1^FS
 
-^CF0,16
-^FO25,258^FDORDEN COMPRA: {$poCode}^FS
-^CF0,16
-^FO320,258^FDCONTENEDOR: {$containerCode}^FS
-^CF0,16
-^FO25,280^FB750,1,0,L,0^FDPROVEEDOR: {$supplierName}^FS
+^BY3,2,96
+^FO56,350^BCN,96,N,N,N^FD{$barcodeValue}^FS
 
-^FO25,306^GB750,1,1^FS
+^CF0,30
+^FO0,462^FB812,1,0,C,0^FD{$barcodeValue}^FS
 
-^BY2,2,75
-^FO100,318^BCN,75,N,N,N^FD{$barcodeValue}^FS
-
-^CF0,26
-^FO0,404^FB800,1,0,C,0^FD{$barcodeValue}^FS
-
-^CF0,15
-^FO0,442^FB800,1,0,C,0^FDETAPA: {$processStage}  |  CONTROL DE CALIDAD UNIBAG^FS
+^CF0,17
+^FO0,506^FB812,1,0,C,0^FDETAPA: {$processStage}  |  CONTROL DE CALIDAD UNIBAG^FS
 
 ^XZ";
     }
@@ -493,6 +519,8 @@ final class PrintService
             'GAP ' . $gapMm . ' mm,0 mm',
             'DIRECTION ' . $direction,
             'REFERENCE ' . $refX . ',' . $refY,
+            'SPEED ' . number_format($this->getTsplSpeed(), 1, '.', ''),
+            'DENSITY ' . $this->getTsplDensity(),
             'CLS',
         ]);
     }
@@ -529,31 +557,31 @@ final class PrintService
         $processStage = $this->t(strtoupper(trim((string)($roll['process_stage'] ?? 'RAW'))));
 
         return $this->buildTsplHeader() . "\r\n"
-            . 'BAR 25,72,750,2' . "\r\n"
-            . 'BAR 25,180,750,1' . "\r\n"
-            . 'BAR 25,248,750,1' . "\r\n"
-            . 'BAR 25,304,750,1' . "\r\n"
-            . 'TEXT 25,18,"3",0,1,1,"UNIBAG CHILE"' . "\r\n"
-            . 'TEXT 25,46,"2",0,1,1,"RECEPCION MATERIA PRIMA"' . "\r\n"
-            . 'TEXT 440,18,"2",0,1,1,"BODEGA: ' . $warehouseCode . '"' . "\r\n"
-            . 'TEXT 440,44,"2",0,1,1,"FECHA: ' . $arrivalDate . '"' . "\r\n"
-            . 'TEXT 25,82,"2",0,1,1,"SKU:"' . "\r\n"
-            . 'TEXT 92,78,"4",0,1,1,"' . $sku . '"' . "\r\n"
-            . 'TEXT 25,118,"2",0,1,1,"' . $product . '"' . "\r\n"
-            . 'TEXT 25,190,"1",0,1,1,"PESO REAL:"' . "\r\n"
-            . 'TEXT 25,210,"3",0,1,1,"' . $this->t($weightStr) . '"' . "\r\n"
-            . 'TEXT 240,190,"1",0,1,1,"METROS:"' . "\r\n"
-            . 'TEXT 240,210,"2",0,1,1,"' . $this->t($metersStr) . '"' . "\r\n"
-            . 'TEXT 440,190,"1",0,1,1,"ANCHO / GR:"' . "\r\n"
-            . 'TEXT 440,210,"2",0,1,1,"' . $this->t($specsStr) . '"' . "\r\n"
-            . 'TEXT 640,190,"1",0,1,1,"COLOR:"' . "\r\n"
-            . 'TEXT 640,210,"2",0,1,1,"' . $color . '"' . "\r\n"
-            . 'TEXT 25,256,"1",0,1,1,"ORDEN COMPRA: ' . $poCode . '"' . "\r\n"
-            . 'TEXT 320,256,"1",0,1,1,"CONTENEDOR: ' . $containerCode . '"' . "\r\n"
-            . 'TEXT 25,278,"1",0,1,1,"PROVEEDOR: ' . $supplierName . '"' . "\r\n"
-            . 'BARCODE 100,318,"128",72,0,0,2,2,"' . $barcodeValue . '"' . "\r\n"
-            . 'TEXT 280,404,"3",0,1,1,"' . $barcodeValue . '"' . "\r\n"
-            . 'TEXT 180,438,"1",0,1,1,"ETAPA: ' . $processStage . ' | CONTROL DE CALIDAD UNIBAG"' . "\r\n"
+            . 'BAR 18,80,776,2' . "\r\n"
+            . 'BAR 18,196,776,1' . "\r\n"
+            . 'BAR 18,272,776,1' . "\r\n"
+            . 'BAR 18,336,776,1' . "\r\n"
+            . 'TEXT 24,18,"4",0,1,1,"UNIBAG CHILE"' . "\r\n"
+            . 'TEXT 24,52,"3",0,1,1,"RECEPCION MATERIA PRIMA"' . "\r\n"
+            . 'TEXT 450,18,"3",0,1,1,"BODEGA: ' . $warehouseCode . '"' . "\r\n"
+            . 'TEXT 450,50,"3",0,1,1,"FECHA: ' . $arrivalDate . '"' . "\r\n"
+            . 'TEXT 24,94,"3",0,1,1,"SKU:"' . "\r\n"
+            . 'TEXT 102,86,"5",0,1,1,"' . $sku . '"' . "\r\n"
+            . 'TEXT 24,136,"3",0,1,1,"' . $product . '"' . "\r\n"
+            . 'TEXT 24,206,"2",0,1,1,"PESO REAL:"' . "\r\n"
+            . 'TEXT 24,228,"4",0,1,1,"' . $this->t($weightStr) . '"' . "\r\n"
+            . 'TEXT 278,206,"2",0,1,1,"METROS:"' . "\r\n"
+            . 'TEXT 278,230,"3",0,1,1,"' . $this->t($metersStr) . '"' . "\r\n"
+            . 'TEXT 500,206,"2",0,1,1,"ANCHO / GR:"' . "\r\n"
+            . 'TEXT 500,230,"3",0,1,1,"' . $this->t($specsStr) . '"' . "\r\n"
+            . 'TEXT 666,206,"2",0,1,1,"COLOR:"' . "\r\n"
+            . 'TEXT 666,230,"3",0,1,1,"' . $color . '"' . "\r\n"
+            . 'TEXT 24,282,"2",0,1,1,"ORDEN COMPRA: ' . $poCode . '"' . "\r\n"
+            . 'TEXT 392,282,"2",0,1,1,"CONTENEDOR: ' . $containerCode . '"' . "\r\n"
+            . 'TEXT 24,308,"2",0,1,1,"PROVEEDOR: ' . $supplierName . '"' . "\r\n"
+            . 'BARCODE 56,350,"128",96,0,0,3,3,"' . $barcodeValue . '"' . "\r\n"
+            . 'TEXT 210,466,"4",0,1,1,"' . $barcodeValue . '"' . "\r\n"
+            . 'TEXT 120,510,"2",0,1,1,"ETAPA: ' . $processStage . ' | CONTROL DE CALIDAD UNIBAG"' . "\r\n"
             . 'PRINT 1,1';
     }
 
@@ -593,30 +621,31 @@ final class PrintService
             'N',
             'q800',
             'Q560,24',
-            'LO20,70,750,2',
-            'LO20,166,750,1',
-            'LO20,236,750,1',
-            'LO20,286,750,1',
-            'A20,18,0,3,1,1,N,"UNIBAG CHILE"',
-            'A20,46,0,2,1,1,N,"RECEPCION MATERIA PRIMA"',
-            'A440,18,0,2,1,1,N,"BOD: ' . $warehouseCode . '"',
-            'A440,42,0,2,1,1,N,"FECHA: ' . $arrivalDate . '"',
-            'A20,82,0,2,1,1,N,"SKU: ' . $sku . '"',
-            'A20,110,0,2,1,1,N,"' . $product . '"',
-            'A20,174,0,1,1,1,N,"PESO REAL:"',
-            'A20,196,0,3,1,1,N,"' . $weightStr . '"',
-            'A220,174,0,1,1,1,N,"METROS:"',
-            'A220,196,0,2,1,1,N,"' . $metersStr . '"',
-            'A420,174,0,1,1,1,N,"ANCHO / GR:"',
-            'A420,196,0,2,1,1,N,"' . $specsStr . '"',
-            'A620,174,0,1,1,1,N,"COLOR:"',
-            'A620,196,0,2,1,1,N,"' . $color . '"',
-            'A20,248,0,2,1,1,N,"OC: ' . $poCode . '"',
-            'A260,248,0,2,1,1,N,"CONT: ' . $containerCode . '"',
-            'A480,248,0,2,1,1,N,"PROV: ' . $supplierName . '"',
-            'B100,304,0,1,2,6,72,N,"' . $barcodeValue . '"',
-            'A220,388,0,3,1,1,N,"' . $barcodeValue . '"',
-            'A140,422,0,1,1,1,N,"ETAPA: ' . $processStage . ' | CONTROL DE CALIDAD UNIBAG"',
+            'D' . $this->getEplDensity(),
+            'LO18,80,776,2',
+            'LO18,196,776,1',
+            'LO18,272,776,1',
+            'LO18,336,776,1',
+            'A24,18,0,4,1,1,N,"UNIBAG CHILE"',
+            'A24,50,0,3,1,1,N,"RECEPCION MATERIA PRIMA"',
+            'A450,18,0,3,1,1,N,"BOD: ' . $warehouseCode . '"',
+            'A450,46,0,3,1,1,N,"FECHA: ' . $arrivalDate . '"',
+            'A24,92,0,3,1,1,N,"SKU: ' . $sku . '"',
+            'A24,132,0,3,1,1,N,"' . $product . '"',
+            'A24,206,0,2,1,1,N,"PESO REAL:"',
+            'A24,230,0,4,1,1,N,"' . $weightStr . '"',
+            'A284,206,0,2,1,1,N,"METROS:"',
+            'A284,230,0,3,1,1,N,"' . $metersStr . '"',
+            'A500,206,0,2,1,1,N,"ANCHO / GR:"',
+            'A500,230,0,3,1,1,N,"' . $specsStr . '"',
+            'A666,206,0,2,1,1,N,"COLOR:"',
+            'A666,230,0,3,1,1,N,"' . $color . '"',
+            'A24,282,0,2,1,1,N,"OC: ' . $poCode . '"',
+            'A392,282,0,2,1,1,N,"CONT: ' . $containerCode . '"',
+            'A24,308,0,2,1,1,N,"PROV: ' . $supplierName . '"',
+            'B56,350,0,1,3,8,96,N,"' . $barcodeValue . '"',
+            'A180,468,0,4,1,1,N,"' . $barcodeValue . '"',
+            'A120,510,0,2,1,1,N,"ETAPA: ' . $processStage . ' | CONTROL DE CALIDAD UNIBAG"',
             'P1',
         ]) . "\r\n";
     }

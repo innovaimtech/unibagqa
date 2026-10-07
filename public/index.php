@@ -23688,9 +23688,11 @@ function renderReceptionThermalLabel(array $data): void
     echo '</div>';
 
     echo '<div class="actions">';
-    echo '<button type="button" class="btn-tb btn-tb-print" onclick="window.print()">🖨️ Imprimir Directo 10×7</button>';
     if ($serverPrintAllowed && $serverPrintUrl !== '') {
-        echo '<a class="btn-tb btn-tb-sec" href="' . h($serverPrintUrl) . '" title="Imprimir directo vía comando físico">⚡ Comando ' . h($commandLabel) . '</a>';
+        echo '<a class="btn-tb btn-tb-print" href="' . h($serverPrintUrl) . '" title="Enviar etiqueta por comando térmico directo">⚡ Imprimir Térmica 10×7</a>';
+        echo '<button type="button" class="btn-tb btn-tb-sec" onclick="window.print()">🖨️ Respaldo navegador</button>';
+    } else {
+        echo '<button type="button" class="btn-tb btn-tb-print" onclick="window.print()">🖨️ Imprimir Directo 10×7</button>';
     }
 
     echo '<div style="display:flex;align-items:center;gap:4px;background:#0f172a;padding:3px 8px;border-radius:6px;border:1px solid #334155">';
@@ -23906,17 +23908,15 @@ if ($path === '/reception/test-label' && $method === 'GET') {
         exit;
     }
 
+    $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
     $serverPrint = isset($_GET['server_print']) && (string)($_GET['server_print']) === '1';
     $serverPrintResult = null;
-    if ($serverPrint && $activePrinter->isEnabled()) {
+    if (($serverPrint || $autoPrint) && $activePrinter->isEnabled()) {
         $serverPrintResult = $activePrinter->printRollLabel($sampleRoll);
+        if (($serverPrintResult['ok'] ?? false) === true) {
+            $autoPrint = false;
+        }
     }
-
-if (isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1') {
-    $autoPrint = true;
-} else {
-    $autoPrint = false;
-}
 
 renderReceptionThermalLabel([
     'sku_code' => $skuCode,
@@ -23978,7 +23978,7 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
     $serverPrint = isset($_GET['server_print']) && (string)$_GET['server_print'] === '1';
     $serverPrintResult = null;
-    if ($serverPrint && $activePrinter->isEnabled()) {
+    if (($serverPrint || $autoPrint) && $activePrinter->isEnabled()) {
         $serverPrintResult = $activePrinter->printRollLabel($roll);
         if (($serverPrintResult['ok'] ?? false) === true) {
             $autoPrint = false;
