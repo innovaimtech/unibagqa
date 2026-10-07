@@ -663,6 +663,10 @@ final class PrintService
 ^CI28
 ^PW600
 ^LL500
+^PR3
+^MD" . $this->getZplDarkness() . "
+^CF0,32
+^FO20,20^FDUNIBAG^FS
 ^CF0,32
 ^FO20,20^FDUNIBAG^FS
 ^CF0,22
@@ -767,6 +771,8 @@ final class PrintService
 ^CI28
 ^PW600
 ^LL630
+^PR3
+^MD" . $this->getZplDarkness() . "
 ^CF0,32
 ^FO20,20^FDUNIBAG^FS
 ^CF0,22
@@ -909,18 +915,19 @@ final class PrintService
             'N',
             'q800',
             'Q560,24',
+            'D' . $this->getEplDensity(),
             'LO20,68,750,2',
             'LO20,136,750,1',
             'LO20,268,750,1',
             'A20,18,0,3,1,1,N,"UNIBAG"',
             'A20,44,0,2,1,1,N,"CAJA PRODUCTO TERMINADO"',
-            'A20,78,0,3,1,1,N,"' . $product . '"',
-            'A20,146,0,2,1,1,N,"OT: ' . $otCode . '"',
-            'A380,146,0,2,1,1,N,"CANTIDAD CAJAS: ' . $boxQty . '"',
-            'A20,176,0,2,1,1,N,"FECHA CIERRE: ' . $finishedAt . '"',
-            'A20,206,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
-            'B100,286,0,1,2,6,72,N,"' . $barcodeValue . '"',
-            'A240,370,0,3,1,1,N,"' . $barcodeValue . '"',
+            'A20,78,0,4,1,1,N,"' . $product . '"',
+            'A20,150,0,2,1,1,N,"OT: ' . $otCode . '"',
+            'A380,150,0,2,1,1,N,"CANTIDAD CAJAS: ' . $boxQty . '"',
+            'A20,182,0,2,1,1,N,"FECHA CIERRE: ' . $finishedAt . '"',
+            'A20,214,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
+            'B70,300,0,1,3,8,96,N,"' . $barcodeValue . '"',
+            'A198,408,0,4,1,1,N,"' . $barcodeValue . '"',
             'P1',
         ]) . "\r\n";
     }
@@ -947,21 +954,23 @@ final class PrintService
             'N',
             'q800',
             'Q560,24',
+            'D' . $this->getEplDensity(),
             'LO20,68,750,2',
             'LO20,136,750,1',
             'LO20,286,750,1',
+            'LO20,286,750,1',
             'A20,18,0,3,1,1,N,"UNIBAG"',
             'A20,44,0,2,1,1,N,"CAJA TRAZABLE"',
-            'A20,78,0,3,1,1,N,"' . $product . '"',
-            'A20,146,0,2,1,1,N,"CAJA: ' . $boxCode . '"',
-            'A380,146,0,2,1,1,N,"OT: ' . $otCode . '"',
-            'A20,176,0,2,1,1,N,"BOBINA ORIGEN: ' . $sourceRoll . '"',
-            'A380,176,0,2,1,1,N,"UNIDADES: ' . $units . '"',
-            'A20,206,0,2,1,1,N,"PALLET: ' . $palletCode . '"',
-            'A380,206,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
-            'A20,236,0,2,1,1,N,"DESTINO: ' . $destinationLabel . '"',
-            'B100,306,0,1,2,6,72,N,"' . $boxCode . '"',
-            'A240,390,0,3,1,1,N,"' . $boxCode . '"',
+            'A20,78,0,4,1,1,N,"' . $product . '"',
+            'A20,150,0,2,1,1,N,"CAJA: ' . $boxCode . '"',
+            'A380,150,0,2,1,1,N,"OT: ' . $otCode . '"',
+            'A20,182,0,2,1,1,N,"BOBINA ORIGEN: ' . $sourceRoll . '"',
+            'A380,182,0,2,1,1,N,"UNIDADES: ' . $units . '"',
+            'A20,214,0,2,1,1,N,"PALLET: ' . $palletCode . '"',
+            'A380,214,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
+            'A20,246,0,2,1,1,N,"DESTINO: ' . $destinationLabel . '"',
+            'B70,318,0,1,3,8,96,N,"' . $boxCode . '"',
+            'A198,426,0,4,1,1,N,"' . $boxCode . '"',
             'P1',
         ]) . "\r\n";
     }
@@ -1008,16 +1017,16 @@ final class PrintService
             'LO20,296,750,1',
             'A20,18,0,3,1,1,N,"UNIBAG"',
             'A20,44,0,2,1,1,N,"PALLET TRAZABLE"',
-            'A20,78,0,3,1,1,N,"' . $product . '"',
-            'A20,146,0,2,1,1,N,"PALLET: ' . $palletCode . '"',
-            'A380,146,0,2,1,1,N,"OT: ' . $otCode . '"',
-            'A20,176,0,2,1,1,N,"BOBINA ORIGEN: ' . $sourceRoll . '"',
-            'A380,176,0,2,1,1,N,"CAJAS: ' . $boxCount . '"',
-            'A20,206,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
-            'A20,236,0,2,1,1,N,"DESTINO: ' . $destinationLabel . '"',
-            'A20,266,0,1,1,1,N,"CODIGOS CAJA: ' . $boxSummary . '"',
-            'B100,314,0,1,2,6,72,N,"' . $palletCode . '"',
-            'A240,398,0,3,1,1,N,"' . $palletCode . '"',
+            'A20,78,0,4,1,1,N,"' . $product . '"',
+            'A20,150,0,2,1,1,N,"PALLET: ' . $palletCode . '"',
+            'A380,150,0,2,1,1,N,"OT: ' . $otCode . '"',
+            'A20,182,0,2,1,1,N,"BOBINA ORIGEN: ' . $sourceRoll . '"',
+            'A380,182,0,2,1,1,N,"CAJAS: ' . $boxCount . '"',
+            'A20,214,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
+            'A380,214,0,2,1,1,N,"DESTINO: ' . $destinationLabel . '"',
+            'A20,246,0,2,1,1,N,"CAJAS ORIGEN: ' . $boxSummary . '"',
+            'B70,318,0,1,3,8,96,N,"' . $palletCode . '"',
+            'A178,426,0,4,1,1,N,"' . $palletCode . '"',
             'P1',
         ]) . "\r\n";
     }

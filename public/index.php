@@ -23272,25 +23272,25 @@ function renderReceptionThermalLabel(array $data): void
       html, body {
         margin: 0;
         padding: 0;
-        background: #0f172a;
+        background: #f3f4f6;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
         color: #000;
         -webkit-font-smoothing: antialiased;
       }
       .no-print-toolbar {
         padding: 10px 16px;
-        background: #1e293b;
-        color: #fff;
+        background: #fff;
+        color: #000;
         display: flex;
         flex-wrap: wrap;
         align-items: center;
         justify-content: space-between;
         gap: 10px;
         font-size: 13px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.12);
         position: relative;
         z-index: 20;
-        border-bottom: 1px solid #334155;
+        border-bottom: 1px solid #000;
       }
       .no-print-toolbar .actions {
         display: flex;
@@ -23312,49 +23312,49 @@ function renderReceptionThermalLabel(array $data): void
         transition: all 0.15s ease;
       }
       .btn-tb-print {
-        background: #00A9A6;
+        background: #000;
         color: #fff;
-        border-color: #00A9A6;
+        border-color: #000;
         font-size: 14px;
         font-weight: 900;
         padding: 8px 20px;
-        box-shadow: 0 2px 8px rgba(0, 169, 166, 0.4);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.16);
       }
       .btn-tb-print:hover {
-        background: #0d9488;
+        background: #111;
       }
       .btn-tb-sec {
-        background: #334155;
-        color: #fff;
-        border-color: #475569;
+        background: #fff;
+        color: #000;
+        border-color: #000;
       }
       .btn-tb-sec:hover {
-        background: #475569;
+        background: #f3f4f6;
       }
       .btn-height-preset {
         padding: 5px 9px;
         font-size: 11.5px;
         font-weight: 800;
-        background: #0f172a;
-        color: #94a3b8;
-        border: 1px solid #334155;
+        background: #fff;
+        color: #111;
+        border: 1px solid #000;
         border-radius: 4px;
         cursor: pointer;
       }
       .btn-height-preset:hover {
-        background: #334155;
-        color: #fff;
+        background: #f3f4f6;
+        color: #000;
       }
       .btn-height-preset.active {
-        background: #10b981;
+        background: #000;
         color: #fff;
-        border-color: #10b981;
+        border-color: #000;
         font-weight: 900;
       }
       .scale-badge {
-        background: #0f172a;
-        border: 1px solid #334155;
-        color: #94a3b8;
+        background: #fff;
+        border: 1px solid #000;
+        color: #111;
         padding: 4px 10px;
         border-radius: 6px;
         font-size: 12px;
@@ -23363,14 +23363,14 @@ function renderReceptionThermalLabel(array $data): void
         gap: 6px;
       }
       .scale-badge strong {
-        color: #38bdf8;
+        color: #000;
       }
       .print-guide-banner {
-        background: #ecfdf5;
-        border-bottom: 2px solid #10b981;
+        background: #fff;
+        border-bottom: 2px solid #000;
         padding: 10px 18px;
         font-size: 12.5px;
-        color: #065f46;
+        color: #111;
         display: flex;
         flex-direction: column;
         gap: 4px;
@@ -23387,7 +23387,7 @@ function renderReceptionThermalLabel(array $data): void
         gap: 6px;
       }
       .guide-num {
-        background: #059669;
+        background: #000;
         color: #fff;
         width: 19px;
         height: 19px;
@@ -23405,7 +23405,7 @@ function renderReceptionThermalLabel(array $data): void
         justify-content: center;
         align-items: center;
         min-height: calc(100vh - 140px);
-        background: #0f172a;
+        background: #f3f4f6;
       }
       .alert-box {
         margin: 10px 24px 0;
@@ -23414,8 +23414,8 @@ function renderReceptionThermalLabel(array $data): void
         font-size: 13px;
         font-weight: 600;
       }
-      .alert-ok { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
-      .alert-err { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+      .alert-ok { background: #fff; border: 1px solid #000; color: #111; }
+      .alert-err { background: #fff; border: 1px solid #000; color: #111; }
 
       /* Envoltorio de la tarjeta en pantalla */
       .label-rot-wrap {
@@ -23683,7 +23683,7 @@ function renderReceptionThermalLabel(array $data): void
     echo '<div class="no-print-toolbar">';
     echo '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
     $headerPrinterDisplay = $configuredPrinterName !== '' ? $configuredPrinterName : 'Impresora Térmica';
-    echo '<span style="font-weight:900;font-size:15px;color:#fff">🖨️ ' . h($headerPrinterDisplay) . '</span>';
+    echo '<span style="font-weight:900;font-size:15px;color:#000">🖨️ ' . h($headerPrinterDisplay) . '</span>';
     echo '<div class="scale-badge">Formato: <strong>100 × 70 mm exactos</strong></div>';
     echo '</div>';
 
@@ -23695,9 +23695,9 @@ function renderReceptionThermalLabel(array $data): void
         echo '<button type="button" class="btn-tb btn-tb-print" onclick="window.print()">🖨️ Imprimir Directo 10×7</button>';
     }
 
-    echo '<div style="display:flex;align-items:center;gap:4px;background:#0f172a;padding:3px 8px;border-radius:6px;border:1px solid #334155">';
-    echo '<span style="font-size:11px;color:#94a3b8;font-weight:800">Modo:</span>';
-    echo '<span style="font-size:11px;color:#fff;font-weight:900">Etiqueta completa 100 × 70 mm</span>';
+    echo '<div style="display:flex;align-items:center;gap:4px;background:#fff;padding:3px 8px;border-radius:6px;border:1px solid #000">';
+    echo '<span style="font-size:11px;color:#111;font-weight:800">Modo:</span>';
+    echo '<span style="font-size:11px;color:#000;font-weight:900">Etiqueta completa 100 × 70 mm</span>';
     echo '</div>';
 
     if ($downloadZplUrl !== '') {
@@ -24138,8 +24138,11 @@ if (preg_match('#^/boxes/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
     $serverPrint = isset($_GET['server_print']) && (string)$_GET['server_print'] === '1';
     $serverPrintResult = null;
-    if ($serverPrint && $printer->isEnabled()) {
+    if (($serverPrint || $autoPrint) && $printer->isEnabled()) {
         $serverPrintResult = $printer->printBoxLabel($box);
+        if (($serverPrintResult['ok'] ?? false) === true) {
+            $autoPrint = false;
+        }
     }
 
     $barcodeValue = strtoupper(trim((string)$box['box_code']));
@@ -24154,19 +24157,18 @@ if (preg_match('#^/boxes/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
       *{box-sizing:border-box}
       body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;margin:0;background:#fff;color:#111}
       .wrap{padding:10px}
-      .label{border:2px solid #111;border-radius:10px;padding:14px;max-width:520px}
-      .brand{font-weight:900;letter-spacing:1px;font-size:18px}
-      .kind{margin-top:4px;font-size:13px;font-weight:800}
-      .product{margin-top:8px;font-size:22px;font-weight:900;line-height:1.15}
+      .label{border:2px solid #111;border-radius:10px;padding:18px;max-width:700px}
+      .brand{font-weight:900;letter-spacing:1px;font-size:22px}
+      .kind{margin-top:6px;font-size:15px;font-weight:900}
+      .product{margin-top:10px;font-size:28px;font-weight:900;line-height:1.15}
       .divider{height:2px;background:#111;margin:10px 0}
-      .rows{display:grid;grid-template-columns:120px 1fr;gap:6px 10px}
-      .k{font-size:12px;color:#374151}
-      .v{font-size:14px;font-weight:800}
+      .rows{display:grid;grid-template-columns:150px 1fr;gap:8px 12px}
+      .k{font-size:13px;color:#111;font-weight:800}
+      .v{font-size:18px;font-weight:900}
       .bottom{margin-top:12px;display:flex;flex-direction:column;align-items:center;justify-content:center}
-      .barcode{margin:6px 0 4px}
-      .idtxt{font-size:16px;font-weight:900;letter-spacing:.5px}
-      .ok{background:#ecfeff;border:1px solid #a5f3fc;color:#155e75;padding:10px;border-radius:10px;margin-bottom:10px}
-      .err{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px;border-radius:10px;margin-bottom:10px}
+      .barcode{margin:10px 0 6px}
+      .idtxt{font-size:22px;font-weight:900;letter-spacing:.8px}
+      .ok,.err{background:#fff;border:1px solid #111;color:#111;padding:10px;border-radius:10px;margin-bottom:10px}
       @media print{
         body{margin:0}
         .wrap{padding:0}
@@ -24232,12 +24234,15 @@ if (preg_match('#^/pallets/(\d+)/label$#', $path, $m) === 1 && $method === 'GET'
     $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
     $serverPrint = isset($_GET['server_print']) && (string)$_GET['server_print'] === '1';
     $serverPrintResult = null;
-    if ($serverPrint && $printer->isEnabled()) {
+    if (($serverPrint || $autoPrint) && $printer->isEnabled()) {
         $serverPrintResult = $printer->printPalletLabel($pallet, $palletBoxes);
+        if (($serverPrintResult['ok'] ?? false) === true) {
+            $autoPrint = false;
+        }
     }
 
     $barcodeValue = strtoupper(trim((string)$pallet['pallet_code']));
-    $barcodeSvg = code39Svg($barcodeValue, 70, 2, 5);
+    $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
     $destinationLabel = (string)$pallet['destination_mode'] === 'CUSTOMER_ORDER'
         ? 'OC cliente: ' . (string)($pallet['customer_order_ref'] ?? '-')
         : 'Bodega: ' . (string)($pallet['warehouse_code'] ?? '-');
@@ -24252,19 +24257,18 @@ if (preg_match('#^/pallets/(\d+)/label$#', $path, $m) === 1 && $method === 'GET'
       *{box-sizing:border-box}
       body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;margin:0;background:#fff;color:#111}
       .wrap{padding:10px}
-      .label{border:2px solid #111;border-radius:10px;padding:14px;max-width:520px}
-      .brand{font-weight:900;letter-spacing:1px;font-size:18px}
-      .kind{margin-top:4px;font-size:13px;font-weight:800}
-      .product{margin-top:8px;font-size:22px;font-weight:900;line-height:1.15}
+      .label{border:2px solid #111;border-radius:10px;padding:18px;max-width:700px}
+      .brand{font-weight:900;letter-spacing:1px;font-size:22px}
+      .kind{margin-top:6px;font-size:15px;font-weight:900}
+      .product{margin-top:10px;font-size:28px;font-weight:900;line-height:1.15}
       .divider{height:2px;background:#111;margin:10px 0}
-      .rows{display:grid;grid-template-columns:120px 1fr;gap:6px 10px}
-      .k{font-size:12px;color:#374151}
-      .v{font-size:14px;font-weight:800}
+      .rows{display:grid;grid-template-columns:150px 1fr;gap:8px 12px}
+      .k{font-size:13px;color:#111;font-weight:800}
+      .v{font-size:18px;font-weight:900}
       .bottom{margin-top:12px;display:flex;flex-direction:column;align-items:center;justify-content:center}
-      .barcode{margin:6px 0 4px}
-      .idtxt{font-size:16px;font-weight:900;letter-spacing:.5px}
-      .ok{background:#ecfeff;border:1px solid #a5f3fc;color:#155e75;padding:10px;border-radius:10px;margin-bottom:10px}
-      .err{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:10px;border-radius:10px;margin-bottom:10px}
+      .barcode{margin:10px 0 6px}
+      .idtxt{font-size:22px;font-weight:900;letter-spacing:.8px}
+      .ok,.err{background:#fff;border:1px solid #111;color:#111;padding:10px;border-radius:10px;margin-bottom:10px}
       @media print{
         body{margin:0}
         .wrap{padding:0}
@@ -24328,8 +24332,16 @@ if (preg_match('#^/work-orders/(\d+)/box-label$#', $path, $m) === 1 && $method =
 
     $finish = $service->getLastWorkOrderFinish($id);
     $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
+    $serverPrint = isset($_GET['server_print']) && (string)$_GET['server_print'] === '1';
+    $serverPrintResult = null;
+    if (($serverPrint || $autoPrint) && $printer->isEnabled()) {
+        $serverPrintResult = $printer->printWorkOrderBoxLabel($ot, $finish);
+        if (($serverPrintResult['ok'] ?? false) === true) {
+            $autoPrint = false;
+        }
+    }
     $barcodeValue = strtoupper(trim((string)$ot['ot_code']));
-    $barcodeSvg = code39Svg($barcodeValue, 70, 2, 5);
+    $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
 
     echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
     echo '<title>Etiqueta cajas</title>';
@@ -24337,23 +24349,31 @@ if (preg_match('#^/work-orders/(\d+)/box-label$#', $path, $m) === 1 && $method =
       *{box-sizing:border-box}
       body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;margin:0;background:#fff;color:#111}
       .wrap{padding:10px}
-      .label{border:2px solid #111;border-radius:10px;padding:14px;max-width:520px}
-      .brand{font-weight:900;letter-spacing:1px;font-size:18px}
-      .kind{margin-top:4px;font-size:13px;font-weight:800}
-      .product{margin-top:8px;font-size:24px;font-weight:900;line-height:1.15}
+      .label{border:2px solid #111;border-radius:10px;padding:18px;max-width:700px}
+      .brand{font-weight:900;letter-spacing:1px;font-size:22px}
+      .kind{margin-top:6px;font-size:15px;font-weight:900}
+      .product{margin-top:10px;font-size:30px;font-weight:900;line-height:1.15}
       .divider{height:2px;background:#111;margin:10px 0}
-      .rows{display:grid;grid-template-columns:120px 1fr;gap:6px 10px}
-      .k{font-size:12px;color:#374151}
-      .v{font-size:14px;font-weight:800}
+      .rows{display:grid;grid-template-columns:150px 1fr;gap:8px 12px}
+      .k{font-size:13px;color:#111;font-weight:800}
+      .v{font-size:18px;font-weight:900}
       .bottom{margin-top:12px;display:flex;flex-direction:column;align-items:center;justify-content:center}
-      .barcode{margin:6px 0 4px}
-      .idtxt{font-size:16px;font-weight:900;letter-spacing:.5px}
+      .barcode{margin:10px 0 6px}
+      .idtxt{font-size:22px;font-weight:900;letter-spacing:.8px}
       @media print{
         body{margin:0}
         .wrap{padding:0}
         .label{border:none}
       }
     </style></head><body><div class="wrap"><div class="label">';
+
+    if (is_array($serverPrintResult)) {
+        if (($serverPrintResult['ok'] ?? false) === true) {
+            echo '<div style="background:#fff;border:1px solid #111;color:#111;padding:10px;border-radius:10px;margin-bottom:10px">Etiqueta enviada a la impresora.</div>';
+        } else {
+            echo '<div style="background:#fff;border:1px solid #111;color:#111;padding:10px;border-radius:10px;margin-bottom:10px">No se pudo imprimir: ' . h((string)($serverPrintResult['error'] ?? 'Error desconocido.')) . '</div>';
+        }
+    }
 
     echo '<div class="brand">UNIBAG</div>';
     echo '<div class="kind">CAJA PRODUCTO TERMINADO</div>';
