@@ -269,6 +269,14 @@ if (handleAuthRoutes($path, $method)) {
 
 unibagEnforceAuthenticatedAreaAccess($path);
 
+// Fast-path para lectura de balanza: no requiere abrir conexiones a base de datos (evita latencia de MySQL ERP)
+if ($path === '/api/scale/weight' && $method === 'GET') {
+    header('Content-Type: application/json; charset=utf-8');
+    $fastScale = new ScaleService($_ENV);
+    echo json_encode($fastScale->readWeightKg(), JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 try {
     $trzPdo = Db::trzPdo();
     $erpPdo = Db::erpPdo();
@@ -3150,6 +3158,7 @@ function render(string $title, string $body): void
         echo '<a class="subitem' . ($currentPath === '/reports/machine-events' ? ' active' : '') . '" href="/reports/machine-events"><span>Eventos de Máquina</span></a>';
         echo '<a class="subitem' . ($isLunch ? ' active' : '') . '" href="/reports/colaciones"><span>Control Colaciones</span></a>';
         echo '<a class="subitem' . ($currentPath === '/reports/nivel-servicio' ? ' active' : '') . '" href="/reports/nivel-servicio"><span>Nivel de Servicio</span></a>';
+        echo '<a class="subitem' . ($currentPath === '/reports/reception-audit' ? ' active' : '') . '" href="/reports/reception-audit"><span>Auditoría Recepción</span></a>';
         echo '<a class="subitem' . (str_starts_with($currentPath, '/reports/monthly-presentation') ? ' active' : '') . '" href="/reports/monthly-presentation"><span>Informe Mensual PPT</span></a>';
     } elseif ($activeModule === 'bonificaciones') {
         $bonusView = (string)($_GET['view'] ?? 'bonoflexo');
@@ -13716,6 +13725,34 @@ if ($path === '/purchase-orders' && $method === 'GET') {
     exit;
 }
 
+if (preg_match('#^/import-containers/(\d+)/rolls-excel$#', $path, $m) === 1 && $method === 'GET') {
+    $containerId = (int)$m[1];
+    $lineId = isset($_GET['line']) ? (int)$_GET['line'] : null;
+    $rolls = $service->listRollsByImportContainer($containerId, $lineId, 5000);
+    $container = $service->getImportContainer($containerId);
+    $cCode = $container ? trim((string)$container['container_code']) : (string)$containerId;
+    unibagOutputWarehouseRollsExcel(
+        'bobinas-contenedor-' . $cCode . '-' . date('Ymd-His') . '.xlsx',
+        $rolls,
+        'Contenedor ' . $cCode
+    );
+    exit;
+}
+
+if (preg_match('#^/purchase-orders/(\d+)/rolls-excel$#', $path, $m) === 1 && $method === 'GET') {
+    $poId = (int)$m[1];
+    $lineId = isset($_GET['line']) ? (int)$_GET['line'] : null;
+    $rolls = $service->listRollsByPurchaseOrder($poId, $lineId, 5000);
+    $po = $service->getPurchaseOrder($poId);
+    $poCode = $po ? trim((string)$po['po_code']) : (string)$poId;
+    unibagOutputWarehouseRollsExcel(
+        'bobinas-oc-' . $poCode . '-' . date('Ymd-His') . '.xlsx',
+        $rolls,
+        'Orden de Compra ' . $poCode
+    );
+    exit;
+}
+
 if ($path === '/import-containers/export-excel' && $method === 'GET') {
     $supplierId = isset($_GET['supplier_id']) ? (int)$_GET['supplier_id'] : 0;
     $status = isset($_GET['status']) ? (string)$_GET['status'] : 'active';
@@ -13915,6 +13952,283 @@ if ($path === '/import-containers/export-excel' && $method === 'GET') {
     exit;
 }
 
+if ($path === '/reports/reception-audit' && $method === 'GET') {
+    $view = 'container';
+    $dateFrom = isset($_GET['date_from']) ? trim((string)$_GET['date_from']) : '';
+    $dateTo = isset($_GET['date_to']) ? trim((string)$_GET['date_to']) : '';
+    $poCode = isset($_GET['po_code']) ? trim((string)$_GET['po_code']) : '';
+    $containerCode = isset($_GET['container_code']) ? trim((string)$_GET['container_code']) : '';
+    $criticalOnly = isset($_GET['critical_only']) && $_GET['critical_only'] === '1';
+
+    $activeContainers = $service->listImportContainers(
+        null,
+        null,
+        'active',
+        500,
+        $dateFrom !== '' ? $dateFrom : null,
+        $dateTo !== '' ? $dateTo : null,
+        $poCode !== '' ? $poCode : null,
+        null,
+        $containerCode !== '' ? $containerCode : null,
+        null,
+        0
+    );
+    $completeContainers = $service->listImportContainers(
+        null,
+        null,
+        'complete',
+        500,
+        $dateFrom !== '' ? $dateFrom : null,
+        $dateTo !== '' ? $dateTo : null,
+        $poCode !== '' ? $poCode : null,
+        null,
+        $containerCode !== '' ? $containerCode : null,
+        null,
+        0
+    );
+
+    $containersById = [];
+    foreach (array_merge($activeContainers, $completeContainers) as $container) {
+        $containersById[(int)$container['id']] = $container;
+    }
+    $containers = array_values($containersById);
+    usort($containers, static fn(array $a, array $b): int => ((int)($b['id'] ?? 0)) <=> ((int)($a['id'] ?? 0)));
+
+    $isCriticalReceptionRow = static function (float $orderedRolls, float $receivedRolls, float $orderedWeight, float $receivedWeight, bool $erpComplete): bool {
+        $qtyDiff = round($receivedRolls - $orderedRolls, 3);
+        $weightDiff = round($receivedWeight - $orderedWeight, 3);
+        $weightDiffPct = $orderedWeight > 0.0001 ? abs(($weightDiff / $orderedWeight) * 100) : 0.0;
+        return abs($qtyDiff) >= 1.0 || $weightDiffPct >= 3.0 || !$erpComplete;
+    };
+
+    $containerRows = [];
+    $summaryTotals = [
+        'containers' => 0,
+        'received_rolls' => 0.0,
+        'ordered_rolls' => 0.0,
+        'received_weight_kg' => 0.0,
+        'ordered_weight_kg' => 0.0,
+        'critical' => 0,
+        'complete' => 0,
+    ];
+
+    foreach ($containers as $container) {
+        $orderedRolls = round((float)($container['ordered_rolls'] ?? 0), 3);
+        $receivedRolls = round((float)($container['received_rolls'] ?? 0), 3);
+        $orderedWeight = round((float)($container['ordered_weight_kg'] ?? 0), 3);
+        $receivedWeight = round((float)($container['received_weight_kg'] ?? 0), 3);
+        $qtyDiff = round($receivedRolls - $orderedRolls, 3);
+        $weightDiff = round($receivedWeight - $orderedWeight, 3);
+        $weightDiffPct = $orderedWeight > 0.0001 ? round(($weightDiff / $orderedWeight) * 100, 2) : 0.0;
+        $erpComplete = (bool)($container['erp_is_complete'] ?? false);
+        $isCritical = $isCriticalReceptionRow($orderedRolls, $receivedRolls, $orderedWeight, $receivedWeight, $erpComplete);
+
+        if ($criticalOnly && !$isCritical) {
+            continue;
+        }
+
+        $container['qty_diff'] = $qtyDiff;
+        $container['weight_diff'] = $weightDiff;
+        $container['weight_diff_pct'] = $weightDiffPct;
+        $container['is_critical'] = $isCritical;
+        $containerRows[] = $container;
+
+        $summaryTotals['containers']++;
+        $summaryTotals['received_rolls'] += $receivedRolls;
+        $summaryTotals['ordered_rolls'] += $orderedRolls;
+        $summaryTotals['received_weight_kg'] += $receivedWeight;
+        $summaryTotals['ordered_weight_kg'] += $orderedWeight;
+        if ($isCritical) {
+            $summaryTotals['critical']++;
+        }
+        if ((string)($container['status'] ?? '') === 'COMPLETE') {
+            $summaryTotals['complete']++;
+        }
+    }
+
+    $clearUrl = '/reports/reception-audit';
+    $body = '<div style="display:flex;flex-direction:column;gap:18px">';
+    $body .= renderReceptionNavTabs('reports');
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:18px 20px;box-shadow:0 10px 28px rgba(15,23,42,.05)">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:800">Informe</div>
+            <div style="font-size:20px;font-weight:800;color:#0f172a;margin-top:4px">Listado de contenedores recepcionados</div>
+            <div style="font-size:13px;color:#64748b;margin-top:4px">' . h((string)count($containerRows)) . ' contenedores encontrados</div>
+          </div>
+        </div>
+        <form method="get" action="/reports/reception-audit" class="rec-filter-form" style="margin-top:14px">
+          <div class="rec-filter-grid-imp">
+            <div class="rec-field">
+              <label>Fecha inicio</label>
+              <input type="date" name="date_from" value="' . h($dateFrom) . '">
+            </div>
+            <div class="rec-field">
+              <label>Fecha final</label>
+              <input type="date" name="date_to" value="' . h($dateTo) . '">
+            </div>
+            <div class="rec-field">
+              <label>Contenedor</label>
+              <input name="container_code" type="text" value="' . h($containerCode) . '" placeholder="Ej. FFAU7684870">
+            </div>
+            <div class="rec-field">
+              <label>OC</label>
+              <input name="po_code" type="text" value="' . h($poCode) . '" placeholder="Ej. OC0003963">
+            </div>
+            <div class="rec-field" style="display:flex;align-items:flex-end">
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#334155;text-transform:none">
+                <input type="checkbox" name="critical_only" value="1"' . ($criticalOnly ? ' checked' : '') . '>
+                Solo puntos críticos
+              </label>
+            </div>
+            <div class="rec-actions">
+              <button class="rec-btn-filter" type="submit">Filtrar</button>
+              <a href="' . h($clearUrl) . '" class="rec-btn-clear">Limpiar</a>
+            </div>
+          </div>
+        </form>
+      </div>';
+    $body .= '<div class="rec-table-card"><div class="rec-table-wrap"><table class="rec-table"><thead><tr>
+        <th>Contenedor</th><th>OCs</th><th>Estado</th><th>Esperado</th><th>Recepcionado</th><th>Diferencia</th><th>Cierre ERP</th><th style="text-align:right">Acción</th>
+      </tr></thead><tbody>';
+    foreach ($containerRows as $container) {
+        $containerId = (int)$container['id'];
+        $weightDiff = (float)($container['weight_diff'] ?? 0);
+        $qtyDiff = (float)($container['qty_diff'] ?? 0);
+        $diffColor = ((bool)($container['is_critical'] ?? false)) ? '#b91c1c' : '#0f766e';
+        $reportUrl = '/reports/reception-audit/container/' . $containerId;
+        $body .= '<tr' . (((bool)($container['is_critical'] ?? false)) ? ' style="background:#fff7f7"' : '') . '>';
+        $body .= '<td><a class="rec-code-link" href="' . h($reportUrl) . '">' . h((string)($container['container_code'] ?: ('#' . $containerId))) . '</a></td>';
+        $body .= '<td>' . h((string)($container['po_codes'] ?: '-')) . '</td>';
+        $body .= '<td>' . renderReceptionStatusBadge((string)$container['status']) . '</td>';
+        $body .= '<td><strong>' . h(formatReceptionValue((float)($container['ordered_rolls'] ?? 0), 'Unid.')) . ' Unid.</strong><div style="font-size:12px;color:#64748b">' . h(formatReceptionValue((float)($container['ordered_weight_kg'] ?? 0), 'Kg')) . ' Kg</div></td>';
+        $body .= '<td><strong>' . h(formatReceptionValue((float)($container['received_rolls'] ?? 0), 'Unid.')) . ' Unid.</strong><div style="font-size:12px;color:#64748b">' . h(formatReceptionValue((float)($container['received_weight_kg'] ?? 0), 'Kg')) . ' Kg</div></td>';
+        $body .= '<td style="color:' . $diffColor . ';font-weight:700">' . h(($qtyDiff >= 0 ? '+' : '') . formatReceptionValue($qtyDiff, 'Unid.')) . ' Unid.<div style="font-size:12px">' . h(($weightDiff >= 0 ? '+' : '') . formatReceptionValue($weightDiff, 'Kg')) . ' Kg (' . number_format((float)($container['weight_diff_pct'] ?? 0), 2, ',', '.') . '%)</div></td>';
+        $body .= '<td>' . (((bool)($container['erp_is_complete'] ?? false))
+            ? '<span class="rec-badge rec-badge-complete">Completo ERP</span>'
+            : '<span class="rec-badge rec-badge-partial">Pendiente ERP</span>') . '</td>';
+        $body .= '<td style="text-align:right;white-space:nowrap"><a class="btn" style="padding:7px 12px;font-size:12px;display:inline-flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:160px;border-radius:10px" href="' . h($reportUrl) . '"><span style="font-weight:800">Ver reporte</span><span style="font-size:11px;opacity:.9">Analisis del contenedor</span></a></td>';
+        $body .= '</tr>';
+    }
+    if ($containerRows === []) {
+        $body .= '<tr><td colspan="8"><div class="rec-empty">No hay contenedores para los filtros seleccionados.</div></td></tr>';
+    }
+    $body .= '</tbody></table></div></div>';
+
+    $body .= '</div>';
+    render('Auditoría de Recepción', $body);
+    exit;
+}
+
+if (preg_match('#^/reports/reception-audit/container/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
+    $containerId = (int)$m[1];
+    $container = $service->getImportContainer($containerId);
+    if ($container === null) {
+        http_response_code(404);
+        render('No encontrado', '<div class="card">No existe el contenedor.</div>');
+        exit;
+    }
+
+    $lines = $service->listImportContainerLines($containerId);
+    $qtyDiff = round((float)($container['received_rolls'] ?? 0) - (float)($container['ordered_rolls'] ?? 0), 3);
+    $weightDiff = round((float)($container['received_weight_kg'] ?? 0) - (float)($container['ordered_weight_kg'] ?? 0), 3);
+    $weightDiffPct = (float)($container['ordered_weight_kg'] ?? 0) > 0.0001
+        ? round(($weightDiff / (float)$container['ordered_weight_kg']) * 100, 2)
+        : 0.0;
+    $criticalLines = 0;
+    $topLine = null;
+    $topLineGap = -1.0;
+    foreach ($lines as $line) {
+        $lineSummary = receptionLineSummary($line);
+        $lineOrderedWeight = round((float)($lineSummary['ordered_weight_kg'] ?? 0), 3);
+        $lineReceivedWeight = round((float)($lineSummary['received_weight_kg'] ?? 0), 3);
+        $lineQtyDiff = round((float)($lineSummary['received_rolls'] ?? 0) - (float)($lineSummary['ordered_rolls'] ?? 0), 3);
+        $lineWeightDiff = round($lineReceivedWeight - $lineOrderedWeight, 3);
+        $lineWeightDiffPct = $lineOrderedWeight > 0.0001 ? round(($lineWeightDiff / $lineOrderedWeight) * 100, 2) : 0.0;
+        $line['qty_diff'] = $lineQtyDiff;
+        $line['weight_diff'] = $lineWeightDiff;
+        $line['weight_diff_pct'] = $lineWeightDiffPct;
+        $line['is_complete'] = (bool)($lineSummary['is_complete'] ?? false);
+        $line['summary'] = $lineSummary;
+        if (abs($lineQtyDiff) >= 1.0 || abs($lineWeightDiffPct) >= 3.0 || !$line['is_complete']) {
+            $criticalLines++;
+        }
+        if (abs($lineWeightDiffPct) > $topLineGap) {
+            $topLineGap = abs($lineWeightDiffPct);
+            $topLine = $line;
+        }
+    }
+    unset($line);
+
+    $reportTitle = trim((string)($container['container_code'] ?? '')) !== ''
+        ? 'Reporte de Contenedor ' . trim((string)$container['container_code'])
+        : 'Reporte de Contenedor #' . $containerId;
+    $erpLabel = (bool)($container['erp_is_complete'] ?? false) ? 'Completo en ERP' : 'Pendiente en ERP';
+    $diffColor = $weightDiff >= 0 ? '#065f46' : '#9a3412';
+    $executiveText = 'El contenedor presenta una diferencia de ' . ($weightDiff >= 0 ? '+' : '') . formatReceptionValue($weightDiff, 'Kg') . ' Kg y ' . ($qtyDiff >= 0 ? '+' : '') . formatReceptionValue($qtyDiff, 'Unid.') . ' unidades. ';
+    $executiveText .= 'Estado ERP: ' . $erpLabel . '. ';
+    $executiveText .= 'Lineas criticas detectadas: ' . $criticalLines . ' de ' . count($lines) . '.';
+    if (is_array($topLine)) {
+        $executiveText .= ' Mayor desviacion: ' . trim((string)($topLine['sku_code'] ?? '-')) . ' (' . number_format((float)($topLine['weight_diff_pct'] ?? 0), 2, ',', '.') . '%).';
+    }
+
+    $body = '<div style="display:flex;flex-direction:column;gap:18px">';
+    $body .= renderReceptionNavTabs('reports');
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:18px;padding:20px 22px;box-shadow:0 12px 28px rgba(15,23,42,.06)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#64748b;font-weight:800">Reporte de contenedor</div>
+            <h1 style="margin:6px 0 8px 0;font-size:28px;color:#0f172a">' . h($reportTitle) . '</h1>
+            <div style="font-size:14px;color:#475569;line-height:1.6;max-width:920px">' . h($executiveText) . '</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <a class="btn secondary" href="/reports/reception-audit">Volver al listado</a>
+            <a class="btn" href="/import-containers/' . $containerId . '">Abrir detalle operativo</a>
+          </div>
+        </div>
+      </div>';
+
+    $body .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">';
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px 18px"><div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">OCs</div><div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:8px">' . h((string)($container['po_codes'] ?: '-')) . '</div></div>';
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px 18px"><div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Bill of Lading</div><div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:8px">' . h((string)($container['bill_of_lading'] ?: '-')) . '</div></div>';
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px 18px"><div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Buque</div><div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:8px">' . h((string)($container['vessel_name'] ?: '-')) . '</div></div>';
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px 18px"><div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Estado ERP</div><div style="font-size:18px;font-weight:800;color:' . ((bool)($container['erp_is_complete'] ?? false) ? '#065f46' : '#9a3412') . ';margin-top:8px">' . h($erpLabel) . '</div></div>';
+    $body .= '</div>';
+
+    $body .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">';
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px 18px"><div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Esperado</div><div style="font-size:26px;font-weight:800;color:#0f172a;margin-top:6px">' . h(formatReceptionValue((float)($container['ordered_rolls'] ?? 0), 'Unid.')) . '</div><div style="font-size:12px;color:#64748b;margin-top:4px">' . h(formatReceptionValue((float)($container['ordered_weight_kg'] ?? 0), 'Kg')) . ' Kg</div></div>';
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px 18px"><div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Recepcionado</div><div style="font-size:26px;font-weight:800;color:#065f46;margin-top:6px">' . h(formatReceptionValue((float)($container['received_rolls'] ?? 0), 'Unid.')) . '</div><div style="font-size:12px;color:#64748b;margin-top:4px">' . h(formatReceptionValue((float)($container['received_weight_kg'] ?? 0), 'Kg')) . ' Kg</div></div>';
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px 18px"><div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Diferencia</div><div style="font-size:26px;font-weight:800;color:' . $diffColor . ';margin-top:6px">' . h(($qtyDiff >= 0 ? '+' : '') . formatReceptionValue($qtyDiff, 'Unid.')) . '</div><div style="font-size:12px;color:#64748b;margin-top:4px">' . h(($weightDiff >= 0 ? '+' : '') . formatReceptionValue($weightDiff, 'Kg')) . ' Kg</div></div>';
+    $body .= '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px 18px"><div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Desviacion peso</div><div style="font-size:26px;font-weight:800;color:' . $diffColor . ';margin-top:6px">' . h(number_format($weightDiffPct, 2, ',', '.')) . '%</div><div style="font-size:12px;color:#64748b;margin-top:4px">' . h((string)$criticalLines) . ' lineas criticas</div></div>';
+    $body .= '</div>';
+
+    $body .= '<div class="rec-table-card"><div style="padding:16px 18px;border-bottom:1px solid #e2e8f0;background:#f8fafc"><div style="font-size:18px;font-weight:800;color:#0f172a">Detalle del contenedor</div><div style="font-size:13px;color:#64748b;margin-top:4px">Cruce entre lo esperado y lo realmente recepcionado por linea</div></div><div class="rec-table-wrap"><table class="rec-table"><thead><tr>
+        <th>OC</th><th>SKU</th><th>Modo</th><th>Especificacion</th><th>Esperado</th><th>Recepcionado</th><th>Diferencia</th><th>Estado</th>
+      </tr></thead><tbody>';
+    foreach ($lines as $line) {
+        $lineSummary = $line['summary'] ?? receptionLineSummary($line);
+        $lineDiffColor = ((bool)($line['is_complete'] ?? false) && abs((float)($line['weight_diff_pct'] ?? 0)) < 3.0 && abs((float)($line['qty_diff'] ?? 0)) < 1.0) ? '#0f766e' : '#b91c1c';
+        $body .= '<tr' . ($lineDiffColor === '#b91c1c' ? ' style="background:#fff7f7"' : '') . '>';
+        $body .= '<td>' . h((string)($line['po_code'] ?? '-')) . '</td>';
+        $body .= '<td><strong>' . h((string)($line['sku_code'] ?? '-')) . '</strong><div style="font-size:12px;color:#64748b">' . h((string)($line['sku_description'] ?? '-')) . '</div></td>';
+        $body .= '<td>' . h(receptionModeLabel((string)($line['reception_mode'] ?? 'QUANTITY'))) . '</td>';
+        $body .= '<td>' . buildReceptionSpec($line) . '</td>';
+        $body .= '<td>' . formatReceptionDual($lineSummary, 'ordered') . '</td>';
+        $body .= '<td>' . formatReceptionDual($lineSummary, 'received') . '</td>';
+        $body .= '<td style="color:' . $lineDiffColor . ';font-weight:700">' . h((((float)($line['qty_diff'] ?? 0)) >= 0 ? '+' : '') . formatReceptionValue((float)($line['qty_diff'] ?? 0), 'Unid.')) . ' Unid.<div style="font-size:12px">' . h((((float)($line['weight_diff'] ?? 0)) >= 0 ? '+' : '') . formatReceptionValue((float)($line['weight_diff'] ?? 0), 'Kg')) . ' Kg (' . number_format((float)($line['weight_diff_pct'] ?? 0), 2, ',', '.') . '%)</div></td>';
+        $body .= '<td>' . ((bool)($line['is_complete'] ?? false) ? '<span class="rec-badge rec-badge-complete">Completa</span>' : '<span class="rec-badge rec-badge-partial">Pendiente</span>') . '</td>';
+        $body .= '</tr>';
+    }
+    if ($lines === []) {
+        $body .= '<tr><td colspan="8"><div class="rec-empty">Sin lineas recepcionadas para este contenedor.</div></td></tr>';
+    }
+    $body .= '</tbody></table></div></div>';
+
+    $body .= '</div>';
+    render($reportTitle, $body);
+    exit;
+}
+
 if ($path === '/import-containers' && $method === 'GET') {
     $supplierId = isset($_GET['supplier_id']) ? (int)$_GET['supplier_id'] : 0;
     $status = isset($_GET['status']) ? (string)$_GET['status'] : 'active';
@@ -14065,13 +14379,27 @@ if ($path === '/import-containers' && $method === 'GET') {
             $cLabel = $blVal !== '' ? ('BL ' . $blVal) : ('Cargamento #' . (int)$container['id']);
         }
         $cUrl = '/import-containers/' . (int)$container['id'];
+        $containerProgress = renderReceptionProgressCol((int)($container['completed_lines'] ?? 0), (int)($container['total_lines'] ?? 0));
+        $containerProgress .= '<div style="margin-top:6px;font-size:11px;line-height:1.35;color:#475569">'
+            . '<div><strong>Recibido:</strong> '
+            . h(formatReceptionValue((float)($container['received_rolls'] ?? 0), 'Unid.')) . ' / '
+            . h(formatReceptionValue((float)($container['ordered_rolls'] ?? 0), 'Unid.')) . ' Unid.</div>'
+            . '<div><strong>Peso:</strong> '
+            . h(formatReceptionValue((float)($container['received_weight_kg'] ?? 0), 'Kg')) . ' / '
+            . h(formatReceptionValue((float)($container['ordered_weight_kg'] ?? 0), 'Kg')) . ' Kg</div>'
+            . '<div><strong>ERP:</strong> '
+            . (((bool)($container['erp_is_complete'] ?? false))
+                ? '<span style="color:#15803d;font-weight:700">Completo</span>'
+                : '<span style="color:#b45309;font-weight:700">Pendiente</span>')
+            . '</div>'
+            . '</div>';
         $body .= '<tr>';
         $body .= '<td><a class="rec-code-link" href="' . h($cUrl) . '">' . h($cLabel) . '</a></td>';
         $body .= '<td>' . h((string)($container['bill_of_lading'] ?: '-')) . '</td>';
         $body .= '<td><span style="font-weight:600">' . h((string)($container['forwarder_name'] ?: '-')) . '</span></td>';
         $body .= '<td><span style="font-family:ui-monospace,monospace;font-size:12px;color:#0f766e">' . h((string)($container['po_codes'] ?: '-')) . '</span></td>';
         $body .= '<td>' . renderReceptionStatusBadge((string)$container['status']) . '</td>';
-        $body .= '<td>' . renderReceptionProgressCol((int)($container['completed_lines'] ?? 0), (int)($container['total_lines'] ?? 0)) . '</td>';
+        $body .= '<td>' . $containerProgress . '</td>';
         $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)($container['eta_plant'] ?: '-')) . '</span></td>';
         $body .= '<td style="text-align:right"><a class="btn" style="padding:5px 12px;font-size:12px" href="' . h($cUrl) . '">' . ($isComplete ? 'Ver detalle' : 'Recepcionar') . '</a></td>';
         $body .= '</tr>';
@@ -14137,6 +14465,16 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
 
     $cCode = trim((string)$container['container_code']);
     $cTitle = $cCode !== '' ? ('Contenedor ' . $cCode) : (trim((string)$container['bill_of_lading']) !== '' ? ('Cargamento BL ' . trim((string)$container['bill_of_lading'])) : ('Cargamento #' . $containerId));
+    $containerOrderedUnits = formatReceptionValue((float)($container['ordered_rolls'] ?? 0), 'Unid.') . ' Unid.';
+    $containerReceivedUnits = formatReceptionValue((float)($container['received_rolls'] ?? 0), 'Unid.') . ' Unid.';
+    $containerPendingUnits = formatReceptionValue((float)($container['pending_rolls'] ?? 0), 'Unid.') . ' Unid.';
+    $containerOrderedWeight = formatReceptionValue((float)($container['ordered_weight_kg'] ?? 0), 'Kg') . ' Kg';
+    $containerReceivedWeight = formatReceptionValue((float)($container['received_weight_kg'] ?? 0), 'Kg') . ' Kg';
+    $containerPendingWeight = formatReceptionValue((float)($container['pending_weight_kg'] ?? 0), 'Kg') . ' Kg';
+    $containerErpStatus = (bool)($container['erp_is_complete'] ?? false) ? 'Completo en ERP' : 'Pendiente en ERP';
+    $containerErpColor = (bool)($container['erp_is_complete'] ?? false) ? '#065f46' : '#9a3412';
+    $containerErpBg = (bool)($container['erp_is_complete'] ?? false) ? '#ecfdf5' : '#fff7ed';
+    $containerErpBorder = (bool)($container['erp_is_complete'] ?? false) ? '#a7f3d0' : '#fdba74';
 
     $backUrl = $isComplete ? '/import-containers?status=complete' : '/import-containers?status=active';
     $body = '<div class="rec-shell">';
@@ -14165,6 +14503,10 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
         <div class="rec-meta-box"><div class="rec-meta-label">Embarcador</div><div class="rec-meta-val">' . h((string)($container['forwarder_name'] ?: '-')) . '</div></div>
         <div class="rec-meta-box"><div class="rec-meta-label">Incoterm</div><div class="rec-meta-val">' . h((string)($container['incoterm'] ?: '-')) . '</div></div>
         <div class="rec-meta-box"><div class="rec-meta-label">ETA planta</div><div class="rec-meta-val">' . h((string)($container['eta_plant'] ?: '-')) . '</div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">Ordenado</div><div class="rec-meta-val">' . h($containerOrderedUnits) . '<div style="font-size:12px;color:#64748b;margin-top:2px">' . h($containerOrderedWeight) . '</div></div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">Recepcionado</div><div class="rec-meta-val" style="color:#065f46">' . h($containerReceivedUnits) . '<div style="font-size:12px;color:#047857;margin-top:2px">' . h($containerReceivedWeight) . '</div></div></div>
+        <div class="rec-meta-box"><div class="rec-meta-label">Pendiente</div><div class="rec-meta-val" style="color:' . (((float)($container['pending_rolls'] ?? 0) > 0 || (float)($container['pending_weight_kg'] ?? 0) > 0) ? '#9a3412' : '#065f46') . '">' . h($containerPendingUnits) . '<div style="font-size:12px;color:#64748b;margin-top:2px">' . h($containerPendingWeight) . '</div></div></div>
+        <div class="rec-meta-box" style="background:' . $containerErpBg . ';border-color:' . $containerErpBorder . '"><div class="rec-meta-label">Estado ERP</div><div class="rec-meta-val" style="color:' . $containerErpColor . '">' . h($containerErpStatus) . '<div style="font-size:12px;color:' . $containerErpColor . ';margin-top:2px">Líneas completas: ' . h((string)((int)($container['completed_lines'] ?? 0))) . ' / ' . h((string)((int)($container['total_lines'] ?? 0))) . '</div></div></div>
       </div>';
 
     $body .= '<div class="rec-table-card"><div class="rec-table-wrap"><table class="rec-table"><thead><tr>
@@ -14200,6 +14542,82 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
     }
     $body .= '</tbody></table></div></div>';
 
+    $cntRolls = $service->listRollsByImportContainer($containerId, null, 2000);
+    $cntRollsCount = count($cntRolls);
+    $cntRollsWeight = array_sum(array_column($cntRolls, 'weight_kg'));
+    if ($cntRollsCount > 0) {
+        $body .= '<div class="rec-table-card" style="margin-top:16px"><div style="padding:14px 18px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
+        $body .= '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+        $body .= '<div style="font-weight:800;font-size:15px;color:#0f172a">📦 Bobinas Recepcionadas en este Cargamento</div>';
+        $body .= '<span id="cnt_rolls_badge_count" style="font-size:11.5px;font-weight:800;background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:12px">' . $cntRollsCount . ' bobinas</span>';
+        $body .= '<span id="cnt_rolls_badge_weight" style="font-size:11.5px;font-weight:800;background:#f0fdf4;color:#16a34a;padding:2px 8px;border-radius:12px">' . number_format($cntRollsWeight, 2, ',', '.') . ' Kg</span>';
+        $body .= '</div>';
+        $body .= '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+        $body .= '<input id="cnt_rolls_search" type="text" placeholder="🔍 Filtrar bobina, trazabilidad, SKU..." style="height:32px;padding:0 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;width:240px" oninput="filterCntRolls(this.value)">';
+        $body .= '<a class="btn secondary" href="/import-containers/' . $containerId . '/rolls-excel" style="height:32px;display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:0 12px">';
+        $body .= '<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg> Descargar Excel (' . $cntRollsCount . ')';
+        $body .= '</a>';
+        $body .= '</div></div>';
+        $body .= '<div class="rec-table-wrap" style="max-height:550px;overflow-y:auto">';
+        $body .= '<table id="cnt_rolls_table" class="rec-table" style="font-size:12.5px"><thead><tr style="position:sticky;top:0;background:#f8fafc;z-index:2">';
+        $body .= '<th style="width:40px;text-align:center">N°</th><th>Código Bobina</th><th>Cód. Trazabilidad</th><th>SKU / Artículo</th><th>Bodega</th><th style="text-align:right">Peso Real (Kg)</th><th style="text-align:center">Especificación</th><th>Fecha / Hora</th><th>Operador</th><th style="text-align:right">Acciones</th>';
+        $body .= '</tr></thead><tbody id="cnt_rolls_tbody">';
+        $cIdx = 0;
+        foreach ($cntRolls as $cr) {
+            $cIdx++;
+            $crId = (int)$cr['id'];
+            $crCode = (string)($cr['roll_code'] ?? '');
+            $crTrz = (string)($cr['traceability_code'] ?? $crCode);
+            $crWeight = (float)($cr['weight_kg'] ?? 0);
+            $crSku = (string)($cr['sku_code'] ?? '');
+            $crDesc = (string)($cr['sku_description'] ?? '');
+            $crWh = trim((string)($cr['warehouse_name'] ?? '')) ?: (string)($cr['warehouse_code'] ?? '-');
+            $crDate = !empty($cr['created_at']) ? date('d/m/Y H:i', strtotime((string)$cr['created_at'])) : '-';
+            $crOp = (string)($cr['operator_name'] ?? '');
+            $crWidth = (int)($cr['width_mm'] ?? 0);
+            $crMic = (int)($cr['microns'] ?? 0);
+            $crMet = (float)($cr['meters'] ?? 0);
+            $crSpec = ($crWidth > 0 || $crMic > 0 || $crMet > 0) ? ($crWidth . 'mm × ' . $crMic . 'µm × ' . number_format($crMet, 0, ',', '.') . 'm') : '-';
+            $crFilter = mb_strtolower($crCode . ' ' . $crTrz . ' ' . $crSku . ' ' . $crDesc . ' ' . $crWh . ' ' . $crOp);
+
+            $body .= '<tr class="cnt-roll-row" data-text="' . h($crFilter) . '" data-weight="' . number_format($crWeight, 3, '.', '') . '">';
+            $body .= '<td style="text-align:center;color:#64748b">' . $cIdx . '</td>';
+            $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-weight:700">' . h($crCode) . '</span></td>';
+            $body .= '<td><a href="/stock/traceability?q=' . rawurlencode($crTrz) . '" target="_blank" style="font-family:monospace;font-weight:700;color:#0f766e;text-decoration:none;background:#f0fdfa;border:1px solid #ccfbf1;padding:2px 6px;border-radius:4px" title="Ver árbol de trazabilidad 360°">' . h($crTrz) . ' 🔍</a></td>';
+            $body .= '<td><div style="font-weight:700">' . h($crSku) . '</div><div style="font-size:11px;color:#64748b;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' . h($crDesc) . '</div></td>';
+            $body .= '<td><span class="wh-badge" style="font-size:11px;padding:2px 7px;font-weight:600">' . h($crWh) . '</span></td>';
+            $body .= '<td style="text-align:right"><strong>' . number_format($crWeight, 3, ',', '.') . ' Kg</strong></td>';
+            $body .= '<td style="text-align:center;color:#64748b;font-size:11.5px">' . h($crSpec) . '</td>';
+            $body .= '<td style="color:#64748b;font-size:12px">' . h($crDate) . '</td>';
+            $body .= '<td style="color:#64748b;font-size:11.5px">' . ($crOp !== '' ? ('👤 ' . h($crOp)) : '-') . '</td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:4px;justify-content:flex-end">';
+            $body .= '<a class="btn" style="padding:3px 8px;font-size:11px;background:#0284c7;border-color:#0284c7;color:#fff" href="/rolls/' . $crId . '/label?auto_print=1" target="_blank" title="Imprimir etiqueta">🖨️ 10x7</a>';
+            if ($printer->isEnabled()) {
+                $body .= '<a class="btn secondary" style="padding:3px 6px;font-size:11px" href="/rolls/' . $crId . '/label?server_print=1" target="_blank" title="Térmico">⚡</a>';
+            }
+            $body .= '</div></td>';
+            $body .= '</tr>';
+        }
+        $body .= '</tbody></table></div></div>';
+        $body .= '<script>
+        function filterCntRolls(q) {
+            q = (q || "").trim().toLowerCase();
+            var rows = document.querySelectorAll("#cnt_rolls_tbody .cnt-roll-row");
+            var vis = 0, sumW = 0;
+            rows.forEach(function(r) {
+                var text = r.getAttribute("data-text") || "";
+                var show = (q === "" || text.indexOf(q) !== -1);
+                r.style.display = show ? "" : "none";
+                if (show) { vis++; sumW += parseFloat(r.getAttribute("data-weight") || "0"); }
+            });
+            var bC = document.getElementById("cnt_rolls_badge_count");
+            var bW = document.getElementById("cnt_rolls_badge_weight");
+            if (bC) bC.textContent = vis + " bobinas";
+            if (bW) bW.textContent = sumW.toLocaleString("es-CL", {minimumFractionDigits: 2, maximumFractionDigits: 2}) + " Kg";
+        }
+        </script>';
+    }
+
     if (!$isComplete) {
         $body .= renderCloseReceptionModal('/import-containers/' . $containerId . '/close', $cTitle, $totalPendingUnits);
     }
@@ -14233,10 +14651,7 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         render('No encontrado', '<div class="card">No existe el contenedor.</div>');
         exit;
     }
-    if ((string)$container['status'] === 'COMPLETE') {
-        render('Recepción importación', '<div class="err">Esta recepción ya está finalizada y no permite agregar más.</div><div style="margin-top:12px"><a class="btn secondary" href="/import-containers/' . $containerId . '">Volver</a></div>');
-        exit;
-    }
+    $isReceptionLocked = false;
     $containerItemId = isset($_GET['line']) ? (int)$_GET['line'] : 0;
     $line = $service->getImportContainerLine($containerItemId);
     if ($line === null || (int)($line['import_container_id'] ?? 0) !== $containerId) {
@@ -14246,7 +14661,13 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
     }
 
     $warehouses = $service->listWarehousesForReception();
-    $recent = $service->listRollsByPurchaseOrderLine((int)$line['id'], 10, (int)$line['import_container_item_id']);
+    $allLineRolls = $service->listRollsByImportContainer($containerId, (int)$line['import_container_item_id'], 2000);
+    if (empty($allLineRolls)) {
+        $allLineRolls = $service->listRollsByPurchaseOrderLine((int)$line['id'], 2000, (int)$line['import_container_item_id']);
+    }
+    $totalLineRollsCount = count($allLineRolls);
+    $totalLineRollsWeight = array_sum(array_column($allLineRolls, 'weight_kg'));
+    $recent = $allLineRolls;
     $lineSummary = receptionLineSummary($line);
     $isWeightMode = $lineSummary['mode'] === 'WEIGHT';
     $lineUnit = $lineSummary['unit'];
@@ -14291,17 +14712,51 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         </div>
       </div>';
 
+    if ($isReceptionLocked) {
+        $body .= '<div class="card" style="background:#fff7ed;border:1px solid #fdba74;color:#9a3412;padding:12px 18px;border-radius:10px;margin-bottom:14px">
+            <strong>Recepción cerrada temporalmente para agregar:</strong> esta línea está marcada como finalizada, pero puedes seguir borrando bobinas desde esta misma pantalla para corregir pruebas o ingresos erróneos.
+        </div>';
+    }
+
     if ($savedRollId > 0) {
         $savedRoll = $service->getRoll($savedRollId);
         $savedRollCode = is_array($savedRoll) ? (string)($savedRoll['roll_code'] ?? ('#' . $savedRollId)) : ('#' . $savedRollId);
-        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito.</strong></div>';
-        $body .= '<div style="display:flex;gap:6px">';
+        $savedRollWeight = is_array($savedRoll) ? number_format((float)($savedRoll['weight_kg'] ?? 0), 3, '.', '') : '0';
+        $body .= '<div class="card" style="background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;padding:12px 18px;border-radius:10px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
+        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito (' . h($savedRollWeight) . ' Kg).</strong></div>';
+        $body .= '<div style="display:flex;gap:6px;align-items:center">';
         $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:12.5px;border-radius:6px;font-weight:700;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $savedRollId . '/label?auto_print=1" target="_blank">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
             $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank" title="Imprimir directo vía comando térmico">⚡ ' . h($printLangName) . '</a>';
         }
-        $body .= '<a class="btn secondary" style="padding:6px 12px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label" target="_blank">👁️ Ver</a>';
+        $body .= '<button type="button" class="btn btn-delete-roll" style="background:#fee2e2;border-color:#fca5a5;color:#b91c1c;padding:6px 12px;font-size:12px;border-radius:6px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px" data-roll-id="' . (int)$savedRollId . '" data-roll-code="' . h($savedRollCode) . '" data-roll-weight="' . h($savedRollWeight) . '" title="Borrar este pesaje si hubo un error">🗑️ Borrar este pesaje (error)</button>';
         $body .= '</div></div>';
+    }
+
+    if (isset($_GET['roll_deleted'])) {
+        $body .= '<div class="card" style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px 18px;border-radius:10px;margin-bottom:14px;display:flex;align-items:center;gap:10px">
+            <span style="font-size:18px">🗑️</span>
+            <div><strong>Pesaje eliminado:</strong> La bobina <strong>' . h((string)$_GET['roll_deleted']) . '</strong> fue eliminada y el peso ingresado se ha descontado de la recepción.</div>
+        </div>';
+    }
+
+    if (isset($_GET['delete_error'])) {
+        $body .= '<div class="card" style="background:#fef2f2;border:1px solid #f87171;color:#b91c1c;padding:12px 18px;border-radius:10px;margin-bottom:14px">
+            <strong>❌ Error al eliminar:</strong> ' . h((string)$_GET['delete_error']) . '
+        </div>';
+    }
+
+    if (isset($_GET['roll_moved'])) {
+        $body .= '<div class="card" style="background:#ecfeff;border:1px solid #a5f3fc;color:#155e75;padding:12px 18px;border-radius:10px;margin-bottom:14px;display:flex;align-items:center;gap:10px">
+            <span style="font-size:18px">📦</span>
+            <div><strong>Bobina(s) movida(s):</strong> ' . h((string)$_GET['roll_moved']) . '</div>
+        </div>';
+    }
+
+    if (isset($_GET['move_error'])) {
+        $body .= '<div class="card" style="background:#fef2f2;border:1px solid #f87171;color:#b91c1c;padding:12px 18px;border-radius:10px;margin-bottom:14px">
+            <strong>❌ Error al mover bobinas:</strong> ' . h((string)$_GET['move_error']) . '
+        </div>';
     }
 
     $body .= '<div class="card" style="margin-bottom:14px;border-radius:12px;border:1px solid #e2e8f0;padding:16px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
@@ -14379,69 +14834,134 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
             </div>
             <div style="flex:1;min-width:200px">
               <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚙️ Modo recepción</label>
-              <select id="reception_mode_selector" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
+              <select id="reception_mode_selector"' . ($isReceptionLocked ? ' disabled' : '') . ' style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
                 <option value="WEIGHT"' . ($isWeightMode ? ' selected' : '') . '>Por peso</option>
                 <option value="QUANTITY"' . (!$isWeightMode ? ' selected' : '') . '>Por unidades</option>
               </select>
             </div>
             <div style="flex:1;min-width:220px">
               <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🏭 Bodega de Destino *</label>
-              <select name="warehouse_id" required style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
+              <select name="warehouse_id" required' . ($isReceptionLocked ? ' disabled' : '') . ' style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
                 <option value="">Seleccionar bodega</option>';
     foreach ($warehouses as $w) {
-        $body .= '<option value="' . (int)$w['id'] . '">' . h((string)$w['code']) . ' - ' . h((string)$w['name']) . '</option>';
+        $whLabel = trim((string)$w['name']) !== '' ? (string)$w['name'] : ('Bodega ' . (string)$w['code']);
+        $body .= '<option value="' . (int)$w['id'] . '" data-name="' . h($whLabel) . '">' . h($whLabel) . '</option>';
     }
     $body .= '</select>
             </div>
             <div id="weight_field_wrapper" style="flex:1;min-width:200px">
               <label id="primary_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚖️ Peso real (Kg)</label>
-              <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="0" value=""' . ($pendingInputMax !== '' ? ' max="' . h($pendingInputMax) . '"' : '') . ' placeholder="0.000" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:15px;font-weight:700;color:#0f172a">
+              <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="15" value=""' . ($isReceptionLocked ? ' disabled' : '') . ' placeholder="15.000" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:15px;font-weight:700;color:#0f172a">
             </div>
             <div id="qty_field_wrapper" style="flex:1;min-width:200px">
               <label id="qty_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🔢 Cantidad recibida (Unid.)</label>
-              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:14px;font-weight:700">
+              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1"' . ($isReceptionLocked ? ' disabled' : '') . ' style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:14px;font-weight:700">
             </div>
             <div id="action_buttons_wrapper" style="flex:0 0 ' . ($isWeightMode ? '310px' : '200px') . ';display:flex;flex-direction:row;gap:8px;align-items:flex-end;justify-content:flex-end;flex-wrap:nowrap">';
-    $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . (!$isWeightMode ? ' style="display:none"' : '') . ' style="height:38px;padding:0 14px;border-radius:8px;font-weight:700">Activar balanza</button>
-              <button class="btn" type="button" id="save_print"' . (!$isWeightMode ? ' style="display:none"' : '') . ' disabled style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button>
-              <button class="btn" type="submit" id="submit_primary"' . ($isWeightMode ? ' style="display:none"' : '') . ' style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button></div>
+    $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . ((!$isWeightMode || $isReceptionLocked) ? ' style="display:none"' : '') . ' style="height:38px;padding:0 14px;border-radius:8px;font-weight:700">Activar balanza</button>
+              <button class="btn" type="button" id="save_print"' . ((!$isWeightMode || $isReceptionLocked) ? ' style="display:none"' : '') . ' disabled style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button>
+              <button class="btn" type="submit" id="submit_primary"' . (($isWeightMode || $isReceptionLocked) ? ' style="display:none"' : '') . ' style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button></div>
           </div>
           <div class="row" id="scale_status_row" style="margin-top:8px' . ($isWeightMode ? '' : ';display:none') . ';align-items:center">
             <div style="flex:1"></div>
             <div style="flex:2;text-align:right">
-              <span class="muted" id="scale_status" style="font-size:12.5px;font-weight:600;background:#f8fafc;border:1px solid #e2e8f0;padding:4px 12px;border-radius:20px;display:inline-block">Balanza: inactiva · Máximo pendiente ' . h(formatReceptionValue((float)$lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit) . '</span>
+              <span class="muted" id="scale_status" style="font-size:12.5px;font-weight:600;background:#f8fafc;border:1px solid #e2e8f0;padding:4px 12px;border-radius:20px;display:inline-block">' . ($isReceptionLocked ? 'Recepción cerrada para nuevos ingresos · usa borrar para corregir' : ('Balanza: inactiva · Máximo pendiente ' . h(formatReceptionValue((float)$lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit))) . '</span>
             </div>
           </div>
         </form>
       </div>';
 
     $body .= '<div class="card" style="margin-top:14px;border-radius:12px;border:1px solid #e2e8f0;padding:16px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-        <div style="font-weight:800;font-size:15px;color:#0f172a;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between">
-          <span>📋 Últimas recepciones de este contenedor</span>
-          <span style="font-size:12px;color:#64748b;font-weight:600">Historial reciente</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;border-bottom:1px solid #f1f5f9;padding-bottom:12px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span style="font-weight:800;font-size:16px;color:#0f172a">📦 Bobinas Recepcionadas en esta Línea</span>
+            <span class="rec-badge" id="rec_badge_count" style="background:#0284c7;color:#fff;font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px" data-total="' . $totalLineRollsCount . '">' . $totalLineRollsCount . ' bobinas</span>
+            <span class="rec-badge" id="rec_badge_weight" style="background:#e0f2fe;color:#0369a1;font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px">' . number_format($totalLineRollsWeight, 2, ',', '.') . ' Kg</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <a class="btn" href="/import-containers/' . $containerId . '/rolls-excel?line=' . (int)$line['import_container_item_id'] . '" style="background:#059669;border-color:#059669;color:#fff;font-size:12px;padding:6px 14px;border-radius:8px;font-weight:700;display:inline-flex;align-items:center;gap:6px" title="Exportar bobinas de esta línea a Excel">
+              <span>📊</span> Exportar Excel Línea
+            </a>
+            <a class="btn secondary" href="/import-containers/' . $containerId . '/rolls-excel" style="font-size:12px;padding:6px 12px;border-radius:8px;font-weight:700;display:inline-flex;align-items:center;gap:5px" title="Exportar todas las bobinas del contenedor completo">
+              <span>📋</span> Todo el Contenedor
+            </a>
+          </div>
         </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1;max-width:600px">
+            <input type="text" id="rec_live_search" placeholder="🔍 Buscar por código bobina, trazabilidad o bodega..." oninput="filterRecLiveTable()" style="height:34px;border-radius:8px;border:1px solid #cbd5e1;padding:0 12px;font-size:12.5px;flex:1;min-width:240px;background:#f8fafc">
+            <div style="display:inline-flex;border-radius:8px;border:1px solid #cbd5e1;overflow:hidden">
+              <button type="button" id="btn_rec_all" onclick="toggleRecView(\'all\')" style="padding:6px 12px;font-size:12px;font-weight:700;background:#0284c7;color:#fff;border:none;cursor:pointer">Todas (' . $totalLineRollsCount . ')</button>
+              <button type="button" id="btn_rec_recent" onclick="toggleRecView(\'recent\')" style="padding:6px 12px;font-size:12px;font-weight:600;background:#f8fafc;color:#475569;border:none;cursor:pointer">Últimas 10</button>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <select id="move_selected_warehouse" style="height:34px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:12px;font-weight:600;min-width:180px">
+              <option value="">Mover a bodega...</option>';
+    foreach ($warehouses as $w) {
+        $moveWhLabel = trim((string)$w['name']) !== '' ? (string)$w['name'] : ('Bodega ' . (string)$w['code']);
+        $body .= '<option value="' . (int)$w['id'] . '">' . h($moveWhLabel) . '</option>';
+    }
+    $body .= '</select>
+            <button type="button" id="move_selected_rolls" class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;font-weight:700">📦 Mover seleccionadas</button>
+            <button type="button" id="delete_selected_rolls" class="btn" style="background:#fee2e2;border-color:#fca5a5;color:#b91c1c;font-size:12px;padding:6px 12px;border-radius:8px;font-weight:700">🗑️ Borrar seleccionadas</button>
+          </div>
+        </div>
+
         <div class="rec-table-wrap">
-        <table class="rec-table"><thead><tr><th>Código Bobina</th><th>Bodega</th><th>Unidades</th><th>Peso (Kg)</th><th>Fecha Registro</th><th style="text-align:right">Etiqueta 10x7</th></tr></thead><tbody id="recent_tbody">';
+        <table class="rec-table">
+          <thead>
+            <tr>
+              <th style="width:38px"><input type="checkbox" id="select_all_rolls" title="Seleccionar todas"></th>
+              <th>Código Bobina</th>
+              <th>Cód. Trazabilidad</th>
+              <th>Bodega</th>
+              <th>Peso Real (Kg)</th>
+              <th>Medidas / SKU</th>
+              <th>Fecha Registro</th>
+              <th>Operador</th>
+              <th style="text-align:right">Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="recent_tbody">';
+
+    $idx = 0;
     foreach ($recent as $r) {
-        $recentValue = formatReceptionValue((float)($r['received_qty'] ?? 1), 'Unid.') . ' Unid.';
+        $idx++;
         $recentWeight = formatReceptionValue((float)($r['weight_kg'] ?? 0), 'Kg');
-        $body .= '<tr>';
-        $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-size:13px">' . h((string)$r['roll_code']) . '</span></td>';
-        $body .= '<td><span class="wh-badge" style="font-size:11px;padding:2px 6px">' . h((string)$r['warehouse_code']) . '</span></td>';
-        $body .= '<td>' . h($recentValue) . '</td>';
+        $whDisplayName = trim((string)($r['warehouse_name'] ?? '')) ?: (string)($r['warehouse_code'] ?? '-');
+        $rollWeightStr = number_format((float)($r['weight_kg'] ?? 0), 3, '.', '');
+        $rollCodeStr = (string)($r['roll_code'] ?? ('#' . $r['id']));
+        $trzCode = (string)($r['traceability_code'] ?: $rollCodeStr);
+        $specParts = [];
+        if (!empty($r['width_mm'])) $specParts[] = (float)$r['width_mm'] . 'mm';
+        if (!empty($r['microns'])) $specParts[] = (float)$r['microns'] . 'µ';
+        if (!empty($r['meters'])) $specParts[] = (float)$r['meters'] . 'm';
+        $specText = !empty($specParts) ? implode(' · ', $specParts) : (string)($r['sku_code'] ?? '-');
+        $opName = trim((string)($r['operator_name'] ?? '')) ?: '-';
+
+        $body .= '<tr class="rec-row-item" data-index="' . $idx . '" data-search="' . h(strtolower($rollCodeStr . ' ' . $trzCode . ' ' . $whDisplayName . ' ' . $opName . ' ' . $specText)) . '">';
+        $body .= '<td><input type="checkbox" class="recent-roll-check" value="' . (int)$r['id'] . '" data-roll-code="' . h($rollCodeStr) . '" style="width:16px;height:16px;cursor:pointer"></td>';
+        $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-size:13px;font-weight:700">' . h($rollCodeStr) . '</span></td>';
+        $body .= '<td><a href="/stock/traceability?q=' . urlencode($trzCode) . '" target="_blank" style="font-family:monospace;font-size:12px;color:#0284c7;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Ver árbol de trazabilidad 360°">🌳 ' . h($trzCode) . '</a></td>';
+        $body .= '<td><span class="wh-badge" style="font-size:11px;padding:3px 8px;font-weight:600" title="Código: ' . h((string)$r['warehouse_code']) . '">' . h($whDisplayName) . '</span></td>';
         $body .= '<td><strong>' . h($recentWeight) . ' Kg</strong></td>';
+        $body .= '<td><span style="font-size:11.5px;color:#475569">' . h($specText) . '</span></td>';
         $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)$r['created_at']) . '</span></td>';
+        $body .= '<td><span style="font-size:11.5px;color:#475569">' . h($opName) . '</span></td>';
         $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
         $body .= '<a class="btn" style="padding:4px 10px;font-size:12px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
             $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo térmico">⚡ ' . h($printLangName) . '</a>';
         }
         $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño">👁️ Ver</a>';
+        $body .= '<button type="button" class="btn btn-delete-roll" style="padding:4px 8px;font-size:11.5px;border-radius:6px;background:#fee2e2;border-color:#fca5a5;color:#b91c1c;display:inline-flex;align-items:center;gap:3px;font-weight:700;cursor:pointer" data-roll-id="' . (int)$r['id'] . '" data-roll-code="' . h($rollCodeStr) . '" data-roll-weight="' . h($rollWeightStr) . '" title="Borrar este pesaje si hubo error">🗑️ Borrar</button>';
         $body .= '</div></td>';
         $body .= '</tr>';
     }
     if ($recent === []) {
-        $body .= '<tr><td colspan="6"><div class="rec-empty" style="padding:18px"><div class="rec-empty-icon" style="font-size:24px">📦</div><div style="font-weight:700">Sin recepciones registradas aún para esta línea.</div><div style="font-size:12px">Pesa la primera bobina para registrar e imprimir automáticamente.</div></div></td></tr>';
+        $body .= '<tr><td colspan="9"><div class="rec-empty" style="padding:18px"><div class="rec-empty-icon" style="font-size:24px">📦</div><div style="font-weight:700">Sin recepciones registradas aún para esta línea.</div><div style="font-size:12px">Pesa la primera bobina para registrar e imprimir automáticamente.</div></div></td></tr>';
     }
     $body .= '</tbody></table></div></div>';
 
@@ -14502,6 +15022,75 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
       </div>';
 
     $body .= '<script>
+      window.deleteRoll = async function (rollId, rollCode, weightKg, skipReload) {
+        rollId = Number(rollId);
+        if (!rollId || isNaN(rollId)) {
+          alert("ID de bobina no válido.");
+          return null;
+        }
+        var weightLabel = (weightKg && Number(weightKg) > 0) ? " de " + Number(weightKg).toFixed(3) + " Kg" : "";
+        var confirmMsg = "¿Estás seguro de BORRAR el pesaje de la bobina " + (rollCode || ("#" + rollId)) + weightLabel + "?\n\nEsta acción revertirá el peso ingresado y permitirá volver a ingresarlo si hubo un error.";
+        if (!skipReload && !window.confirm(confirmMsg)) return null;
+
+        var csrfInput = document.querySelector("input[name=_csrf]");
+        var csrfVal = csrfInput ? csrfInput.value : "";
+
+        try {
+          var body = new URLSearchParams();
+          body.set("_csrf", csrfVal);
+          var res = await fetch("/api/rolls/" + rollId + "/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body.toString()
+          });
+          var data = await res.json();
+          if (!data || data.ok !== true) {
+            alert("Error al borrar: " + ((data && data.error) ? data.error : "No se pudo eliminar el pesaje"));
+            return null;
+          }
+          if (skipReload) {
+            return data;
+          }
+          var currentUrl = new URL(window.location.href);
+          currentUrl.searchParams.set("roll_deleted", data.roll_code || ("#" + rollId));
+          currentUrl.searchParams.delete("saved_roll_id");
+          window.location.href = currentUrl.toString();
+          return data;
+        } catch (err) {
+          if (skipReload) {
+            alert("Error al borrar: no se pudo completar el borrado múltiple.");
+            return null;
+          }
+          var f = document.createElement("form");
+          f.method = "POST";
+          f.action = "/rolls/" + rollId + "/delete";
+          var cInput = document.createElement("input");
+          cInput.type = "hidden";
+          cInput.name = "_csrf";
+          cInput.value = csrfVal;
+          f.appendChild(cInput);
+          var rInput = document.createElement("input");
+          rInput.type = "hidden";
+          rInput.name = "redirect_to";
+          rInput.value = window.location.href;
+          f.appendChild(rInput);
+          document.body.appendChild(f);
+          f.submit();
+          return null;
+        }
+      };
+
+      document.addEventListener("click", function (e) {
+        var btn = e.target.closest(".btn-delete-roll");
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var id = btn.getAttribute("data-roll-id");
+        var code = btn.getAttribute("data-roll-code") || ("#" + id);
+        var weight = btn.getAttribute("data-roll-weight") || "";
+        window.deleteRoll(id, code, weight);
+      });
+
       (function () {
         var form = document.getElementById("receive_form");
         var modeField = document.getElementById("reception_mode");
@@ -14511,6 +15100,7 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         var qtyInput = document.getElementById("received_qty_input");
         var toggle = document.getElementById("toggle_scale");
         var saveBtn = document.getElementById("save_print");
+        var submitBtn = document.getElementById("submit_primary");
         var submitPrimary = document.getElementById("submit_primary");
         var actionButtonsWrapper = document.getElementById("action_buttons_wrapper");
         var weightFieldWrapper = document.getElementById("weight_field_wrapper");
@@ -14522,10 +15112,20 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         var status = document.getElementById("scale_status");
         var tbody = document.getElementById("recent_tbody");
         var preview = document.getElementById("label_preview");
+        var selectAllRolls = document.getElementById("select_all_rolls");
+        var moveSelectedBtn = document.getElementById("move_selected_rolls");
+        var moveSelectedWarehouse = document.getElementById("move_selected_warehouse");
+        var deleteSelectedBtn = document.getElementById("delete_selected_rolls");
+        var receptionLocked = ' . json_encode($isReceptionLocked) . ';
         if (!form || !modeField || !weight || !qty || !qtyInput || !toggle || !saveBtn || !status) return;
+        if (receptionLocked) {
+          saveBtn.disabled = true;
+          if (submitPrimary) submitPrimary.disabled = true;
+        }
 
         var active = false;
         var timer = null;
+        var polling = false;
         var last = null;
         var stable = 0;
         var lastSaved = null;
@@ -14537,18 +15137,30 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         var printTimer = null;
         var lastPrintedAt = 0;
         var lastPrintedWeight = null;
+        var MIN_LABEL_WEIGHT_KG = 15;
         var TRIGGER_ON_KG = 0.100;
         var TRIGGER_OFF_KG = 0.050;
-        var MIN_INTERVAL_MS = 2000;
-        var REARM_DELTA_KG = 0.500;
+        var MIN_INTERVAL_MS = 1000;
+        var STABLE_DELTA_KG = 0.040;
+        var REQUIRED_STABLE_READS = 2;
+        var POLL_INTERVAL_MS = 250;
         var serverPrintEnabled = (function(){
           var el = document.getElementById("server_print_enabled");
           return !!(el && String(el.value) === "1");
         })();
         var serverPrinterName = ' . json_encode($printer->getConfiguredPrinterName()) . ';
         var printLangLabel = ' . json_encode(strtoupper($printer->getConfiguredPrintLanguage())) . ';
+        var currentOpName = ' . json_encode($currentOperatorName) . ';
 
         function setStatus(text) { status.textContent = text; }
+
+        function scheduleNextPoll(delayMs) {
+          if (timer) clearTimeout(timer);
+          timer = null;
+          if (active && !saving) {
+            timer = setTimeout(poll, typeof delayMs === "number" ? delayMs : POLL_INTERVAL_MS);
+          }
+        }
 
         function enqueuePrint(url) {
           if (!active) return;
@@ -14573,7 +15185,7 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           return getMode() === "WEIGHT"
             && !!(wh && wh.value)
             && Number.isFinite(weightValue)
-            && weightValue >= TRIGGER_ON_KG;
+            && weightValue >= MIN_LABEL_WEIGHT_KG;
         }
 
         function syncWeightSaveButton() {
@@ -14586,9 +15198,10 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
 
         function stopScale() {
           active = false;
+          polling = false;
           toggle.textContent = "Activar balanza";
           syncWeightSaveButton();
-          if (timer) clearInterval(timer);
+          if (timer) clearTimeout(timer);
           timer = null;
           if (printTimer) clearTimeout(printTimer);
           printTimer = null;
@@ -14614,7 +15227,7 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
             if (actionButtonsWrapper) actionButtonsWrapper.style.flexBasis = "300px";
             if (scaleStatusSpacer) scaleStatusSpacer.style.flexBasis = "300px";
             if (!active) {
-              setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
+              setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa al menos 15 Kg o activa balanza");
             }
           } else {
             syncQtyValue();
@@ -14655,18 +15268,25 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         }
 
         async function poll() {
-          if (getMode() !== "WEIGHT") {
+          if (!active || saving || getMode() !== "WEIGHT") {
             return;
           }
+          if (polling) return;
+          polling = true;
           try {
             var res = await fetch("/api/scale/weight", { cache: "no-store" });
             var data = await res.json();
-            if (!data || data.ok !== true) throw new Error((data && data.error) ? data.error : "No se pudo leer la balanza.");
+            if (!data || data.ok !== true) {
+              var scaleMsg = (data && data.error) ? data.error : "Balanza: esperando lectura";
+              setStatus(scaleMsg);
+              saveBtn.disabled = true;
+              return;
+            }
             var w = Number(data.weight_kg);
             if (!Number.isFinite(w)) throw new Error("Lectura inválida.");
             weight.value = w.toFixed(3);
 
-            if (last !== null && Math.abs(w - last) < 0.005) stable++; else stable = 0;
+            if (last !== null && Math.abs(w - last) <= STABLE_DELTA_KG) stable++; else stable = 0;
             last = w;
 
             var wh = getWarehouseSelect();
@@ -14674,6 +15294,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
 
             if (w < TRIGGER_OFF_KG) {
               armed = true;
+              stable = 0;
+              last = null;
               lastPrintedWeight = null;
               saveBtn.disabled = true;
               setStatus("Balanza: activa (lista)");
@@ -14686,15 +15308,21 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               return;
             }
 
-            saveBtn.disabled = true;
-            var intervalOk = (Date.now() - lastPrintedAt) >= MIN_INTERVAL_MS;
-            var deltaOk = (lastPrintedWeight !== null) && (Math.abs(w - lastPrintedWeight) >= REARM_DELTA_KG);
-
-            if (!armed && deltaOk) {
-              armed = true;
+            if (w < MIN_LABEL_WEIGHT_KG) {
+              saveBtn.disabled = true;
+              setStatus("Balanza: peso bajo mínimo (15 Kg)");
+              return;
             }
 
+            saveBtn.disabled = true;
+            var intervalOk = (Date.now() - lastPrintedAt) >= MIN_INTERVAL_MS;
+            var isStable = stable >= REQUIRED_STABLE_READS;
+
             if (!saving && armed && hasWarehouse && w >= TRIGGER_ON_KG) {
+              if (!isStable) {
+                setStatus("Balanza: captando peso (" + (stable > 0 ? "confirmando..." : "estabilizando...") + ")");
+                return;
+              }
               if (intervalOk) {
                 armed = false;
                 setStatus("Balanza: activa (guardando...)");
@@ -14713,6 +15341,9 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           } catch (e) {
             setStatus("Balanza: error");
             saveBtn.disabled = true;
+          } finally {
+            polling = false;
+            scheduleNextPoll();
           }
         }
 
@@ -14726,8 +15357,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           if (getMode() !== "WEIGHT") return;
 
           var weightToSave = (weightOverride !== undefined && weightOverride !== null) ? Number(weightOverride) : Number(weight.value);
-          if (!Number.isFinite(weightToSave) || weightToSave < TRIGGER_ON_KG) {
-            setStatus("Balanza: activa (peso inválido)");
+          if (!Number.isFinite(weightToSave) || weightToSave < MIN_LABEL_WEIGHT_KG) {
+            setStatus("Balanza: peso bajo mínimo (15 Kg)");
             return;
           }
           weight.value = weightToSave.toFixed(3);
@@ -14755,9 +15386,10 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
                 if (containerErr.indexOf("no permite") >= 0 || containerErr.indexOf("completa") >= 0 || containerErr.indexOf("finalizada") >= 0) {
                   setStatus("Recepción completa (pausada)");
                   active = false;
+                  polling = false;
                   toggle.textContent = "Activar balanza";
                   saveBtn.disabled = true;
-                  if (timer) clearInterval(timer);
+                  if (timer) clearTimeout(timer);
                   timer = null;
                   return;
                 }
@@ -14774,21 +15406,40 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
 
             if (tbody) {
               var tr = document.createElement("tr");
+              tr.className = "rec-row-item";
+              var dynRollCode = data.roll_code || ("#" + data.id);
+              var trzCode = data.traceability_code || dynRollCode;
               var now = new Date();
-              var whLabel = wh.options[wh.selectedIndex] ? wh.options[wh.selectedIndex].text : "";
-              var whCode = whLabel.split(" - ")[0] || whLabel;
+              var whSelectedOpt = wh.options[wh.selectedIndex];
+              var whDisplayName = whSelectedOpt ? (whSelectedOpt.getAttribute("data-name") || whSelectedOpt.text) : "";
               var dt = now.toISOString().slice(0, 19).replace("T", " ");
 
+              tr.setAttribute("data-search", (dynRollCode + " " + trzCode + " " + whDisplayName + " " + currentOpName).toLowerCase());
+
+              var td0 = document.createElement("td");
+              td0.innerHTML = "<input type=\"checkbox\" class=\"recent-roll-check\" value=\"" + data.id + "\" data-roll-code=\"" + dynRollCode + "\" style=\"width:16px;height:16px;cursor:pointer\">";
+
               var td1 = document.createElement("td");
-              td1.innerHTML = "<span class=\"rec-code-link\" style=\"font-family:monospace;font-size:13px\">" + (data.roll_code ? ("#" + data.roll_code) : ("#" + data.id)) + "</span>";
+              td1.innerHTML = "<span class=\"rec-code-link\" style=\"font-family:monospace;font-size:13px;font-weight:700\">" + dynRollCode + "</span>";
+
+              var tdTraz = document.createElement("td");
+              tdTraz.innerHTML = "<a href=\"/stock/traceability?q=" + encodeURIComponent(trzCode) + "\" target=\"_blank\" style=\"font-family:monospace;font-size:12px;color:#0284c7;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:4px\" title=\"Ver árbol de trazabilidad 360°\">🌳 " + trzCode + "</a>";
+
               var td2 = document.createElement("td");
-              td2.innerHTML = "<span class=\"wh-badge\" style=\"font-size:11px;padding:2px 6px\">" + whCode + "</span>";
-              var td3 = document.createElement("td");
-              td3.textContent = "1 Unid.";
+              td2.innerHTML = "<span class=\"wh-badge\" style=\"font-size:11px;padding:3px 8px;font-weight:600\">" + whDisplayName + "</span>";
+
               var td4 = document.createElement("td");
               td4.innerHTML = "<strong>" + weightToSave.toFixed(3) + " Kg</strong>";
+
+              var tdSku = document.createElement("td");
+              tdSku.innerHTML = "<span style=\"font-size:11.5px;color:#475569\">-</span>";
+
               var td5 = document.createElement("td");
               td5.innerHTML = "<span style=\"color:#64748b;font-size:12px\">" + dt + "</span>";
+
+              var tdOp = document.createElement("td");
+              tdOp.innerHTML = "<span style=\"font-size:11.5px;color:#475569\">" + (currentOpName || "Operador") + "</span>";
+
               var td6 = document.createElement("td");
               td6.style.textAlign = "right";
 
@@ -14798,15 +15449,32 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               divActions.style.justifyContent = "flex-end";
               divActions.style.alignItems = "center";
 
+              var btnAuto = document.createElement("a");
+              btnAuto.className = "btn";
+              btnAuto.style.padding = "4px 10px";
+              btnAuto.style.fontSize = "12px";
+              btnAuto.style.borderRadius = "6px";
+              btnAuto.style.background = "#0284c7";
+              btnAuto.style.borderColor = "#0284c7";
+              btnAuto.style.color = "#fff";
+              btnAuto.style.display = "inline-flex";
+              btnAuto.style.alignItems = "center";
+              btnAuto.style.gap = "4px";
+              btnAuto.target = "_blank";
+              btnAuto.rel = "noopener";
+              btnAuto.href = "/rolls/" + data.id + "/label?auto_print=1";
+              btnAuto.textContent = "🖨️ Imprimir 10x7";
+              divActions.appendChild(btnAuto);
+
               if (serverPrintEnabled) {
                 var btnDirect = document.createElement("a");
-                btnDirect.className = "btn";
-                btnDirect.style.padding = "4px 9px";
+                btnDirect.className = "btn secondary";
+                btnDirect.style.padding = "4px 8px";
                 btnDirect.style.fontSize = "11.5px";
                 btnDirect.style.borderRadius = "6px";
-                btnDirect.style.background = "#0284c7";
-                btnDirect.style.borderColor = "#0284c7";
-                btnDirect.style.color = "#fff";
+                btnDirect.style.display = "inline-flex";
+                btnDirect.style.alignItems = "center";
+                btnDirect.style.gap = "3px";
                 btnDirect.target = "_blank";
                 btnDirect.rel = "noopener";
                 btnDirect.href = data.server_print_url || ("/rolls/" + data.id + "/label?server_print=1");
@@ -14825,15 +15493,47 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               btnView.textContent = "👁️ Ver";
               divActions.appendChild(btnView);
 
+              var btnDel = document.createElement("button");
+              btnDel.type = "button";
+              btnDel.className = "btn btn-delete-roll";
+              btnDel.setAttribute("data-roll-id", data.id);
+              btnDel.setAttribute("data-roll-code", dynRollCode);
+              btnDel.setAttribute("data-roll-weight", weightToSave.toFixed(3));
+              btnDel.style.padding = "4px 8px";
+              btnDel.style.fontSize = "11.5px";
+              btnDel.style.borderRadius = "6px";
+              btnDel.style.background = "#fee2e2";
+              btnDel.style.borderColor = "#fca5a5";
+              btnDel.style.color = "#b91c1c";
+              btnDel.style.fontWeight = "700";
+              btnDel.style.cursor = "pointer";
+              btnDel.textContent = "🗑️ Borrar";
+              btnDel.onclick = function() {
+                deleteRoll(data.id, dynRollCode, weightToSave.toFixed(3));
+              };
+              divActions.appendChild(btnDel);
+
               td6.appendChild(divActions);
 
+              tr.appendChild(td0);
               tr.appendChild(td1);
+              tr.appendChild(tdTraz);
               tr.appendChild(td2);
-              tr.appendChild(td3);
               tr.appendChild(td4);
+              tr.appendChild(tdSku);
               tr.appendChild(td5);
+              tr.appendChild(tdOp);
               tr.appendChild(td6);
               tbody.prepend(tr);
+
+              var countBadge = document.getElementById("rec_badge_count");
+              if (countBadge) {
+                var currentCount = (parseInt(countBadge.getAttribute("data-total") || "0", 10) || 0) + 1;
+                countBadge.setAttribute("data-total", currentCount);
+                countBadge.textContent = currentCount + " bobinas";
+                var btnAll = document.getElementById("btn_rec_all");
+                if (btnAll) btnAll.textContent = "Todas (" + currentCount + ")";
+              }
             }
 
             if (preview) {
@@ -14844,11 +15544,13 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               setStatus("Balanza: activa (etiqueta emitida en " + (serverPrinterName || "impresora") + ")");
             } else {
               var printTarget = data.print_url || (labelHref + "?auto_print=1");
-              if (active) {
+              if (active && !serverPrintEnabled) {
                 enqueuePrint(printTarget);
               } else {
                 window.open(printTarget, "_blank", "noopener");
-                setStatus("Recepción guardada e impresión lista");
+                setStatus(serverPrintEnabled
+                  ? "Recepción guardada; impresión directa no respondió, se abrió respaldo"
+                  : "Recepción guardada e impresión lista");
               }
             }
           } catch (e) {
@@ -14857,6 +15559,7 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
             saving = false;
             saveBtn.textContent = "Guardar e imprimir";
             syncWeightSaveButton();
+            scheduleNextPoll(200);
           }
         }
 
@@ -14884,7 +15587,6 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               printWindow = null;
             }
             poll();
-            timer = setInterval(poll, 1000);
           } else {
             stopScale();
             setStatus("Balanza: inactiva");
@@ -14900,7 +15602,7 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               } else if (canManualWeightSave()) {
                 setStatus("Listo para guardar e imprimir 1 unidad");
               } else {
-                setStatus("Ingresa peso manual o activa balanza");
+                setStatus("Ingresa al menos 15 Kg o activa balanza");
               }
             }
             syncWeightSaveButton();
@@ -14925,7 +15627,7 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
 
         weight.addEventListener("input", function () {
           if (getMode() === "WEIGHT" && !active) {
-            setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
+            setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa al menos 15 Kg o activa balanza");
           }
           syncWeightSaveButton();
           updatePreviewWeight(weight.value);
@@ -14940,15 +15642,150 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         qtyInput.addEventListener("input", function () {
           syncQtyValue();
         });
-        form.addEventListener("submit", function () {
+        form.addEventListener("submit", function (event) {
           if (getMode() === "WEIGHT") {
             qty.value = "1";
           } else {
             syncQtyValue();
+            if (submitBtn) {
+              if (submitBtn.dataset.submitting === "1") {
+                event.preventDefault();
+                return;
+              }
+              submitBtn.dataset.submitting = "1";
+              submitBtn.disabled = true;
+              submitBtn.textContent = "Guardando...";
+            }
           }
         });
         modeField.value = modeField.value === "WEIGHT" ? "WEIGHT" : "QUANTITY";
         applyModeUI();
+
+        function getSelectedRollChecks() {
+          return Array.prototype.slice.call(document.querySelectorAll(".recent-roll-check:checked"));
+        }
+
+        if (selectAllRolls) {
+          selectAllRolls.addEventListener("change", function () {
+            var checks = document.querySelectorAll(".recent-roll-check");
+            for (var i = 0; i < checks.length; i++) {
+              checks[i].checked = !!selectAllRolls.checked;
+            }
+          });
+        }
+
+        if (deleteSelectedBtn) {
+          deleteSelectedBtn.addEventListener("click", async function () {
+            var selected = getSelectedRollChecks();
+            if (!selected.length) {
+              alert("Selecciona al menos una bobina para borrar.");
+              return;
+            }
+            var labels = selected.map(function (el) { return el.getAttribute("data-roll-code") || ("#" + el.value); });
+            var ok = confirm("¿Borrar " + selected.length + " bobina(s) desde esta recepción?\n\n" + labels.join(", "));
+            if (!ok) return;
+            var deletedLabels = [];
+            for (var i = 0; i < selected.length; i++) {
+              var result = await deleteRoll(Number(selected[i].value), selected[i].getAttribute("data-roll-code") || ("#" + selected[i].value), "", true);
+              if (result && result.ok === true) {
+                deletedLabels.push(result.roll_code || ("#" + selected[i].value));
+              }
+            }
+            if (deletedLabels.length) {
+              var currentUrl = new URL(window.location.href);
+              currentUrl.searchParams.set("roll_deleted", deletedLabels.join(", "));
+              currentUrl.searchParams.delete("saved_roll_id");
+              window.location.href = currentUrl.toString();
+            }
+          });
+        }
+
+        if (moveSelectedBtn) {
+          moveSelectedBtn.addEventListener("click", function () {
+            var selected = getSelectedRollChecks();
+            if (!selected.length) {
+              alert("Selecciona al menos una bobina para mover.");
+              return;
+            }
+            if (!moveSelectedWarehouse || !moveSelectedWarehouse.value) {
+              alert("Selecciona la bodega destino.");
+              return;
+            }
+            var labels = selected.map(function (el) { return el.getAttribute("data-roll-code") || ("#" + el.value); });
+            var warehouseLabel = moveSelectedWarehouse.options[moveSelectedWarehouse.selectedIndex]
+              ? moveSelectedWarehouse.options[moveSelectedWarehouse.selectedIndex].text
+              : ("#" + moveSelectedWarehouse.value);
+            var ok = confirm("¿Mover " + selected.length + " bobina(s) a " + warehouseLabel + "?\n\n" + labels.join(", "));
+            if (!ok) return;
+
+            var f = document.createElement("form");
+            f.method = "post";
+            f.action = "/reception/rolls/move";
+
+            var csrfInput = form.querySelector("input[name=_csrf]");
+            var cInput = document.createElement("input");
+            cInput.type = "hidden";
+            cInput.name = "_csrf";
+            cInput.value = (csrfInput ? csrfInput.value : "");
+            f.appendChild(cInput);
+
+            var rInput = document.createElement("input");
+            rInput.type = "hidden";
+            rInput.name = "redirect_to";
+            rInput.value = window.location.href;
+            f.appendChild(rInput);
+
+            var idsInput = document.createElement("input");
+            idsInput.type = "hidden";
+            idsInput.name = "roll_ids";
+            idsInput.value = selected.map(function (el) { return el.value; }).join(",");
+            f.appendChild(idsInput);
+
+            var whInput = document.createElement("input");
+            whInput.type = "hidden";
+            whInput.name = "to_warehouse_id";
+            whInput.value = moveSelectedWarehouse.value;
+            f.appendChild(whInput);
+
+            document.body.appendChild(f);
+            f.submit();
+          });
+        }
+
+        window.toggleRecView = function(mode) {
+          var btnAll = document.getElementById("btn_rec_all");
+          var btnRecent = document.getElementById("btn_rec_recent");
+          var rows = document.querySelectorAll("#recent_tbody tr.rec-row-item");
+          if (mode === "recent") {
+            if (btnAll) { btnAll.style.background = "#f8fafc"; btnAll.style.color = "#475569"; btnAll.style.fontWeight = "600"; }
+            if (btnRecent) { btnRecent.style.background = "#0284c7"; btnRecent.style.color = "#fff"; btnRecent.style.fontWeight = "700"; }
+            for (var i = 0; i < rows.length; i++) {
+              rows[i].style.display = i < 10 ? "" : "none";
+            }
+          } else {
+            if (btnAll) { btnAll.style.background = "#0284c7"; btnAll.style.color = "#fff"; btnAll.style.fontWeight = "700"; }
+            if (btnRecent) { btnRecent.style.background = "#f8fafc"; btnRecent.style.color = "#475569"; btnRecent.style.fontWeight = "600"; }
+            for (var i = 0; i < rows.length; i++) {
+              rows[i].style.display = "";
+            }
+          }
+        };
+
+        window.filterRecLiveTable = function() {
+          var input = document.getElementById("rec_live_search");
+          if (!input) return;
+          var q = (input.value || "").trim().toLowerCase();
+          var rows = document.querySelectorAll("#recent_tbody tr.rec-row-item");
+          for (var i = 0; i < rows.length; i++) {
+            var searchData = rows[i].getAttribute("data-search") || rows[i].textContent.toLowerCase();
+            if (!q || searchData.indexOf(q) !== -1) {
+              rows[i].style.display = "";
+            } else {
+              rows[i].style.display = "none";
+            }
+          }
+        };
+
         saveBtn.addEventListener("click", function () { saveAndPrint(); });
       })();
     </script>';
@@ -15131,10 +15968,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         render('No encontrado', '<div class="card">No existe la OC.</div>');
         exit;
     }
-    if ((string)$po['status'] === 'COMPLETE') {
-        render('Recepción OC', '<div class="err">Esta recepción ya está finalizada y no permite agregar más.</div><div style="margin-top:12px"><a class="btn secondary" href="/purchase-orders/' . (int)$poId . '">Volver</a></div>');
-        exit;
-    }
+    $isReceptionLocked = false;
     $lineId = isset($_GET['line']) ? (int)$_GET['line'] : 0;
     $line = $service->getPurchaseOrderLine($lineId);
     if ($line === null || (int)$line['purchase_order_id'] !== $poId) {
@@ -15144,7 +15978,13 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
     }
 
     $warehouses = $service->listWarehousesForReception();
-    $recent = $service->listRollsByPurchaseOrderLine($lineId, 10);
+    $allLineRolls = $service->listRollsByPurchaseOrder($poId, $lineId, 2000);
+    if (empty($allLineRolls)) {
+        $allLineRolls = $service->listRollsByPurchaseOrderLine($lineId, 2000);
+    }
+    $totalLineRollsCount = count($allLineRolls);
+    $totalLineRollsWeight = array_sum(array_column($allLineRolls, 'weight_kg'));
+    $recent = $allLineRolls;
     $lineSummary = receptionLineSummary($line);
     $isWeightMode = $lineSummary['mode'] === 'WEIGHT';
     $lineUnit = $lineSummary['unit'];
@@ -15188,17 +16028,51 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         </div>
       </div>';
 
+    if ($isReceptionLocked) {
+        $body .= '<div class="card" style="background:#fff7ed;border:1px solid #fdba74;color:#9a3412;padding:12px 18px;border-radius:10px;margin-bottom:14px">
+            <strong>Recepción cerrada temporalmente para agregar:</strong> esta línea está marcada como finalizada, pero puedes seguir borrando bobinas desde esta misma pantalla para corregir pruebas o ingresos erróneos.
+        </div>';
+    }
+
     if ($savedRollId > 0) {
         $savedRoll = $service->getRoll($savedRollId);
         $savedRollCode = is_array($savedRoll) ? (string)($savedRoll['roll_code'] ?? ('#' . $savedRollId)) : ('#' . $savedRollId);
-        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito.</strong></div>';
-        $body .= '<div style="display:flex;gap:6px">';
+        $savedRollWeight = is_array($savedRoll) ? number_format((float)($savedRoll['weight_kg'] ?? 0), 3, '.', '') : '0';
+        $body .= '<div class="card" style="background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;padding:12px 18px;border-radius:10px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
+        $body .= '<div><strong>✅ Bobina ' . h($savedRollCode) . ' recepcionada con éxito (' . h($savedRollWeight) . ' Kg).</strong></div>';
+        $body .= '<div style="display:flex;gap:6px;align-items:center">';
         $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:12.5px;border-radius:6px;font-weight:700;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $savedRollId . '/label?auto_print=1" target="_blank">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
             $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank" title="Imprimir directo vía comando térmico">⚡ ' . h($printLangName) . '</a>';
         }
-        $body .= '<a class="btn secondary" style="padding:6px 12px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label" target="_blank">👁️ Ver</a>';
+        $body .= '<button type="button" class="btn btn-delete-roll" style="background:#fee2e2;border-color:#fca5a5;color:#b91c1c;padding:6px 12px;font-size:12px;border-radius:6px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px" data-roll-id="' . (int)$savedRollId . '" data-roll-code="' . h($savedRollCode) . '" data-roll-weight="' . h($savedRollWeight) . '" title="Borrar este pesaje si hubo un error">🗑️ Borrar este pesaje (error)</button>';
         $body .= '</div></div>';
+    }
+
+    if (isset($_GET['roll_deleted'])) {
+        $body .= '<div class="card" style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px 18px;border-radius:10px;margin-bottom:14px;display:flex;align-items:center;gap:10px">
+            <span style="font-size:18px">🗑️</span>
+            <div><strong>Pesaje eliminado:</strong> La bobina <strong>' . h((string)$_GET['roll_deleted']) . '</strong> fue eliminada y el peso ingresado se ha descontado de la recepción.</div>
+        </div>';
+    }
+
+    if (isset($_GET['delete_error'])) {
+        $body .= '<div class="card" style="background:#fef2f2;border:1px solid #f87171;color:#b91c1c;padding:12px 18px;border-radius:10px;margin-bottom:14px">
+            <strong>❌ Error al eliminar:</strong> ' . h((string)$_GET['delete_error']) . '
+        </div>';
+    }
+
+    if (isset($_GET['roll_moved'])) {
+        $body .= '<div class="card" style="background:#ecfeff;border:1px solid #a5f3fc;color:#155e75;padding:12px 18px;border-radius:10px;margin-bottom:14px;display:flex;align-items:center;gap:10px">
+            <span style="font-size:18px">📦</span>
+            <div><strong>Bobina(s) movida(s):</strong> ' . h((string)$_GET['roll_moved']) . '</div>
+        </div>';
+    }
+
+    if (isset($_GET['move_error'])) {
+        $body .= '<div class="card" style="background:#fef2f2;border:1px solid #f87171;color:#b91c1c;padding:12px 18px;border-radius:10px;margin-bottom:14px">
+            <strong>❌ Error al mover bobinas:</strong> ' . h((string)$_GET['move_error']) . '
+        </div>';
     }
 
     $body .= '<div class="card" style="margin-bottom:14px;border-radius:12px;border:1px solid #e2e8f0;padding:16px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
@@ -15276,69 +16150,134 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
             </div>
             <div style="flex:1;min-width:200px">
               <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚙️ Modo recepción</label>
-              <select id="reception_mode_selector" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
+              <select id="reception_mode_selector"' . ($isReceptionLocked ? ' disabled' : '') . ' style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
                 <option value="WEIGHT"' . ($isWeightMode ? ' selected' : '') . '>Por peso</option>
                 <option value="QUANTITY"' . (!$isWeightMode ? ' selected' : '') . '>Por unidades</option>
               </select>
             </div>
             <div style="flex:1;min-width:220px">
               <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🏭 Bodega de Destino *</label>
-              <select name="warehouse_id" required style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
+              <select name="warehouse_id" required' . ($isReceptionLocked ? ' disabled' : '') . ' style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
                 <option value="">Seleccionar bodega</option>';
     foreach ($warehouses as $w) {
-        $body .= '<option value="' . (int)$w['id'] . '">' . h((string)$w['code']) . ' - ' . h((string)$w['name']) . '</option>';
+        $whLabel = trim((string)$w['name']) !== '' ? (string)$w['name'] : ('Bodega ' . (string)$w['code']);
+        $body .= '<option value="' . (int)$w['id'] . '" data-name="' . h($whLabel) . '">' . h($whLabel) . '</option>';
     }
     $body .= '</select>
             </div>
             <div id="weight_field_wrapper" style="flex:1;min-width:200px">
               <label id="primary_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚖️ Peso real (Kg)</label>
-              <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="0" value=""' . ($pendingInputMax !== '' ? ' max="' . h($pendingInputMax) . '"' : '') . ' placeholder="0.000" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:15px;font-weight:700;color:#0f172a">
+              <input id="weight_kg" name="weight_kg" type="number" step="0.001" min="15" value=""' . ($isReceptionLocked ? ' disabled' : '') . ' placeholder="15.000" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:15px;font-weight:700;color:#0f172a">
             </div>
             <div id="qty_field_wrapper" style="flex:1;min-width:200px">
               <label id="qty_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🔢 Cantidad recibida (Unid.)</label>
-              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1" style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:14px;font-weight:700">
+              <input id="received_qty_input" type="number" step="0.001" min="0.001" value="1"' . ($isReceptionLocked ? ' disabled' : '') . ' style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:14px;font-weight:700">
             </div>
             <div id="action_buttons_wrapper" style="flex:0 0 ' . ($isWeightMode ? '310px' : '200px') . ';display:flex;flex-direction:row;gap:8px;align-items:flex-end;justify-content:flex-end;flex-wrap:nowrap">';
-    $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . (!$isWeightMode ? ' style="display:none"' : '') . ' style="height:38px;padding:0 14px;border-radius:8px;font-weight:700">Activar balanza</button>
-              <button class="btn" type="button" id="save_print"' . (!$isWeightMode ? ' style="display:none"' : '') . ' disabled style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button>
-              <button class="btn" type="submit" id="submit_primary"' . ($isWeightMode ? ' style="display:none"' : '') . ' style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button></div>
+    $body .= '<button class="btn secondary" type="button" id="toggle_scale"' . ((!$isWeightMode || $isReceptionLocked) ? ' style="display:none"' : '') . ' style="height:38px;padding:0 14px;border-radius:8px;font-weight:700">Activar balanza</button>
+              <button class="btn" type="button" id="save_print"' . ((!$isWeightMode || $isReceptionLocked) ? ' style="display:none"' : '') . ' disabled style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button>
+              <button class="btn" type="submit" id="submit_primary"' . (($isWeightMode || $isReceptionLocked) ? ' style="display:none"' : '') . ' style="height:38px;padding:0 16px;border-radius:8px;font-weight:800;background:#00A9A6">Guardar e imprimir</button></div>
           </div>
           <div class="row" id="scale_status_row" style="margin-top:8px' . ($isWeightMode ? '' : ';display:none') . ';align-items:center">
             <div style="flex:1"></div>
             <div style="flex:2;text-align:right">
-              <span class="muted" id="scale_status" style="font-size:12.5px;font-weight:600;background:#f8fafc;border:1px solid #e2e8f0;padding:4px 12px;border-radius:20px;display:inline-block">Balanza: inactiva · Máximo pendiente ' . h(formatReceptionValue((float)$lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit) . '</span>
+              <span class="muted" id="scale_status" style="font-size:12.5px;font-weight:600;background:#f8fafc;border:1px solid #e2e8f0;padding:4px 12px;border-radius:20px;display:inline-block">' . ($isReceptionLocked ? 'Recepción cerrada para nuevos ingresos · usa borrar para corregir' : ('Balanza: inactiva · Máximo pendiente ' . h(formatReceptionValue((float)$lineSummary['pending'], $lineUnit)) . ' ' . h($lineUnit))) . '</span>
             </div>
           </div>
         </form>
       </div>';
 
     $body .= '<div class="card" style="margin-top:14px;border-radius:12px;border:1px solid #e2e8f0;padding:16px 20px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-        <div style="font-weight:800;font-size:15px;color:#0f172a;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between">
-          <span>📋 Últimas recepciones de esta Orden de Compra</span>
-          <span style="font-size:12px;color:#64748b;font-weight:600">Historial reciente</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;border-bottom:1px solid #f1f5f9;padding-bottom:12px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span style="font-weight:800;font-size:16px;color:#0f172a">📦 Bobinas Recepcionadas en esta Línea</span>
+            <span class="rec-badge" id="rec_badge_count" style="background:#0284c7;color:#fff;font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px" data-total="' . $totalLineRollsCount . '">' . $totalLineRollsCount . ' bobinas</span>
+            <span class="rec-badge" id="rec_badge_weight" style="background:#e0f2fe;color:#0369a1;font-size:12px;font-weight:700;padding:3px 10px;border-radius:12px">' . number_format($totalLineRollsWeight, 2, ',', '.') . ' Kg</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <a class="btn" href="/purchase-orders/' . $poId . '/rolls-excel?line=' . (int)$lineId . '" style="background:#059669;border-color:#059669;color:#fff;font-size:12px;padding:6px 14px;border-radius:8px;font-weight:700;display:inline-flex;align-items:center;gap:6px" title="Exportar bobinas de esta línea a Excel">
+              <span>📊</span> Exportar Excel Línea
+            </a>
+            <a class="btn secondary" href="/purchase-orders/' . $poId . '/rolls-excel" style="font-size:12px;padding:6px 12px;border-radius:8px;font-weight:700;display:inline-flex;align-items:center;gap:5px" title="Exportar todas las bobinas de la orden de compra">
+              <span>📋</span> Toda la OC
+            </a>
+          </div>
         </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex:1;max-width:600px">
+            <input type="text" id="rec_live_search" placeholder="🔍 Buscar por código bobina, trazabilidad o bodega..." oninput="filterRecLiveTable()" style="height:34px;border-radius:8px;border:1px solid #cbd5e1;padding:0 12px;font-size:12.5px;flex:1;min-width:240px;background:#f8fafc">
+            <div style="display:inline-flex;border-radius:8px;border:1px solid #cbd5e1;overflow:hidden">
+              <button type="button" id="btn_rec_all" onclick="toggleRecView(\'all\')" style="padding:6px 12px;font-size:12px;font-weight:700;background:#0284c7;color:#fff;border:none;cursor:pointer">Todas (' . $totalLineRollsCount . ')</button>
+              <button type="button" id="btn_rec_recent" onclick="toggleRecView(\'recent\')" style="padding:6px 12px;font-size:12px;font-weight:600;background:#f8fafc;color:#475569;border:none;cursor:pointer">Últimas 10</button>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <select id="move_selected_warehouse" style="height:34px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:12px;font-weight:600;min-width:180px">
+              <option value="">Mover a bodega...</option>';
+    foreach ($warehouses as $w) {
+        $moveWhLabel = trim((string)$w['name']) !== '' ? (string)$w['name'] : ('Bodega ' . (string)$w['code']);
+        $body .= '<option value="' . (int)$w['id'] . '">' . h($moveWhLabel) . '</option>';
+    }
+    $body .= '</select>
+            <button type="button" id="move_selected_rolls" class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;font-weight:700">📦 Mover seleccionadas</button>
+            <button type="button" id="delete_selected_rolls" class="btn" style="background:#fee2e2;border-color:#fca5a5;color:#b91c1c;font-size:12px;padding:6px 12px;border-radius:8px;font-weight:700">🗑️ Borrar seleccionadas</button>
+          </div>
+        </div>
+
         <div class="rec-table-wrap">
-        <table class="rec-table"><thead><tr><th>Código Bobina</th><th>Bodega</th><th>Unidades</th><th>Peso (Kg)</th><th>Fecha Registro</th><th style="text-align:right">Etiqueta 10x7</th></tr></thead><tbody id="recent_tbody">';
+        <table class="rec-table">
+          <thead>
+            <tr>
+              <th style="width:38px"><input type="checkbox" id="select_all_rolls" title="Seleccionar todas"></th>
+              <th>Código Bobina</th>
+              <th>Cód. Trazabilidad</th>
+              <th>Bodega</th>
+              <th>Peso Real (Kg)</th>
+              <th>Medidas / SKU</th>
+              <th>Fecha Registro</th>
+              <th>Operador</th>
+              <th style="text-align:right">Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="recent_tbody">';
+
+    $idx = 0;
     foreach ($recent as $r) {
-        $recentValue = formatReceptionValue((float)($r['received_qty'] ?? 1), 'Unid.') . ' Unid.';
+        $idx++;
         $recentWeight = formatReceptionValue((float)($r['weight_kg'] ?? 0), 'Kg');
-        $body .= '<tr>';
-        $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-size:13px">' . h((string)$r['roll_code']) . '</span></td>';
-        $body .= '<td><span class="wh-badge" style="font-size:11px;padding:2px 6px">' . h((string)$r['warehouse_code']) . '</span></td>';
-        $body .= '<td>' . h($recentValue) . '</td>';
+        $whDisplayName = trim((string)($r['warehouse_name'] ?? '')) ?: (string)($r['warehouse_code'] ?? '-');
+        $rollWeightStr = number_format((float)($r['weight_kg'] ?? 0), 3, '.', '');
+        $rollCodeStr = (string)($r['roll_code'] ?? ('#' . $r['id']));
+        $trzCode = (string)($r['traceability_code'] ?: $rollCodeStr);
+        $specParts = [];
+        if (!empty($r['width_mm'])) $specParts[] = (float)$r['width_mm'] . 'mm';
+        if (!empty($r['microns'])) $specParts[] = (float)$r['microns'] . 'µ';
+        if (!empty($r['meters'])) $specParts[] = (float)$r['meters'] . 'm';
+        $specText = !empty($specParts) ? implode(' · ', $specParts) : (string)($r['sku_code'] ?? '-');
+        $opName = trim((string)($r['operator_name'] ?? '')) ?: '-';
+
+        $body .= '<tr class="rec-row-item" data-index="' . $idx . '" data-search="' . h(strtolower($rollCodeStr . ' ' . $trzCode . ' ' . $whDisplayName . ' ' . $opName . ' ' . $specText)) . '">';
+        $body .= '<td><input type="checkbox" class="recent-roll-check" value="' . (int)$r['id'] . '" data-roll-code="' . h($rollCodeStr) . '" style="width:16px;height:16px;cursor:pointer"></td>';
+        $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-size:13px;font-weight:700">' . h($rollCodeStr) . '</span></td>';
+        $body .= '<td><a href="/stock/traceability?q=' . urlencode($trzCode) . '" target="_blank" style="font-family:monospace;font-size:12px;color:#0284c7;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Ver árbol de trazabilidad 360°">🌳 ' . h($trzCode) . '</a></td>';
+        $body .= '<td><span class="wh-badge" style="font-size:11px;padding:3px 8px;font-weight:600" title="Código: ' . h((string)$r['warehouse_code']) . '">' . h($whDisplayName) . '</span></td>';
         $body .= '<td><strong>' . h($recentWeight) . ' Kg</strong></td>';
+        $body .= '<td><span style="font-size:11.5px;color:#475569">' . h($specText) . '</span></td>';
         $body .= '<td><span style="color:#64748b;font-size:12px">' . h((string)$r['created_at']) . '</span></td>';
+        $body .= '<td><span style="font-size:11.5px;color:#475569">' . h($opName) . '</span></td>';
         $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
         $body .= '<a class="btn" style="padding:4px 10px;font-size:12px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
             $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo térmico">⚡ ' . h($printLangName) . '</a>';
         }
         $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño">👁️ Ver</a>';
+        $body .= '<button type="button" class="btn btn-delete-roll" style="padding:4px 8px;font-size:11.5px;border-radius:6px;background:#fee2e2;border-color:#fca5a5;color:#b91c1c;display:inline-flex;align-items:center;gap:3px;font-weight:700;cursor:pointer" data-roll-id="' . (int)$r['id'] . '" data-roll-code="' . h($rollCodeStr) . '" data-roll-weight="' . h($rollWeightStr) . '" title="Borrar este pesaje si hubo error">🗑️ Borrar</button>';
         $body .= '</div></td>';
         $body .= '</tr>';
     }
     if ($recent === []) {
-        $body .= '<tr><td colspan="6"><div class="rec-empty" style="padding:18px"><div class="rec-empty-icon" style="font-size:24px">📦</div><div style="font-weight:700">Sin recepciones registradas aún para esta línea.</div><div style="font-size:12px">Pesa la primera bobina para registrar e imprimir automáticamente.</div></div></td></tr>';
+        $body .= '<tr><td colspan="9"><div class="rec-empty" style="padding:18px"><div class="rec-empty-icon" style="font-size:24px">📦</div><div style="font-weight:700">Sin recepciones registradas aún para esta línea.</div><div style="font-size:12px">Pesa la primera bobina para registrar e imprimir automáticamente.</div></div></td></tr>';
     }
     $body .= '</tbody></table></div></div>';
 
@@ -15399,6 +16338,75 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
       </div>';
 
     $body .= '<script>
+      window.deleteRoll = async function (rollId, rollCode, weightKg, skipReload) {
+        rollId = Number(rollId);
+        if (!rollId || isNaN(rollId)) {
+          alert("ID de bobina no válido.");
+          return null;
+        }
+        var weightLabel = (weightKg && Number(weightKg) > 0) ? " de " + Number(weightKg).toFixed(3) + " Kg" : "";
+        var confirmMsg = "¿Estás seguro de BORRAR el pesaje de la bobina " + (rollCode || ("#" + rollId)) + weightLabel + "?\n\nEsta acción revertirá el peso ingresado y permitirá volver a ingresarlo si hubo un error.";
+        if (!skipReload && !window.confirm(confirmMsg)) return null;
+
+        var csrfInput = document.querySelector("input[name=_csrf]");
+        var csrfVal = csrfInput ? csrfInput.value : "";
+
+        try {
+          var body = new URLSearchParams();
+          body.set("_csrf", csrfVal);
+          var res = await fetch("/api/rolls/" + rollId + "/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body.toString()
+          });
+          var data = await res.json();
+          if (!data || data.ok !== true) {
+            alert("Error al borrar: " + ((data && data.error) ? data.error : "No se pudo eliminar el pesaje"));
+            return null;
+          }
+          if (skipReload) {
+            return data;
+          }
+          var currentUrl = new URL(window.location.href);
+          currentUrl.searchParams.set("roll_deleted", data.roll_code || ("#" + rollId));
+          currentUrl.searchParams.delete("saved_roll_id");
+          window.location.href = currentUrl.toString();
+          return data;
+        } catch (err) {
+          if (skipReload) {
+            alert("Error al borrar: no se pudo completar el borrado múltiple.");
+            return null;
+          }
+          var f = document.createElement("form");
+          f.method = "POST";
+          f.action = "/rolls/" + rollId + "/delete";
+          var cInput = document.createElement("input");
+          cInput.type = "hidden";
+          cInput.name = "_csrf";
+          cInput.value = csrfVal;
+          f.appendChild(cInput);
+          var rInput = document.createElement("input");
+          rInput.type = "hidden";
+          rInput.name = "redirect_to";
+          rInput.value = window.location.href;
+          f.appendChild(rInput);
+          document.body.appendChild(f);
+          f.submit();
+          return null;
+        }
+      };
+
+      document.addEventListener("click", function (e) {
+        var btn = e.target.closest(".btn-delete-roll");
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var id = btn.getAttribute("data-roll-id");
+        var code = btn.getAttribute("data-roll-code") || ("#" + id);
+        var weight = btn.getAttribute("data-roll-weight") || "";
+        window.deleteRoll(id, code, weight);
+      });
+
       (function () {
         var form = document.getElementById("receive_form");
         var modeField = document.getElementById("reception_mode");
@@ -15408,6 +16416,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         var qtyInput = document.getElementById("received_qty_input");
         var toggle = document.getElementById("toggle_scale");
         var saveBtn = document.getElementById("save_print");
+        var submitBtn = document.getElementById("submit_primary");
         var submitPrimary = document.getElementById("submit_primary");
         var actionButtonsWrapper = document.getElementById("action_buttons_wrapper");
         var weightFieldWrapper = document.getElementById("weight_field_wrapper");
@@ -15419,10 +16428,20 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         var status = document.getElementById("scale_status");
         var tbody = document.getElementById("recent_tbody");
         var preview = document.getElementById("label_preview");
+        var selectAllRolls = document.getElementById("select_all_rolls");
+        var moveSelectedBtn = document.getElementById("move_selected_rolls");
+        var moveSelectedWarehouse = document.getElementById("move_selected_warehouse");
+        var deleteSelectedBtn = document.getElementById("delete_selected_rolls");
+        var receptionLocked = ' . json_encode($isReceptionLocked) . ';
         if (!form || !modeField || !weight || !qty || !qtyInput || !toggle || !saveBtn || !status) return;
+        if (receptionLocked) {
+          saveBtn.disabled = true;
+          if (submitPrimary) submitPrimary.disabled = true;
+        }
 
         var active = false;
         var timer = null;
+        var polling = false;
         var last = null;
         var stable = 0;
         var lastSaved = null;
@@ -15434,18 +16453,30 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         var printTimer = null;
         var lastPrintedAt = 0;
         var lastPrintedWeight = null;
+        var MIN_LABEL_WEIGHT_KG = 15;
         var TRIGGER_ON_KG = 0.100;
         var TRIGGER_OFF_KG = 0.050;
-        var MIN_INTERVAL_MS = 2000;
-        var REARM_DELTA_KG = 0.500;
+        var MIN_INTERVAL_MS = 1000;
+        var STABLE_DELTA_KG = 0.040;
+        var REQUIRED_STABLE_READS = 2;
+        var POLL_INTERVAL_MS = 250;
         var serverPrintEnabled = (function(){
           var el = document.getElementById("server_print_enabled");
           return !!(el && String(el.value) === "1");
         })();
         var serverPrinterName = ' . json_encode($printer->getConfiguredPrinterName()) . ';
         var printLangLabel = ' . json_encode(strtoupper($printer->getConfiguredPrintLanguage())) . ';
+        var currentOpName = ' . json_encode($currentOperatorName) . ';
 
         function setStatus(text) { status.textContent = text; }
+
+        function scheduleNextPoll(delayMs) {
+          if (timer) clearTimeout(timer);
+          timer = null;
+          if (active && !saving) {
+            timer = setTimeout(poll, typeof delayMs === "number" ? delayMs : POLL_INTERVAL_MS);
+          }
+        }
 
         function enqueuePrint(url) {
           if (!active) return;
@@ -15470,7 +16501,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           return getMode() === "WEIGHT"
             && !!(wh && wh.value)
             && Number.isFinite(weightValue)
-            && weightValue >= TRIGGER_ON_KG;
+            && weightValue >= MIN_LABEL_WEIGHT_KG;
         }
 
         function syncWeightSaveButton() {
@@ -15483,6 +16514,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
 
         function stopScale() {
           active = false;
+          polling = false;
           toggle.textContent = "Activar balanza";
           syncWeightSaveButton();
           if (timer) clearInterval(timer);
@@ -15511,7 +16543,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
             if (actionButtonsWrapper) actionButtonsWrapper.style.flexBasis = "300px";
             if (scaleStatusSpacer) scaleStatusSpacer.style.flexBasis = "300px";
             if (!active) {
-              setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
+              setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa al menos 15 Kg o activa balanza");
             }
           } else {
             syncQtyValue();
@@ -15552,18 +16584,25 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         }
 
         async function poll() {
-          if (getMode() !== "WEIGHT") {
+          if (!active || saving || getMode() !== "WEIGHT") {
             return;
           }
+          if (polling) return;
+          polling = true;
           try {
             var res = await fetch("/api/scale/weight", { cache: "no-store" });
             var data = await res.json();
-            if (!data || data.ok !== true) throw new Error((data && data.error) ? data.error : "No se pudo leer la balanza.");
+            if (!data || data.ok !== true) {
+              var scaleMsg = (data && data.error) ? data.error : "Balanza: esperando lectura";
+              setStatus(scaleMsg);
+              saveBtn.disabled = true;
+              return;
+            }
             var w = Number(data.weight_kg);
             if (!Number.isFinite(w)) throw new Error("Lectura inválida.");
             weight.value = w.toFixed(3);
 
-            if (last !== null && Math.abs(w - last) < 0.005) stable++; else stable = 0;
+            if (last !== null && Math.abs(w - last) <= STABLE_DELTA_KG) stable++; else stable = 0;
             last = w;
 
             var wh = getWarehouseSelect();
@@ -15571,6 +16610,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
 
             if (w < TRIGGER_OFF_KG) {
               armed = true;
+              stable = 0;
+              last = null;
               lastPrintedWeight = null;
               saveBtn.disabled = true;
               setStatus("Balanza: activa (lista)");
@@ -15583,16 +16624,22 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               return;
             }
 
+            if (w < MIN_LABEL_WEIGHT_KG) {
+              saveBtn.disabled = true;
+              setStatus("Balanza: peso bajo mínimo (15 Kg)");
+              return;
+            }
+
             saveBtn.disabled = true;
             var now = Date.now();
             var intervalOk = (now - lastPrintedAt) >= MIN_INTERVAL_MS;
-            var deltaOk = (lastPrintedWeight !== null) && (Math.abs(w - lastPrintedWeight) >= REARM_DELTA_KG);
-
-            if (!armed && deltaOk) {
-              armed = true;
-            }
+            var isStable = stable >= REQUIRED_STABLE_READS;
 
             if (!saving && armed && hasWarehouse && w >= TRIGGER_ON_KG) {
+              if (!isStable) {
+                setStatus("Balanza: captando peso (" + (stable > 0 ? "confirmando..." : "estabilizando...") + ")");
+                return;
+              }
               if (intervalOk) {
                 armed = false;
                 setStatus("Balanza: activa (guardando...)");
@@ -15611,6 +16658,9 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           } catch (e) {
             setStatus("Balanza: error");
             saveBtn.disabled = true;
+          } finally {
+            polling = false;
+            scheduleNextPoll();
           }
         }
 
@@ -15625,8 +16675,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           if (getMode() !== "WEIGHT") return;
 
           var weightToSave = (weightOverride !== undefined && weightOverride !== null) ? Number(weightOverride) : Number(weight.value);
-          if (!Number.isFinite(weightToSave) || weightToSave < TRIGGER_ON_KG) {
-            setStatus("Balanza: activa (peso inválido)");
+          if (!Number.isFinite(weightToSave) || weightToSave < MIN_LABEL_WEIGHT_KG) {
+            setStatus("Balanza: peso bajo mínimo (15 Kg)");
             return;
           }
           weight.value = weightToSave.toFixed(3);
@@ -15680,21 +16730,40 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
 
             if (tbody) {
               var tr = document.createElement("tr");
+              tr.className = "rec-row-item";
+              var dynRollCode = data.roll_code || ("#" + data.id);
+              var trzCode = data.traceability_code || dynRollCode;
               var now = new Date();
-              var whLabel = wh.options[wh.selectedIndex] ? wh.options[wh.selectedIndex].text : "";
-              var whCode = whLabel.split(" - ")[0] || whLabel;
+              var whSelectedOpt = wh.options[wh.selectedIndex];
+              var whDisplayName = whSelectedOpt ? (whSelectedOpt.getAttribute("data-name") || whSelectedOpt.text) : "";
               var dt = now.toISOString().slice(0, 19).replace("T", " ");
 
+              tr.setAttribute("data-search", (dynRollCode + " " + trzCode + " " + whDisplayName + " " + currentOpName).toLowerCase());
+
+              var td0 = document.createElement("td");
+              td0.innerHTML = "<input type=\"checkbox\" class=\"recent-roll-check\" value=\"" + data.id + "\" data-roll-code=\"" + dynRollCode + "\" style=\"width:16px;height:16px;cursor:pointer\">";
+
               var td1 = document.createElement("td");
-              td1.innerHTML = "<span class=\"rec-code-link\" style=\"font-family:monospace;font-size:13px\">" + (data.roll_code ? ("#" + data.roll_code) : ("#" + data.id)) + "</span>";
+              td1.innerHTML = "<span class=\"rec-code-link\" style=\"font-family:monospace;font-size:13px;font-weight:700\">" + dynRollCode + "</span>";
+
+              var tdTraz = document.createElement("td");
+              tdTraz.innerHTML = "<a href=\"/stock/traceability?q=" + encodeURIComponent(trzCode) + "\" target=\"_blank\" style=\"font-family:monospace;font-size:12px;color:#0284c7;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:4px\" title=\"Ver árbol de trazabilidad 360°\">🌳 " + trzCode + "</a>";
+
               var td2 = document.createElement("td");
-              td2.innerHTML = "<span class=\"wh-badge\" style=\"font-size:11px;padding:2px 6px\">" + whCode + "</span>";
-              var td3 = document.createElement("td");
-              td3.textContent = "1 Unid.";
+              td2.innerHTML = "<span class=\"wh-badge\" style=\"font-size:11px;padding:3px 8px;font-weight:600\">" + whDisplayName + "</span>";
+
               var td4 = document.createElement("td");
               td4.innerHTML = "<strong>" + weightToSave.toFixed(3) + " Kg</strong>";
+
+              var tdSku = document.createElement("td");
+              tdSku.innerHTML = "<span style=\"font-size:11.5px;color:#475569\">-</span>";
+
               var td5 = document.createElement("td");
               td5.innerHTML = "<span style=\"color:#64748b;font-size:12px\">" + dt + "</span>";
+
+              var tdOp = document.createElement("td");
+              tdOp.innerHTML = "<span style=\"font-size:11.5px;color:#475569\">" + (currentOpName || "Operador") + "</span>";
+
               var td6 = document.createElement("td");
               td6.style.textAlign = "right";
 
@@ -15704,15 +16773,32 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               divActions.style.justifyContent = "flex-end";
               divActions.style.alignItems = "center";
 
+              var btnAuto = document.createElement("a");
+              btnAuto.className = "btn";
+              btnAuto.style.padding = "4px 10px";
+              btnAuto.style.fontSize = "12px";
+              btnAuto.style.borderRadius = "6px";
+              btnAuto.style.background = "#0284c7";
+              btnAuto.style.borderColor = "#0284c7";
+              btnAuto.style.color = "#fff";
+              btnAuto.style.display = "inline-flex";
+              btnAuto.style.alignItems = "center";
+              btnAuto.style.gap = "4px";
+              btnAuto.target = "_blank";
+              btnAuto.rel = "noopener";
+              btnAuto.href = "/rolls/" + data.id + "/label?auto_print=1";
+              btnAuto.textContent = "🖨️ Imprimir 10x7";
+              divActions.appendChild(btnAuto);
+
               if (serverPrintEnabled) {
                 var btnDirect = document.createElement("a");
-                btnDirect.className = "btn";
-                btnDirect.style.padding = "4px 9px";
+                btnDirect.className = "btn secondary";
+                btnDirect.style.padding = "4px 8px";
                 btnDirect.style.fontSize = "11.5px";
                 btnDirect.style.borderRadius = "6px";
-                btnDirect.style.background = "#0284c7";
-                btnDirect.style.borderColor = "#0284c7";
-                btnDirect.style.color = "#fff";
+                btnDirect.style.display = "inline-flex";
+                btnDirect.style.alignItems = "center";
+                btnDirect.style.gap = "3px";
                 btnDirect.target = "_blank";
                 btnDirect.rel = "noopener";
                 btnDirect.href = data.server_print_url || ("/rolls/" + data.id + "/label?server_print=1");
@@ -15731,15 +16817,47 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               btnView.textContent = "👁️ Ver";
               divActions.appendChild(btnView);
 
+              var btnDel = document.createElement("button");
+              btnDel.type = "button";
+              btnDel.className = "btn btn-delete-roll";
+              btnDel.setAttribute("data-roll-id", data.id);
+              btnDel.setAttribute("data-roll-code", dynRollCode);
+              btnDel.setAttribute("data-roll-weight", weightToSave.toFixed(3));
+              btnDel.style.padding = "4px 8px";
+              btnDel.style.fontSize = "11.5px";
+              btnDel.style.borderRadius = "6px";
+              btnDel.style.background = "#fee2e2";
+              btnDel.style.borderColor = "#fca5a5";
+              btnDel.style.color = "#b91c1c";
+              btnDel.style.fontWeight = "700";
+              btnDel.style.cursor = "pointer";
+              btnDel.textContent = "🗑️ Borrar";
+              btnDel.onclick = function() {
+                deleteRoll(data.id, dynRollCode, weightToSave.toFixed(3));
+              };
+              divActions.appendChild(btnDel);
+
               td6.appendChild(divActions);
 
+              tr.appendChild(td0);
               tr.appendChild(td1);
+              tr.appendChild(tdTraz);
               tr.appendChild(td2);
-              tr.appendChild(td3);
               tr.appendChild(td4);
+              tr.appendChild(tdSku);
               tr.appendChild(td5);
+              tr.appendChild(tdOp);
               tr.appendChild(td6);
               tbody.prepend(tr);
+
+              var countBadge = document.getElementById("rec_badge_count");
+              if (countBadge) {
+                var currentCount = (parseInt(countBadge.getAttribute("data-total") || "0", 10) || 0) + 1;
+                countBadge.setAttribute("data-total", currentCount);
+                countBadge.textContent = currentCount + " bobinas";
+                var btnAll = document.getElementById("btn_rec_all");
+                if (btnAll) btnAll.textContent = "Todas (" + currentCount + ")";
+              }
             }
 
             if (preview) {
@@ -15750,11 +16868,13 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               setStatus("Balanza: activa (etiqueta emitida en " + (serverPrinterName || "impresora") + ")");
             } else {
               var printTarget = data.print_url || (labelHref + "?auto_print=1");
-              if (active) {
+              if (active && !serverPrintEnabled) {
                 enqueuePrint(printTarget);
               } else {
                 window.open(printTarget, "_blank", "noopener");
-                setStatus("Recepción guardada e impresión lista");
+                setStatus(serverPrintEnabled
+                  ? "Recepción guardada; impresión directa no respondió, se abrió respaldo"
+                  : "Recepción guardada e impresión lista");
               }
             }
           } catch (e) {
@@ -15763,6 +16883,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
             saving = false;
             saveBtn.textContent = "Guardar e imprimir";
             syncWeightSaveButton();
+            scheduleNextPoll(200);
           }
         }
 
@@ -15829,7 +16950,6 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               printWindow = null;
             }
             poll();
-            timer = setInterval(poll, 1000);
           } else {
             stopScale();
             setStatus("Balanza: inactiva");
@@ -15845,7 +16965,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               } else if (canManualWeightSave()) {
                 setStatus("Listo para guardar e imprimir 1 unidad");
               } else {
-                setStatus("Ingresa peso manual o activa balanza");
+                setStatus("Ingresa al menos 15 Kg o activa balanza");
               }
             }
             syncWeightSaveButton();
@@ -15870,7 +16990,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
 
         weight.addEventListener("input", function () {
           if (getMode() === "WEIGHT" && !active) {
-            setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa peso manual o activa balanza");
+            setStatus(canManualWeightSave() ? "Listo para guardar e imprimir 1 unidad" : "Ingresa al menos 15 Kg o activa balanza");
           }
           syncWeightSaveButton();
           updatePreviewWeight(weight.value);
@@ -15885,15 +17005,150 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         qtyInput.addEventListener("input", function () {
           syncQtyValue();
         });
-        form.addEventListener("submit", function () {
+        form.addEventListener("submit", function (event) {
           if (getMode() === "WEIGHT") {
             qty.value = "1";
           } else {
             syncQtyValue();
+            if (submitBtn) {
+              if (submitBtn.dataset.submitting === "1") {
+                event.preventDefault();
+                return;
+              }
+              submitBtn.dataset.submitting = "1";
+              submitBtn.disabled = true;
+              submitBtn.textContent = "Guardando...";
+            }
           }
         });
         modeField.value = modeField.value === "WEIGHT" ? "WEIGHT" : "QUANTITY";
         applyModeUI();
+
+        function getSelectedRollChecks() {
+          return Array.prototype.slice.call(document.querySelectorAll(".recent-roll-check:checked"));
+        }
+
+        if (selectAllRolls) {
+          selectAllRolls.addEventListener("change", function () {
+            var checks = document.querySelectorAll(".recent-roll-check");
+            for (var i = 0; i < checks.length; i++) {
+              checks[i].checked = !!selectAllRolls.checked;
+            }
+          });
+        }
+
+        if (deleteSelectedBtn) {
+          deleteSelectedBtn.addEventListener("click", async function () {
+            var selected = getSelectedRollChecks();
+            if (!selected.length) {
+              alert("Selecciona al menos una bobina para borrar.");
+              return;
+            }
+            var labels = selected.map(function (el) { return el.getAttribute("data-roll-code") || ("#" + el.value); });
+            var ok = confirm("¿Borrar " + selected.length + " bobina(s) desde esta recepción?\n\n" + labels.join(", "));
+            if (!ok) return;
+            var deletedLabels = [];
+            for (var i = 0; i < selected.length; i++) {
+              var result = await deleteRoll(Number(selected[i].value), selected[i].getAttribute("data-roll-code") || ("#" + selected[i].value), "", true);
+              if (result && result.ok === true) {
+                deletedLabels.push(result.roll_code || ("#" + selected[i].value));
+              }
+            }
+            if (deletedLabels.length) {
+              var currentUrl = new URL(window.location.href);
+              currentUrl.searchParams.set("roll_deleted", deletedLabels.join(", "));
+              currentUrl.searchParams.delete("saved_roll_id");
+              window.location.href = currentUrl.toString();
+            }
+          });
+        }
+
+        if (moveSelectedBtn) {
+          moveSelectedBtn.addEventListener("click", function () {
+            var selected = getSelectedRollChecks();
+            if (!selected.length) {
+              alert("Selecciona al menos una bobina para mover.");
+              return;
+            }
+            if (!moveSelectedWarehouse || !moveSelectedWarehouse.value) {
+              alert("Selecciona la bodega destino.");
+              return;
+            }
+            var labels = selected.map(function (el) { return el.getAttribute("data-roll-code") || ("#" + el.value); });
+            var warehouseLabel = moveSelectedWarehouse.options[moveSelectedWarehouse.selectedIndex]
+              ? moveSelectedWarehouse.options[moveSelectedWarehouse.selectedIndex].text
+              : ("#" + moveSelectedWarehouse.value);
+            var ok = confirm("¿Mover " + selected.length + " bobina(s) a " + warehouseLabel + "?\n\n" + labels.join(", "));
+            if (!ok) return;
+
+            var f = document.createElement("form");
+            f.method = "post";
+            f.action = "/reception/rolls/move";
+
+            var csrfInput = form.querySelector("input[name=_csrf]");
+            var cInput = document.createElement("input");
+            cInput.type = "hidden";
+            cInput.name = "_csrf";
+            cInput.value = (csrfInput ? csrfInput.value : "");
+            f.appendChild(cInput);
+
+            var rInput = document.createElement("input");
+            rInput.type = "hidden";
+            rInput.name = "redirect_to";
+            rInput.value = window.location.href;
+            f.appendChild(rInput);
+
+            var idsInput = document.createElement("input");
+            idsInput.type = "hidden";
+            idsInput.name = "roll_ids";
+            idsInput.value = selected.map(function (el) { return el.value; }).join(",");
+            f.appendChild(idsInput);
+
+            var whInput = document.createElement("input");
+            whInput.type = "hidden";
+            whInput.name = "to_warehouse_id";
+            whInput.value = moveSelectedWarehouse.value;
+            f.appendChild(whInput);
+
+            document.body.appendChild(f);
+            f.submit();
+          });
+        }
+
+        window.toggleRecView = function(mode) {
+          var btnAll = document.getElementById("btn_rec_all");
+          var btnRecent = document.getElementById("btn_rec_recent");
+          var rows = document.querySelectorAll("#recent_tbody tr.rec-row-item");
+          if (mode === "recent") {
+            if (btnAll) { btnAll.style.background = "#f8fafc"; btnAll.style.color = "#475569"; btnAll.style.fontWeight = "600"; }
+            if (btnRecent) { btnRecent.style.background = "#0284c7"; btnRecent.style.color = "#fff"; btnRecent.style.fontWeight = "700"; }
+            for (var i = 0; i < rows.length; i++) {
+              rows[i].style.display = i < 10 ? "" : "none";
+            }
+          } else {
+            if (btnAll) { btnAll.style.background = "#0284c7"; btnAll.style.color = "#fff"; btnAll.style.fontWeight = "700"; }
+            if (btnRecent) { btnRecent.style.background = "#f8fafc"; btnRecent.style.color = "#475569"; btnRecent.style.fontWeight = "600"; }
+            for (var i = 0; i < rows.length; i++) {
+              rows[i].style.display = "";
+            }
+          }
+        };
+
+        window.filterRecLiveTable = function() {
+          var input = document.getElementById("rec_live_search");
+          if (!input) return;
+          var q = (input.value || "").trim().toLowerCase();
+          var rows = document.querySelectorAll("#recent_tbody tr.rec-row-item");
+          for (var i = 0; i < rows.length; i++) {
+            var searchData = rows[i].getAttribute("data-search") || rows[i].textContent.toLowerCase();
+            if (!q || searchData.indexOf(q) !== -1) {
+              rows[i].style.display = "";
+            } else {
+              rows[i].style.display = "none";
+            }
+          }
+        };
+
         saveBtn.addEventListener("click", function () { saveAndPrint(); });
       })();
     </script>';
@@ -20372,6 +21627,17 @@ if (preg_match('#^/rolls/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
     $transferAvailability = rollTransferAvailability($roll);
     $rollNavParams = inventoryNavigationContext() ? inventoryNavigationParams() : [];
     $rollBackUrl = inventoryNavigationContext() ? inventoryReturnUrl() : ('/stock?bodega=' . (int)$roll['warehouse_code']);
+    $canDeleteReceivedRoll = (string)($roll['status'] ?? '') === 'RECEIVED'
+        && (int)($roll['current_work_order_id'] ?? 0) <= 0
+        && $childRolls === []
+        && $boxesFromRoll === []
+        && $palletsFromRoll === [];
+    $deleteRedirectUrl = '/reception';
+    if ((int)($roll['import_container_id'] ?? 0) > 0 && (int)($roll['import_container_item_id'] ?? 0) > 0) {
+        $deleteRedirectUrl = '/import-containers/' . (int)$roll['import_container_id'] . '/receive?line=' . (int)$roll['import_container_item_id'];
+    } elseif ((int)($roll['purchase_order_id'] ?? 0) > 0 && (int)($roll['purchase_order_line_id'] ?? 0) > 0) {
+        $deleteRedirectUrl = '/purchase-orders/' . (int)$roll['purchase_order_id'] . '/receive?line=' . (int)$roll['purchase_order_line_id'];
+    }
 
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Recepción #' . (int)$roll['id'] . '</div>
@@ -20380,6 +21646,13 @@ if (preg_match('#^/rolls/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
           ' . ($transferAvailability['can_transfer']
             ? '<a class="btn secondary" href="' . h(withQuery('/rolls/' . (int)$roll['id'] . '/transfer', $rollNavParams)) . '">Transferir</a>'
             : '<span class="btn secondary" style="opacity:.55;cursor:not-allowed" title="' . h((string)($transferAvailability['warehouse']['reason'] ?: $transferAvailability['work_order']['reason'])) . '">Transferir</span>') . '
+          ' . ($canDeleteReceivedRoll
+            ? '<form method="post" action="/rolls/' . (int)$roll['id'] . '/delete" onsubmit="return confirm(\'¿Borrar esta bobina recepcionada? Esta acción quitará su registro y permitirá recepcionarla nuevamente si hubo un error.\');" style="display:inline-flex;margin:0">
+                <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
+                <input type="hidden" name="redirect_to" value="' . h($deleteRedirectUrl) . '">
+                <button class="btn" type="submit" style="background:#fee2e2;border-color:#fca5a5;color:#b91c1c">Borrar recepción</button>
+              </form>'
+            : '') . '
           <a class="btn" href="/rolls/' . (int)$roll['id'] . '/label">Etiqueta</a>
         </div>
       </div>';
@@ -22699,6 +23972,76 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
         'title' => 'Etiqueta 10x7 - ' . $barcodeValue,
     ]);
     exit;
+}
+
+if (preg_match('#^/rolls/(\d+)/delete$#', $path, $m) === 1 && $method === 'POST') {
+    requireCsrf();
+    $rollId = (int)$m[1];
+    $redirectUrl = (string)($_POST['redirect_to'] ?? '/reception');
+    $parsed = parse_url($redirectUrl);
+    if (!empty($parsed['query'])) {
+        parse_str($parsed['query'], $qParams);
+        unset($qParams['saved_roll_id'], $qParams['printed']);
+        $base = ($parsed['path'] ?? '/reception');
+        $redirectUrl = $qParams !== [] ? ($base . '?' . http_build_query($qParams)) : $base;
+    }
+    $res = $service->deleteReceivedRoll($rollId);
+    $delim = str_contains($redirectUrl, '?') ? '&' : '?';
+    if (($res['ok'] ?? false) === true) {
+        redirectResponse($redirectUrl . $delim . 'roll_deleted=' . urlencode((string)($res['roll_code'] ?? $rollId)));
+    } else {
+        redirectResponse($redirectUrl . $delim . 'delete_error=' . urlencode((string)($res['error'] ?? 'No se pudo eliminar la bobina')));
+    }
+}
+
+if ($path === '/reception/rolls/move' && $method === 'POST') {
+    requireCsrf();
+    $rollIdsRaw = trim((string)($_POST['roll_ids'] ?? ''));
+    $toWarehouseId = (int)($_POST['to_warehouse_id'] ?? 0);
+    $redirectUrl = (string)($_POST['redirect_to'] ?? '/reception');
+    $parsed = parse_url($redirectUrl);
+    if (!empty($parsed['query'])) {
+        parse_str($parsed['query'], $qParams);
+        unset($qParams['saved_roll_id'], $qParams['printed'], $qParams['roll_moved'], $qParams['move_error']);
+        $base = ($parsed['path'] ?? '/reception');
+        $redirectUrl = $qParams !== [] ? ($base . '?' . http_build_query($qParams)) : $base;
+    }
+
+    $rollIds = array_values(array_unique(array_filter(array_map(
+        static fn(string $value): int => (int)trim($value),
+        explode(',', $rollIdsRaw)
+    ), static fn(int $id): bool => $id > 0)));
+
+    if ($rollIds === []) {
+        $delim = str_contains($redirectUrl, '?') ? '&' : '?';
+        redirectResponse($redirectUrl . $delim . 'move_error=' . urlencode('Selecciona al menos una bobina para mover.'));
+    }
+    if ($toWarehouseId <= 0) {
+        $delim = str_contains($redirectUrl, '?') ? '&' : '?';
+        redirectResponse($redirectUrl . $delim . 'move_error=' . urlencode('Selecciona la bodega destino.'));
+    }
+
+    $moved = [];
+    $errors = [];
+    foreach ($rollIds as $rollId) {
+        $res = $service->transferRoll($rollId, $toWarehouseId, $currentOperatorName, null);
+        if (($res['ok'] ?? false) === true) {
+            $roll = $service->getRoll($rollId);
+            $moved[] = is_array($roll) ? (string)($roll['roll_code'] ?? ('#' . $rollId)) : ('#' . $rollId);
+            continue;
+        }
+        $errors[] = '#' . $rollId . ': ' . implode(' ', array_map('strval', (array)($res['errors'] ?? ['No se pudo mover la bobina.'])));
+    }
+
+    $params = [];
+    if ($moved !== []) {
+        $params['roll_moved'] = implode(', ', $moved);
+    }
+    if ($errors !== []) {
+        $params['move_error'] = implode(' | ', $errors);
+    }
+    $targetUrl = withQuery($redirectUrl, $params);
+    redirectResponse($targetUrl);
 }
 
 if (preg_match('#^/boxes/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') {

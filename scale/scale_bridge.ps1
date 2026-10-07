@@ -13,12 +13,21 @@ param(
   [string]$RequestCommand = ''
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+# StrictMode deshabilitado para evitar conflictos de propiedades dinámicas en hashtables
+$ErrorActionPreference = 'Continue'
+
+# Cargar helper nativo Win32Serial para evitar el bug de SetCommState / DTR en chips CH340 y Prolific
+$csPath = Join-Path $PSScriptRoot 'Win32Serial.cs'
+if (Test-Path $csPath) {
+  try {
+    Add-Type -Path $csPath -ErrorAction SilentlyContinue
+  } catch {}
+}
 
 $script:stubWeight = $null
 $script:stubUntil = $null
 $script:serial = $null
+$script:serialType = 'none'
 $script:activeComPort = $ComPort
 $script:lastRawReading = ''
 $script:lastParsedWeight = $null
@@ -42,25 +51,27 @@ function Parse-WeightKg([string]$raw) {
   if ([string]::IsNullOrWhiteSpace($raw)) {
     return $null
   }
-  # Dividir por saltos de linea y tomar la ultima linea no vacia
-  $lines = $raw -split "[\r\n]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-  $target = if ($lines.Count -gt 0) { $lines[-1] } else { $raw }
+  # Dividir por saltos de linea e inspeccionar desde la ultima linea no vacia hacia atras
+  $lines = @($raw -split "[\r\n]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($lines.Count -eq 0) {
+    return $null
+  }
 
-  # Extraer numeros con signo opcional y decimales (. o ,)
-  $m = [regex]::Match($target, '[-+]?\s*(\d+(?:[.,]\d+)?)')
-  if (-not $m.Success) {
-    return $null
-  }
-  $s = $m.Groups[1].Value.Replace(',', '.')
-  try {
-    $v = [double]::Parse($s, [System.Globalization.CultureInfo]::InvariantCulture)
-    if ($v -lt 0) {
-      return $null
+  for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+    $target = $lines[$i]
+    # Extraer numeros con signo opcional y decimales (. o ,)
+    $m = [regex]::Match($target, '[-+]?\s*(\d+(?:[.,]\d+)?)')
+    if ($m.Success) {
+      $s = $m.Groups[1].Value.Replace(',', '.')
+      try {
+        $v = [double]::Parse($s, [System.Globalization.CultureInfo]::InvariantCulture)
+        if ($v -ge 0) {
+          return [Math]::Round($v, 3)
+        }
+      } catch {}
     }
-    return [Math]::Round($v, 3)
-  } catch {
-    return $null
   }
+  return $null
 }
 
 function Read-WeightKgStub() {
@@ -102,19 +113,35 @@ function Ensure-SerialOpen() {
   }
   $script:activeComPort = $targetPort
 
-  $p = [System.IO.Ports.Parity]::$Parity
-  $s = [System.IO.Ports.StopBits]::$StopBits
+  # 1. Intentar con Win32Serial (diseñado para drivers CH340 sin DTR/RTS)
+  try {
+    $win32 = New-Object Unibag.Serial.Win32Serial
+    if ($win32.Open($targetPort, $BaudRate)) {
+      $script:serial = $win32
+      $script:serialType = 'win32'
+      Write-Host ("[SERIAL] Puerto {0} abierto correctamente vía Win32 API a {1} baudios." -f $targetPort, $BaudRate) -ForegroundColor Green
+      return $true
+    }
+  } catch {
+    Write-Host ("[SERIAL] Falló apertura Win32 ({0}), intentando fallback .NET..." -f $_.Exception.Message) -ForegroundColor Yellow
+  }
 
-  $sp = New-Object System.IO.Ports.SerialPort $targetPort, $BaudRate, $p, $DataBits, $s
-  $sp.NewLine = "`r`n"
-  $sp.ReadTimeout = $ReadTimeoutMs
-  $sp.WriteTimeout = 800
-  $sp.DtrEnable = $true
-  $sp.RtsEnable = $true
-  $sp.Open()
-  $script:serial = $sp
-  Write-Host ("[SERIAL] Puerto {0} abierto correctamente a {1} baudios (8-{2}-{3})." -f $targetPort, $BaudRate, $Parity[0], $StopBits) -ForegroundColor Green
-  return $true
+  # 2. Fallback con System.IO.Ports.SerialPort
+  try {
+    $p = [System.IO.Ports.Parity]::$Parity
+    $s = [System.IO.Ports.StopBits]::$StopBits
+    $sp = New-Object System.IO.Ports.SerialPort $targetPort, $BaudRate, $p, $DataBits, $s
+    $sp.NewLine = "`r`n"
+    $sp.ReadTimeout = $ReadTimeoutMs
+    $sp.WriteTimeout = 800
+    $sp.Open()
+    $script:serial = $sp
+    $script:serialType = 'dotnet'
+    Write-Host ("[SERIAL] Puerto {0} abierto vía .NET SerialPort a {1} baudios." -f $targetPort, $BaudRate) -ForegroundColor Green
+    return $true
+  } catch {
+    throw $_.Exception.Message
+  }
 }
 
 function Read-WeightKgSerial() {
@@ -134,16 +161,33 @@ function Read-WeightKgSerial() {
 
   $raw = ''
   try {
-    if (-not [string]::IsNullOrWhiteSpace($RequestCommand)) {
-      $script:serial.Write($RequestCommand)
-    }
-
-    Start-Sleep -Milliseconds 80
-
-    if ($script:serial.BytesToRead -gt 0) {
+    if ($script:serialType -eq 'win32') {
+      if (-not [string]::IsNullOrWhiteSpace($RequestCommand)) {
+        [void]$script:serial.SendCommand($RequestCommand)
+        Start-Sleep -Milliseconds 40
+      }
+      # 1. Leer datos disponibles en cola del driver (0 ms si la balanza ya transmitió trama)
       $raw = $script:serial.ReadExisting()
+      if ([string]::IsNullOrWhiteSpace($raw)) {
+        # 2. Si no había trama en cola, esperar una fracción corta (máx 120ms en vez de 500ms)
+        $raw = $script:serial.ReadBlock(120)
+      }
+      if ([string]::IsNullOrWhiteSpace($raw)) {
+        # 3. Si no hay trama continua, solicitar activamente con comando 'R\r\n' (protocolo LP-7516)
+        [void]$script:serial.SendCommand("R`r`n")
+        Start-Sleep -Milliseconds 50
+        $raw = $script:serial.ReadBlock(150)
+      }
     } else {
-      $raw = $script:serial.ReadLine()
+      if (-not [string]::IsNullOrWhiteSpace($RequestCommand)) {
+        $script:serial.Write($RequestCommand)
+        Start-Sleep -Milliseconds 40
+      }
+      if ($script:serial.BytesToRead -gt 0) {
+        $raw = $script:serial.ReadExisting()
+      } else {
+        $raw = $script:serial.ReadLine()
+      }
     }
     $script:lastRawReading = $raw
   } catch {
@@ -162,11 +206,16 @@ function Read-WeightKgSerial() {
 
   $w = Parse-WeightKg $raw
   if ($w -eq $null) {
+    $msg = if ([string]::IsNullOrWhiteSpace($raw)) {
+      "Puerto $script:activeComPort abierto pero sin datos transmitidos. En la balanza LP-7516 verifica: C18=4 (Envío continuo) y C19=3 (9600 baudios), o presiona PRINT si está en modo manual."
+    } else {
+      "Trama serial recibida pero sin peso numérico válido: '$raw'"
+    }
     return @{
       ok = $false
       weight_kg = $null
       raw = $raw
-      error = "Trama serial recibida pero sin peso numerico valido: '$raw'"
+      error = $msg
       model = 'LP-7516'
       source = 'serial'
       com_port = $script:activeComPort
@@ -186,25 +235,48 @@ function Read-WeightKgSerial() {
 }
 
 function Read-WeightKg() {
-  if ($Mode -eq 'serial') {
-    return Read-WeightKgSerial
+  $res = if ($Mode -eq 'serial') {
+    Read-WeightKgSerial
+  } else {
+    Read-WeightKgStub
   }
-  return Read-WeightKgStub
+  if ($res -is [System.Array]) {
+    return $res[-1]
+  }
+  return $res
 }
+
+# Liberar puerto 8765 si otro proceso huérfano de PowerShell lo tiene ocupado
+try {
+  $existing = Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue
+  if ($existing) {
+    foreach ($conn in $existing) {
+      $p = $conn.OwningProcess
+      if ($p -gt 4 -and $p -ne $PID) {
+        Write-Host ("Liberando puerto 8765 ocupado por proceso previo PID {0}..." -f $p) -ForegroundColor Yellow
+        Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+      }
+    }
+    Start-Sleep -Milliseconds 600
+  }
+} catch {}
 
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add($Listen)
+if ($Listen.Contains('localhost:')) {
+  $listener.Prefixes.Add($Listen.Replace('localhost:', '127.0.0.1:'))
+}
 $listener.Start()
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "     PUENTE DE BALANZA RS-232 / USB (UNIBAG LP-7516)      " -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ("Servidor HTTP activo en: {0}" -f $Listen) -ForegroundColor Green
-Write-Host ("Modo: {0} | Puerto COM configurado: {1} | Baudios: {2}" -f $Mode, $ComPort, $BaudRate) -ForegroundColor Yellow
+Write-Host ("Modo: {0} | Puerto COM: {1} | Baudios: {2}" -f $Mode, $ComPort, $BaudRate) -ForegroundColor Yellow
 $initialPorts = [System.IO.Ports.SerialPort]::GetPortNames()
 if ($initialPorts.Count -eq 0) {
     Write-Host "AVISO: No se detecta ningun puerto COM conectado en Windows todavia." -ForegroundColor Magenta
-    Write-Host "Conecta el cable RS-232 a USB y el puente lo detectara automaticamente al solicitar peso." -ForegroundColor Magenta
+    Write-Host "Conecta el cable RS-232 a USB y el puente lo detectara automaticamente." -ForegroundColor Magenta
 } else {
     Write-Host ("Puertos COM detectados: {0}" -f ($initialPorts -join ', ')) -ForegroundColor Green
 }

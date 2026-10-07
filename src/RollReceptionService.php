@@ -32,6 +32,7 @@ final class RollReceptionService
 
         $this->pdo->beginTransaction();
         try {
+
             $stmt = $this->pdo->prepare(
                 'INSERT INTO rolls (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, microns, width_mm, color, meters, status, purchase_order_id, purchase_order_line_id, import_container_id, import_container_item_id, supplier_id, current_work_order_id)
                  VALUES (:roll_code, :sku_id, :warehouse_id, :weight_kg, :received_qty, :reception_mode, :microns, :width_mm, :color, :meters, :status, :po_id, :pol_id, :import_container_id, :import_container_item_id, :supplier_id, :work_order_id)'

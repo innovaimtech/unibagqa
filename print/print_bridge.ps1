@@ -78,6 +78,9 @@ public class RawPrinterHelper {
 
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add($Listen)
+if ($Listen.Contains('localhost:')) {
+  $listener.Prefixes.Add($Listen.Replace('localhost:', '127.0.0.1:'))
+}
 $listener.Start()
 
 Write-Host ("Print bridge running: {0}" -f $Listen)

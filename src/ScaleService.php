@@ -17,7 +17,7 @@ final class ScaleService
         }
 
         if ($mode === 'http') {
-            $url = (string)($this->env['SCALE_HTTP_URL'] ?? 'http://localhost:8765/weight');
+            $url = (string)($this->env['SCALE_HTTP_URL'] ?? 'http://127.0.0.1:8765/weight');
             return $this->readFromHttp($url);
         }
 
@@ -43,11 +43,18 @@ final class ScaleService
         }
 
         $ch = curl_init($url);
+        $headers = [];
+        if (str_contains($url, '127.0.0.1')) {
+            $parsedPort = parse_url($url, PHP_URL_PORT) ?: 8765;
+            $headers[] = 'Host: localhost:' . $parsedPort;
+        }
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CONNECTTIMEOUT => 2,
-            CURLOPT_TIMEOUT => 3,
+            CURLOPT_IPRESOLVE => defined('CURL_IPRESOLVE_V4') ? CURL_IPRESOLVE_V4 : 1,
+            CURLOPT_CONNECTTIMEOUT_MS => 800,
+            CURLOPT_TIMEOUT_MS => 1200,
             CURLOPT_FAILONERROR => false,
+            CURLOPT_HTTPHEADER => $headers,
         ]);
         $raw = curl_exec($ch);
         $err = curl_error($ch);

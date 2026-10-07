@@ -114,6 +114,60 @@ final class Db
     }
 
     /**
+     * Conexión opcional a un ERP legacy / antiguo.
+     *
+     * Se usa para sincronizar cierres y recepciones de contenedor hacia una
+     * segunda base cuando el sistema antiguo no comparte la misma BD que el ERP
+     * principal.
+     *
+     * Variables esperadas:
+     * - LEGACY_ERP_DB_HOST
+     * - LEGACY_ERP_DB_PORT
+     * - LEGACY_ERP_DB_NAME
+     * - LEGACY_ERP_DB_USER
+     * - LEGACY_ERP_DB_PASS
+     * - LEGACY_ERP_DB_CHARSET
+     */
+    public static function legacyErpPdoOrNull(): ?PDO
+    {
+        $host = self::clean(Env::get('LEGACY_ERP_DB_HOST', ''), '');
+        $name = self::clean(Env::get('LEGACY_ERP_DB_NAME', ''), '');
+        $user = self::clean(Env::get('LEGACY_ERP_DB_USER', ''), '');
+        if ($host === '' || $name === '' || $user === '') {
+            return null;
+        }
+
+        $port = self::clean(Env::get('LEGACY_ERP_DB_PORT', '3306'), '3306');
+        $pass = self::clean(Env::get('LEGACY_ERP_DB_PASS', ''), '');
+        $charset = self::clean(Env::get('LEGACY_ERP_DB_CHARSET', Env::get('ERP_DB_CHARSET', 'utf8mb4')), 'utf8mb4');
+
+        $primaryHost = self::clean(Env::get('ERP_DB_HOST', '127.0.0.1'), '127.0.0.1');
+        $primaryPort = self::clean(Env::get('ERP_DB_PORT', '3306'), '3306');
+        $primaryName = self::clean(Env::get('ERP_DB_NAME', 'unibag_unibag'), 'unibag_unibag');
+        $primaryUser = self::clean(Env::get('ERP_DB_USER', 'root'), 'root');
+        $primaryPass = self::clean(Env::get('ERP_DB_PASS', ''), '');
+
+        if (
+            $host === $primaryHost &&
+            $port === $primaryPort &&
+            $name === $primaryName &&
+            $user === $primaryUser &&
+            $pass === $primaryPass
+        ) {
+            return self::erpPdo();
+        }
+
+        return self::connect('legacy_erp', [
+            'host' => $host,
+            'port' => $port,
+            'name' => $name,
+            'user' => $user,
+            'pass' => $pass,
+            'charset' => $charset,
+        ]);
+    }
+
+    /**
      * @param array{host:?string,port:?string,name:?string,user:?string,pass:?string,charset:?string} $config
      */
     private static function connect(string $key, array $config): PDO

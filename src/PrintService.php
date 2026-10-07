@@ -37,7 +37,7 @@ final class PrintService
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
-        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://localhost:8767/print');
+        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = (string)($this->env['PRINT_PRINTER_NAME'] ?? '');
         if ($printerName === '') {
             return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
@@ -59,7 +59,7 @@ final class PrintService
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
-        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://localhost:8767/print');
+        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = (string)($this->env['PRINT_PRINTER_NAME'] ?? '');
         if ($printerName === '') {
             return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
@@ -81,7 +81,7 @@ final class PrintService
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
-        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://localhost:8767/print');
+        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = (string)($this->env['PRINT_PRINTER_NAME'] ?? '');
         if ($printerName === '') {
             return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
@@ -103,7 +103,7 @@ final class PrintService
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
-        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://localhost:8767/print');
+        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = (string)($this->env['PRINT_PRINTER_NAME'] ?? '');
         if ($printerName === '') {
             return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
@@ -132,14 +132,21 @@ final class PrintService
             'zpl' => $language === 'zpl' ? $content : null,
         ], JSON_UNESCAPED_UNICODE);
 
+        $headers = ['Content-Type: application/json; charset=utf-8'];
+        if (str_contains($url, '127.0.0.1')) {
+            $parsedPort = parse_url($url, PHP_URL_PORT) ?: 8767;
+            $headers[] = 'Host: localhost:' . $parsedPort;
+        }
+
         $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CONNECTTIMEOUT => 2,
-            CURLOPT_TIMEOUT => 6,
+            CURLOPT_IPRESOLVE => defined('CURL_IPRESOLVE_V4') ? CURL_IPRESOLVE_V4 : 1,
+            CURLOPT_CONNECTTIMEOUT_MS => 1500,
+            CURLOPT_TIMEOUT_MS => 4000,
             CURLOPT_FAILONERROR => false,
             CURLOPT_POST => true,
-            CURLOPT_HTTPHEADER => ['Content-Type: application/json; charset=utf-8'],
+            CURLOPT_HTTPHEADER => $headers,
             CURLOPT_POSTFIELDS => $payload,
         ]);
         $raw = curl_exec($ch);

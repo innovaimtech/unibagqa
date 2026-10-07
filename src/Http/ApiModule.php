@@ -64,14 +64,9 @@ function handleApiRoutes(
     string $currentOperatorName
 ): bool {
     if ($path === '/api/scale/weight' && $method === 'GET') {
-        // Endpoint de lectura de balanza: útil para formularios de recepción y flujos con peso.
-        // ---
-        // Scale read endpoint: useful for reception forms and weight-based flows.
+        // Endpoint de lectura de balanza: entrega JSON de estado (ok=true con peso o ok=false con detalle)
         header('Content-Type: application/json; charset=utf-8');
         $result = $scale->readWeightKg();
-        if ($result['ok'] !== true) {
-            http_response_code(502);
-        }
         echo json_encode($result, JSON_UNESCAPED_UNICODE);
         return true;
     }
@@ -144,6 +139,18 @@ function handleApiRoutes(
             'printed' => $printed,
             'print_error' => $printError,
         ], JSON_UNESCAPED_UNICODE);
+        return true;
+    }
+
+    if (preg_match('#^/api/rolls/(\d+)/delete$#', $path, $m) === 1 && $method === 'POST') {
+        requireCsrf();
+        header('Content-Type: application/json; charset=utf-8');
+        $rollId = (int)$m[1];
+        $result = $service->deleteReceivedRoll($rollId);
+        if (($result['ok'] ?? false) !== true) {
+            http_response_code(422);
+        }
+        echo json_encode($result, JSON_UNESCAPED_UNICODE);
         return true;
     }
 
