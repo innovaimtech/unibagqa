@@ -1532,6 +1532,36 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '</div>';
     $body .= '</div>';
 
+    $body .= '<div id="same_sku_toolbar" style="display:none;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 14px;margin-bottom:14px">';
+    $body .= '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">';
+    $body .= '<div>';
+    $body .= '<div style="font-size:12px;font-weight:700;color:#1d4ed8">🧾 Impresión por SKU</div>';
+    $body .= '<div id="same_sku_summary" style="font-size:11.5px;color:#475569;margin-top:2px"></div>';
+    $body .= '</div>';
+    $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
+    $body .= '<button type="button" class="btn secondary" id="btn_print_selected_current" style="padding:4px 10px;font-size:12px;font-weight:700" onclick="renderCurrentSpecificLabel()">Solo esta etiqueta</button>';
+    $body .= '<button type="button" class="btn secondary" id="btn_print_same_sku_all" style="padding:4px 10px;font-size:12px;font-weight:700" onclick="renderAllSameSkuLabels()">Todas las de este SKU</button>';
+    $body .= '</div>';
+    $body .= '</div>';
+    $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
+    $body .= '<select id="same_sku_entry_select" class="form-control" style="flex:1;min-width:260px;height:38px;padding:0 10px;font-size:12px" onchange="renderSelectedSameSkuLabel()"></select>';
+    $body .= '<button type="button" class="btn secondary" style="padding:4px 10px;font-size:12px;font-weight:700" onclick="renderSelectedSameSkuLabel()">Ver etiqueta seleccionada</button>';
+    $body .= '</div>';
+    $body .= '</div>';
+
+    $body .= '<div id="delete_label_toolbar" style="display:none;background:#fff1f2;border:1px solid #fecdd3;border-radius:10px;padding:10px 14px;margin-bottom:14px">';
+    $body .= '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">';
+    $body .= '<div>';
+    $body .= '<div style="font-size:12px;font-weight:700;color:#be123c">🗑️ Borrado de etiquetas</div>';
+    $body .= '<div id="delete_label_summary" style="font-size:11.5px;color:#475569;margin-top:2px"></div>';
+    $body .= '</div>';
+    $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
+    $body .= '<button type="button" class="btn" id="btn_delete_selected_label" style="padding:4px 10px;font-size:12px;font-weight:700;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5" onclick="deleteSelectedLabelFromModal()">Borrar etiqueta seleccionada</button>';
+    $body .= '<button type="button" class="btn" id="btn_delete_same_sku_all" style="display:none;padding:4px 10px;font-size:12px;font-weight:700;background:#fecaca;color:#991b1b;border:1px solid #f87171" onclick="deleteAllSameSkuLabelsFromModal()">Borrar todas las del SKU</button>';
+    $body .= '</div>';
+    $body .= '</div>';
+    $body .= '</div>';
+
     $body .= '<div id="printableArea"></div>';
 
     $body .= '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">';
@@ -1563,7 +1593,168 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     // JAVASCRIPT INTERACTIVO
     $body .= '<script>
         var autoPrintData = ' . json_encode($autoPrintEntries, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) . ';
+        var recentTraceabilityEntries = ' . json_encode($recentEntries, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) . ';
         var currentEntryForSplit = null;
+        var currentSameSkuEntries = [];
+        var currentPrintSourceEntry = null;
+
+        function normalizeSku(value) {
+            return String(value || "").trim().toUpperCase();
+        }
+
+        function getEntryCode(entry) {
+            return String((entry && (entry.traceability_code || entry.code)) || "").trim();
+        }
+
+        function getEntriesForSameSku(entry) {
+            if (!entry) return [];
+            var targetSku = normalizeSku(entry.item_code);
+            if (!targetSku) return [entry];
+
+            var found = [];
+            var seenCodes = {};
+            recentTraceabilityEntries.forEach(function(row) {
+                if (normalizeSku(row.item_code) !== targetSku) return;
+                var code = getEntryCode(row);
+                if (!code || seenCodes[code]) return;
+                seenCodes[code] = true;
+                found.push(row);
+            });
+
+            var currentCode = getEntryCode(entry);
+            if (currentCode && !seenCodes[currentCode]) {
+                found.unshift(entry);
+            }
+
+            return found.length > 0 ? found : [entry];
+        }
+
+        function setSameSkuToolbarVisibility(isVisible) {
+            var toolbar = document.getElementById("same_sku_toolbar");
+            if (toolbar) toolbar.style.display = isVisible ? "block" : "none";
+        }
+
+        function setDeleteToolbarVisibility(isVisible) {
+            var toolbar = document.getElementById("delete_label_toolbar");
+            if (toolbar) toolbar.style.display = isVisible ? "block" : "none";
+        }
+
+        function setupDeleteToolbar(entry) {
+            var summary = document.getElementById("delete_label_summary");
+            var deleteAllBtn = document.getElementById("btn_delete_same_sku_all");
+            if (!entry) {
+                if (summary) summary.textContent = "";
+                if (deleteAllBtn) deleteAllBtn.style.display = "none";
+                setDeleteToolbarVisibility(false);
+                return;
+            }
+
+            var code = getEntryCode(entry);
+            var skuText = String(entry.item_code || "").trim();
+            var totalSkuEntries = currentSameSkuEntries.length;
+            if (summary) {
+                summary.textContent = "Etiqueta seleccionada: " + code + (skuText ? (" · SKU " + skuText) : "");
+            }
+            if (deleteAllBtn) {
+                deleteAllBtn.style.display = totalSkuEntries > 1 ? "inline-flex" : "none";
+                deleteAllBtn.textContent = "Borrar todas las del SKU (" + totalSkuEntries + ")";
+            }
+            setDeleteToolbarVisibility(true);
+        }
+
+        function submitDeleteForm(entryId, sku) {
+            document.getElementById("delete_entry_id").value = entryId > 0 ? String(entryId) : "0";
+            document.getElementById("delete_sku").value = sku || "";
+            document.getElementById("form_delete_trz_entry").submit();
+        }
+
+        function setupSameSkuToolbar(entry) {
+            var summary = document.getElementById("same_sku_summary");
+            var select = document.getElementById("same_sku_entry_select");
+            currentPrintSourceEntry = entry || null;
+            currentSameSkuEntries = getEntriesForSameSku(entry);
+
+            if (!summary || !select || !entry || currentSameSkuEntries.length <= 1) {
+                if (summary) summary.textContent = "";
+                if (select) select.innerHTML = "";
+                setSameSkuToolbarVisibility(false);
+                setupDeleteToolbar(entry || null);
+                return;
+            }
+
+            var currentCode = getEntryCode(entry);
+            var skuText = String(entry.item_code || "").trim();
+            summary.textContent = skuText + " · " + currentSameSkuEntries.length + " etiqueta(s) registradas para este SKU.";
+            select.innerHTML = "";
+            currentSameSkuEntries.forEach(function(row) {
+                var option = document.createElement("option");
+                var code = getEntryCode(row);
+                var qty = parseFloat(row.quantity || 1);
+                var unit = String(row.unit_name || "UNID").trim();
+                var createdAt = row.created_at ? String(row.created_at) : "";
+                option.value = code;
+                option.textContent = code + " · " + qty.toLocaleString("es-CL", {minimumFractionDigits: 0, maximumFractionDigits: 2}) + " " + unit + (createdAt ? (" · " + createdAt) : "");
+                if (code === currentCode) option.selected = true;
+                select.appendChild(option);
+            });
+
+            setSameSkuToolbarVisibility(true);
+            setupDeleteToolbar(entry);
+        }
+
+        function renderCurrentSpecificLabel() {
+            if (!currentPrintSourceEntry) return;
+            var select = document.getElementById("same_sku_entry_select");
+            if (select) select.value = getEntryCode(currentPrintSourceEntry);
+            renderLabelList([currentPrintSourceEntry]);
+            setupDeleteToolbar(currentPrintSourceEntry);
+        }
+
+        function renderAllSameSkuLabels() {
+            if (!currentSameSkuEntries || currentSameSkuEntries.length === 0) return;
+            renderLabelList(currentSameSkuEntries);
+        }
+
+        function renderSelectedSameSkuLabel() {
+            var select = document.getElementById("same_sku_entry_select");
+            if (!select || !currentSameSkuEntries || currentSameSkuEntries.length === 0) return;
+            var selectedCode = String(select.value || "");
+            var selectedEntry = currentSameSkuEntries.find(function(row) {
+                return getEntryCode(row) === selectedCode;
+            });
+            if (!selectedEntry) return;
+            currentPrintSourceEntry = selectedEntry;
+            renderLabelList([selectedEntry]);
+            setupDeleteToolbar(selectedEntry);
+        }
+
+        function deleteSelectedLabelFromModal() {
+            if (!currentPrintSourceEntry) return;
+            var entryId = parseInt(currentPrintSourceEntry.id || 0, 10);
+            var code = getEntryCode(currentPrintSourceEntry);
+            if (!entryId || entryId <= 0) {
+                alert("No se pudo identificar la etiqueta seleccionada para borrarla.");
+                return;
+            }
+            var msg = "¿Está seguro de borrar la etiqueta " + code + "?\\n\\nEsta acción eliminará el registro trazable y liberará el stock nuevamente.";
+            if (confirm(msg)) {
+                submitDeleteForm(entryId, "");
+            }
+        }
+
+        function deleteAllSameSkuLabelsFromModal() {
+            if (!currentPrintSourceEntry) return;
+            var sku = normalizeSku(currentPrintSourceEntry.item_code);
+            if (!sku) {
+                alert("No se pudo identificar el SKU para borrarlo en bloque.");
+                return;
+            }
+            var totalSkuEntries = currentSameSkuEntries.length || 0;
+            var msg = "⚠️ ¿Está seguro de borrar todas las etiquetas del SKU " + sku + "?\\n\\nSe eliminarán " + totalSkuEntries + " registro(s) trazables y el stock quedará liberado nuevamente.";
+            if (confirm(msg)) {
+                submitDeleteForm(0, sku);
+            }
+        }
 
         function openTraceabilityTreeModal(code) {
             var modal = document.getElementById("traceabilityTreeModal");
@@ -1859,6 +2050,10 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
             var toolbar = document.getElementById("multi_label_toolbar");
             currentEntryForSplit = null;
+            var sameSkuInList = list.every(function(row) {
+                return normalizeSku(row.item_code) === normalizeSku(list[0].item_code);
+            });
+            setupSameSkuToolbar(sameSkuInList ? (list[0] || null) : null);
 
             // Si es un solo registro pero tiene quantity > 1 (ej: 10 bobinas), dar la opción de imprimir 1 etiqueta por cada unidad
             if (list.length === 1 && parseFloat(list[0].quantity) > 1.0001) {
@@ -1906,6 +2101,9 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
         function closePrintLabel() {
             document.getElementById("printLabelModal").classList.remove("open");
+            currentSameSkuEntries = [];
+            currentPrintSourceEntry = null;
+            setDeleteToolbarVisibility(false);
         }
 
         function printLabelNow() {
