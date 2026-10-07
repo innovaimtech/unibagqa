@@ -24146,7 +24146,7 @@ if (preg_match('#^/boxes/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     }
 
     $barcodeValue = strtoupper(trim((string)$box['box_code']));
-    $barcodeSvg = code39Svg($barcodeValue, 70, 2, 5);
+    $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
     $destinationLabel = (string)$box['destination_mode'] === 'CUSTOMER_ORDER'
         ? 'OC cliente: ' . (string)($box['customer_order_ref'] ?? '-')
         : 'Bodega: ' . (string)($box['warehouse_code'] ?? '-');

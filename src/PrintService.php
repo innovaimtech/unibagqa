@@ -667,8 +667,6 @@ final class PrintService
 ^MD" . $this->getZplDarkness() . "
 ^CF0,32
 ^FO20,20^FDUNIBAG^FS
-^CF0,32
-^FO20,20^FDUNIBAG^FS
 ^CF0,22
 ^FO20,58^FDCAJA PRODUCTO TERMINADO^FS
 ^CF0,34
@@ -681,10 +679,10 @@ final class PrintService
 ^FO20,222^FDOPERADOR: {$operator}^FS
 ^FO20,250^FDCANTIDAD CAJAS: {$boxQty}^FS
 
-^BY2,2,80
-^FO80,300^BCN,90,Y,N,N^FD{$barcodeValue}^FS
+^BY3,2,96
+^FO56,292^BCN,96,N,N,N^FD{$barcodeValue}^FS
 ^CF0,32
-^FO0,426^FB600,1,0,C,0^FD{$barcodeValue}^FS
+^FO0,418^FB600,1,0,C,0^FD{$barcodeValue}^FS
 ^XZ";
     }
 
@@ -710,6 +708,8 @@ final class PrintService
 ^CI28
 ^PW600
 ^LL610
+^PR3
+^MD" . $this->getZplDarkness() . "
 ^CF0,32
 ^FO20,20^FDUNIBAG^FS
 ^CF0,22
@@ -727,10 +727,10 @@ final class PrintService
 ^FO20,306^FDOPERADOR: {$operator}^FS
 ^FO20,334^FDDESTINO: {$destinationLabel}^FS
 
-^BY2,2,82
-^FO60,392^BCN,90,Y,N,N^FD{$boxCode}^FS
+^BY3,2,96
+^FO42,378^BCN,96,N,N,N^FD{$boxCode}^FS
 ^CF0,32
-^FO0,534^FB600,1,0,C,0^FD{$boxCode}^FS
+^FO0,514^FB600,1,0,C,0^FD{$boxCode}^FS
 ^XZ";
     }
 
@@ -790,10 +790,10 @@ final class PrintService
 ^FO20,306^FDDESTINO: {$destinationLabel}^FS
 ^FO20,334^FB560,2,0,L,0^FDCODIGOS CAJA: {$boxSummary}^FS
 
-^BY2,2,82
-^FO60,402^BCN,90,Y,N,N^FD{$palletCode}^FS
+^BY3,2,96
+^FO42,388^BCN,96,N,N,N^FD{$palletCode}^FS
 ^CF0,32
-^FO0,554^FB600,1,0,C,0^FD{$palletCode}^FS
+^FO0,532^FB600,1,0,C,0^FD{$palletCode}^FS
 ^XZ";
     }
 
@@ -815,8 +815,8 @@ final class PrintService
             . 'TEXT 20,194,"2",0,1,1,"FECHA CIERRE: ' . $finishedAt . '"' . "\r\n"
             . 'TEXT 20,222,"2",0,1,1,"OPERADOR: ' . $operator . '"' . "\r\n"
             . 'TEXT 20,250,"2",0,1,1,"CANTIDAD CAJAS: ' . $boxQty . '"' . "\r\n"
-            . 'BARCODE 80,300,"128",90,1,0,2,2,"' . $barcodeValue . '"' . "\r\n"
-            . 'TEXT 200,426,"3",0,1,1,"' . $barcodeValue . '"' . "\r\n"
+            . 'BARCODE 56,292,"128",96,0,0,3,3,"' . $barcodeValue . '"' . "\r\n"
+            . 'TEXT 176,418,"4",0,1,1,"' . $barcodeValue . '"' . "\r\n"
             . 'PRINT 1,1';
     }
 
@@ -849,8 +849,8 @@ final class PrintService
             . 'TEXT 20,278,"2",0,1,1,"PALLET: ' . $palletCode . '"' . "\r\n"
             . 'TEXT 20,306,"2",0,1,1,"OPERADOR: ' . $operator . '"' . "\r\n"
             . 'TEXT 20,334,"2",0,1,1,"DESTINO: ' . $destinationLabel . '"' . "\r\n"
-            . 'BARCODE 60,392,"128",92,1,0,2,2,"' . $boxCode . '"' . "\r\n"
-            . 'TEXT 180,534,"3",0,1,1,"' . $boxCode . '"' . "\r\n"
+            . 'BARCODE 42,378,"128",96,0,0,3,3,"' . $boxCode . '"' . "\r\n"
+            . 'TEXT 164,514,"4",0,1,1,"' . $boxCode . '"' . "\r\n"
             . 'PRINT 1,1';
     }
 
@@ -897,8 +897,8 @@ final class PrintService
             . 'TEXT 20,278,"2",0,1,1,"OPERADOR: ' . $operator . '"' . "\r\n"
             . 'TEXT 20,306,"2",0,1,1,"DESTINO: ' . $destinationLabel . '"' . "\r\n"
             . 'TEXT 20,334,"2",0,1,1,"CODIGOS CAJA: ' . $boxSummary . '"' . "\r\n"
-            . 'BARCODE 60,402,"128",92,1,0,2,2,"' . $palletCode . '"' . "\r\n"
-            . 'TEXT 170,554,"3",0,1,1,"' . $palletCode . '"' . "\r\n"
+            . 'BARCODE 42,388,"128",96,0,0,3,3,"' . $palletCode . '"' . "\r\n"
+            . 'TEXT 154,524,"4",0,1,1,"' . $palletCode . '"' . "\r\n"
             . 'PRINT 1,1';
     }
 
@@ -926,8 +926,8 @@ final class PrintService
             'A380,150,0,2,1,1,N,"CANTIDAD CAJAS: ' . $boxQty . '"',
             'A20,182,0,2,1,1,N,"FECHA CIERRE: ' . $finishedAt . '"',
             'A20,214,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
-            'B70,300,0,1,3,8,96,N,"' . $barcodeValue . '"',
-            'A198,408,0,4,1,1,N,"' . $barcodeValue . '"',
+            'B56,292,0,1,3,8,96,N,"' . $barcodeValue . '"',
+            'A176,408,0,4,1,1,N,"' . $barcodeValue . '"',
             'P1',
         ]) . "\r\n";
     }
@@ -969,8 +969,8 @@ final class PrintService
             'A20,214,0,2,1,1,N,"PALLET: ' . $palletCode . '"',
             'A380,214,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
             'A20,246,0,2,1,1,N,"DESTINO: ' . $destinationLabel . '"',
-            'B70,318,0,1,3,8,96,N,"' . $boxCode . '"',
-            'A198,426,0,4,1,1,N,"' . $boxCode . '"',
+            'B42,304,0,1,3,8,96,N,"' . $boxCode . '"',
+            'A164,420,0,4,1,1,N,"' . $boxCode . '"',
             'P1',
         ]) . "\r\n";
     }
@@ -1012,6 +1012,7 @@ final class PrintService
             'N',
             'q800',
             'Q560,24',
+            'D' . $this->getEplDensity(),
             'LO20,68,750,2',
             'LO20,136,750,1',
             'LO20,296,750,1',
@@ -1025,8 +1026,8 @@ final class PrintService
             'A20,214,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
             'A380,214,0,2,1,1,N,"DESTINO: ' . $destinationLabel . '"',
             'A20,246,0,2,1,1,N,"CAJAS ORIGEN: ' . $boxSummary . '"',
-            'B70,318,0,1,3,8,96,N,"' . $palletCode . '"',
-            'A178,426,0,4,1,1,N,"' . $palletCode . '"',
+            'B42,304,0,1,3,8,96,N,"' . $palletCode . '"',
+            'A154,420,0,4,1,1,N,"' . $palletCode . '"',
             'P1',
         ]) . "\r\n";
     }
