@@ -21743,6 +21743,7 @@ SQL;
     public function registerWarehouseTraceabilityEntry(array $data): array
     {
         $this->ensureTraceabilityWarehouseEntriesTable();
+        $maxLabelsPerBatch = 50;
 
         $code = strtoupper(trim((string)($data['traceability_code'] ?? '')));
         $entityType = strtoupper(trim((string)($data['entity_type'] ?? 'PRODUCT')));
@@ -21769,10 +21770,10 @@ SQL;
             // Si el usuario puso package_count > 1, son esa cantidad de bultos unitarios
             // Si el usuario puso package_count = 1 pero quantity > 1, interpretamos que son N productos individuales de 1 unidad
             if ($rawCount > 1) {
-                $packageCount = max(1, min(200, $rawCount));
+                $packageCount = max(1, $rawCount);
                 $qty = 1.0;
             } elseif ($rawQty > 1) {
-                $packageCount = max(1, min(200, (int)round($rawQty)));
+                $packageCount = max(1, (int)round($rawQty));
                 $qty = 1.0;
             } else {
                 $packageCount = 1;
@@ -21780,8 +21781,12 @@ SQL;
             }
         } else {
             // Modo agrupado: N bultos con M unidades cada uno (ej. 5 cajas de 500 bolsas c/u)
-            $packageCount = max(1, min(200, $rawCount));
+            $packageCount = max(1, $rawCount);
             $qty = max(0.001, $rawQty);
+        }
+
+        if ($packageCount > $maxLabelsPerBatch) {
+            return ['ok' => false, 'error' => 'Por estabilidad del sistema, el maximo permitido es de 50 etiquetas por vez. Divida el ingreso en tandas mas pequenas.'];
         }
 
         $unitName = trim((string)($data['unit_name'] ?? 'UNID')) ?: 'UNID';

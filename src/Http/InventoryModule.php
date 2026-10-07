@@ -1142,6 +1142,42 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     }
 
     $recentEntries = $service->listWarehouseTraceabilityEntries($storehouseId > 0 ? $storehouseId : null, null, 500);
+    $groupedRecentEntries = [];
+    foreach ($recentEntries as $entry) {
+        $groupSku = strtoupper(trim((string)($entry['item_code'] ?? '')));
+        $groupKey = $groupSku !== '' ? ('sku_' . $groupSku) : ('code_' . (string)($entry['traceability_code'] ?? ''));
+        if (!isset($groupedRecentEntries[$groupKey])) {
+            $groupedRecentEntries[$groupKey] = [
+                'group_key' => $groupKey,
+                'item_code' => (string)($entry['item_code'] ?? ''),
+                'item_description' => (string)($entry['item_description'] ?? ''),
+                'entity_type' => strtoupper((string)($entry['entity_type'] ?? 'PRODUCT')),
+                'warehouse_name' => (string)($entry['warehouse_name'] ?? ''),
+                'unit_name' => (string)($entry['unit_name'] ?? 'UNID'),
+                'operator_name' => (string)($entry['operator_name'] ?? ''),
+                'latest_created_at' => (string)($entry['created_at'] ?? ''),
+                'latest_traceability_code' => (string)($entry['traceability_code'] ?? ''),
+                'label_count' => 0,
+                'total_quantity' => 0.0,
+                'entries' => [],
+            ];
+        }
+
+        $groupedRecentEntries[$groupKey]['label_count']++;
+        $groupedRecentEntries[$groupKey]['total_quantity'] += (float)($entry['quantity'] ?? 1);
+        $groupedRecentEntries[$groupKey]['entries'][] = $entry;
+
+        $entryCreatedAt = (string)($entry['created_at'] ?? '');
+        if (
+            $groupedRecentEntries[$groupKey]['latest_created_at'] === ''
+            || ($entryCreatedAt !== '' && strtotime($entryCreatedAt) > strtotime((string)$groupedRecentEntries[$groupKey]['latest_created_at']))
+        ) {
+            $groupedRecentEntries[$groupKey]['latest_created_at'] = $entryCreatedAt;
+            $groupedRecentEntries[$groupKey]['operator_name'] = (string)($entry['operator_name'] ?? '');
+            $groupedRecentEntries[$groupKey]['latest_traceability_code'] = (string)($entry['traceability_code'] ?? '');
+        }
+    }
+    $groupedRecentEntries = array_values($groupedRecentEntries);
     $suggestedCode = $service->generateTraceabilityCode('PRODUCT');
     $msg = trim((string)($_GET['msg'] ?? ''));
     $err = trim((string)($_GET['error'] ?? ''));
@@ -1359,8 +1395,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div id="sec_mode_unitary">';
     $body .= '<div class="form-group">';
     $body .= '<label id="lbl_unitary_count">Cantidad de Productos / Bultos a Rotular (Etiquetas a Imprimir) *</label>';
-    $body .= '<input type="number" min="1" max="200" name="package_count" id="input_package_count" class="form-control" value="1" required oninput="calcTotals()">';
-    $body .= '<div class="muted" style="font-size:11.5px;margin-top:4px;color:#0f766e;font-weight:600">👉 Se generará una etiqueta física individual con código único para CADA producto/bulto físico.</div>';
+    $body .= '<input type="number" min="1" max="50" name="package_count" id="input_package_count" class="form-control" value="1" required oninput="calcTotals()">';
+    $body .= '<div class="muted" style="font-size:11.5px;margin-top:4px;color:#0f766e;font-weight:600">👉 Se generará una etiqueta física individual con código único para CADA producto/bulto físico. Máximo 50 etiquetas por vez.</div>';
     $body .= '</div>';
     $body .= '</div>';
 
@@ -1369,8 +1405,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div class="trz-fields-2col">';
     $body .= '<div class="form-group">';
     $body .= '<label>1. Cantidad de Bultos (Etiquetas a Imprimir) *</label>';
-    $body .= '<input type="number" min="1" max="200" id="input_package_count_pack" class="form-control" value="1" oninput="calcTotals()">';
-    $body .= '<div class="muted" style="font-size:11px;margin-top:3px">Número de pallets, cajas o bultos físicos a rotular.</div>';
+    $body .= '<input type="number" min="1" max="50" id="input_package_count_pack" class="form-control" value="1" oninput="calcTotals()">';
+    $body .= '<div class="muted" style="font-size:11px;margin-top:3px">Número de pallets, cajas o bultos físicos a rotular. Máximo 50 etiquetas por vez.</div>';
     $body .= '</div>';
     $body .= '<div class="form-group">';
     $body .= '<label>2. Unidades de Producto por Bulto *</label>';
@@ -1430,73 +1466,79 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div class="trz-card">';
     $body .= '<div class="trz-card-title">';
     $body .= '<span>📋 Ingresos Trazables Recientes</span>';
-    $body .= '<span style="font-size:12px;font-weight:700;color:#64748b">' . count($recentEntries) . ' registrados</span>';
+    $body .= '<span style="font-size:12px;font-weight:700;color:#64748b">' . count($groupedRecentEntries) . ' códigos agrupados · ' . count($recentEntries) . ' etiquetas</span>';
     $body .= '</div>';
 
     // Barra de búsqueda rápida en vivo y botón para borrar lote completo si se filtra
     $initialQuery = trim((string)($_GET['q'] ?? ($_GET['filter'] ?? '')));
     $body .= '<div style="margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
     $body .= '<div style="flex:1;min-width:240px">';
-    $body .= '<input type="text" id="trz-live-filter" placeholder="🔍 Buscar por código, SKU, descripción u operador..." class="form-control" style="font-size:12.5px" value="' . h($initialQuery) . '" oninput="filterRecentEntries(this.value)">';
+    $body .= '<input type="text" id="trz-live-filter" placeholder="🔍 Buscar por SKU, descripción, código reciente u operador..." class="form-control" style="font-size:12.5px" value="' . h($initialQuery) . '" oninput="filterRecentEntries(this.value)">';
     $body .= '</div>';
-    $body .= '<button type="button" id="btn_delete_filtered_sku" class="btn" style="display:none;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;padding:0 12px;height:42px;font-size:12px;font-weight:700;cursor:pointer" onclick="deleteAllFilteredBySku()">🗑️ Borrar bultos mostrados</button>';
+    $body .= '<button type="button" id="btn_delete_filtered_sku" class="btn" style="display:none;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;padding:0 12px;height:42px;font-size:12px;font-weight:700;cursor:pointer" onclick="deleteAllFilteredBySku()">🗑️ Borrar código mostrado</button>';
     $body .= '</div>';
 
     $body .= '<div class="table-wrap" style="max-height:680px;overflow-y:auto;overflow-x:auto">';
     $body .= '<table id="table-recent-entries" style="width:100%;border-collapse:collapse;font-size:12.5px">';
     $body .= '<thead>';
     $body .= '<tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0;position:sticky;top:0;z-index:2">';
-    $body .= '<th style="padding:10px 12px;text-align:left;font-weight:700">Código Trazable</th>';
+    $body .= '<th style="padding:10px 12px;text-align:left;font-weight:700">Código / SKU</th>';
     $body .= '<th style="padding:10px 12px;text-align:left;font-weight:700">Tipo</th>';
-    $body .= '<th style="padding:10px 12px;text-align:left;font-weight:700">Artículo / SKU</th>';
-    $body .= '<th style="padding:10px 12px;text-align:right;font-weight:700">Cantidad</th>';
-    $body .= '<th style="padding:10px 12px;text-align:left;font-weight:700">Fecha / Operador</th>';
+    $body .= '<th style="padding:10px 12px;text-align:left;font-weight:700">Artículo</th>';
+    $body .= '<th style="padding:10px 12px;text-align:right;font-weight:700">Etiquetas / Cantidad</th>';
+    $body .= '<th style="padding:10px 12px;text-align:left;font-weight:700">Último registro</th>';
     $body .= '<th style="padding:10px 12px;text-align:center;font-weight:700">Acciones</th>';
     $body .= '</tr>';
     $body .= '</thead>';
     $body .= '<tbody>';
 
-    if ($recentEntries === []) {
+    if ($groupedRecentEntries === []) {
         $body .= '<tr><td colspan="6" style="padding:32px 14px;text-align:center;color:#64748b">';
         $body .= '<div style="font-size:32px;margin-bottom:8px">📦</div>';
         $body .= 'Aún no se registran bultos con código de trazabilidad en esta bodega.<br>Complete el formulario para realizar el primer ingreso.';
         $body .= '</td></tr>';
     }
 
-    foreach ($recentEntries as $entry) {
-        $eType = strtoupper((string)($entry['entity_type'] ?? 'PRODUCT'));
-        $eCode = (string)$entry['traceability_code'];
-        $eSku = (string)$entry['item_code'];
-        $eDesc = (string)$entry['item_description'];
-        $eQty = (float)($entry['quantity'] ?? 1);
-        $eUnit = (string)($entry['unit_name'] ?? 'UNID');
-        $eWh = (string)($entry['warehouse_name'] ?? '');
-        $eDate = date('d/m/Y H:i', strtotime((string)$entry['created_at']));
-        $eOp = (string)($entry['operator_name'] ?? '');
-        $pkgNum = (int)($entry['package_number'] ?? 1);
-        $totPkg = (int)($entry['total_packages'] ?? 1);
+    foreach ($groupedRecentEntries as $group) {
+        $gType = strtoupper((string)($group['entity_type'] ?? 'PRODUCT'));
+        $gCode = (string)($group['latest_traceability_code'] ?? '');
+        $gSku = (string)($group['item_code'] ?? '');
+        $gDesc = (string)($group['item_description'] ?? '');
+        $gQty = (float)($group['total_quantity'] ?? 0);
+        $gUnit = (string)($group['unit_name'] ?? 'UNID');
+        $gWh = (string)($group['warehouse_name'] ?? '');
+        $gOp = (string)($group['operator_name'] ?? '');
+        $gCount = (int)($group['label_count'] ?? 0);
+        $gEntries = (array)($group['entries'] ?? []);
+        $gLatestDateRaw = (string)($group['latest_created_at'] ?? '');
+        $gLatestDate = $gLatestDateRaw !== '' ? date('d/m/Y H:i', strtotime($gLatestDateRaw)) : '-';
+        $gRowText = mb_strtolower(trim($gSku . ' ' . $gDesc . ' ' . $gCode . ' ' . $gWh . ' ' . $gOp));
 
-        $body .= '<tr class="trz-entry-row" style="border-bottom:1px solid #f1f5f9" data-text="' . h(mb_strtolower($eCode . ' ' . $eSku . ' ' . $eDesc . ' ' . $eWh . ' ' . $eOp)) . '">';
+        $body .= '<tr class="trz-entry-row" style="border-bottom:1px solid #f1f5f9" data-text="' . h($gRowText) . '" data-sku="' . h($gSku) . '" data-label-count="' . $gCount . '">';
         $body .= '<td style="padding:10px 12px;white-space:nowrap">';
-        $body .= '<button type="button" class="trz-tag-code" style="cursor:pointer;border:1px solid #ccfbf1" onclick="openTraceabilityTreeModal(' . h(json_encode($eCode)) . ')" title="Ver árbol de trazabilidad 360° en vivo">' . h($eCode) . ' 🔍</button>';
-        $body .= ' <a href="/stock/traceability?q=' . rawurlencode($eCode) . '" target="_blank" style="font-size:11.5px;color:#0f766e;text-decoration:none;font-weight:700" title="Abrir en pantalla completa">↗</a>';
-        if ($totPkg > 1) {
-            $body .= '<div style="font-size:10.5px;color:#0f766e;font-weight:700;margin-top:2px">Bulto ' . $pkgNum . ' / ' . $totPkg . '</div>';
+        $body .= '<div style="font-weight:800;color:#0f172a">' . h($gSku !== '' ? $gSku : $gCode) . '</div>';
+        if ($gCode !== '') {
+            $body .= '<button type="button" class="trz-tag-code" style="cursor:pointer;border:1px solid #ccfbf1;margin-top:4px" onclick="openTraceabilityTreeModal(' . h(json_encode($gCode)) . ')" title="Ver árbol de trazabilidad 360° del último registro">' . h($gCode) . ' 🔍</button>';
+            $body .= ' <a href="/stock/traceability?q=' . rawurlencode($gCode) . '" target="_blank" style="font-size:11.5px;color:#0f766e;text-decoration:none;font-weight:700" title="Abrir en pantalla completa">↗</a>';
         }
+        $body .= '<div style="font-size:10.5px;color:#64748b;margin-top:4px">' . $gCount . ' etiqueta(s) agrupadas</div>';
         $body .= '</td>';
-        $body .= '<td style="padding:10px 12px;white-space:nowrap"><span class="badge-type ' . h($eType) . '">' . h($eType) . '</span></td>';
+        $body .= '<td style="padding:10px 12px;white-space:nowrap"><span class="badge-type ' . h($gType) . '">' . h($gType) . '</span></td>';
         $body .= '<td style="padding:10px 12px">';
-        $body .= '<div style="font-weight:700;color:#0f172a">' . h($eSku) . '</div>';
-        $body .= '<div style="font-size:11px;color:#64748b;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' . h($eDesc) . '</div>';
+        $body .= '<div style="font-weight:700;color:#0f172a">' . h($gDesc) . '</div>';
+        $body .= '<div style="font-size:11px;color:#64748b;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' . h($gWh) . '</div>';
         $body .= '</td>';
-        $body .= '<td style="padding:10px 12px;text-align:right;font-weight:800;color:#0f172a;white-space:nowrap">' . number_format($eQty, 2, ',', '.') . ' <span style="font-size:11px;color:#64748b">' . h($eUnit) . '</span></td>';
+        $body .= '<td style="padding:10px 12px;text-align:right;font-weight:800;color:#0f172a;white-space:nowrap">';
+        $body .= '<div>' . $gCount . ' etiqueta(s)</div>';
+        $body .= '<div style="font-size:11px;color:#64748b;margin-top:2px">' . number_format($gQty, 2, ',', '.') . ' ' . h($gUnit) . '</div>';
+        $body .= '</td>';
         $body .= '<td style="padding:10px 12px;font-size:11.5px;color:#475569">';
-        $body .= '<div style="font-weight:700;color:#334155">' . h($eDate) . '</div>';
-        $body .= '<div style="font-size:11px;color:#64748b">👤 ' . h($eOp) . '</div>';
+        $body .= '<div style="font-weight:700;color:#334155">' . h($gLatestDate) . '</div>';
+        $body .= '<div style="font-size:11px;color:#64748b">👤 ' . h($gOp) . '</div>';
         $body .= '</td>';
         $body .= '<td style="padding:10px 12px;text-align:center;white-space:nowrap">';
-        $body .= '<button type="button" class="btn secondary" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#f8fafc;border:1px solid #cbd5e1;color:#334155" onclick="openPrintLabel(' . h(json_encode($entry, JSON_HEX_APOS | JSON_HEX_QUOT)) . ')">🖨️ Etiqueta</button>';
-        $body .= ' <button type="button" class="btn" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#fee2e2;border:1px solid #fca5a5;color:#b91c1c;margin-left:4px;cursor:pointer" onclick="deleteTraceabilityEntry(' . (int)$entry['id'] . ', ' . h(json_encode($eCode)) . ')" title="Eliminar este bulto ingresado por error">🗑️ Borrar</button>';
+        $body .= '<button type="button" class="btn secondary" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#f8fafc;border:1px solid #cbd5e1;color:#334155" onclick="openPrintLabel(' . h(json_encode($gEntries, JSON_HEX_APOS | JSON_HEX_QUOT)) . ')">🖨️ Ver etiquetas</button>';
+        $body .= ' <button type="button" class="btn" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#fee2e2;border:1px solid #fca5a5;color:#b91c1c;margin-left:4px;cursor:pointer" onclick="deleteGroupedSku(' . h(json_encode($gSku)) . ', ' . $gCount . ')" title="Eliminar todas las etiquetas agrupadas de este código">🗑️ Borrar grupo</button>';
         $body .= '</td>';
         $body .= '</tr>';
     }
@@ -1597,6 +1639,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         var currentEntryForSplit = null;
         var currentSameSkuEntries = [];
         var currentPrintSourceEntry = null;
+        var MAX_TRACEABILITY_LABELS = 50;
 
         function normalizeSku(value) {
             return String(value || "").trim().toUpperCase();
@@ -1604,6 +1647,12 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
         function getEntryCode(entry) {
             return String((entry && (entry.traceability_code || entry.code)) || "").trim();
+        }
+
+        function clampPackageCount(value) {
+            var n = parseInt(value || "1", 10);
+            if (isNaN(n) || n < 1) return 1;
+            return Math.min(MAX_TRACEABILITY_LABELS, n);
         }
 
         function getEntriesForSameSku(entry) {
@@ -1844,15 +1893,17 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             var mode = document.getElementById("input_packaging_mode").value || "UNITARY";
             var pkgs = 1;
             var unitsPerPkg = 1;
+            var countPackInput = document.getElementById("input_package_count_pack");
+            var countUnitaryInput = document.getElementById("input_package_count");
 
             if (mode === "UNITARY") {
-                pkgs = parseInt(document.getElementById("input_package_count").value || "1", 10);
-                if (isNaN(pkgs) || pkgs < 1) pkgs = 1;
+                pkgs = clampPackageCount(countUnitaryInput ? countUnitaryInput.value : "1");
+                if (countUnitaryInput) countUnitaryInput.value = pkgs;
                 unitsPerPkg = 1;
                 document.getElementById("input_quantity").value = "1";
             } else {
-                pkgs = parseInt(document.getElementById("input_package_count_pack").value || "1", 10);
-                if (isNaN(pkgs) || pkgs < 1) pkgs = 1;
+                pkgs = clampPackageCount(countPackInput ? countPackInput.value : "1");
+                if (countPackInput) countPackInput.value = pkgs;
                 unitsPerPkg = parseFloat(document.getElementById("input_quantity").value || "1");
                 if (isNaN(unitsPerPkg) || unitsPerPkg < 0) unitsPerPkg = 0;
             }
@@ -1876,9 +1927,9 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                     summaryBox.style.borderColor = "#99f6e4";
                     summaryBox.style.color = "#0f766e";
                     if (mode === "UNITARY") {
-                        summaryBox.innerHTML = "<strong>📊 Resumen de rotulación:</strong> Se generarán <strong>" + pkgs + " etiquetas únicas e individuales</strong> (1 por cada producto/bulto físico) para un total de <strong>" + total.toLocaleString("es-CL", {minimumFractionDigits: 1, maximumFractionDigits: 2}) + "</strong> unidades de producto.";
+                        summaryBox.innerHTML = "<strong>📊 Resumen de rotulación:</strong> Se generarán <strong>" + pkgs + " etiquetas únicas e individuales</strong> (1 por cada producto/bulto físico) para un total de <strong>" + total.toLocaleString("es-CL", {minimumFractionDigits: 1, maximumFractionDigits: 2}) + "</strong> unidades de producto. Límite operativo: <strong>" + MAX_TRACEABILITY_LABELS + " etiquetas por vez</strong>.";
                     } else {
-                        summaryBox.innerHTML = "<strong>📊 Resumen de rotulación:</strong> Se generarán <strong>" + pkgs + " etiquetas</strong> (1 por cada bulto agrupado) para un total de <strong>" + total.toLocaleString("es-CL", {minimumFractionDigits: 1, maximumFractionDigits: 2}) + "</strong> unidades de producto.";
+                        summaryBox.innerHTML = "<strong>📊 Resumen de rotulación:</strong> Se generarán <strong>" + pkgs + " etiquetas</strong> (1 por cada bulto agrupado) para un total de <strong>" + total.toLocaleString("es-CL", {minimumFractionDigits: 1, maximumFractionDigits: 2}) + "</strong> unidades de producto. Límite operativo: <strong>" + MAX_TRACEABILITY_LABELS + " etiquetas por vez</strong>.";
                     }
                 }
             }
@@ -1929,16 +1980,16 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             if (upper.indexOf("BOB") !== -1 || upper.indexOf("ROLL") !== -1) {
                 selectEntityType("ROLL");
                 setPackagingMode("UNITARY");
-                document.getElementById("input_package_count").value = Math.max(1, Math.round(pending));
+                document.getElementById("input_package_count").value = Math.min(MAX_TRACEABILITY_LABELS, Math.max(1, Math.round(pending)));
             } else if (upper.indexOf("PALLET") !== -1) {
                 selectEntityType("PALLET");
                 setPackagingMode("UNITARY");
-                document.getElementById("input_package_count").value = Math.max(1, Math.round(pending));
+                document.getElementById("input_package_count").value = Math.min(MAX_TRACEABILITY_LABELS, Math.max(1, Math.round(pending)));
             } else if (upper.indexOf("CAJA") !== -1 || upper.indexOf("BOX") !== -1) {
                 selectEntityType("BOX");
             } else {
                 setPackagingMode("UNITARY");
-                document.getElementById("input_package_count").value = Math.max(1, Math.round(pending));
+                document.getElementById("input_package_count").value = Math.min(MAX_TRACEABILITY_LABELS, Math.max(1, Math.round(pending)));
             }
 
             calcTotals();
@@ -1947,17 +1998,26 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         function filterRecentEntries(q) {
             q = (q || "").toLowerCase().trim();
             var rows = document.querySelectorAll(".trz-entry-row");
-            var visibleCount = 0;
+            var visibleRows = [];
             rows.forEach(function(r) {
                 var text = r.getAttribute("data-text") || "";
                 var match = (q === "" || text.indexOf(q) !== -1);
                 r.style.display = match ? "" : "none";
-                if (match) visibleCount++;
+                if (match) visibleRows.push(r);
             });
             var btnBulk = document.getElementById("btn_delete_filtered_sku");
             if (btnBulk) {
-                btnBulk.style.display = (q.length >= 2 && visibleCount > 0) ? "inline-flex" : "none";
-                btnBulk.innerHTML = "🗑️ Borrar los " + visibleCount + " bulto(s) mostrados de \x27" + escapeHtml(q) + "\x27";
+                if (q.length >= 2 && visibleRows.length === 1) {
+                    var targetRow = visibleRows[0];
+                    var targetSku = String(targetRow.getAttribute("data-sku") || "").trim();
+                    var labelCount = parseInt(targetRow.getAttribute("data-label-count") || "0", 10);
+                    btnBulk.dataset.targetSku = targetSku;
+                    btnBulk.style.display = targetSku !== "" ? "inline-flex" : "none";
+                    btnBulk.innerHTML = "🗑️ Borrar código " + escapeHtml(targetSku) + " (" + labelCount + " etiqueta" + (labelCount === 1 ? "" : "s") + ")";
+                } else {
+                    btnBulk.dataset.targetSku = "";
+                    btnBulk.style.display = "none";
+                }
             }
         }
 
@@ -2136,14 +2196,26 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             }
         }
 
-        function deleteAllFilteredBySku() {
-            var q = (document.getElementById("trz-live-filter").value || "").trim();
-            if (!q) return;
-            var msg = "⚠️ ¿Está completamente seguro de eliminar TODOS los bultos mostrados para el artículo/filtro \x27" + q + "\x27 en esta bodega?\\n\\nEsta acción borrará las etiquetas y liberará el stock en bodega.";
+        function deleteGroupedSku(sku, labelCount) {
+            sku = String(sku || "").trim();
+            if (!sku) {
+                alert("No se pudo identificar el código agrupado para borrarlo.");
+                return;
+            }
+            var countText = parseInt(labelCount || 0, 10);
+            var msg = "⚠️ ¿Está seguro de borrar todas las etiquetas del código " + sku + "?\\n\\nSe eliminarán " + countText + " etiqueta(s) agrupadas y el stock quedará liberado nuevamente.";
             if (confirm(msg)) {
-                document.getElementById("delete_entry_id").value = "0";
-                document.getElementById("delete_sku").value = q;
-                document.getElementById("form_delete_trz_entry").submit();
+                submitDeleteForm(0, sku);
+            }
+        }
+
+        function deleteAllFilteredBySku() {
+            var btnBulk = document.getElementById("btn_delete_filtered_sku");
+            var targetSku = btnBulk ? String(btnBulk.dataset.targetSku || "").trim() : "";
+            if (!targetSku) return;
+            var msg = "⚠️ ¿Está completamente seguro de eliminar todas las etiquetas del código \x27" + targetSku + "\x27 en esta bodega?\\n\\nEsta acción borrará las etiquetas agrupadas y liberará el stock en bodega.";
+            if (confirm(msg)) {
+                submitDeleteForm(0, targetSku);
             }
         }
 
