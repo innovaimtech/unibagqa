@@ -8,10 +8,45 @@ final class PrintService
     {
     }
 
+    public function withProfile(string $profile): self
+    {
+        $env = $this->env;
+        $env['PRINT_PROFILE'] = $this->normalizeProfile($profile);
+        return new self($env);
+    }
+
+    public function getConfiguredProfile(): string
+    {
+        return $this->getPrintProfile();
+    }
+
+    private function normalizeProfile(string $profile): string
+    {
+        $profile = strtolower(trim($profile));
+        return in_array($profile, ['default', 'zebra', 'barpos'], true) ? $profile : 'default';
+    }
+
+    private function normalizeLanguage(string $language): string
+    {
+        $language = strtolower(trim($language));
+        return in_array($language, ['zpl', 'tspl', 'epl'], true) ? $language : 'zpl';
+    }
+
+    private function getPrintProfile(): string
+    {
+        return $this->normalizeProfile((string)($this->env['PRINT_PROFILE'] ?? 'default'));
+    }
+
     private function getPrintLanguage(): string
     {
-        $language = strtolower(trim((string)($this->env['PRINT_LANGUAGE'] ?? 'zpl')));
-        return in_array($language, ['zpl', 'tspl', 'epl'], true) ? $language : 'zpl';
+        $profile = $this->getPrintProfile();
+        if ($profile === 'zebra') {
+            return $this->normalizeLanguage((string)($this->env['PRINT_ZEBRA_LANGUAGE'] ?? 'zpl'));
+        }
+        if ($profile === 'barpos') {
+            return $this->normalizeLanguage((string)($this->env['PRINT_BARPOS_LANGUAGE'] ?? 'tspl'));
+        }
+        return $this->normalizeLanguage((string)($this->env['PRINT_LANGUAGE'] ?? 'zpl'));
     }
 
     public function getConfiguredPrintLanguage(): string
@@ -21,6 +56,19 @@ final class PrintService
 
     public function getConfiguredPrinterName(): string
     {
+        $profile = $this->getPrintProfile();
+        if ($profile === 'zebra') {
+            $printerName = trim((string)($this->env['PRINT_ZEBRA_PRINTER_NAME'] ?? ''));
+            if ($printerName !== '') {
+                return $printerName;
+            }
+        }
+        if ($profile === 'barpos') {
+            $printerName = trim((string)($this->env['PRINT_BARPOS_PRINTER_NAME'] ?? ''));
+            if ($printerName !== '') {
+                return $printerName;
+            }
+        }
         return trim((string)($this->env['PRINT_PRINTER_NAME'] ?? ''));
     }
 
@@ -38,7 +86,7 @@ final class PrintService
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
-        $printerName = (string)($this->env['PRINT_PRINTER_NAME'] ?? '');
+        $printerName = $this->getConfiguredPrinterName();
         if ($printerName === '') {
             return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
         }
@@ -60,7 +108,7 @@ final class PrintService
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
-        $printerName = (string)($this->env['PRINT_PRINTER_NAME'] ?? '');
+        $printerName = $this->getConfiguredPrinterName();
         if ($printerName === '') {
             return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
         }
@@ -82,7 +130,7 @@ final class PrintService
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
-        $printerName = (string)($this->env['PRINT_PRINTER_NAME'] ?? '');
+        $printerName = $this->getConfiguredPrinterName();
         if ($printerName === '') {
             return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
         }
@@ -104,7 +152,7 @@ final class PrintService
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
-        $printerName = (string)($this->env['PRINT_PRINTER_NAME'] ?? '');
+        $printerName = $this->getConfiguredPrinterName();
         if ($printerName === '') {
             return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
         }

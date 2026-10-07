@@ -289,6 +289,18 @@ $prodService = new ProductionService($erpPdo, $trzPdo);
 $scale = new ScaleService($_ENV);
 $printer = new PrintService($_ENV);
 
+function unibagNormalizePrinterProfile(?string $profile): string
+{
+    $profile = strtolower(trim((string)$profile));
+    return in_array($profile, ['default', 'zebra', 'barpos'], true) ? $profile : 'default';
+}
+
+function unibagPrinterProfileQuery(string $profile): string
+{
+    $profile = unibagNormalizePrinterProfile($profile);
+    return $profile === 'default' ? '' : ('&printer_profile=' . urlencode($profile));
+}
+
 if (handleApiRoutes($path, $method, $service, $scale, $printer, $currentOperatorName)) {
     exit;
 }
@@ -14688,7 +14700,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
     $activeCardRollId = $latestRoll ? (int)$latestRoll['id'] : 0;
     $hasReceivedRoll = $activeCardRollId > 0;
     $cardIframeSrc = $hasReceivedRoll ? ('/rolls/' . $activeCardRollId . '/label') : $previewUrl;
-    $printLangName = strtoupper($printer->getConfiguredPrintLanguage());
+    $zebraProfileQuery = '&printer_profile=zebra';
+    $barposProfileQuery = '&printer_profile=barpos';
 
     $body = '<div class="rec-header-card" style="margin-bottom:14px">
         <div class="rec-title-group">
@@ -14727,7 +14740,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         $body .= '<div style="display:flex;gap:6px;align-items:center">';
         $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:12.5px;border-radius:6px;font-weight:700;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $savedRollId . '/label?auto_print=1" target="_blank">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank" title="Imprimir directo vía comando térmico">⚡ ' . h($printLangName) . '</a>';
+            $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1' . $zebraProfileQuery . '" target="_blank" title="Imprimir directo en Zebra">⚡ Zebra</a>';
+            $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1' . $barposProfileQuery . '" target="_blank" title="Imprimir directo en Barpos">⚡ Barpos</a>';
         }
         $body .= '<button type="button" class="btn btn-delete-roll" style="background:#fee2e2;border-color:#fca5a5;color:#b91c1c;padding:6px 12px;font-size:12px;border-radius:6px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px" data-roll-id="' . (int)$savedRollId . '" data-roll-code="' . h($savedRollCode) . '" data-roll-weight="' . h($savedRollWeight) . '" title="Borrar este pesaje si hubo un error">🗑️ Borrar este pesaje (error)</button>';
         $body .= '</div></div>';
@@ -14953,7 +14967,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
         $body .= '<a class="btn" style="padding:4px 10px;font-size:12px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo térmico">⚡ ' . h($printLangName) . '</a>';
+            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1' . $zebraProfileQuery . '" target="_blank" title="Imprimir en Zebra">⚡ Zebra</a>';
+            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1' . $barposProfileQuery . '" target="_blank" title="Imprimir en Barpos">⚡ Barpos</a>';
         }
         $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño">👁️ Ver</a>';
         $body .= '<button type="button" class="btn btn-delete-roll" style="padding:4px 8px;font-size:11.5px;border-radius:6px;background:#fee2e2;border-color:#fca5a5;color:#b91c1c;display:inline-flex;align-items:center;gap:3px;font-weight:700;cursor:pointer" data-roll-id="' . (int)$r['id'] . '" data-roll-code="' . h($rollCodeStr) . '" data-roll-weight="' . h($rollWeightStr) . '" title="Borrar este pesaje si hubo error">🗑️ Borrar</button>';
@@ -14980,8 +14995,8 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
             </div>
             <div style="font-size:12px;color:#64748b;margin-top:2px">' .
               ($hasReceivedRoll
-                ? 'Etiqueta de la bobina recepcionada. Puedes re-imprimir directamente o descargar el comando ' . h($printLangName) . '.'
-                : 'Visualiza el diseño físico o imprime una muestra de prueba directamente a tu impresora térmica sin registrar datos.') . '
+                ? 'Etiqueta de la bobina recepcionada. Puedes re-imprimirla directo en Zebra o Barpos, o descargar el comando térmico.'
+                : 'Visualiza el diseño físico o prueba la salida térmica en Zebra o Barpos sin registrar datos.') . '
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
@@ -14991,17 +15006,23 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           🖨️ Imprimir Etiqueta 10x7
         </a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?server_print=1" target="_blank">
-              ⚡ ' . h($printLangName) . ' Directo
+            $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?server_print=1' . $zebraProfileQuery . '" target="_blank">
+              ⚡ Zebra Directa
+            </a>';
+            $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?server_print=1' . $barposProfileQuery . '" target="_blank">
+              ⚡ Barpos Directa
             </a>';
         }
-        $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1" download>
-          <span>⬇️</span> Comando ' . h($printLangName) . '
+        $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1' . $zebraProfileQuery . '" download>
+          <span>⬇️</span> Zebra ZPL
         </a>
-        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label" target="_blank">
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1' . $barposProfileQuery . '" download>
+          <span>⬇️</span> Barpos TSPL
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label' . $zebraProfileQuery . '" target="_blank">
           <span>🔍</span> Abrir Ampliada
         </a>
-        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '" target="_blank" title="Ver muestra sin datos reales">
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . $zebraProfileQuery) . '" target="_blank" title="Ver muestra sin datos reales">
           <span>🧪</span> Muestra sin Guardar
         </a>';
     } else {
@@ -15009,10 +15030,19 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
           Imprimir Muestra de Prueba
         </a>
-        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '&download_zpl=1" download>
-          <span>⬇️</span> Comando ' . h($printLangName) . '
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . '&server_print=1' . $zebraProfileQuery) . '" target="_blank">
+          <span>⚡</span> Zebra Directa
         </a>
-        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '" target="_blank">
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . '&server_print=1' . $barposProfileQuery) . '" target="_blank">
+          <span>⚡</span> Barpos Directa
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . '&download_zpl=1' . $zebraProfileQuery) . '" download>
+          <span>⬇️</span> Zebra ZPL
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . '&download_zpl=1' . $barposProfileQuery) . '" download>
+          <span>⬇️</span> Barpos TSPL
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . $zebraProfileQuery) . '" target="_blank">
           <span>🔍</span> Abrir Ampliada
         </a>';
     }
@@ -15467,19 +15497,33 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               divActions.appendChild(btnAuto);
 
               if (serverPrintEnabled) {
-                var btnDirect = document.createElement("a");
-                btnDirect.className = "btn secondary";
-                btnDirect.style.padding = "4px 8px";
-                btnDirect.style.fontSize = "11.5px";
-                btnDirect.style.borderRadius = "6px";
-                btnDirect.style.display = "inline-flex";
-                btnDirect.style.alignItems = "center";
-                btnDirect.style.gap = "3px";
-                btnDirect.target = "_blank";
-                btnDirect.rel = "noopener";
-                btnDirect.href = data.server_print_url || ("/rolls/" + data.id + "/label?server_print=1");
-                btnDirect.textContent = "⚡ " + (printLangLabel || "Imprimir");
-                divActions.appendChild(btnDirect);
+                var btnZebra = document.createElement("a");
+                btnZebra.className = "btn secondary";
+                btnZebra.style.padding = "4px 8px";
+                btnZebra.style.fontSize = "11.5px";
+                btnZebra.style.borderRadius = "6px";
+                btnZebra.style.display = "inline-flex";
+                btnZebra.style.alignItems = "center";
+                btnZebra.style.gap = "3px";
+                btnZebra.target = "_blank";
+                btnZebra.rel = "noopener";
+                btnZebra.href = "/rolls/" + data.id + "/label?server_print=1&printer_profile=zebra";
+                btnZebra.textContent = "⚡ Zebra";
+                divActions.appendChild(btnZebra);
+
+                var btnBarpos = document.createElement("a");
+                btnBarpos.className = "btn secondary";
+                btnBarpos.style.padding = "4px 8px";
+                btnBarpos.style.fontSize = "11.5px";
+                btnBarpos.style.borderRadius = "6px";
+                btnBarpos.style.display = "inline-flex";
+                btnBarpos.style.alignItems = "center";
+                btnBarpos.style.gap = "3px";
+                btnBarpos.target = "_blank";
+                btnBarpos.rel = "noopener";
+                btnBarpos.href = "/rolls/" + data.id + "/label?server_print=1&printer_profile=barpos";
+                btnBarpos.textContent = "⚡ Barpos";
+                divActions.appendChild(btnBarpos);
               }
 
               var btnView = document.createElement("a");
@@ -16004,7 +16048,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
     $activeCardRollId = $latestRoll ? (int)$latestRoll['id'] : 0;
     $hasReceivedRoll = $activeCardRollId > 0;
     $cardIframeSrc = $hasReceivedRoll ? ('/rolls/' . $activeCardRollId . '/label') : $previewUrl;
-    $printLangName = strtoupper($printer->getConfiguredPrintLanguage());
+    $zebraProfileQuery = '&printer_profile=zebra';
+    $barposProfileQuery = '&printer_profile=barpos';
 
     $body = '<div class="rec-header-card" style="margin-bottom:14px">
         <div class="rec-title-group">
@@ -16043,7 +16088,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         $body .= '<div style="display:flex;gap:6px;align-items:center">';
         $body .= '<a class="btn" style="background:#0284c7;color:#fff;padding:6px 14px;font-size:12.5px;border-radius:6px;font-weight:700;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $savedRollId . '/label?auto_print=1" target="_blank">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1" target="_blank" title="Imprimir directo vía comando térmico">⚡ ' . h($printLangName) . '</a>';
+            $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1' . $zebraProfileQuery . '" target="_blank" title="Imprimir directo en Zebra">⚡ Zebra</a>';
+            $body .= '<a class="btn secondary" style="padding:6px 10px;font-size:12px;border-radius:6px;font-weight:600" href="/rolls/' . $savedRollId . '/label?server_print=1' . $barposProfileQuery . '" target="_blank" title="Imprimir directo en Barpos">⚡ Barpos</a>';
         }
         $body .= '<button type="button" class="btn btn-delete-roll" style="background:#fee2e2;border-color:#fca5a5;color:#b91c1c;padding:6px 12px;font-size:12px;border-radius:6px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px" data-roll-id="' . (int)$savedRollId . '" data-roll-code="' . h($savedRollCode) . '" data-roll-weight="' . h($savedRollWeight) . '" title="Borrar este pesaje si hubo un error">🗑️ Borrar este pesaje (error)</button>';
         $body .= '</div></div>';
@@ -16269,7 +16315,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         $body .= '<td style="text-align:right"><div style="display:flex;gap:5px;justify-content:flex-end;align-items:center">';
         $body .= '<a class="btn" style="padding:4px 10px;font-size:12px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;display:inline-flex;align-items:center;gap:4px" href="/rolls/' . (int)$r['id'] . '/label?auto_print=1" target="_blank" rel="noopener">🖨️ Imprimir 10x7</a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1" target="_blank" title="Imprimir directo térmico">⚡ ' . h($printLangName) . '</a>';
+            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1' . $zebraProfileQuery . '" target="_blank" title="Imprimir en Zebra">⚡ Zebra</a>';
+            $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label?server_print=1' . $barposProfileQuery . '" target="_blank" title="Imprimir en Barpos">⚡ Barpos</a>';
         }
         $body .= '<a class="btn secondary" style="padding:4px 8px;font-size:11.5px;border-radius:6px;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . (int)$r['id'] . '/label" target="_blank" title="Ver diseño">👁️ Ver</a>';
         $body .= '<button type="button" class="btn btn-delete-roll" style="padding:4px 8px;font-size:11.5px;border-radius:6px;background:#fee2e2;border-color:#fca5a5;color:#b91c1c;display:inline-flex;align-items:center;gap:3px;font-weight:700;cursor:pointer" data-roll-id="' . (int)$r['id'] . '" data-roll-code="' . h($rollCodeStr) . '" data-roll-weight="' . h($rollWeightStr) . '" title="Borrar este pesaje si hubo error">🗑️ Borrar</button>';
@@ -16296,8 +16343,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
             </div>
             <div style="font-size:12px;color:#64748b;margin-top:2px">' .
               ($hasReceivedRoll
-                ? 'Etiqueta de la bobina recepcionada. Puedes re-imprimir directamente o descargar el comando ' . h($printLangName) . '.'
-                : 'Visualiza el diseño físico o imprime una muestra de prueba directamente a tu impresora térmica sin registrar datos.') . '
+                ? 'Etiqueta de la bobina recepcionada. Puedes re-imprimirla directo en Zebra o Barpos, o descargar el comando térmico.'
+                : 'Visualiza el diseño físico o prueba la salida térmica en Zebra o Barpos sin registrar datos.') . '
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
@@ -16307,17 +16354,23 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           🖨️ Imprimir Etiqueta 10x7
         </a>';
         if ($printer->isEnabled()) {
-            $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?server_print=1" target="_blank">
-              ⚡ ' . h($printLangName) . ' Directo
+            $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?server_print=1' . $zebraProfileQuery . '" target="_blank">
+              ⚡ Zebra Directa
+            </a>';
+            $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?server_print=1' . $barposProfileQuery . '" target="_blank">
+              ⚡ Barpos Directa
             </a>';
         }
-        $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1" download>
-          <span>⬇️</span> Comando ' . h($printLangName) . '
+        $body .= '<a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1' . $zebraProfileQuery . '" download>
+          <span>⬇️</span> Zebra ZPL
         </a>
-        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label" target="_blank">
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label?download_zpl=1' . $barposProfileQuery . '" download>
+          <span>⬇️</span> Barpos TSPL
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="/rolls/' . $activeCardRollId . '/label' . $zebraProfileQuery . '" target="_blank">
           <span>🔍</span> Abrir Ampliada
         </a>
-        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '" target="_blank" title="Ver muestra sin datos reales">
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . $zebraProfileQuery) . '" target="_blank" title="Ver muestra sin datos reales">
           <span>🧪</span> Muestra sin Guardar
         </a>';
     } else {
@@ -16325,10 +16378,19 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
           Imprimir Muestra de Prueba
         </a>
-        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '&download_zpl=1" download>
-          <span>⬇️</span> Comando ' . h($printLangName) . '
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . '&server_print=1' . $zebraProfileQuery) . '" target="_blank">
+          <span>⚡</span> Zebra Directa
         </a>
-        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl) . '" target="_blank">
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . '&server_print=1' . $barposProfileQuery) . '" target="_blank">
+          <span>⚡</span> Barpos Directa
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . '&download_zpl=1' . $zebraProfileQuery) . '" download>
+          <span>⬇️</span> Zebra ZPL
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . '&download_zpl=1' . $barposProfileQuery) . '" download>
+          <span>⬇️</span> Barpos TSPL
+        </a>
+        <a class="btn secondary" style="font-size:12px;padding:6px 12px;border-radius:8px;display:inline-flex;align-items:center;gap:5px" href="' . h($previewUrl . $zebraProfileQuery) . '" target="_blank">
           <span>🔍</span> Abrir Ampliada
         </a>';
     }
@@ -16791,19 +16853,33 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
               divActions.appendChild(btnAuto);
 
               if (serverPrintEnabled) {
-                var btnDirect = document.createElement("a");
-                btnDirect.className = "btn secondary";
-                btnDirect.style.padding = "4px 8px";
-                btnDirect.style.fontSize = "11.5px";
-                btnDirect.style.borderRadius = "6px";
-                btnDirect.style.display = "inline-flex";
-                btnDirect.style.alignItems = "center";
-                btnDirect.style.gap = "3px";
-                btnDirect.target = "_blank";
-                btnDirect.rel = "noopener";
-                btnDirect.href = data.server_print_url || ("/rolls/" + data.id + "/label?server_print=1");
-                btnDirect.textContent = "⚡ " + (printLangLabel || "Imprimir");
-                divActions.appendChild(btnDirect);
+                var btnZebra = document.createElement("a");
+                btnZebra.className = "btn secondary";
+                btnZebra.style.padding = "4px 8px";
+                btnZebra.style.fontSize = "11.5px";
+                btnZebra.style.borderRadius = "6px";
+                btnZebra.style.display = "inline-flex";
+                btnZebra.style.alignItems = "center";
+                btnZebra.style.gap = "3px";
+                btnZebra.target = "_blank";
+                btnZebra.rel = "noopener";
+                btnZebra.href = "/rolls/" + data.id + "/label?server_print=1&printer_profile=zebra";
+                btnZebra.textContent = "⚡ Zebra";
+                divActions.appendChild(btnZebra);
+
+                var btnBarpos = document.createElement("a");
+                btnBarpos.className = "btn secondary";
+                btnBarpos.style.padding = "4px 8px";
+                btnBarpos.style.fontSize = "11.5px";
+                btnBarpos.style.borderRadius = "6px";
+                btnBarpos.style.display = "inline-flex";
+                btnBarpos.style.alignItems = "center";
+                btnBarpos.style.gap = "3px";
+                btnBarpos.target = "_blank";
+                btnBarpos.rel = "noopener";
+                btnBarpos.href = "/rolls/" + data.id + "/label?server_print=1&printer_profile=barpos";
+                btnBarpos.textContent = "⚡ Barpos";
+                divActions.appendChild(btnBarpos);
               }
 
               var btnView = document.createElement("a");
@@ -23742,6 +23818,9 @@ if ($path === '/reception/test-label' && $method === 'GET') {
     $lineId = (int)($_GET['line'] ?? 0);
     $weightParam = isset($_GET['weight']) && (float)$_GET['weight'] > 0 ? (float)$_GET['weight'] : null;
     $whId = isset($_GET['warehouse_id']) ? (int)$_GET['warehouse_id'] : 0;
+    $printerProfile = unibagNormalizePrinterProfile((string)($_GET['printer_profile'] ?? 'default'));
+    $activePrinter = $printer->withProfile($printerProfile);
+    $printerProfileQuery = unibagPrinterProfileQuery($printerProfile);
 
     $line = null;
     if ($type === 'import' && $lineId > 0) {
@@ -23812,25 +23891,25 @@ if ($path === '/reception/test-label' && $method === 'GET') {
         'process_stage' => 'RAW',
         'is_sample' => true,
     ];
-    $printLanguage = $printer->getConfiguredPrintLanguage();
+    $printLanguage = $activePrinter->getConfiguredPrintLanguage();
     $printExtension = in_array($printLanguage, ['tspl', 'epl', 'zpl'], true) ? $printLanguage : 'zpl';
     if (isset($_GET['zpl']) && (string)$_GET['zpl'] === '1') {
         header('Content-Type: text/plain; charset=utf-8');
-        echo $printer->getRollPrintCommand($sampleRoll);
+        echo $activePrinter->getRollPrintCommand($sampleRoll);
         exit;
     }
     if (isset($_GET['download_zpl']) && (string)$_GET['download_zpl'] === '1') {
         $filename = 'etiqueta_muestra_10x7_' . $skuCode . '.' . $printExtension;
         header('Content-Type: text/plain; charset=utf-8');
         header('Content-Disposition: attachment; filename="' . $filename . '"');
-        echo $printer->getRollPrintCommand($sampleRoll);
+        echo $activePrinter->getRollPrintCommand($sampleRoll);
         exit;
     }
 
     $serverPrint = isset($_GET['server_print']) && (string)($_GET['server_print']) === '1';
     $serverPrintResult = null;
-    if ($serverPrint && $printer->isEnabled()) {
-        $serverPrintResult = $printer->printRollLabel($sampleRoll);
+    if ($serverPrint && $activePrinter->isEnabled()) {
+        $serverPrintResult = $activePrinter->printRollLabel($sampleRoll);
     }
 
 if (isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1') {
@@ -23858,12 +23937,12 @@ renderReceptionThermalLabel([
     'is_sample' => true,
     'auto_print' => $autoPrint,
     'print_language' => $printLanguage,
-    'printer_name' => $printer->getConfiguredPrinterName(),
-    'server_print_allowed' => $printer->isEnabled(),
-    'server_print_url' => '?server_print=1&type=' . urlencode($type) . '&line=' . $lineId,
+    'printer_name' => $activePrinter->getConfiguredPrinterName(),
+    'server_print_allowed' => $activePrinter->isEnabled(),
+    'server_print_url' => '?server_print=1&type=' . urlencode($type) . '&line=' . $lineId . $printerProfileQuery,
     'server_print_result' => $serverPrintResult,
-    'download_zpl_url' => '?download_zpl=1&type=' . urlencode($type) . '&line=' . $lineId,
-    'raw_zpl_url' => '?zpl=1&type=' . urlencode($type) . '&line=' . $lineId,
+    'download_zpl_url' => '?download_zpl=1&type=' . urlencode($type) . '&line=' . $lineId . $printerProfileQuery,
+    'raw_zpl_url' => '?zpl=1&type=' . urlencode($type) . '&line=' . $lineId . $printerProfileQuery,
     'title' => 'Etiqueta de Prueba 10x7 - ' . $skuCode,
 ]);
 exit;
@@ -23871,6 +23950,9 @@ exit;
 
 if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') {
     $id = (int)$m[1];
+    $printerProfile = unibagNormalizePrinterProfile((string)($_GET['printer_profile'] ?? 'default'));
+    $activePrinter = $printer->withProfile($printerProfile);
+    $printerProfileQuery = unibagPrinterProfileQuery($printerProfile);
     $roll = $service->getRoll($id);
     if ($roll === null) {
         http_response_code(404);
@@ -23878,26 +23960,26 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
         exit;
     }
 
-    $printLanguage = $printer->getConfiguredPrintLanguage();
+    $printLanguage = $activePrinter->getConfiguredPrintLanguage();
     $printExtension = in_array($printLanguage, ['tspl', 'epl', 'zpl'], true) ? $printLanguage : 'zpl';
     if (isset($_GET['zpl']) && (string)$_GET['zpl'] === '1') {
         header('Content-Type: text/plain; charset=utf-8');
-        echo $printer->getRollPrintCommand($roll);
+        echo $activePrinter->getRollPrintCommand($roll);
         exit;
     }
     if (isset($_GET['download_zpl']) && (string)$_GET['download_zpl'] === '1') {
         $filename = 'etiqueta_bobina_' . ($roll['roll_code'] ?: $id) . '.' . $printExtension;
         header('Content-Type: text/plain; charset=utf-8');
         header('Content-Disposition: attachment; filename="' . $filename . '"');
-        echo $printer->getRollPrintCommand($roll);
+        echo $activePrinter->getRollPrintCommand($roll);
         exit;
     }
 
     $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
     $serverPrint = isset($_GET['server_print']) && (string)$_GET['server_print'] === '1';
     $serverPrintResult = null;
-    if ($serverPrint && $printer->isEnabled()) {
-        $serverPrintResult = $printer->printRollLabel($roll);
+    if ($serverPrint && $activePrinter->isEnabled()) {
+        $serverPrintResult = $activePrinter->printRollLabel($roll);
         if (($serverPrintResult['ok'] ?? false) === true) {
             $autoPrint = false;
         }
@@ -23963,12 +24045,12 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
         'is_sample' => false,
         'auto_print' => $autoPrint,
         'print_language' => $printLanguage,
-        'printer_name' => $printer->getConfiguredPrinterName(),
-        'server_print_allowed' => $printer->isEnabled(),
-        'server_print_url' => '/rolls/' . (int)$id . '/label?server_print=1',
+        'printer_name' => $activePrinter->getConfiguredPrinterName(),
+        'server_print_allowed' => $activePrinter->isEnabled(),
+        'server_print_url' => '/rolls/' . (int)$id . '/label?server_print=1' . $printerProfileQuery,
         'server_print_result' => $serverPrintResult,
-        'download_zpl_url' => '/rolls/' . (int)$id . '/label?download_zpl=1',
-        'raw_zpl_url' => '/rolls/' . (int)$id . '/label?zpl=1',
+        'download_zpl_url' => '/rolls/' . (int)$id . '/label?download_zpl=1' . $printerProfileQuery,
+        'raw_zpl_url' => '/rolls/' . (int)$id . '/label?zpl=1' . $printerProfileQuery,
         'title' => 'Etiqueta 10x7 - ' . $barcodeValue,
     ]);
     exit;
