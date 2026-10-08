@@ -205,9 +205,14 @@ function handleProductionRoutes(
             || (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
             || stripos((string)($activeInit['type_ant_title'] ?? ''), 'flexo') !== false
             || stripos((string)($activeInit['equipo_name'] ?? ''), 'flexo') !== false);
+        $isSeri = ((int)($activeInit['equipo_prod_isprinter_seri'] ?? 0) === 1)
+            || ($equipoTypeId === 11 || $equipoTypeId === 8 || $equipoTypeId === 22)
+            || stripos((string)($activeInit['type_ant_title'] ?? ''), 'seri') !== false
+            || stripos((string)($activeInit['equipo_name'] ?? ''), 'seri') !== false
+            || stripos((string)($activeInit['equipo_name'] ?? ''), 'pulpo') !== false;
 
         $dateFilter = trim((string)($_GET['plan_date'] ?? $_GET['date'] ?? ''));
-        if ($dateFilter === '' && $isFlexo) {
+        if ($dateFilter === '' && ($isFlexo || $isSeri)) {
             $dateFilter = date('d.m.Y');
         } elseif ($dateFilter === 'all') {
             $dateFilter = null;
@@ -667,6 +672,18 @@ function handleProductionRoutes(
             $selectedPoints = array_map('intval', $_POST['autocontrol_points']);
         }
 
+        // Guardar Merma de Alistamiento si fue ingresada en el formulario
+        $mermaAmt = (float)str_replace(',', '.', (string)($_REQUEST['merma_alis_amount'] ?? 0));
+        $mermaKgs = (float)str_replace(',', '.', (string)($_REQUEST['merma_alis_kgs'] ?? 0));
+        $mermaMts = (float)str_replace(',', '.', (string)($_REQUEST['merma_alis_mts'] ?? 0));
+        $mermaComm = trim((string)($_REQUEST['merma_alis_comments'] ?? ''));
+        if ($mermaAmt > 0 || $mermaKgs > 0 || $mermaMts > 0 || $mermaComm !== '') {
+            $prodService->saveAlistamientoMerma($workerOtId, $mermaAmt, $mermaKgs, $mermaMts, $mermaComm);
+        }
+
+        // Asegurar cierre de evento de alistamiento
+        $prodService->closeOpenAperturaEvent($workerOtId);
+
         if ($submode === 'close') {
             $prodService->sendAutocontrolToSupervisor($workerOtId, $selectedPoints, $userId);
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&supervisor_notified=1');
@@ -1118,9 +1135,14 @@ function handleProductionRoutes(
             || (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
             || stripos((string)($activeInit['type_ant_title'] ?? ''), 'flexo') !== false
             || stripos((string)($activeInit['equipo_name'] ?? ''), 'flexo') !== false);
+        $isSeri = ((int)($activeInit['equipo_prod_isprinter_seri'] ?? 0) === 1)
+            || ($equipoTypeId === 11 || $equipoTypeId === 8 || $equipoTypeId === 22)
+            || stripos((string)($activeInit['type_ant_title'] ?? ''), 'seri') !== false
+            || stripos((string)($activeInit['equipo_name'] ?? ''), 'seri') !== false
+            || stripos((string)($activeInit['equipo_name'] ?? ''), 'pulpo') !== false;
 
         $dateFilter = null;
-        if ($isFlexo) {
+        if ($isFlexo || $isSeri) {
             $reqPlanDate = trim((string)($_GET['plan_date'] ?? ''));
             if ($reqPlanDate === 'all') {
                 $dateFilter = null;
@@ -1160,6 +1182,174 @@ function handleProductionRoutes(
         $query = trim((string)($_GET['q'] ?? ($_GET['query'] ?? '')));
         $tree = $query !== '' ? $prodService->getTraceabilityTree($query) : null;
         renderProductionTraceabilityScreen($query, $tree, $currentOperatorName, $plantaName);
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // SOLICITAR MATERIALES / BOBINAS EN BODEGA 3000 (Menú lateral · mid=7 y mid=8)
+    // -------------------------------------------------------------------------
+    if ($path === '/production/materials/request' && $method === 'GET') {
+        $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
+        if ($activeInit === null) {
+            renderProductionNeedMachineScreen($currentOperatorName, $plantaName);
+            return true;
+        }
+
+        $equipoId = (int)$activeInit['win_equipoid'];
+        $activeOrders = $prodService->listActiveOrdersInCourse($plantaId, $equipoId);
+        $scheduledOrders = $prodService->listScheduledOrdersForMachine($equipoId, $plantaId);
+
+        $selectedAgId = isset($_GET['agid']) ? (int)$_GET['agid'] : (int)($_GET['ag_id'] ?? 0);
+        if ($selectedAgId <= 0 && !empty($activeOrders)) {
+            $selectedAgId = (int)$activeOrders[0]['ag_id'];
+        } elseif ($selectedAgId <= 0 && !empty($scheduledOrders)) {
+            $selectedAgId = (int)$scheduledOrders[0]['ag_id'];
+        }
+
+        $selectedAgenda = $selectedAgId > 0 ? $prodService->getWorkOrderAgendaDetails($selectedAgId) : null;
+        $workerOt = ($selectedAgId > 0) ? $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $selectedAgId) : null;
+        $workerOtId = $workerOt !== null ? (int)$workerOt['id'] : 0;
+
+        $bodega3000Rolls = $prodService->listAvailableRollsInBodega3000($selectedAgId);
+        $centralRolls = ($selectedAgenda !== null) ? $prodService->listAvailableRollsForProduction(
+            null,
+            100,
+            (string)($selectedAgenda['fabric_color'] ?? ''),
+            (float)($selectedAgenda['req_operador_tela_width'] ?? 0),
+            (string)($selectedAgenda['fab_type'] ?? ''),
+            (float)($selectedAgenda['fab_mat_gramms'] ?? 0)
+        ) : [];
+
+        $assignedRolls = ($workerOtId > 0) ? ($prodService->getWorkOrderMaterialQuota($selectedAgId, $workerOtId)['assigned_rolls'] ?? []) : [];
+
+        renderProductionMaterialsRequestScreen(
+            $activeInit,
+            $activeOrders,
+            $scheduledOrders,
+            $selectedAgId,
+            $selectedAgenda,
+            $workerOtId,
+            $bodega3000Rolls,
+            $centralRolls,
+            $assignedRolls,
+            $currentOperatorName,
+            $plantaName
+        );
+        return true;
+    }
+
+    if ($path === '/production/materials/request/assign' && $method === 'POST') {
+        requireCsrf();
+        $agId = (int)($_POST['agid'] ?? 0);
+        $workerOtId = (int)($_POST['worker_ot_id'] ?? 0);
+        $actionMode = trim((string)($_POST['action_mode'] ?? 'bodega3000'));
+        $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
+        $equipoId = $activeInit !== null ? (int)$activeInit['win_equipoid'] : 0;
+
+        if ($workerOtId <= 0 && $agId > 0 && $activeInit !== null) {
+            $startRes = $prodService->startWorkerOt($agId, (int)$activeInit['id']);
+            if ($startRes['ok']) {
+                $workerOtId = (int)$startRes['worker_ot_id'];
+            }
+        }
+
+        if ($actionMode === 'manual_sin_trazabilidad') {
+            $mat = trim((string)($_POST['manual_material'] ?? 'TNT'));
+            $col = trim((string)($_POST['manual_color'] ?? ''));
+            $wCm = (float)str_replace(',', '.', (string)($_POST['manual_width'] ?? 0));
+            $kilos = (float)str_replace(',', '.', (string)($_POST['manual_kg'] ?? 0));
+            $metros = (float)str_replace(',', '.', (string)($_POST['manual_meters'] ?? 0));
+            $comm = trim((string)($_POST['manual_comments'] ?? ''));
+
+            $ident = "BOBINA-MANUAL-{$mat}" . ($col !== '' ? "-{$col}" : '');
+            if ($wCm > 0) $ident .= "-{$wCm}cm";
+
+            $res = $prodService->assignBodega3000RollToMachine(
+                $workerOtId,
+                $ident,
+                $kilos,
+                $currentOperatorName,
+                $equipoId,
+                "Material: {$mat}, Color: {$col}, Ancho: {$wCm}cm, Metros: {$metros}m. {$comm}",
+                true,
+                $agId
+            );
+            if ($res['ok']) {
+                redirectResponse('/production/materials/request?agid=' . $agId . '&saved_material=1&no_trace=1');
+            } else {
+                redirectResponse('/production/materials/request?agid=' . $agId . '&error=' . rawurlencode((string)($res['error'] ?? 'Error al cargar bobina manual.')));
+            }
+            return true;
+        } elseif ($actionMode === 'bodega3000') {
+            $rollIds = (array)($_POST['roll_ids'] ?? []);
+            if (empty($rollIds) && !empty($_POST['roll_id'])) {
+                $rollIds = [$_POST['roll_id']];
+            }
+            $weightKg = (float)str_replace(',', '.', (string)($_POST['weight_kg'] ?? 0));
+            $comments = trim((string)($_POST['comments'] ?? ''));
+
+            $lastRes = ['ok' => false, 'error' => 'No se seleccionó ninguna bobina de Bodega 3000.'];
+            foreach ($rollIds as $rid) {
+                $lastRes = $prodService->assignBodega3000RollToMachine(
+                    $workerOtId,
+                    (string)$rid,
+                    $weightKg,
+                    $currentOperatorName,
+                    $equipoId,
+                    $comments,
+                    false,
+                    $agId
+                );
+            }
+            if ($lastRes['ok']) {
+                redirectResponse('/production/materials/request?agid=' . $agId . '&saved_material=1');
+            } else {
+                redirectResponse('/production/materials/request?agid=' . $agId . '&error=' . rawurlencode((string)($lastRes['error'] ?? 'Error al cargar bobina.')));
+            }
+            return true;
+        } elseif ($actionMode === 'solicitar_central') {
+            $rollIds = (array)($_POST['roll_ids'] ?? []);
+            $comments = trim((string)($_POST['comments'] ?? ''));
+            $supUser = trim((string)($_POST['sup_user'] ?? ''));
+            $supPass = trim((string)($_POST['sup_pass'] ?? ''));
+            $reqSup = !empty($_POST['requires_supervisor']);
+            $res = $prodService->requestRollsForWorkOrder($workerOtId, $rollIds, $comments, $currentOperatorName, $supUser, $supPass, $reqSup);
+            if ($res['ok']) {
+                redirectResponse('/production/materials/request?agid=' . $agId . '&saved_material=1');
+            } else {
+                redirectResponse('/production/materials/request?agid=' . $agId . '&error=' . rawurlencode((string)($res['error'] ?? 'Error al solicitar bobinas.')));
+            }
+            return true;
+        } elseif ($actionMode === 'insumos_directos') {
+            $matType = trim((string)($_POST['material_type'] ?? 'Insumo Directo'));
+            $matQty = (float)str_replace(',', '.', (string)($_POST['material_qty'] ?? 0));
+            $matUnit = trim((string)($_POST['material_unit'] ?? 'unid'));
+            $comments = trim((string)($_POST['comments'] ?? ''));
+            $desc = "Solicitud Insumo: {$matType} - Cant: {$matQty} {$matUnit}";
+            if ($comments !== '') $desc .= " ({$comments})";
+
+            Db::erpPdo()->prepare("
+                INSERT INTO prod_worker_ot_events
+                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                VALUES
+                 (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)
+            ")->execute([
+                ':ot_id' => $workerOtId,
+                ':amt' => $matQty,
+                ':crtdat' => time(),
+                ':comments' => $desc,
+            ]);
+            redirectResponse('/production/materials/request?agid=' . $agId . '&saved_material=1');
+            return true;
+        }
+
+        redirectResponse('/production/materials/request?agid=' . $agId);
+        return true;
+    }
+
+    if ($path === '/production/materials/bodega3000' && $method === 'GET') {
+        $bodega3000Rolls = $prodService->listAvailableRollsInBodega3000(null, 300);
+        renderProductionBodega3000Screen($bodega3000Rolls, $currentOperatorName, $plantaName);
         return true;
     }
 
@@ -1375,13 +1565,13 @@ function renderProdwrkShell(
              onclick="location.href='/production/work-orders/active';">
             <i class="fa fa-fw fa-circle" style="font-size:12px;color:<?=$mid === 5 ? '#00A85A' : '#7FA8A5'?>"></i> En cursos
         </div>
-        <div style="cursor:pointer;font-size:14px;padding-left:25px;color:<?=$mid === 3 ? '#FFFFFF' : '#B8D5D3'?>;background-color:<?=$mid === 3 ? '#115452' : 'transparent'?>;padding-top:10px;padding-bottom:10px"
-             onclick="location.href='/production/work-orders/history';">
-            <i class="fa fa-fw fa-circle" style="font-size:12px;color:<?=$mid === 3 ? '#00A85A' : '#7FA8A5'?>"></i> Historico
+        <div style="cursor:pointer;font-size:14px;padding-left:25px;color:<?=$mid === 7 ? '#FFFFFF' : '#B8D5D3'?>;background-color:<?=$mid === 7 ? '#115452' : 'transparent'?>;padding-top:10px;padding-bottom:10px"
+             onclick="location.href='/production/materials/request';">
+            <i class="fa fa-fw fa-dolly" style="font-size:12px;color:<?=$mid === 7 ? '#00A85A' : '#7FA8A5'?>"></i> Solicitar materiales
         </div>
-        <div style="cursor:pointer;font-size:14px;padding-left:25px;color:<?=$mid === 6 ? '#FFFFFF' : '#B8D5D3'?>;background-color:<?=$mid === 6 ? '#115452' : 'transparent'?>;padding-top:10px;padding-bottom:10px"
-             onclick="location.href='/production/traceability';">
-            <i class="fa fa-fw fa-sitemap" style="font-size:12px;color:<?=$mid === 6 ? '#00A85A' : '#7FA8A5'?>"></i> Trazabilidad 360°
+        <div style="cursor:pointer;font-size:14px;padding-left:25px;color:<?=$mid === 8 ? '#FFFFFF' : '#B8D5D3'?>;background-color:<?=$mid === 8 ? '#115452' : 'transparent'?>;padding-top:10px;padding-bottom:10px"
+             onclick="location.href='/production/materials/bodega3000';">
+            <i class="fa fa-fw fa-warehouse" style="font-size:12px;color:<?=$mid === 8 ? '#00A85A' : '#7FA8A5'?>"></i> Bobinas Bodega 3000
         </div>
         
         <div style="clear:both;height:12px"></div>
@@ -1540,12 +1730,21 @@ function renderProductionOperatorConsole(
         }
     }
 
+    if (isset($_GET['end_alis']) || $mode === 'autocontrol') {
+        if ($workerOtId > 0) {
+            $prodServiceInstance = new ProductionService(Db::erpPdo(), Db::trzPdo());
+            $prodServiceInstance->closeOpenAperturaEvent($workerOtId);
+            $hasAlis = true;
+            $alisStatus['has_alis'] = true;
+        }
+    }
+
     $hasApertura = !empty($alisStatus['has_apertura']);
-    $hasAlis = !empty($alisStatus['has_alis']);
+    $hasAlis = !empty($alisStatus['has_alis']) || isset($_GET['end_alis']) || ($mode === 'autocontrol');
     $superInputs = (int)($autoctrlStatus['super_inputs'] ?? 0);
     $superPending = !empty($autoctrlStatus['super_pending']);
     // Rebobinadora no utiliza autocontrol
-    $gotoAutocontrol = (!$isRebobinadora && $hasAlis && !empty($autoctrlStatus['goto_autocontrol']));
+    $gotoAutocontrol = (!$isRebobinadora && ($hasAlis || $mode === 'autocontrol') && (!empty($autoctrlStatus['goto_autocontrol']) || $mode === 'autocontrol'));
 
     // Formatear colores exactamente como en autocontrol.form.php (Foto 3)
     $printcolors = '';
@@ -2251,6 +2450,42 @@ function renderProductionOperatorConsole(
                 <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
                 <input type="hidden" name="mode" value="autoctrlsave">
                 <input type="hidden" name="submode" id="autoctrl_submode" value="close">
+
+                <?php
+                $savedAlisMerma = ($workerOtId > 0) ? (new ProductionService(Db::erpPdo(), Db::trzPdo()))->getAlistamientoMerma($workerOtId) : null;
+                $defaultAlisAmt = $savedAlisMerma['amount'] ?? '';
+                $defaultAlisKgs = $savedAlisMerma['kgs'] ?? '';
+                $defaultAlisMts = $savedAlisMerma['mts'] ?? '';
+                $defaultAlisComm = $savedAlisMerma['comments'] ?? '';
+                ?>
+                <div style="background:#FFFBEB;border:1.5px solid #FCD34D;border-radius:6px;padding:16px;margin-bottom:15px">
+                    <div style="font-weight:bold;font-size:14px;color:#92400E;margin-bottom:6px;display:flex;align-items:center;gap:8px">
+                        <i class="fa fa-balance-scale" style="font-size:18px"></i> Registro de Merma de Alistamiento (Setup / Puesta a Punto)
+                    </div>
+                    <div style="font-size:12.5px;color:#B45309;margin-bottom:12px;line-height:1.4">
+                        Indique la merma generada durante el alistamiento y calibración de la máquina. Estos valores se transferirán automáticamente a la merma de la OT al <b>Finalizar Producción</b>, por lo que no tendrá que volver a acordarse ni ingresarla al terminar el turno.
+                    </div>
+                    <table border="0" cellpadding="6" cellspacing="0" style="width:100%">
+                    <tr>
+                        <td width="25%" style="padding:4px">
+                            <label style="display:block;font-size:11.5px;font-weight:bold;color:#78350F;margin-bottom:3px">Bolsas / Unidades:</label>
+                            <input type="number" step="1" name="merma_alis_amount" class="inptxt" style="width:100%;font-weight:bold;background:#fff" placeholder="0" value="<?=$defaultAlisAmt > 0 ? (int)$defaultAlisAmt : ''?>">
+                        </td>
+                        <td width="25%" style="padding:4px">
+                            <label style="display:block;font-size:11.5px;font-weight:bold;color:#78350F;margin-bottom:3px">Kilos (kg):</label>
+                            <input type="number" step="0.1" name="merma_alis_kgs" class="inptxt" style="width:100%;font-weight:bold;background:#fff" placeholder="0.0" value="<?=$defaultAlisKgs > 0 ? $defaultAlisKgs : ''?>">
+                        </td>
+                        <td width="25%" style="padding:4px">
+                            <label style="display:block;font-size:11.5px;font-weight:bold;color:#78350F;margin-bottom:3px">Metros (m):</label>
+                            <input type="number" step="1" name="merma_alis_mts" class="inptxt" style="width:100%;font-weight:bold;background:#fff" placeholder="0" value="<?=$defaultAlisMts > 0 ? (int)$defaultAlisMts : ''?>">
+                        </td>
+                        <td width="25%" style="padding:4px">
+                            <label style="display:block;font-size:11.5px;font-weight:bold;color:#78350F;margin-bottom:3px">Observación / Causa:</label>
+                            <input type="text" name="merma_alis_comments" class="inptxt" style="width:100%;background:#fff" placeholder="Ej: Ajuste de registro, calibración..." value="<?=htmlspecialchars((string)$defaultAlisComm)?>">
+                        </td>
+                    </tr>
+                    </table>
+                </div>
 
                 <table border="0" width="100%" cellpadding="0" cellspacing="0">
                 <tr>
@@ -4379,6 +4614,13 @@ function renderProductionOperatorConsole(
                 $repairMap[(int)$du['evt_repair_typeid']] = $du;
             }
         }
+        // Pre-llenar automáticamente la Merma de Alistamiento (Tipo 9: Ajuste / Aprobación) registrada en autocontrol
+        if ($workerOtId > 0 && empty($mermaMap[9])) {
+            $alisMerma = $prodServiceInstance->getAlistamientoMerma($workerOtId);
+            if ($alisMerma !== null && ((float)($alisMerma['evt_amount'] ?? 0) > 0 || (float)($alisMerma['evt_kgstounits'] ?? 0) > 0 || (float)($alisMerma['evt_mtstounits'] ?? 0) > 0 || trim((string)($alisMerma['evt_comments'] ?? '')) !== '')) {
+                $mermaMap[9] = $alisMerma;
+            }
+        }
         $valAmount = (float)($currentRefEvt['evt_amount'] ?? 0);
         $valAmount2 = (float)($currentRefEvt['evt_amount2'] ?? 0);
         $valBobinaKg = (float)($currentRefEvt['prod_bobina_kg'] ?? 0);
@@ -4834,7 +5076,7 @@ function renderProductionOperatorConsole(
                         </td>
                         <td width="50%" style="padding-left:5px" align="right">
                             <?php if ($isEvtOpen): ?>
-                                <div class="btnorange" onclick="document.getElementById('ap_submode').value='end';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 16px;font-weight:bold">
+                                <div class="btnorange" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1';" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 16px;font-weight:bold">
                                     <i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar alistamiento / Ir a Autocontrol
                                 </div>
                                 <div class="btngrey" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 14px">
@@ -6891,6 +7133,13 @@ function renderProductionOperatorConsole(
         <!-- ============================================================== -->
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;margin-bottom:10px">
         <tr>
+            <?php if (!$hasAlis && $hasApertura && !$isRebobinadora): ?>
+                <td style="padding-right:4px">
+                    <div class="btnorange" style="background:#E1A500;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1'">
+                        <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> ⏹️ Terminar alistamiento / Autocontrol&nbsp;</nobr>
+                    </div>
+                </td>
+            <?php endif; ?>
             <?php if ($hasAlis || $isSeri || $isRebobinadora): ?>
                 <?php if ($isRebobinadora): ?>
                     <td style="padding-right:4px">
@@ -7079,8 +7328,8 @@ function renderProductionOperatorConsole(
                             <?php if ($end === 0): ?>
                                 <?php if ($ev['evt_type'] === 'apertura'): ?>
                                     <div class="btnorange" style="padding:4px 10px;font-size:12px;display:inline-block;cursor:pointer"
-                                         onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=apertura&refid=<?=$ev['id']?>'">
-                                        <i class="fa fa-stop"></i> Terminar
+                                         onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1'">
+                                        <i class="fa fa-stop"></i> Terminar Alistamiento / Autocontrol
                                     </div>
                                 <?php else: ?>
                                     <div class="btnorange" style="padding:4px 10px;font-size:12px;display:inline-block;cursor:pointer"
@@ -7563,6 +7812,11 @@ function renderProductionNewWorkOrderScreen(
         || (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
         || stripos((string)($activeInit['type_ant_title'] ?? ''), 'flexo') !== false
         || stripos((string)($activeInit['equipo_name'] ?? ''), 'flexo') !== false);
+    $isSeri = ((int)($activeInit['equipo_prod_isprinter_seri'] ?? 0) === 1)
+        || ($equipoTypeId === 11 || $equipoTypeId === 8 || $equipoTypeId === 22)
+        || stripos((string)($activeInit['type_ant_title'] ?? ''), 'seri') !== false
+        || stripos((string)($activeInit['equipo_name'] ?? ''), 'seri') !== false
+        || stripos((string)($activeInit['equipo_name'] ?? ''), 'pulpo') !== false;
 
     ob_start();
     ?>
@@ -7855,6 +8109,171 @@ function renderProductionNewWorkOrderScreen(
             </tbody>
             </table>
         </div>
+    <?php elseif ($isSeri): ?>
+        <!-- ============================================================== -->
+        <!-- DISEÑO ESPECÍFICO SERIGRAFÍA: Iniciar nueva OT                 -->
+        <!-- ============================================================== -->
+        <div style="font-size:20px;margin-bottom:10px"><b>Ordenes de trabajo</b></div>
+        <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
+        <tr>
+            <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
+                <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
+                <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
+                <b>Iniciar nueva OT</b> en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Serigrafía'))?></b>
+            </td>
+        </tr>
+        </table>
+
+        <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+                <div style="font-size:15px;font-weight:bold;color:#115452">
+                    <i class="fa fa-fw fa-paint-brush"></i> OTs Programadas para Serigrafía
+                    <?php if (!empty($dateFilter)): ?>
+                        <span style="font-size:13px;font-weight:normal;color:#666666;margin-left:8px">
+                            (Fecha: <b><?=htmlspecialchars($dateFilter)?></b>)
+                        </span>
+                    <?php else: ?>
+                        <span style="font-size:13px;font-weight:normal;color:#666666;margin-left:8px">
+                            (Todas las fechas)
+                        </span>
+                    <?php endif; ?>
+                </div>
+
+                <!-- Filtro rápido por fecha -->
+                <div style="display:flex;align-items:center;gap:8px">
+                    <form method="get" action="/production/work-orders/new" style="margin:0;display:inline-flex;align-items:center;gap:6px">
+                        <label style="font-size:12px;color:#64748B;font-weight:600"><i class="fa fa-calendar-alt"></i> Fecha:</label>
+                        <input type="date" name="plan_date" value="<?= !empty($dateFilter) && preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $dateFilter, $mD) ? "{$mD[3]}-{$mD[2]}-{$mD[1]}" : date('Y-m-d') ?>" style="padding:4px 8px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px" onchange="this.form.submit()">
+                        <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
+                            <a href="/production/work-orders/new" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
+                        <?php endif; ?>
+                        <?php if (!empty($dateFilter)): ?>
+                            <a href="/production/work-orders/new?plan_date=all" class="btngrey" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Todas</a>
+                        <?php else: ?>
+                            <a href="/production/work-orders/new" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
+                        <?php endif; ?>
+                    </form>
+                </div>
+            </div>
+            <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1050px">
+            <colgroup>
+                <col width="90">
+                <col width="75">
+                <col width="160">
+                <col width="180">
+                <col width="75">
+                <col width="110">
+                <col width="150">
+                <col width="95">
+                <col width="95">
+                <col width="65">
+                <col width="110">
+            </colgroup>
+            <thead>
+                <tr>
+                    <td class="tdheader">N° C.C.</td>
+                    <td class="tdheader">N° O.T.</td>
+                    <td class="tdheader">Cliente</td>
+                    <td class="tdheader">Diseño</td>
+                    <td class="tdheader" align="center">Material</td>
+                    <td class="tdheader">Medidas</td>
+                    <td class="tdheader">Colores</td>
+                    <td class="tdheader" align="right">Contador</td>
+                    <td class="tdheader" align="right">Cantidad Bolsas</td>
+                    <td class="tdheader" align="center">Imagen</td>
+                    <td class="tdheader" align="center">Opciones</td>
+                </tr>
+            </thead>
+            <tbody>
+            <?php if (empty($scheduledOrders)): ?>
+                <tr>
+                    <td colspan="11" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                        <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
+                        No hay órdenes de trabajo planificadas para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
+                        <div style="margin-top:10px">
+                            <a href="/production/work-orders/new?plan_date=all" class="btnblue" style="font-size:12px;text-decoration:none;padding:5px 14px;display:inline-block">
+                                <i class="fa fa-list"></i> Ver todas las órdenes de la agenda
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+            <?php else: ?>
+                <?php foreach ($scheduledOrders as $so):
+                    $imgHash = trim((string)($so['fab_design_imagehash'] ?? $so['item_img_hash'] ?? ''));
+                    $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
+                    $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
+                    
+                    $prodSku = trim((string)($so['item_number_prod'] ?? ''));
+                    $prodTitle = trim((string)($so['item_title'] ?? ''));
+                    $designName = trim((string)($so['fab_design_name'] ?? ''));
+                    $fullDesign = ($prodSku !== '' && $prodTitle !== '') ? "{$prodSku} | {$prodTitle}" : ($prodTitle ?: ($prodSku ?: ($designName ?: '-')));
+                    
+                    $w = (int)($so['fab_med_width'] ?? 0);
+                    $h = (int)($so['fab_med_height'] ?? 0);
+                    $fuelle = (int)($so['fab_med_fuelle'] ?? 0);
+                    $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : '-';
+                    $mat = !empty($so['fab_type']) ? (string)$so['fab_type'] : 'TNT';
+                    
+                    $colores = [];
+                    for ($i = 1; $i <= 6; $i++) {
+                        $c = trim((string)($so["fab_print_colordesc_{$i}"] ?? ''));
+                        if ($c !== '') {
+                            $colores[] = $c;
+                        }
+                    }
+                    
+                    $cantBolsas = (float)($so['ag_amount'] ?? 0);
+                    $contador = (float)($so['seri_contador'] ?? 0);
+                ?>
+                    <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['prd_number'])?></b></td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['cust_name'])?></b></td>
+                        <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($fullDesign)?></td>
+                        <td class="tdnrm" align="center">
+                            <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
+                        </td>
+                        <td class="tdnrm" style="white-space:nowrap"><?=htmlspecialchars($medidasStr)?></td>
+                        <td class="tdnrm">
+                            <?php if (empty($colores)): ?>
+                                <span style="color:#94A3B8;font-size:12px"><i>Sin colores</i></span>
+                            <?php else: ?>
+                                <div style="display:flex;flex-direction:column;gap:2px">
+                                    <?php foreach ($colores as $idx => $colorName): ?>
+                                        <span style="font-size:11px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:3px;padding:1px 5px;color:#334155;white-space:nowrap">
+                                            <b><?=($idx + 1)?>:</b> <?=htmlspecialchars($colorName)?>
+                                        </span>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+                        </td>
+                        <td class="tdnrm" align="right">
+                            <b style="color:#0F766E"><?=number_format($contador, 0, ',', '.')?></b>
+                        </td>
+                        <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                        <td class="tdnrm" align="center">
+                            <?php if ($hasImg): ?>
+                                <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
+                                    <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+                                    <i class="fa fa-search-plus" style="color:#0284C7;font-size:11px"></i>
+                                </div>
+                            <?php else: ?>
+                                <span style="color:#94A3B8;font-size:12px"><i>Sin foto</i></span>
+                            <?php endif; ?>
+                        </td>
+                        <td class="tdnrm" align="center">
+                            <form method="post" action="/production/work-orders/init" style="margin:0">
+                                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
+                                <button type="submit" class="btngreen" style="padding:6px 14px"><i class="fa fa-play"></i> Iniciar OT</button>
+                            </form>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php endif; ?>
+            </tbody>
+            </table>
+        </div>
     <?php else: ?>
         <!-- ============================================================== -->
         <!-- FORMATO ESTÁNDAR / LEGACY DE UNIBAG PARA OTRAS MÁQUINAS         -->
@@ -8041,6 +8460,11 @@ function renderProductionActiveOrdersScreen(
         || (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
         || stripos((string)($activeInit['type_ant_title'] ?? ''), 'flexo') !== false
         || stripos((string)($activeInit['equipo_name'] ?? ''), 'flexo') !== false);
+    $isSeri = ((int)($activeInit['equipo_prod_isprinter_seri'] ?? 0) === 1)
+        || ($equipoTypeId === 11 || $equipoTypeId === 8 || $equipoTypeId === 22)
+        || stripos((string)($activeInit['type_ant_title'] ?? ''), 'seri') !== false
+        || stripos((string)($activeInit['equipo_name'] ?? ''), 'seri') !== false
+        || stripos((string)($activeInit['equipo_name'] ?? ''), 'pulpo') !== false;
 
     ob_start();
     ?>
@@ -8312,6 +8736,169 @@ function renderProductionActiveOrdersScreen(
                             <?php endif; ?>
                         </td>
                         <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
+                        <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                        <td class="tdnrm" align="center">
+                            <?php if ($hasImg): ?>
+                                <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$row['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$row['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
+                                    <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+                                    <i class="fa fa-search-plus" style="color:#0284C7;font-size:11px"></i>
+                                </div>
+                            <?php else: ?>
+                                <span style="color:#94A3B8;font-size:12px"><i>Sin foto</i></span>
+                            <?php endif; ?>
+                        </td>
+                        <td class="tdnrm" align="center">
+                            <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 14px;text-decoration:none">
+                                <i class="fa fa-desktop"></i> Operar
+                            </a>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php endif; ?>
+            </tbody>
+            </table>
+        </div>
+    <?php elseif ($isSeri): ?>
+        <!-- ============================================================== -->
+        <!-- DISEÑO ESPECÍFICO SERIGRAFÍA: En curso                         -->
+        <!-- ============================================================== -->
+        <div style="font-size:20px;margin-bottom:10px"><b>Ordenes de trabajo</b></div>
+        <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
+        <tr>
+            <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
+                <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
+                <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
+                <b>En curso</b> en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Serigrafía'))?></b>
+            </td>
+        </tr>
+        </table>
+
+        <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+                <div style="font-size:15px;font-weight:bold;color:#115452">
+                    <i class="fa fa-fw fa-paint-brush"></i> OTs En Curso para Serigrafía
+                    <?php if (!empty($dateFilter)): ?>
+                        <span style="font-size:13px;font-weight:normal;color:#666666;margin-left:8px">
+                            (Fecha: <b><?=htmlspecialchars($dateFilter)?></b>)
+                        </span>
+                    <?php else: ?>
+                        <span style="font-size:13px;font-weight:normal;color:#666666;margin-left:8px">
+                            (Todas las fechas)
+                        </span>
+                    <?php endif; ?>
+                </div>
+
+                <!-- Filtro rápido por fecha -->
+                <div style="display:flex;align-items:center;gap:8px">
+                    <form method="get" action="/production/work-orders/active" style="margin:0;display:inline-flex;align-items:center;gap:6px">
+                        <label style="font-size:12px;color:#64748B;font-weight:600"><i class="fa fa-calendar-alt"></i> Fecha:</label>
+                        <input type="date" name="plan_date" value="<?= !empty($dateFilter) && preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $dateFilter, $mD) ? "{$mD[3]}-{$mD[2]}-{$mD[1]}" : date('Y-m-d') ?>" style="padding:4px 8px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px" onchange="this.form.submit()">
+                        <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
+                            <a href="/production/work-orders/active" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
+                        <?php endif; ?>
+                        <?php if (!empty($dateFilter)): ?>
+                            <a href="/production/work-orders/active?plan_date=all" class="btngrey" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Todas</a>
+                        <?php else: ?>
+                            <a href="/production/work-orders/active" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
+                        <?php endif; ?>
+                    </form>
+                </div>
+            </div>
+            <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1050px">
+            <colgroup>
+                <col width="90">
+                <col width="75">
+                <col width="160">
+                <col width="180">
+                <col width="75">
+                <col width="110">
+                <col width="150">
+                <col width="95">
+                <col width="95">
+                <col width="65">
+                <col width="110">
+            </colgroup>
+            <thead>
+                <tr>
+                    <td class="tdheader">N° C.C.</td>
+                    <td class="tdheader">N° O.T.</td>
+                    <td class="tdheader">Cliente</td>
+                    <td class="tdheader">Diseño</td>
+                    <td class="tdheader" align="center">Material</td>
+                    <td class="tdheader">Medidas</td>
+                    <td class="tdheader">Colores</td>
+                    <td class="tdheader" align="right">Contador</td>
+                    <td class="tdheader" align="right">Cantidad Bolsas</td>
+                    <td class="tdheader" align="center">Imagen</td>
+                    <td class="tdheader" align="center">Opciones</td>
+                </tr>
+            </thead>
+            <tbody>
+            <?php if (empty($activeList)): ?>
+                <tr>
+                    <td colspan="11" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                        <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
+                        No hay órdenes en curso para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
+                        <div style="margin-top:10px">
+                            <a href="/production/work-orders/active?plan_date=all" class="btnblue" style="font-size:12px;text-decoration:none;padding:5px 14px;display:inline-block">
+                                <i class="fa fa-list"></i> Ver todas las órdenes de la agenda
+                            </a>
+                        </div>
+                    </td>
+                </tr>
+            <?php else: ?>
+                <?php foreach ($activeList as $row):
+                    $imgHash = trim((string)($row['fab_design_imagehash'] ?? $row['item_img_hash'] ?? ''));
+                    $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
+                    $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
+                    
+                    $prodSku = trim((string)($row['item_number_prod'] ?? ''));
+                    $prodTitle = trim((string)($row['item_title'] ?? ''));
+                    $designName = trim((string)($row['fab_design_name'] ?? ''));
+                    $fullDesign = ($prodSku !== '' && $prodTitle !== '') ? "{$prodSku} | {$prodTitle}" : ($prodTitle ?: ($prodSku ?: ($designName ?: '-')));
+                    
+                    $w = (int)($row['fab_med_width'] ?? 0);
+                    $h = (int)($row['fab_med_height'] ?? 0);
+                    $fuelle = (int)($row['fab_med_fuelle'] ?? 0);
+                    $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : '-';
+                    $mat = !empty($row['fab_type']) ? (string)$row['fab_type'] : 'TNT';
+                    
+                    $colores = [];
+                    for ($i = 1; $i <= 6; $i++) {
+                        $c = trim((string)($row["fab_print_colordesc_{$i}"] ?? ''));
+                        if ($c !== '') {
+                            $colores[] = $c;
+                        }
+                    }
+                    
+                    $cantBolsas = (float)($row['ag_amount'] ?? 0);
+                    $contador = (float)($row['seri_contador'] ?? 0);
+                ?>
+                    <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$row['req_number'])?></b></td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$row['prd_number'])?></b></td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$row['cust_name'])?></b></td>
+                        <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($fullDesign)?></td>
+                        <td class="tdnrm" align="center">
+                            <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
+                        </td>
+                        <td class="tdnrm" style="white-space:nowrap"><?=htmlspecialchars($medidasStr)?></td>
+                        <td class="tdnrm">
+                            <?php if (empty($colores)): ?>
+                                <span style="color:#94A3B8;font-size:12px"><i>Sin colores</i></span>
+                            <?php else: ?>
+                                <div style="display:flex;flex-direction:column;gap:2px">
+                                    <?php foreach ($colores as $idx => $colorName): ?>
+                                        <span style="font-size:11px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:3px;padding:1px 5px;color:#334155;white-space:nowrap">
+                                            <b><?=($idx + 1)?>:</b> <?=htmlspecialchars($colorName)?>
+                                        </span>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+                        </td>
+                        <td class="tdnrm" align="right">
+                            <b style="color:#0F766E"><?=number_format($contador, 0, ',', '.')?></b>
+                        </td>
                         <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
                         <td class="tdnrm" align="center">
                             <?php if ($hasImg): ?>
@@ -8904,3 +9491,698 @@ function renderProductionTraceabilityScreen(
 
     renderProdwrkShell('Trazabilidad ' . htmlspecialchars($query), $body, 6, $operatorName, $plantaName);
 }
+
+// =============================================================================
+// PANTALLA: SOLICITAR / CARGAR MATERIALES A LA MÁQUINA (mid=7)
+// =============================================================================
+function renderProductionMaterialsRequestScreen(
+    array $activeInit,
+    array $activeOrders,
+    array $scheduledOrders,
+    int $selectedAgId,
+    ?array $selectedAgenda,
+    int $workerOtId,
+    array $bodega3000Rolls,
+    array $centralRolls,
+    array $assignedRolls,
+    string $operatorName,
+    string $plantaName
+): void {
+    $machineName = (string)($activeInit['equipo_name'] ?? 'MÁQUINA');
+    $allOrders = array_merge($activeOrders, $scheduledOrders);
+    // Eliminar duplicados por ag_id
+    $uniqueOrders = [];
+    foreach ($allOrders as $ord) {
+        $aid = (int)($ord['ag_id'] ?? 0);
+        if ($aid > 0 && !isset($uniqueOrders[$aid])) {
+            $uniqueOrders[$aid] = $ord;
+        }
+    }
+
+    $savedMaterial = isset($_GET['saved_material']);
+    $noTrace = isset($_GET['no_trace']);
+    $error = isset($_GET['error']) ? trim((string)$_GET['error']) : '';
+
+    $otTitle = $selectedAgenda !== null ? (string)($selectedAgenda['prd_number'] ?? $selectedAgId) : '';
+    $custName = $selectedAgenda !== null ? (string)($selectedAgenda['cust_name'] ?? '-') : '-';
+    $prodSku = $selectedAgenda !== null ? trim((string)($selectedAgenda['item_number_prod'] ?? '')) : '';
+    $prodTitle = $selectedAgenda !== null ? trim((string)($selectedAgenda['item_title'] ?? '')) : '';
+    $designName = $selectedAgenda !== null ? trim((string)($selectedAgenda['fab_design_name'] ?? '')) : '';
+    $fullDesign = ($prodSku !== '' && $prodTitle !== '') ? "{$prodSku} | {$prodTitle}" : ($prodTitle ?: ($prodSku ?: ($designName ?: '-')));
+
+    $mat = $selectedAgenda !== null ? (!empty($selectedAgenda['fab_type']) ? (string)$selectedAgenda['fab_type'] : 'TNT') : 'TNT';
+    $w = $selectedAgenda !== null ? (int)($selectedAgenda['fab_med_width'] ?? 0) : 0;
+    $h = $selectedAgenda !== null ? (int)($selectedAgenda['fab_med_height'] ?? 0) : 0;
+    $fuelle = $selectedAgenda !== null ? (int)($selectedAgenda['fab_med_fuelle'] ?? 0) : 0;
+    $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : '-';
+    $fabricColor = $selectedAgenda !== null ? (string)($selectedAgenda['fabric_color'] ?? '') : '';
+    $agAmount = $selectedAgenda !== null ? (float)($selectedAgenda['ag_amount'] ?? 0) : 0;
+
+    $colores = [];
+    if ($selectedAgenda !== null) {
+        for ($i = 1; $i <= 6; $i++) {
+            $c = trim((string)($selectedAgenda["fab_print_colordesc_{$i}"] ?? ''));
+            if ($c !== '') {
+                $colores[] = $c;
+            }
+        }
+    }
+
+    $imgHash = $selectedAgenda !== null ? trim((string)($selectedAgenda['fab_design_imagehash'] ?? $selectedAgenda['item_img_hash'] ?? '')) : '';
+    $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
+    $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
+
+    ob_start();
+    ?>
+    <div style="font-size:20px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+            <i class="fa fa-dolly" style="color:#00A85A"></i> Solicitar / Cargar Materiales a Máquina: <span style="color:#0E7572"><?=htmlspecialchars($machineName)?></span>
+        </div>
+        <div style="font-size:13px;font-weight:normal;color:#64748B">
+            <span style="background:#E2E8F0;padding:4px 10px;border-radius:4px;color:#1E293B">
+                <i class="fa fa-user"></i> <?=htmlspecialchars($operatorName)?> &bull; <i class="fa fa-building"></i> <?=htmlspecialchars($plantaName)?>
+            </span>
+        </div>
+    </div>
+
+    <?php if ($savedMaterial): ?>
+        <div style="background:#D1FAE5;border:1.5px solid #10B981;border-radius:6px;padding:12px 18px;margin-bottom:15px;color:#065F46;font-size:13px;display:flex;align-items:center;gap:10px">
+            <i class="fa fa-check-circle" style="font-size:20px;color:#059669"></i>
+            <div>
+                <b>¡Material cargado exitosamente a la máquina y operario!</b>
+                <?php if ($noTrace): ?>
+                    <span style="background:#FEF3C7;color:#92400E;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;margin-left:8px">Sin Trazabilidad Física</span>
+                    La bobina quedó registrada directamente para su uso en la orden de trabajo.
+                <?php else: ?>
+                    La bobina quedó cargada con su código de trazabilidad en Bodega 3000.
+                <?php endif; ?>
+            </div>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($error !== ''): ?>
+        <div style="background:#FEE2E2;border:1.5px solid #EF4444;border-radius:6px;padding:12px 18px;margin-bottom:15px;color:#991B1B;font-size:13px;display:flex;align-items:center;gap:10px">
+            <i class="fa fa-exclamation-triangle" style="font-size:20px;color:#DC2626"></i>
+            <div><b>Error al cargar material:</b> <?=htmlspecialchars($error)?></div>
+        </div>
+    <?php endif; ?>
+
+    <!-- ============================================================== -->
+    <!-- SECCIÓN 1: SELECCIONAR ORDEN DE TRABAJO EN PRODUCCIÓN          -->
+    <!-- ============================================================== -->
+    <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:18px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+        <div style="font-size:14px;font-weight:bold;color:#0F766E;margin-bottom:12px;display:flex;align-items:center;gap:8px">
+            <i class="fa fa-tasks"></i> 1. Seleccione la Orden de Trabajo (OT) que recibirá los materiales
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <label style="font-size:13px;color:#334155;font-weight:bold">Orden de Trabajo:</label>
+            <select class="inptxt" style="width:100%;max-width:550px;background:#FFF;font-size:13px;padding:8px" onchange="location.href='/production/materials/request?agid=' + this.value;">
+                <option value="">&lt; Seleccione una OT en producción de esta máquina &gt;</option>
+                <?php foreach ($uniqueOrders as $ord):
+                    $aid = (int)$ord['ag_id'];
+                    $pNum = (string)($ord['prd_number'] ?? $ord['ag_id']);
+                    $cName = (string)($ord['cust_name'] ?? '');
+                    $pTitle = (string)($ord['item_title'] ?? $ord['fab_design_name'] ?? '');
+                    $isSelected = ($aid === $selectedAgId);
+                ?>
+                    <option value="<?=$aid?>" <?=$isSelected ? 'selected' : ''?>>
+                        OT #<?=$pNum?> &mdash; <?=htmlspecialchars($cName)?> (<?=htmlspecialchars(mb_substr($pTitle, 0, 40))?>)
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <?php if ($selectedAgId > 0): ?>
+                <a href="/production/work-orders/operate?agid=<?=$selectedAgId?>" class="btnblue" style="text-decoration:none;padding:7px 15px;font-size:12px">
+                    <i class="fa fa-desktop"></i> Ir a Consola de la OT
+                </a>
+            <?php endif; ?>
+        </div>
+
+        <?php if ($selectedAgenda !== null): ?>
+            <!-- FICHA TÉCNICA DE LA OT SELECCIONADA -->
+            <div style="margin-top:15px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:14px">
+                <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                <colgroup>
+                    <col width="110">
+                    <col width="120">
+                    <col width="180">
+                    <col>
+                    <col width="100">
+                    <col width="120">
+                    <col width="90">
+                </colgroup>
+                <thead>
+                    <tr style="border-bottom:1px solid #CBD5E1">
+                        <td class="tdheader">N° C.C.</td>
+                        <td class="tdheader">N° O.T.</td>
+                        <td class="tdheader">Cliente</td>
+                        <td class="tdheader">Diseño / Producto</td>
+                        <td class="tdheader" align="center">Material</td>
+                        <td class="tdheader">Medidas</td>
+                        <td class="tdheader" align="center">Imagen</td>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)($selectedAgenda['req_number'] ?? '-'))?></b></td>
+                        <td class="tdnrm"><b style="color:#0F766E">OT #<?=htmlspecialchars($otTitle)?></b></td>
+                        <td class="tdnrm"><b><?=htmlspecialchars($custName)?></b></td>
+                        <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($fullDesign)?></td>
+                        <td class="tdnrm" align="center">
+                            <span style="background:#E0F2FE;color:#0369A1;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:bold"><?=htmlspecialchars($mat)?></span>
+                        </td>
+                        <td class="tdnrm" style="white-space:nowrap"><?=htmlspecialchars($medidasStr)?></td>
+                        <td class="tdnrm" align="center">
+                            <?php if ($hasImg): ?>
+                                <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars($otTitle)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Ver diseño">
+                            <?php else: ?>
+                                <span style="color:#94A3B8;font-size:12px">-</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php if (!empty($fabricColor) || !empty($colores) || $agAmount > 0): ?>
+                        <tr>
+                            <td colspan="7" style="background:#FFFFFF;padding:8px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">
+                                <?php if (!empty($fabricColor)): ?>
+                                    <span style="margin-right:15px"><b>Color Tela:</b> <span style="background:#FEF3C7;color:#92400E;padding:2px 6px;border-radius:3px"><?=htmlspecialchars($fabricColor)?></span></span>
+                                <?php endif; ?>
+                                <?php if (!empty($colores)): ?>
+                                    <span style="margin-right:15px"><b>Colores Impresión:</b> <?=htmlspecialchars(implode(', ', $colores))?></span>
+                                <?php endif; ?>
+                                <?php if ($agAmount > 0): ?>
+                                    <span><b>Cantidad Programada:</b> <b style="color:#0F766E"><?=number_format($agAmount, 0, ',', '.')?></b> bolsas</span>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
+                </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <?php if ($selectedAgId <= 0): ?>
+        <div style="background:#FFF;border:1px dashed #CBD5E1;border-radius:8px;padding:40px 20px;text-align:center;color:#64748B">
+            <i class="fa fa-arrow-up" style="font-size:32px;color:#94A3B8;margin-bottom:10px;display:block"></i>
+            Por favor, <b>seleccione una Orden de Trabajo arriba</b> para consultar las bobinas disponibles en Bodega 3000 o realizar la carga de materiales.
+        </div>
+    <?php else: ?>
+
+        <!-- ============================================================== -->
+        <!-- SECCIÓN 2: PESTAÑAS DE CARGA DE MATERIALES                     -->
+        <!-- ============================================================== -->
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05);margin-bottom:18px">
+            <div style="display:flex;border-bottom:1px solid #CBD5E1;background:#F8FAFC">
+                <button type="button" id="tab_btn_bodega3000" class="tab-btn active" onclick="switchMaterialTab('bodega3000')" style="padding:12px 20px;font-size:13px;font-weight:bold;border:none;background:#FFF;border-bottom:3px solid #00A85A;color:#065F46;cursor:pointer;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-warehouse" style="color:#00A85A"></i> Bobinas en Bodega 3000 (<?=count($bodega3000Rolls)?>)
+                </button>
+                <button type="button" id="tab_btn_manual" class="tab-btn" onclick="switchMaterialTab('manual')" style="padding:12px 20px;font-size:13px;font-weight:bold;border:none;background:transparent;border-bottom:3px solid transparent;color:#64748B;cursor:pointer;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-bolt" style="color:#D97706"></i> Cargar Sin Trazabilidad (Saltar Trazabilidad)
+                </button>
+                <button type="button" id="tab_btn_central" class="tab-btn" onclick="switchMaterialTab('central')" style="padding:12px 20px;font-size:13px;font-weight:bold;border:none;background:transparent;border-bottom:3px solid transparent;color:#64748B;cursor:pointer;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-truck-loading" style="color:#0284C7"></i> Solicitar de Bodega Central (100 / 200)
+                </button>
+            </div>
+
+            <!-- TAB 1: BOBINAS EN BODEGA 3000 -->
+            <div id="tab_pane_bodega3000" style="padding:18px;display:block">
+                <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:6px;padding:12px 16px;margin-bottom:15px;color:#065F46;font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+                    <div>
+                        <i class="fa fa-info-circle" style="color:#059669"></i>
+                        <b>Bobinas actualmente ubicadas en Bodega 3000 (Planta / Insumos en Producción).</b>
+                        Estas bobinas ya fueron trasladadas a producción y pueden cargarse directamente a la máquina y operario con 1 clic.
+                    </div>
+                    <div>
+                        <input type="text" id="filter_b3000" placeholder="🔍 Buscar por código, color o descripción..." class="inptxt" style="width:260px;font-size:12px;padding:6px 10px" onkeyup="filterTable('tbl_b3000', this.value)">
+                    </div>
+                </div>
+
+                <div style="overflow-x:auto">
+                    <table id="tbl_b3000" border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:980px">
+                    <colgroup>
+                        <col width="140">
+                        <col width="90">
+                        <col>
+                        <col width="100">
+                        <col width="110">
+                        <col width="100">
+                        <col width="110">
+                        <col width="130">
+                        <col width="140">
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <td class="tdheader">Código / SKU</td>
+                            <td class="tdheader" align="center">Material</td>
+                            <td class="tdheader">Descripción de Tela</td>
+                            <td class="tdheader">Color</td>
+                            <td class="tdheader" align="center">Ancho / Gramaje</td>
+                            <td class="tdheader" align="right">Metros</td>
+                            <td class="tdheader" align="right">Kilos Disp.</td>
+                            <td class="tdheader" align="center">Compatibilidad</td>
+                            <td class="tdheader" align="center">Acción</td>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php if (empty($bodega3000Rolls)): ?>
+                        <tr>
+                            <td colspan="9" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                                <i class="fa fa-box-open" style="font-size:28px;color:#94A3B8;margin-bottom:8px;display:block"></i>
+                                No hay bobinas registradas actualmente en Bodega 3000.<br>
+                                Puede cargar una bobina manual en la pestaña <b>"Cargar Sin Trazabilidad"</b> o solicitar bobinas desde la Bodega Central (100 / 200).
+                            </td>
+                        </tr>
+                    <?php else: ?>
+                        <?php foreach ($bodega3000Rolls as $bRoll):
+                            $rCode = (string)($bRoll['roll_code'] ?? $bRoll['sku_code'] ?? '-');
+                            $rMat = (string)($bRoll['roll_material'] ?? 'TNT');
+                            $rDesc = (string)($bRoll['sku_desc'] ?? '-');
+                            $rCol = (string)($bRoll['color'] ?? '-');
+                            $rW = (float)($bRoll['width_cm'] ?? round(($bRoll['width_mm'] ?? 0) / 10));
+                            $rGramms = (int)($bRoll['microns'] ?? 80);
+                            $rMts = (float)($bRoll['meters'] ?? 0);
+                            $rKg = (float)($bRoll['weight_kg'] ?? $bRoll['current_weight_kg'] ?? 0);
+                            $isCompat = !empty($bRoll['is_compatible']);
+                            $rawId = (string)($bRoll['id'] ?? $bRoll['raw_id'] ?? '');
+                        ?>
+                            <tr style="<?=$isCompat ? 'background-color:#F0FDF4' : ''?>" onmouseover="this.style.backgroundColor='#E6F4EA'" onmouseout="this.style.backgroundColor='<?=$isCompat ? '#F0FDF4' : '#FFFFFF'?>'">
+                                <td class="tdnrm"><b><?=htmlspecialchars($rCode)?></b></td>
+                                <td class="tdnrm" align="center">
+                                    <span style="background:#E2E8F0;color:#1E293B;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:bold"><?=htmlspecialchars($rMat)?></span>
+                                </td>
+                                <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($rDesc)?></td>
+                                <td class="tdnrm"><?=htmlspecialchars($rCol)?></td>
+                                <td class="tdnrm" align="center" style="white-space:nowrap">
+                                    <?=$rW > 0 ? "{$rW} cm" : '-'?> &bull; <?=$rGramms > 0 ? "{$rGramms}g" : '-'?>
+                                </td>
+                                <td class="tdnrm" align="right"><?=$rMts > 0 ? number_format($rMts, 0, ',', '.') . ' m' : '-'?></td>
+                                <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($rKg, 1, ',', '.')?> kg</b></td>
+                                <td class="tdnrm" align="center">
+                                    <?php if ($isCompat): ?>
+                                        <span style="background:#D1FAE5;color:#065F46;border:1px solid #6EE7B7;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:bold">
+                                            ⭐ COMPATIBLE
+                                        </span>
+                                    <?php else: ?>
+                                        <span style="color:#94A3B8;font-size:11px">Stock General</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td class="tdnrm" align="center">
+                                    <form method="post" action="/production/materials/request/assign" style="margin:0" onsubmit="return confirm('¿Confirmar carga de bobina <?=htmlspecialchars(addslashes($rCode))?> (<?=$rKg?> kg) a la máquina y operario?');">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="agid" value="<?=$selectedAgId?>">
+                                        <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                        <input type="hidden" name="action_mode" value="bodega3000">
+                                        <input type="hidden" name="roll_id" value="<?=htmlspecialchars($rawId)?>">
+                                        <input type="hidden" name="weight_kg" value="<?=$rKg?>">
+                                        <button type="submit" class="btngreen" style="padding:5px 12px;font-size:12px;cursor:pointer">
+                                            <i class="fa fa-arrow-circle-right"></i> Cargar a Máquina
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                    </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- TAB 2: CARGAR SIN TRAZABILIDAD (SALTAR TRAZABILIDAD) -->
+            <div id="tab_pane_manual" style="padding:22px;display:none">
+                <div style="background:#FFFBEB;border:1.5px solid #FCD34D;border-radius:6px;padding:16px;margin-bottom:20px;color:#92400E">
+                    <div style="font-weight:bold;font-size:14px;margin-bottom:6px;display:flex;align-items:center;gap:8px">
+                        <i class="fa fa-bolt" style="font-size:18px;color:#D97706"></i> Carga Directa Sin Trazabilidad (Saltar Trazabilidad Físicamente)
+                    </div>
+                    <div style="font-size:13px;line-height:1.5">
+                        Como recién estamos iniciando la operación del sistema, esta opción le permite <b>saltarse la trazabilidad física por un momento</b> y utilizar bobinas que aún no cuenten con código QR o etiqueta de barras impresa.
+                        El material quedará cargado inmediatamente a la máquina <b><?=htmlspecialchars($machineName)?></b> y al operario <b><?=htmlspecialchars($operatorName)?></b> bajo la Bodega 3000, permitiendo continuar la producción sin demoras.
+                    </div>
+                </div>
+
+                <form method="post" action="/production/materials/request/assign" style="max-width:750px">
+                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                    <input type="hidden" name="agid" value="<?=$selectedAgId?>">
+                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                    <input type="hidden" name="action_mode" value="manual_sin_trazabilidad">
+
+                    <table border="0" width="100%" cellpadding="8" cellspacing="0">
+                    <colgroup><col width="220"><col></colgroup>
+                    <tr>
+                        <td class="tdleft">Tipo de Material *</td>
+                        <td class="tdnrm">
+                            <select name="manual_material" class="inptxt" style="width:280px;background:#FFF" required>
+                                <option value="TNT" <?=$mat === 'TNT' ? 'selected' : ''?>>TNT (Polipropileno Non-Woven)</option>
+                                <option value="PLA" <?=$mat === 'PLA' ? 'selected' : ''?>>PLA (Biodegradable)</option>
+                                <option value="PP" <?=$mat === 'PP' ? 'selected' : ''?>>PP (Polipropileno)</option>
+                                <option value="OTRO">Otro Material</option>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Color de la Tela *</td>
+                        <td class="tdnrm">
+                            <input type="text" name="manual_color" class="inptxt" style="width:280px" value="<?=htmlspecialchars($fabricColor)?>" placeholder="Ej. Blanco, Azul Marino, Negro..." required>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Ancho de la Bobina (cm)</td>
+                        <td class="tdnrm">
+                            <input type="number" step="0.5" name="manual_width" class="inptxt" style="width:180px" value="<?=$w > 0 ? $w : ''?>" placeholder="Ej. 65"> cm
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Peso Estimado / Kilos (kg) *</td>
+                        <td class="tdnrm">
+                            <input type="number" step="0.1" name="manual_kg" class="inptxt" style="width:180px" value="85" placeholder="85.0" required> kg
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Metros Lineales Aprox.</td>
+                        <td class="tdnrm">
+                            <input type="number" step="1" name="manual_meters" class="inptxt" style="width:180px" value="1100" placeholder="1100"> m
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft" valign="top">Comentarios / Observaciones</td>
+                        <td class="tdnrm">
+                            <textarea name="manual_comments" class="inptxt" style="width:100%;height:60px" placeholder="Lote de fábrica del proveedor, estado del rollo o motivo de bypass de trazabilidad..."></textarea>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm" style="padding-top:15px">
+                            <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;cursor:pointer">
+                                <i class="fa fa-play-circle"></i> Cargar a Máquina sin Trazabilidad
+                            </button>
+                        </td>
+                    </tr>
+                    </table>
+                </form>
+            </div>
+
+            <!-- TAB 3: SOLICITAR DE BODEGA CENTRAL -->
+            <div id="tab_pane_central" style="padding:18px;display:none">
+                <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:6px;padding:12px 16px;margin-bottom:15px;color:#1E40AF;font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+                    <div>
+                        <i class="fa fa-info-circle"></i> <b>Stock disponible en Bodega Central (100 PLA / 200 PP).</b>
+                        Seleccione las bobinas que requiere transferir a la máquina (Bodega 3000) para su uso en esta OT.
+                    </div>
+                    <div>
+                        <input type="text" placeholder="🔍 Filtrar stock central..." class="inptxt" style="width:240px;font-size:12px;padding:6px 10px" onkeyup="filterTable('tbl_central', this.value)">
+                    </div>
+                </div>
+
+                <div style="overflow-x:auto">
+                    <table id="tbl_central" border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:980px">
+                    <colgroup>
+                        <col width="140">
+                        <col width="90">
+                        <col>
+                        <col width="110">
+                        <col width="100">
+                        <col width="110">
+                        <col width="130">
+                        <col width="140">
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <td class="tdheader">Código / SKU</td>
+                            <td class="tdheader" align="center">Material</td>
+                            <td class="tdheader">Descripción de Tela</td>
+                            <td class="tdheader">Bodega Origen</td>
+                            <td class="tdheader">Color</td>
+                            <td class="tdheader" align="right">Kilos</td>
+                            <td class="tdheader" align="center">Compatibilidad</td>
+                            <td class="tdheader" align="center">Acción</td>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php if (empty($centralRolls)): ?>
+                        <tr><td colspan="8" class="tdnrm" style="text-align:center;padding:30px;color:#94A3B8">No se encontraron bobinas adicionales en las bodegas centrales para las características de esta OT.</td></tr>
+                    <?php else: ?>
+                        <?php foreach (array_slice($centralRolls, 0, 80) as $cRoll):
+                            $rCode = (string)($cRoll['roll_code'] ?? $cRoll['sku_code'] ?? '-');
+                            $rMat = (string)($cRoll['roll_material'] ?? 'TNT');
+                            $rDesc = (string)($cRoll['sku_desc'] ?? '-');
+                            $whName = (string)($cRoll['warehouse_name'] ?? 'Bodega Central');
+                            $rCol = (string)($cRoll['color'] ?? '-');
+                            $rKg = (float)($cRoll['weight_kg'] ?? 0);
+                            $isCompat = !empty($cRoll['is_compatible']);
+                            $rawId = (string)($cRoll['id'] ?? $cRoll['raw_id'] ?? '');
+                        ?>
+                            <tr onmouseover="this.style.backgroundColor='#F1F5F9'" onmouseout="this.style.backgroundColor='transparent'">
+                                <td class="tdnrm"><b><?=htmlspecialchars($rCode)?></b></td>
+                                <td class="tdnrm" align="center"><span style="background:#E2E8F0;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:bold"><?=htmlspecialchars($rMat)?></span></td>
+                                <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($rDesc)?></td>
+                                <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($whName)?></td>
+                                <td class="tdnrm"><?=htmlspecialchars($rCol)?></td>
+                                <td class="tdnrm" align="right"><b><?=number_format($rKg, 1, ',', '.')?> kg</b></td>
+                                <td class="tdnrm" align="center">
+                                    <?php if ($isCompat): ?>
+                                        <span style="background:#D1FAE5;color:#065F46;border:1px solid #6EE7B7;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:bold">⭐ Compatible</span>
+                                    <?php else: ?>
+                                        <span style="color:#94A3B8;font-size:11px">-</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td class="tdnrm" align="center">
+                                    <form method="post" action="/production/materials/request/assign" style="margin:0">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="agid" value="<?=$selectedAgId?>">
+                                        <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                        <input type="hidden" name="action_mode" value="solicitar_central">
+                                        <input type="hidden" name="roll_ids[]" value="<?=htmlspecialchars($rawId)?>">
+                                        <button type="submit" class="btnblue" style="padding:4px 10px;font-size:12px;cursor:pointer">
+                                            <i class="fa fa-share"></i> Solicitar
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                    </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================== -->
+        <!-- SECCIÓN 3: MATERIALES Y BOBINAS ASIGNADAS A ESTA OT            -->
+        <!-- ============================================================== -->
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+            <div style="font-size:14px;font-weight:bold;color:#0F766E;margin-bottom:12px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-history"></i> Materiales y Bobinas Asignadas / Consumidas en esta OT
+            </div>
+
+            <?php if (empty($assignedRolls)): ?>
+                <div style="padding:15px;color:#64748B;font-size:13px;font-style:italic">
+                    Aún no hay bobinas asignadas activamente a esta orden de trabajo. Utilice las pestañas superiores para cargar bobinas de Bodega 3000 o realizar una carga sin trazabilidad.
+                </div>
+            <?php else: ?>
+                <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                <thead>
+                    <tr>
+                        <td class="tdheader">Código / Identificador</td>
+                        <td class="tdheader">Descripción</td>
+                        <td class="tdheader" align="right">Peso (Kg)</td>
+                        <td class="tdheader">Operador</td>
+                        <td class="tdheader">Fecha Carga</td>
+                        <td class="tdheader" align="center">Estado</td>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($assignedRolls as $ar): ?>
+                    <tr>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)($ar['roll_code'] ?? '-'))?></b></td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($ar['sku_desc'] ?? '-'))?></td>
+                        <td class="tdnrm" align="right"><b><?=number_format((float)($ar['weight_kg'] ?? 0), 1, ',', '.')?> kg</b></td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($ar['operator_name'] ?? $operatorName))?></td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($ar['created_at'] ?? date('d.m.Y H:i')))?></td>
+                        <td class="tdnrm" align="center">
+                            <span style="background:#D1FAE5;color:#065F46;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold">CARGADA EN MÁQUINA</span>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
+
+    <?php endif; ?>
+
+    <script>
+    function switchMaterialTab(tabName) {
+        document.querySelectorAll('.tab-btn').forEach(function(btn) {
+            btn.style.background = 'transparent';
+            btn.style.color = '#64748B';
+            btn.style.borderBottom = '3px solid transparent';
+        });
+        document.getElementById('tab_pane_bodega3000').style.display = 'none';
+        document.getElementById('tab_pane_manual').style.display = 'none';
+        document.getElementById('tab_pane_central').style.display = 'none';
+
+        var activeBtn = document.getElementById('tab_btn_' + tabName);
+        if (activeBtn) {
+            activeBtn.style.background = '#FFF';
+            activeBtn.style.color = '#065F46';
+            activeBtn.style.borderBottom = '3px solid #00A85A';
+        }
+        var activePane = document.getElementById('tab_pane_' + tabName);
+        if (activePane) {
+            activePane.style.display = 'block';
+        }
+    }
+
+    function filterTable(tableId, query) {
+        query = query.toLowerCase();
+        var rows = document.querySelectorAll('#' + tableId + ' tbody tr');
+        rows.forEach(function(tr) {
+            var text = tr.innerText.toLowerCase();
+            tr.style.display = (text.indexOf(query) !== -1 || query === '') ? '' : 'none';
+        });
+    }
+    </script>
+    <?php
+    $content = ob_get_clean();
+    renderProdwrkShell('Solicitar Materiales', $content, 7, $operatorName, $plantaName);
+}
+
+// =============================================================================
+// PANTALLA: BOBINAS EN BODEGA 3000 (mid=8)
+// =============================================================================
+function renderProductionBodega3000Screen(
+    array $bodega3000Rolls,
+    string $operatorName,
+    string $plantaName
+): void {
+    $totalKgs = 0.0;
+    foreach ($bodega3000Rolls as $r) {
+        $totalKgs += (float)($r['weight_kg'] ?? $r['current_weight_kg'] ?? 0);
+    }
+
+    ob_start();
+    ?>
+    <div style="font-size:20px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+            <i class="fa fa-warehouse" style="color:#00A85A"></i> Inventario de Bobinas e Insumos en Bodega 3000 (Producción)
+        </div>
+        <div style="font-size:13px;font-weight:normal">
+            <a href="/production/materials/request" class="btngreen" style="text-decoration:none;padding:7px 16px;font-size:12px">
+                <i class="fa fa-dolly"></i> Solicitar / Cargar a OT en Curso
+            </a>
+        </div>
+    </div>
+
+    <!-- TARJETAS DE RESUMEN -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:15px;margin-bottom:18px">
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:16px;border-left:4px solid #00A85A">
+            <div style="font-size:12px;color:#64748B;font-weight:bold;text-transform:uppercase">Total Bobinas / Ítems</div>
+            <div style="font-size:24px;font-weight:bold;color:#0F766E;margin-top:4px"><?=number_format(count($bodega3000Rolls), 0, ',', '.')?></div>
+            <div style="font-size:11px;color:#94A3B8;margin-top:4px">Disponibles en Planta</div>
+        </div>
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:16px;border-left:4px solid #0284C7">
+            <div style="font-size:12px;color:#64748B;font-weight:bold;text-transform:uppercase">Stock Total en Peso</div>
+            <div style="font-size:24px;font-weight:bold;color:#0284C7;margin-top:4px"><?=number_format($totalKgs, 1, ',', '.')?> kg</div>
+            <div style="font-size:11px;color:#94A3B8;margin-top:4px">Materia prima e insumos</div>
+        </div>
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:16px;border-left:4px solid #D97706">
+            <div style="font-size:12px;color:#64748B;font-weight:bold;text-transform:uppercase">Bodegas ERP Incluidas</div>
+            <div style="font-size:14px;font-weight:bold;color:#92400E;margin-top:6px">16 (Insumos Prod) &bull; 27 (MP Prod)</div>
+            <div style="font-size:11px;color:#94A3B8;margin-top:4px">Trazabilidad sincronizada</div>
+        </div>
+    </div>
+
+    <!-- TABLA DE BOBINAS BODEGA 3000 -->
+    <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:15px;flex-wrap:wrap;gap:10px">
+            <div style="font-size:14px;font-weight:bold;color:#0F766E">
+                <i class="fa fa-boxes"></i> Detalle de Bobinas Físicas en Bodega 3000
+            </div>
+            <div>
+                <input type="text" id="filter_b3000_full" placeholder="🔍 Filtrar por código, tela, color..." class="inptxt" style="width:300px;font-size:12px;padding:6px 12px" onkeyup="filterBodega3000(this.value)">
+            </div>
+        </div>
+
+        <div style="overflow-x:auto">
+            <table id="tbl_b3000_full" border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1000px">
+            <colgroup>
+                <col width="160">
+                <col width="100">
+                <col>
+                <col width="130">
+                <col width="120">
+                <col width="110">
+                <col width="100">
+                <col width="110">
+                <col width="140">
+            </colgroup>
+            <thead>
+                <tr>
+                    <td class="tdheader">Código / Identificador</td>
+                    <td class="tdheader" align="center">Material</td>
+                    <td class="tdheader">Descripción</td>
+                    <td class="tdheader">Bodega ERP / TRZ</td>
+                    <td class="tdheader">Color</td>
+                    <td class="tdheader" align="center">Ancho / Gramaje</td>
+                    <td class="tdheader" align="right">Metros</td>
+                    <td class="tdheader" align="right">Stock / Kilos</td>
+                    <td class="tdheader" align="center">Acción</td>
+                </tr>
+            </thead>
+            <tbody>
+            <?php if (empty($bodega3000Rolls)): ?>
+                <tr>
+                    <td colspan="9" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                        <i class="fa fa-box-open" style="font-size:28px;color:#94A3B8;margin-bottom:8px;display:block"></i>
+                        No hay bobinas registradas actualmente en Bodega 3000.
+                    </td>
+                </tr>
+            <?php else: ?>
+                <?php foreach ($bodega3000Rolls as $r):
+                    $rCode = (string)($r['roll_code'] ?? $r['sku_code'] ?? '-');
+                    $rMat = (string)($r['roll_material'] ?? 'TNT');
+                    $rDesc = (string)($r['sku_desc'] ?? '-');
+                    $whName = (string)($r['warehouse_name'] ?? 'Bodega 3000');
+                    $rCol = (string)($r['color'] ?? '-');
+                    $rW = (float)($r['width_cm'] ?? round(($r['width_mm'] ?? 0) / 10));
+                    $rGramms = (int)($r['microns'] ?? 80);
+                    $rMts = (float)($r['meters'] ?? 0);
+                    $rKg = (float)($r['weight_kg'] ?? $r['current_weight_kg'] ?? 0);
+                    $rawId = (string)($r['id'] ?? $r['raw_id'] ?? '');
+                ?>
+                    <tr onmouseover="this.style.backgroundColor='#F0FDF4'" onmouseout="this.style.backgroundColor='transparent'">
+                        <td class="tdnrm"><b><?=htmlspecialchars($rCode)?></b></td>
+                        <td class="tdnrm" align="center"><span style="background:#E2E8F0;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:bold"><?=htmlspecialchars($rMat)?></span></td>
+                        <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($rDesc)?></td>
+                        <td class="tdnrm" style="font-size:11px;color:#64748B"><?=htmlspecialchars($whName)?></td>
+                        <td class="tdnrm"><?=htmlspecialchars($rCol)?></td>
+                        <td class="tdnrm" align="center" style="white-space:nowrap"><?=$rW > 0 ? "{$rW} cm" : '-'?> &bull; <?=$rGramms > 0 ? "{$rGramms}g" : '-'?></td>
+                        <td class="tdnrm" align="right"><?=$rMts > 0 ? number_format($rMts, 0, ',', '.') . ' m' : '-'?></td>
+                        <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($rKg, 1, ',', '.')?> kg</b></td>
+                        <td class="tdnrm" align="center">
+                            <a href="/production/materials/request?roll_id=<?=rawurlencode($rawId)?>" class="btnblue" style="padding:4px 10px;font-size:11px;text-decoration:none">
+                                <i class="fa fa-dolly"></i> Asignar a OT
+                            </a>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php endif; ?>
+            </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+    function filterBodega3000(query) {
+        query = query.toLowerCase();
+        var rows = document.querySelectorAll('#tbl_b3000_full tbody tr');
+        rows.forEach(function(tr) {
+            var text = tr.innerText.toLowerCase();
+            tr.style.display = (text.indexOf(query) !== -1 || query === '') ? '' : 'none';
+        });
+    }
+    </script>
+    <?php
+    $content = ob_get_clean();
+    renderProdwrkShell('Bobinas Bodega 3000', $content, 8, $operatorName, $plantaName);
+}
+

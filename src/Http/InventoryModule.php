@@ -2517,10 +2517,752 @@ function unibagRenderStockTraceabilityTreePage(ReceptionService $service, ?Produ
 }
 
 /**
+ * Renderiza la pantalla completa de Traspasos a Producción (Bodega 3000)
+ * con registro trazable de solicitante, despachador, máquina y orden de trabajo.
+ */
+function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?ProductionService $prodService, string $currentOperatorName): void
+{
+    $availableRolls = $service->listAvailableRollsForTransfer(150);
+    $workOrders = $service->listWorkOrdersForTransfer();
+    $machines = $service->listProductionMachines();
+    $pendingRequests = $service->listPendingMaterialRequestsFromProduction(30);
+    $history = $service->listProductionTransferHistory(50);
+
+    $isDispatched = isset($_GET['dispatched']) && (string)$_GET['dispatched'] === '1';
+    $dispatchedRollId = (int)($_GET['roll_id'] ?? 0);
+    $dispatchedRollCode = trim((string)($_GET['roll_code'] ?? ''));
+    $dispatchedOt = trim((string)($_GET['ot'] ?? ''));
+    $dispatchedMachine = trim((string)($_GET['machine'] ?? ''));
+    $dispatchedSolicito = trim((string)($_GET['solicito'] ?? ''));
+    $dispatchedSaco = trim((string)($_GET['saco'] ?? ''));
+    $dispatchedWeight = (float)($_GET['weight'] ?? 0);
+    $errorMessage = trim((string)($_GET['error'] ?? ''));
+
+    $prefillOt = trim((string)($_GET['prefill_ot'] ?? ''));
+    $prefillMachine = trim((string)($_GET['prefill_machine'] ?? ''));
+    $prefillSolicitante = trim((string)($_GET['prefill_solicitante'] ?? ''));
+    $prefillAmount = trim((string)($_GET['prefill_amount'] ?? ''));
+    $activeTab = trim((string)($_GET['tab'] ?? ($isDispatched ? 'historial' : 'nuevo')));
+
+    $body = '<div class="transfers-shell" style="max-width:1280px;margin:0 auto;padding:12px 16px 40px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
+
+    // Encabezado
+    $body .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e2e8f0">';
+    $body .= '  <div>';
+    $body .= '    <div style="display:flex;align-items:center;gap:10px">';
+    $body .= '      <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;letter-spacing:-0.5px">🔄 Traspasos a Producción (Bodega 3000)</h1>';
+    $body .= '      <span style="background:#e0f2fe;color:#0369a1;font-size:12px;font-weight:700;padding:3px 9px;border-radius:12px">Bodega 3000</span>';
+    $body .= '    </div>';
+    $body .= '    <p style="margin:6px 0 0;font-size:13.5px;color:#64748b;max-width:820px">';
+    $body .= '      Despacho de bobinas y materias primas a planta. Toda bobina que sale queda registrada con su <strong>código único de trazabilidad</strong>, ';
+    $body .= '      <strong>quién la solicitó</strong>, <strong>quién la sacó</strong>, <strong>para qué máquina</strong> y <strong>en qué OT</strong> se ocupará.';
+    $body .= '    </p>';
+    $body .= '  </div>';
+    $body .= '  <div style="display:flex;align-items:center;gap:8px">';
+    $body .= '    <a href="/stock" class="btn secondary" style="font-size:13px;padding:8px 14px">📦 Consulta de Stock</a>';
+    $body .= '    <a href="/stock/traceability" class="btn secondary" style="font-size:13px;padding:8px 14px">🌳 Árbol Trazabilidad</a>';
+    $body .= '  </div>';
+    $body .= '</div>';
+
+    // Banner de error si existe
+    if ($errorMessage !== '') {
+        $body .= '<div style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px 16px;border-radius:8px;margin-bottom:18px;display:flex;align-items:center;gap:10px">';
+        $body .= '  <span style="font-size:20px">⚠️</span>';
+        $body .= '  <div style="font-weight:600">' . h($errorMessage) . '</div>';
+        $body .= '</div>';
+    }
+
+    // Banner de éxito si acaba de despachar
+    if ($isDispatched) {
+        $body .= '<div style="background:linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);border:1px solid #86efac;border-radius:12px;padding:18px 22px;margin-bottom:22px;box-shadow:0 4px 12px rgba(22,101,52,0.08)">';
+        $body .= '  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px">';
+        $body .= '    <div>';
+        $body .= '      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
+        $body .= '        <span style="font-size:22px">✅</span>';
+        $body .= '        <span style="font-size:17px;font-weight:800;color:#166534">¡Traspaso a Bodega 3000 registrado exitosamente!</span>';
+        $body .= '      </div>';
+        $body .= '      <div style="font-size:13.5px;color:#14532d;line-height:1.6">';
+        $body .= '        Bobina con código de trazabilidad: <span style="display:inline-block;background:#0f172a;color:#fff;font-family:monospace;font-size:14px;font-weight:700;padding:2px 8px;border-radius:4px;letter-spacing:0.5px">' . h($dispatchedRollCode) . '</span>';
+        if ($dispatchedOt !== '') {
+            $body .= ' &nbsp;|&nbsp; <strong>OT Destino:</strong> #' . h($dispatchedOt);
+        }
+        if ($dispatchedMachine !== '') {
+            $body .= ' &nbsp;|&nbsp; <strong>Máquina:</strong> ' . h($dispatchedMachine);
+        }
+        if ($dispatchedSolicito !== '') {
+            $body .= ' &nbsp;|&nbsp; <strong>Solicitada por:</strong> ' . h($dispatchedSolicito);
+        }
+        if ($dispatchedSaco !== '') {
+            $body .= ' &nbsp;|&nbsp; <strong>Despachada por:</strong> ' . h($dispatchedSaco);
+        }
+        if ($dispatchedWeight > 0) {
+            $body .= ' &nbsp;|&nbsp; <strong>Peso:</strong> ' . number_format($dispatchedWeight, 2, ',', '.') . ' kg';
+        }
+        $body .= '      </div>';
+        $body .= '    </div>';
+        $body .= '    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+        if ($dispatchedRollId > 0) {
+            $body .= '      <a href="/rolls/' . $dispatchedRollId . '/label?server_print=1" target="_blank" class="btn" style="background:#15803d;color:#fff;font-size:13px;padding:9px 16px;border-radius:6px;font-weight:700;display:inline-flex;align-items:center;gap:6px">';
+            $body .= '        <span>🖨️ Imprimir Zebra (100×70)</span>';
+            $body .= '      </a>';
+            $body .= '      <a href="/rolls/' . $dispatchedRollId . '/label" target="_blank" class="btn secondary" style="font-size:13px;padding:9px 14px;border-radius:6px">';
+            $body .= '        <span>👁️ Vista Previa</span>';
+            $body .= '      </a>';
+        }
+        if ($dispatchedRollCode !== '') {
+            $body .= '      <a href="/stock/traceability?q=' . urlencode($dispatchedRollCode) . '" class="btn secondary" style="font-size:13px;padding:9px 14px;border-radius:6px">';
+            $body .= '        <span>🌳 Ver Árbol 360°</span>';
+            $body .= '      </a>';
+        }
+        $body .= '      <a href="/stock/transfers" class="btn" style="background:#0f172a;color:#fff;font-size:13px;padding:9px 14px;border-radius:6px">';
+        $body .= '        <span>➕ Otro Traspaso</span>';
+        $body .= '      </a>';
+        $body .= '    </div>';
+        $body .= '  </div>';
+        $body .= '</div>';
+    }
+
+    // Mini KPIs informativos
+    $body .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:20px">';
+    $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
+    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Bodega Destino</div>';
+    $body .= '    <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:2px">Bodega 3000</div>';
+    $body .= '    <div style="font-size:11.5px;color:#0369a1;margin-top:2px">Planta de Producción</div>';
+    $body .= '  </div>';
+    $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
+    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">OTs Disponibles</div>';
+    $body .= '    <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:2px">' . count($workOrders) . ' en planta</div>';
+    $body .= '    <div style="font-size:11.5px;color:#166534;margin-top:2px">Listas para recibir material</div>';
+    $body .= '  </div>';
+    $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
+    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Bobinas en Bodega Central</div>';
+    $body .= '    <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:2px">' . count($availableRolls) . ' disponibles</div>';
+    $body .= '    <div style="font-size:11.5px;color:#475569;margin-top:2px">Bodegas 100, 200 y stock TRZ</div>';
+    $body .= '  </div>';
+    $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
+    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Traspasos Recientes</div>';
+    $body .= '    <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:2px">' . count($history) . ' registrados</div>';
+    $body .= '    <div style="font-size:11.5px;color:#7c3aed;margin-top:2px">Con trazabilidad completa</div>';
+    $body .= '  </div>';
+    $body .= '</div>';
+
+    // Barra de Navegación por Pestañas
+    $body .= '<div style="display:flex;gap:8px;border-bottom:2px solid #e2e8f0;margin-bottom:20px">';
+    $body .= '  <button type="button" class="tab-btn" id="btn_tab_nuevo" onclick="switchTransferTab(\'nuevo\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
+    $body .= '    🚚 Nuevo Traspaso a Bodega 3000';
+    $body .= '  </button>';
+    $body .= '  <button type="button" class="tab-btn" id="btn_tab_solicitudes" onclick="switchTransferTab(\'solicitudes\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
+    $body .= '    📥 Solicitudes y Agenda Planta <span style="background:#e2e8f0;color:#334155;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($pendingRequests) . '</span>';
+    $body .= '  </button>';
+    $body .= '  <button type="button" class="tab-btn" id="btn_tab_historial" onclick="switchTransferTab(\'historial\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
+    $body .= '    📜 Historial & Trazabilidad <span style="background:#e2e8f0;color:#334155;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($history) . '</span>';
+    $body .= '  </button>';
+    $body .= '</div>';
+
+    // =========================================================================
+    // TAB 1: FORMULARIO DE NUEVO TRASPASO
+    // =========================================================================
+    $body .= '<div id="panel_tab_nuevo" class="transfer-panel">';
+    $body .= '  <form method="post" action="/stock/transfers" id="form_transfer_prod" onsubmit="return validateTransferForm()">';
+    $body .= '    <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+    $body .= '    <input type="hidden" name="action_mode" value="to_production">';
+    $body .= '    <input type="hidden" name="roll_id" id="hid_roll_id" value="">';
+    $body .= '    <input type="hidden" name="code" id="hid_roll_code" value="">';
+    $body .= '    <input type="hidden" name="sku" id="hid_sku" value="">';
+    $body .= '    <input type="hidden" name="sku_desc" id="hid_sku_desc" value="">';
+    $body .= '    <input type="hidden" name="from_warehouse_id" id="hid_from_wh" value="1">';
+
+    $body .= '    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:20px;align-items:start">';
+
+    // Panel Izquierdo: Selección de Bobina / Material
+    $body .= '      <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $body .= '        <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #f1f5f9">';
+    $body .= '          <span style="font-size:18px">📦</span>';
+    $body .= '          <h2 style="margin:0;font-size:16px;font-weight:800;color:#0f172a">1. Bobina o Material en Bodega Central</h2>';
+    $body .= '        </div>';
+
+    // Selector de Modo de Origen
+    $body .= '        <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">';
+    $body .= '          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#334155;cursor:pointer">';
+    $body .= '            <input type="radio" name="origin_mode" value="list" checked onchange="toggleOriginMode(\'list\')"> Bobina en Stock Bodega';
+    $body .= '          </label>';
+    $body .= '          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#334155;cursor:pointer">';
+    $body .= '            <input type="radio" name="origin_mode" value="scan" onchange="toggleOriginMode(\'scan\')"> Pistolear / Escanear Código';
+    $body .= '          </label>';
+    $body .= '          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#334155;cursor:pointer">';
+    $body .= '            <input type="radio" name="origin_mode" value="manual" onchange="toggleOriginMode(\'manual\')"> Bobina Nueva / Sin Código';
+    $body .= '          </label>';
+    $body .= '        </div>';
+
+    // Modo 1: Lista desplegable de Bobinas en Bodega
+    $body .= '        <div id="origin_block_list" style="margin-bottom:14px">';
+    $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:6px">Seleccionar Bobina de Bodega Central <span style="color:#ef4444">*</span></label>';
+    $body .= '          <select id="sel_available_roll" onchange="onAvailableRollSelected(this)" style="width:100%;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px">';
+    $body .= '            <option value="">-- Seleccionar bobina disponible --</option>';
+    foreach ($availableRolls as $ar) {
+        $rId = (int)$ar['id'];
+        $rCode = (string)$ar['roll_code'];
+        $rSku = (string)$ar['sku_code'];
+        $rDesc = (string)($ar['sku_description'] ?: $rSku);
+        $rKg = (float)$ar['weight_kg'];
+        $rWhName = (string)$ar['wh_name'];
+        $rWhId = (int)$ar['warehouse_id'];
+        $body .= '            <option value="' . $rId . '" data-id="' . $rId . '" data-code="' . h($rCode) . '" data-sku="' . h($rSku) . '" data-desc="' . h($rDesc) . '" data-kg="' . $rKg . '" data-whid="' . $rWhId . '" data-whname="' . h($rWhName) . '">';
+        $body .= h($rCode) . ' | ' . h($rSku) . ' | ' . number_format($rKg, 1, ',', '.') . ' kg (' . h($rWhName) . ')';
+        $body .= '</option>';
+    }
+    $body .= '          </select>';
+    $body .= '          <div style="font-size:11.5px;color:#64748b;margin-top:4px">Muestra bobinas activas registradas en Bodegas 100, 200 y stock TRZ.</div>';
+    $body .= '        </div>';
+
+    // Modo 2: Pistolear Código
+    $body .= '        <div id="origin_block_scan" style="display:none;margin-bottom:14px">';
+    $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:6px">Escanear / Pistolear Código de Barra o QR</label>';
+    $body .= '          <div style="display:flex;gap:8px">';
+    $body .= '            <input type="text" id="inp_scan_code" placeholder="Ej: RB-20261007-81B877..." style="flex:1;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-family:monospace">';
+    $body .= '            <button type="button" class="btn secondary" onclick="lookupScannedRoll()" style="padding:9px 14px;font-size:13px">Buscar</button>';
+    $body .= '          </div>';
+    $body .= '          <div style="font-size:11.5px;color:#64748b;margin-top:4px">Presione Enter o Buscar tras pistolear la etiqueta física.</div>';
+    $body .= '        </div>';
+
+    // Modo 3: Material nuevo sin código previo (Generar código nuevo)
+    $body .= '        <div id="origin_block_manual" style="display:none;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;margin-bottom:14px">';
+    $body .= '          <div style="font-size:12px;font-weight:700;color:#0369a1;margin-bottom:8px">ℹ️ Al salir de bodega se generará un código de trazabilidad único nuevo (BOB-...).</div>';
+    $body .= '          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px">';
+    $body .= '            <div>';
+    $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#475569;margin-bottom:3px">SKU / Código Material</label>';
+    $body .= '              <input type="text" name="sku_manual" id="inp_sku_manual" placeholder="Ej: TEL0044" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px">';
+    $body .= '            </div>';
+    $body .= '            <div>';
+    $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#475569;margin-bottom:3px">Color</label>';
+    $body .= '              <input type="text" name="color" id="inp_color_manual" placeholder="Ej: BLANCO" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px">';
+    $body .= '            </div>';
+    $body .= '          </div>';
+    $body .= '          <div style="margin-bottom:8px">';
+    $body .= '            <label style="display:block;font-size:11.5px;font-weight:700;color:#475569;margin-bottom:3px">Descripción de Material</label>';
+    $body .= '            <input type="text" name="sku_desc_manual" id="inp_sku_desc_manual" placeholder="Ej: TELA TNT BLANCO 80GR..." style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px">';
+    $body .= '          </div>';
+    $body .= '          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+    $body .= '            <div>';
+    $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#475569;margin-bottom:3px">Ancho (mm / cm)</label>';
+    $body .= '              <input type="number" step="any" name="width_mm" id="inp_width_manual" placeholder="Ej: 1080" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px">';
+    $body .= '            </div>';
+    $body .= '            <div>';
+    $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#475569;margin-bottom:3px">Metros (m)</label>';
+    $body .= '              <input type="number" step="any" name="meters" id="inp_meters_manual" placeholder="Ej: 1400" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px">';
+    $body .= '            </div>';
+    $body .= '          </div>';
+    $body .= '        </div>';
+
+    // Ficha resumen de la bobina seleccionada
+    $body .= '        <div id="card_selected_roll_preview" style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:8px;padding:12px;margin-top:10px">';
+    $body .= '          <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:6px">Ficha de Bobina a Traspasar</div>';
+    $body .= '          <div id="preview_roll_code" style="font-size:15px;font-weight:800;color:#0f172a;font-family:monospace">Sin bobina seleccionada</div>';
+    $body .= '          <div id="preview_roll_desc" style="font-size:12.5px;color:#475569;margin-top:2px">Seleccione una bobina del stock o pistolee su etiqueta.</div>';
+    $body .= '          <div style="display:flex;gap:14px;margin-top:8px;font-size:12px;color:#334155">';
+    $body .= '            <div><strong>Peso:</strong> <span id="preview_roll_kg">-</span> kg</div>';
+    $body .= '            <div><strong>Bodega Origen:</strong> <span id="preview_roll_wh">-</span></div>';
+    $body .= '          </div>';
+    $body .= '        </div>';
+    $body .= '      </div>';
+
+    // Panel Derecho: Destino en Planta de Producción & Trazabilidad
+    $body .= '      <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $body .= '        <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #f1f5f9">';
+    $body .= '          <span style="font-size:18px">🏭</span>';
+    $body .= '          <h2 style="margin:0;font-size:16px;font-weight:800;color:#0f172a">2. Destino en Planta & Trazabilidad 360°</h2>';
+    $body .= '        </div>';
+
+    // OT Destino
+    $body .= '        <div style="margin-bottom:12px">';
+    $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Orden de Trabajo (OT) en Producción <span style="color:#ef4444">*</span></label>';
+    $body .= '          <select name="ot_id" id="sel_work_order" onchange="onWorkOrderChanged(this)" style="width:100%;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px" required>';
+    $body .= '            <option value="">-- Seleccionar OT en planta --</option>';
+    foreach ($workOrders as $wo) {
+        $woId = (int)$wo['id'];
+        $woCode = (string)$wo['ot_code'];
+        $woSku = (string)$wo['sku_final'];
+        $woStatus = (string)$wo['status'];
+        $isSelected = ($prefillOt !== '' && ($woCode === $prefillOt || (string)$woId === $prefillOt)) ? ' selected' : '';
+        $body .= '            <option value="' . $woId . '" data-ot="' . h($woCode) . '"' . $isSelected . '>';
+        $body .= 'OT #' . h($woCode) . ' - ' . h($woSku) . ' (' . ($woStatus === 'ACTIVE' ? 'ACTIVA' : 'PROGRAMADA') . ')';
+        $body .= '</option>';
+    }
+    $body .= '          </select>';
+    $body .= '          <input type="hidden" name="ot_number" id="hid_ot_number" value="' . h($prefillOt) . '">';
+    $body .= '        </div>';
+
+    // Máquina Destino
+    $body .= '        <div style="margin-bottom:12px">';
+    $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Máquina Destino en Planta <span style="color:#ef4444">*</span></label>';
+    $body .= '          <select name="machine_id" id="sel_machine" onchange="onMachineChanged(this)" style="width:100%;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px" required>';
+    $body .= '            <option value="">-- Seleccionar máquina receptora --</option>';
+    foreach ($machines as $m) {
+        $mId = (int)$m['id'];
+        $mName = (string)$m['equipo_name'];
+        $isSelected = ($prefillMachine !== '' && ($mName === $prefillMachine || (string)$mId === $prefillMachine)) ? ' selected' : '';
+        $body .= '            <option value="' . $mId . '" data-name="' . h($mName) . '"' . $isSelected . '>' . h($mName) . '</option>';
+    }
+    $body .= '          </select>';
+    $body .= '          <input type="hidden" name="machine_name" id="hid_machine_name" value="' . h($prefillMachine) . '">';
+    $body .= '        </div>';
+
+    // Quién la solicitó & Quién la sacó (Crucial para requerimiento de trazabilidad)
+    $body .= '        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">';
+    $body .= '          <div>';
+    $body .= '            <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Quién la solicitó <span style="color:#ef4444">*</span></label>';
+    $body .= '            <input type="text" name="quien_la_solicito" id="inp_quien_solicito" value="' . h($prefillSolicitante) . '" placeholder="Nombre del maquinista/operador" style="width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px" required>';
+    $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">Operador o maquinista que pide el material</div>';
+    $body .= '          </div>';
+    $body .= '          <div>';
+    $body .= '            <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Quién la sacó (Bodeguero) <span style="color:#ef4444">*</span></label>';
+    $body .= '            <input type="text" name="quien_la_saco" id="inp_quien_saco" value="' . h($currentOperatorName) . '" placeholder="Operador de bodega" style="width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px" required>';
+    $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">Persona que entrega físicamente el rollo</div>';
+    $body .= '          </div>';
+    $body .= '        </div>';
+
+    // Kilos a despachar
+    $body .= '        <div style="margin-bottom:12px">';
+    $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Peso a Traspasar (Kg) <span style="color:#ef4444">*</span></label>';
+    $body .= '          <div style="display:flex;align-items:center;gap:6px">';
+    $body .= '            <input type="number" step="0.001" name="weight_kg" id="inp_weight_kg" value="' . h($prefillAmount) . '" placeholder="0.00" style="flex:1;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px;font-weight:700" required>';
+    $body .= '            <span style="font-size:13px;font-weight:700;color:#64748b">Kg</span>';
+    $body .= '          </div>';
+    $body .= '        </div>';
+
+    // Observaciones / Comentarios
+    $body .= '        <div style="margin-bottom:18px">';
+    $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Observaciones / Motivo</label>';
+    $body .= '          <textarea name="comments" rows="2" placeholder="Notas adicionales de entrega a planta..." style="width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:12.5px"></textarea>';
+    $body .= '        </div>';
+
+    // Botón de Confirmación Destacado
+    $body .= '        <button type="submit" class="btn" style="width:100%;background:#15803d;color:#fff;font-size:15px;font-weight:800;padding:12px 20px;border-radius:8px;display:flex;justify-content:center;align-items:center;gap:8px;box-shadow:0 4px 10px rgba(21,128,61,0.25)">';
+    $body .= '          <span>🚀 Confirmar Traspaso y Despachar a Bodega 3000</span>';
+    $body .= '        </button>';
+    $body .= '        <div style="text-align:center;font-size:11.5px;color:#64748b;margin-top:8px">';
+    $body .= '          Se actualizará automáticamente la bodega del rollo a Bodega 3000 y se registrará el evento de trazabilidad auditado.';
+    $body .= '        </div>';
+    $body .= '      </div>';
+
+    $body .= '    </div>';
+    $body .= '  </form>';
+    $body .= '</div>';
+
+    // =========================================================================
+    // TAB 2: SOLICITUDES Y AGENDA DE PLANTA
+    // =========================================================================
+    $body .= '<div id="panel_tab_solicitudes" class="transfer-panel" style="display:none">';
+    $body .= '  <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
+    $body .= '      <div>';
+    $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📥 Solicitudes de Materiales y OTs Programadas en Planta</h2>';
+    $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Haga clic en <strong>⚡ Despachar Material</strong> para auto-completar el formulario de traspaso con los datos de la máquina y la OT.</p>';
+    $body .= '      </div>';
+    $body .= '      <span style="background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px">' . count($pendingRequests) . ' solicitudes</span>';
+    $body .= '    </div>';
+
+    if (empty($pendingRequests)) {
+        $body .= '    <div style="text-align:center;padding:40px 20px;color:#94a3b8">';
+        $body .= '      <div style="font-size:32px;margin-bottom:8px">📭</div>';
+        $body .= '      <div style="font-size:15px;font-weight:700;color:#475569">No hay solicitudes de materiales pendientes en este momento.</div>';
+        $body .= '      <div style="font-size:13px;margin-top:4px">Puede registrar un traspaso manual en la pestaña <strong>Nuevo Traspaso</strong>.</div>';
+        $body .= '    </div>';
+    } else {
+        $body .= '    <div style="overflow-x:auto">';
+        $body .= '      <table class="data-table" style="width:100%;border-collapse:collapse;font-size:13px">';
+        $body .= '        <thead>';
+        $body .= '          <tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0;text-align:left">';
+        $body .= '            <th style="padding:10px 12px">OT / Req #</th>';
+        $body .= '            <th style="padding:10px 12px">Cliente & Producto</th>';
+        $body .= '            <th style="padding:10px 12px">Máquina</th>';
+        $body .= '            <th style="padding:10px 12px">Cantidad / Meta</th>';
+        $body .= '            <th style="padding:10px 12px">Comentarios / Estado</th>';
+        $body .= '            <th style="padding:10px 12px;text-align:center">Acción</th>';
+        $body .= '          </tr>';
+        $body .= '        </thead>';
+        $body .= '        <tbody>';
+        foreach ($pendingRequests as $pr) {
+            $otNum = (string)($pr['prd_number'] ?? '');
+            $reqNum = (string)($pr['req_number'] ?? '');
+            $custName = (string)($pr['cust_name'] ?? '');
+            $itemTitle = (string)($pr['item_title'] ?? '');
+            $eqName = (string)($pr['equipo_name'] ?? '');
+            $eqId = (int)($pr['equipo_id'] ?? $pr['ag_equipoid'] ?? 0);
+            $amount = (float)($pr['ag_amount'] ?? $pr['evt_amount'] ?? 0);
+            $comments = (string)($pr['evt_comments'] ?? '');
+
+            $body .= '          <tr style="border-bottom:1px solid #f1f5f9">';
+            $body .= '            <td style="padding:10px 12px;font-weight:700;color:#0f172a">';
+            $body .= '              <div>#' . h($otNum) . '</div>';
+            if ($reqNum !== '') {
+                $body .= '              <div style="font-size:11px;color:#64748b;font-weight:normal">Req #' . h($reqNum) . '</div>';
+            }
+            $body .= '            </td>';
+            $body .= '            <td style="padding:10px 12px">';
+            $body .= '              <div style="font-weight:600;color:#1e293b">' . h($custName) . '</div>';
+            $body .= '              <div style="font-size:12px;color:#64748b">' . h($itemTitle) . '</div>';
+            $body .= '            </td>';
+            $body .= '            <td style="padding:10px 12px">';
+            $body .= '              <span style="display:inline-block;background:#f0fdf4;color:#166534;font-weight:700;font-size:11.5px;padding:3px 8px;border-radius:4px">' . h($eqName) . '</span>';
+            $body .= '            </td>';
+            $body .= '            <td style="padding:10px 12px;font-weight:600">' . number_format($amount, 0, ',', '.') . ' unid</td>';
+            $body .= '            <td style="padding:10px 12px;font-size:12px;color:#475569">' . h($comments) . '</td>';
+            $body .= '            <td style="padding:10px 12px;text-align:center">';
+            $body .= '              <button type="button" class="btn" onclick="prefillTransferFromRequest(\'' . h($otNum) . '\', \'' . h($eqName) . '\', ' . $eqId . ', \'\')" style="background:#0369a1;color:#fff;font-size:12px;font-weight:700;padding:6px 12px;border-radius:5px">';
+            $body .= '                ⚡ Despachar Material';
+            $body .= '              </button>';
+            $body .= '            </td>';
+            $body .= '          </tr>';
+        }
+        $body .= '        </tbody>';
+        $body .= '      </table>';
+        $body .= '    </div>';
+    }
+    $body .= '  </div>';
+    $body .= '</div>';
+
+    // =========================================================================
+    // TAB 3: HISTORIAL & TRAZABILIDAD DE TRASPASOS
+    // =========================================================================
+    $body .= '<div id="panel_tab_historial" class="transfer-panel" style="display:none">';
+    $body .= '  <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
+    $body .= '      <div>';
+    $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📜 Historial de Traspasos a Bodega 3000 (Planta)</h2>';
+    $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Registro auditado de bobinas traspasadas: quién solicitó, quién sacó, máquina receptora y etiquetas Zebra 100×70.</p>';
+    $body .= '      </div>';
+    $body .= '      <span style="background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px">' . count($history) . ' registros</span>';
+    $body .= '    </div>';
+
+    if (empty($history)) {
+        $body .= '    <div style="text-align:center;padding:40px 20px;color:#94a3b8">';
+        $body .= '      <div style="font-size:32px;margin-bottom:8px">📋</div>';
+        $body .= '      <div style="font-size:15px;font-weight:700;color:#475569">Aún no se registran traspasos a Bodega 3000.</div>';
+        $body .= '    </div>';
+    } else {
+        $body .= '    <div style="overflow-x:auto">';
+        $body .= '      <table class="data-table" style="width:100%;border-collapse:collapse;font-size:13px">';
+        $body .= '        <thead>';
+        $body .= '          <tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0;text-align:left">';
+        $body .= '            <th style="padding:10px 12px">Fecha</th>';
+        $body .= '            <th style="padding:10px 12px">Código Trazabilidad</th>';
+        $body .= '            <th style="padding:10px 12px">SKU / Material</th>';
+        $body .= '            <th style="padding:10px 12px">Peso</th>';
+        $body .= '            <th style="padding:10px 12px">Quién la solicitó</th>';
+        $body .= '            <th style="padding:10px 12px">Quién la sacó</th>';
+        $body .= '            <th style="padding:10px 12px">Máquina</th>';
+        $body .= '            <th style="padding:10px 12px">OT Destino</th>';
+        $body .= '            <th style="padding:10px 12px;text-align:center">Acciones</th>';
+        $body .= '          </tr>';
+        $body .= '        </thead>';
+        $body .= '        <tbody>';
+        foreach ($history as $h) {
+            $hId = (int)$h['id'];
+            $rId = (int)$h['roll_id'];
+            $rCode = (string)$h['roll_code'];
+            $rSku = (string)$h['sku'];
+            $rWeight = (float)$h['weight_kg'];
+            $qSol = (string)$h['quien_la_solicito'];
+            $qSac = (string)$h['quien_la_saco'];
+            $mach = (string)$h['machine_name'];
+            $otNum = (string)$h['ot_number'];
+            $dt = (string)$h['created_at'];
+
+            $body .= '          <tr style="border-bottom:1px solid #f1f5f9">';
+            $body .= '            <td style="padding:10px 12px;font-size:12px;color:#64748b;white-space:nowrap">' . h($dt) . '</td>';
+            $body .= '            <td style="padding:10px 12px">';
+            $body .= '              <a href="/stock/traceability?q=' . urlencode($rCode) . '" style="display:inline-block;background:#0f172a;color:#fff;font-family:monospace;font-size:12px;font-weight:700;padding:2px 7px;border-radius:4px;text-decoration:none" title="Ver Árbol de Trazabilidad 360°">';
+            $body .= h($rCode);
+            $body .= '              </a>';
+            $body .= '            </td>';
+            $body .= '            <td style="padding:10px 12px;font-weight:600;color:#1e293b">' . h($rSku) . '</td>';
+            $body .= '            <td style="padding:10px 12px;font-weight:700">' . number_format($rWeight, 2, ',', '.') . ' kg</td>';
+            $body .= '            <td style="padding:10px 12px;color:#1e293b"><strong>' . h($qSol) . '</strong></td>';
+            $body .= '            <td style="padding:10px 12px;color:#475569">' . h($qSac) . '</td>';
+            $body .= '            <td style="padding:10px 12px">';
+            if ($mach !== '-' && $mach !== '') {
+                $body .= '              <span style="background:#e0f2fe;color:#0369a1;font-weight:700;font-size:11px;padding:2px 6px;border-radius:4px">' . h($mach) . '</span>';
+            } else {
+                $body .= '-';
+            }
+            $body .= '            </td>';
+            $body .= '            <td style="padding:10px 12px;font-weight:700;color:#0f172a">' . ($otNum !== '' && $otNum !== '-' ? '#' . h($otNum) : '-') . '</td>';
+            $body .= '            <td style="padding:10px 12px;text-align:center;white-space:nowrap">';
+            if ($rId > 0) {
+                $body .= '              <a href="/rolls/' . $rId . '/label?server_print=1" target="_blank" class="btn" style="background:#15803d;color:#fff;font-size:11px;padding:4px 8px;border-radius:4px;margin-right:4px;text-decoration:none" title="Imprimir etiqueta en Zebra">';
+                $body .= '🖨️ Zebra';
+                $body .= '              </a>';
+                $body .= '              <a href="/rolls/' . $rId . '/label" target="_blank" class="btn secondary" style="font-size:11px;padding:4px 8px;border-radius:4px;margin-right:4px;text-decoration:none" title="Ver etiqueta 100×70">';
+                $body .= '👁️ Ver';
+                $body .= '              </a>';
+            }
+            $body .= '              <a href="/stock/traceability?q=' . urlencode($rCode) . '" class="btn secondary" style="font-size:11px;padding:4px 8px;border-radius:4px;text-decoration:none" title="Ver árbol genealógico completo">';
+            $body .= '🌳 Árbol';
+            $body .= '              </a>';
+            $body .= '            </td>';
+            $body .= '          </tr>';
+        }
+        $body .= '        </tbody>';
+        $body .= '      </table>';
+        $body .= '    </div>';
+    }
+    $body .= '  </div>';
+    $body .= '</div>';
+
+    // Script interactivo de UI
+    $body .= '<script>
+      function switchTransferTab(tab) {
+        document.getElementById("panel_tab_nuevo").style.display = tab === "nuevo" ? "block" : "none";
+        document.getElementById("panel_tab_solicitudes").style.display = tab === "solicitudes" ? "block" : "none";
+        document.getElementById("panel_tab_historial").style.display = tab === "historial" ? "block" : "none";
+
+        var tabs = ["nuevo", "solicitudes", "historial"];
+        tabs.forEach(function(t) {
+          var btn = document.getElementById("btn_tab_" + t);
+          if (btn) {
+            if (t === tab) {
+              btn.style.color = "#0f172a";
+              btn.style.borderBottomColor = "#0f172a";
+            } else {
+              btn.style.color = "#64748b";
+              btn.style.borderBottomColor = "transparent";
+            }
+          }
+        });
+      }
+
+      function toggleOriginMode(mode) {
+        document.getElementById("origin_block_list").style.display = mode === "list" ? "block" : "none";
+        document.getElementById("origin_block_scan").style.display = mode === "scan" ? "block" : "none";
+        document.getElementById("origin_block_manual").style.display = mode === "manual" ? "block" : "none";
+
+        if (mode === "scan") {
+          var inp = document.getElementById("inp_scan_code");
+          if (inp) inp.focus();
+        } else if (mode === "manual") {
+          document.getElementById("hid_roll_id").value = "0";
+          document.getElementById("hid_roll_code").value = "";
+          updateRollPreview("[Se generará código BOB-...]", "Material sin código previo", 0, "Bodega Central");
+        }
+      }
+
+      function onAvailableRollSelected(select) {
+        var opt = select.options[select.selectedIndex];
+        if (!opt || !opt.value) {
+          document.getElementById("hid_roll_id").value = "";
+          document.getElementById("hid_roll_code").value = "";
+          document.getElementById("hid_sku").value = "";
+          document.getElementById("hid_sku_desc").value = "";
+          updateRollPreview("Sin bobina seleccionada", "Seleccione una bobina del stock o pistolee su etiqueta.", "-", "-");
+          return;
+        }
+
+        var rId = opt.getAttribute("data-id") || "";
+        var rCode = opt.getAttribute("data-code") || "";
+        var rSku = opt.getAttribute("data-sku") || "";
+        var rDesc = opt.getAttribute("data-desc") || "";
+        var rKg = opt.getAttribute("data-kg") || "0";
+        var rWhName = opt.getAttribute("data-whname") || "Bodega Central";
+        var rWhId = opt.getAttribute("data-whid") || "1";
+
+        document.getElementById("hid_roll_id").value = rId;
+        document.getElementById("hid_roll_code").value = rCode;
+        document.getElementById("hid_sku").value = rSku;
+        document.getElementById("hid_sku_desc").value = rDesc;
+        document.getElementById("hid_from_wh").value = rWhId;
+        document.getElementById("inp_weight_kg").value = rKg;
+
+        updateRollPreview(rCode, rSku + " - " + rDesc, rKg, rWhName);
+      }
+
+      function updateRollPreview(code, desc, kg, wh) {
+        document.getElementById("preview_roll_code").textContent = code;
+        document.getElementById("preview_roll_desc").textContent = desc;
+        document.getElementById("preview_roll_kg").textContent = kg;
+        document.getElementById("preview_roll_wh").textContent = wh;
+      }
+
+      function lookupScannedRoll() {
+        var code = (document.getElementById("inp_scan_code").value || "").trim();
+        if (!code) {
+          alert("Por favor ingrese o escanee un código de bobina.");
+          return;
+        }
+        var sel = document.getElementById("sel_available_roll");
+        var found = false;
+        for (var i = 0; i < sel.options.length; i++) {
+          var opt = sel.options[i];
+          if ((opt.getAttribute("data-code") || "").toUpperCase() === code.toUpperCase() || opt.value === code) {
+            sel.selectedIndex = i;
+            onAvailableRollSelected(sel);
+            found = true;
+            break;
+          }
+        }
+        if (found) {
+          alert("¡Bobina encontrada en el stock de bodega!");
+          toggleOriginMode("list");
+          document.querySelector("input[name=\'origin_mode\'][value=\'list\']").checked = true;
+        } else {
+          document.getElementById("hid_roll_id").value = "0";
+          document.getElementById("hid_roll_code").value = code;
+          updateRollPreview(code, "Bobina pistoleada (se actualizará en TRZ)", document.getElementById("inp_weight_kg").value || "-", "Bodega Central");
+          alert("Código ingresado: " + code + ". Proceda a completar la OT y máquina.");
+        }
+      }
+
+      document.getElementById("inp_scan_code") && document.getElementById("inp_scan_code").addEventListener("keydown", function(e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          lookupScannedRoll();
+        }
+      });
+
+      function onWorkOrderChanged(select) {
+        var opt = select.options[select.selectedIndex];
+        var otNum = opt ? (opt.getAttribute("data-ot") || "") : "";
+        document.getElementById("hid_ot_number").value = otNum;
+      }
+
+      function onMachineChanged(select) {
+        var opt = select.options[select.selectedIndex];
+        var mName = opt ? (opt.getAttribute("data-name") || "") : "";
+        document.getElementById("hid_machine_name").value = mName;
+      }
+
+      function prefillTransferFromRequest(otNum, machineName, machineId, solicitante) {
+        switchTransferTab("nuevo");
+        var selWo = document.getElementById("sel_work_order");
+        if (selWo) {
+          for (var i = 0; i < selWo.options.length; i++) {
+            if ((selWo.options[i].getAttribute("data-ot") || "") === otNum) {
+              selWo.selectedIndex = i;
+              onWorkOrderChanged(selWo);
+              break;
+            }
+          }
+        }
+        document.getElementById("hid_ot_number").value = otNum;
+
+        var selM = document.getElementById("sel_machine");
+        if (selM) {
+          for (var j = 0; j < selM.options.length; j++) {
+            if ((selM.options[j].getAttribute("data-name") || "").toUpperCase() === machineName.toUpperCase() || selM.options[j].value == machineId) {
+              selM.selectedIndex = j;
+              onMachineChanged(selM);
+              break;
+            }
+          }
+        }
+        document.getElementById("hid_machine_name").value = machineName;
+
+        if (solicitante) {
+          document.getElementById("inp_quien_solicito").value = solicitante;
+        }
+      }
+
+      function validateTransferForm() {
+        var selWo = document.getElementById("sel_work_order");
+        if (!selWo.value) {
+          alert("Debe seleccionar una OT de destino en planta.");
+          selWo.focus();
+          return false;
+        }
+        var selM = document.getElementById("sel_machine");
+        if (!selM.value) {
+          alert("Debe seleccionar la máquina receptora en planta.");
+          selM.focus();
+          return false;
+        }
+        var sol = document.getElementById("inp_quien_solicito").value.trim();
+        if (!sol) {
+          alert("Debe ingresar quién solicitó la bobina.");
+          document.getElementById("inp_quien_solicito").focus();
+          return false;
+        }
+        var sac = document.getElementById("inp_quien_saco").value.trim();
+        if (!sac) {
+          alert("Debe ingresar quién sacó/despachó la bobina de bodega.");
+          document.getElementById("inp_quien_saco").focus();
+          return false;
+        }
+        var kg = parseFloat(document.getElementById("inp_weight_kg").value || "0");
+        if (kg <= 0) {
+          alert("Debe ingresar un peso válido en Kg para la bobina.");
+          document.getElementById("inp_weight_kg").focus();
+          return false;
+        }
+        return true;
+      }
+
+      // Inicializar pestaña activa
+      switchTransferTab("' . h($activeTab) . '");
+    </script>';
+
+    $body .= '</div>'; // Fin transfers-shell
+
+    render('Traspasos a Producción (Bodega 3000)', $body);
+}
+
+/**
  * Router de rutas de inventario.
  */
 function handleInventoryRoutes(string $path, string $method, ReceptionService $service, string $currentOperatorName, ?ProductionService $prodService = null): bool
 {
+    // GET: Pantalla completa de Traspasos a Bodega 3000 (Planta)
+    if (($path === '/stock/transfers' || $path === '/stock/traspasos') && $method === 'GET') {
+        unibagRenderWarehouseTransfersPage($service, $prodService, $currentOperatorName);
+        return true;
+    }
+
+    // POST: Registrar Traspaso a Bodega 3000 (Planta) con trazabilidad integral
+    if (($path === '/stock/transfers' || $path === '/stock/traspasos') && $method === 'POST') {
+        requireCsrf();
+        $actionMode = (string)($_POST['action_mode'] ?? '');
+        $isToProd = $actionMode === 'to_production'
+            || !empty($_POST['quien_la_solicito'])
+            || !empty($_POST['machine_name'])
+            || !empty($_POST['ot_number'])
+            || !empty($_POST['ot_id']);
+
+        if ($isToProd) {
+            $res = $service->dispatchWarehouseTransferToProduction($_POST, $currentOperatorName);
+            if (!$res['ok']) {
+                $err = !empty($res['errors']) ? implode(', ', (array)$res['errors']) : 'Error al registrar traspaso a producción.';
+                redirectResponse('/stock/transfers?error=' . rawurlencode($err));
+                return true;
+            }
+            $params = http_build_query([
+                'dispatched' => 1,
+                'roll_id' => (int)($res['roll_id'] ?? 0),
+                'roll_code' => (string)($res['roll_code'] ?? ''),
+                'ot' => (string)($res['ot_number'] ?? ''),
+                'machine' => (string)($res['machine_name'] ?? ''),
+                'solicito' => (string)($res['quien_la_solicito'] ?? ''),
+                'saco' => (string)($res['quien_la_saco'] ?? ''),
+                'weight' => (float)($res['weight_kg'] ?? 0),
+            ]);
+            redirectResponse('/stock/transfers?' . $params);
+            return true;
+        }
+
+        // Fallback para traspaso tradicional si se invoca con transfer_mode clásico
+        $toWarehouseId = (int)($_POST['to_warehouse_id'] ?? 0);
+        $rollId = (int)($_POST['roll_id'] ?? 0);
+        $workOrderId = !empty($_POST['work_order_id']) ? (int)$_POST['work_order_id'] : null;
+        if ($toWarehouseId > 0 && $rollId > 0) {
+            $result = $service->transferRoll($rollId, $toWarehouseId, $currentOperatorName, $workOrderId);
+            if ($result['ok'] === true) {
+                redirectResponse('/rolls/' . $rollId);
+                return true;
+            }
+            $err = !empty($result['errors']) ? implode(', ', (array)$result['errors']) : 'Error al transferir bobina.';
+            redirectResponse('/stock/transfers?error=' . rawurlencode($err));
+            return true;
+        }
+    }
+
     // AJAX: Sugerir código de trazabilidad
     if ($path === '/stock/traceability-code-suggest' && $method === 'GET') {
         header('Content-Type: application/json; charset=utf-8');
