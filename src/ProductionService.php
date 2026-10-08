@@ -467,9 +467,43 @@ final class ProductionService
      * @param int $plantaId ID de planta
      * @return array<int, array<string, mixed>>
      */
-    public function listScheduledOrdersForMachine(int $equipoId, int $plantaId): array
+    public function listScheduledOrdersForMachine(int $equipoId, int $plantaId, ?string $dateFilter = null): array
     {
         $wherePlanta = $plantaId > 0 ? " AND t0.ag_plantaid = :planta_id" : "";
+        $whereDate = "";
+        $params = [':equipo_id' => $equipoId];
+        if ($plantaId > 0) {
+            $params[':planta_id'] = $plantaId;
+        }
+
+        if (!empty($dateFilter) && $dateFilter !== 'all') {
+            $normalizedDate = trim($dateFilter);
+            if (preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $normalizedDate, $mD)) {
+                $day = (int)$mD[3];
+                $month = (int)$mD[2];
+                $year = (int)$mD[1];
+                $normalizedDate = sprintf('%02d.%02d.%04d', $day, $month, $year);
+            } elseif (preg_match('/^(\d{1,2})[\.\/-](\d{1,2})[\.\/-](\d{4})$/', $normalizedDate, $mD)) {
+                $day = (int)$mD[1];
+                $month = (int)$mD[2];
+                $year = (int)$mD[3];
+                $normalizedDate = sprintf('%02d.%02d.%04d', $day, $month, $year);
+            } else {
+                $day = (int)date('d');
+                $month = (int)date('m');
+                $year = (int)date('Y');
+                $normalizedDate = date('d.m.Y');
+            }
+
+            $dateStart = mktime(0, 0, 0, $month, $day, $year);
+            $dateEnd = mktime(23, 59, 59, $month, $day, $year);
+
+            $whereDate = " AND (t0.ag_date = :target_date OR (t0.ag_date_stamp >= :date_start AND t0.ag_date_stamp <= :date_end))";
+            $params[':target_date'] = $normalizedDate;
+            $params[':date_start'] = $dateStart;
+            $params[':date_end'] = $dateEnd;
+        }
+
         $sql = "SELECT DISTINCT t0.id AS ag_id, t0.ag_date, t0.ag_amount, t0.ag_status, t0.ag_active,
                                t0.pulpo_tot_frente, t0.pulpo_tot_dorso, t0.pulpo_finished_bags,
                                t0.pulpo_surplus_frente, t0.pulpo_surplus_dorso,
@@ -499,14 +533,11 @@ final class ProductionService
                 WHERE t0.ag_equipo_id = :equipo_id
                   {$wherePlanta}
                   AND t0.ag_status = 1
+                  {$whereDate}
                 ORDER BY t0.ag_date ASC, t0.ag_order ASC, t0.id ASC
                 LIMIT 50";
 
         try {
-            $params = [':equipo_id' => $equipoId];
-            if ($plantaId > 0) {
-                $params[':planta_id'] = $plantaId;
-            }
             $stmt = $this->erpPdo->prepare($sql);
             $stmt->execute($params);
             $orders = $stmt->fetchAll();
@@ -4063,14 +4094,47 @@ final class ProductionService
     /**
      * Lista todas las OTs actualmente en ejecución en la planta (`wok_status = 1`).
      */
-    public function listActiveOrdersInCourse(int $plantaId, int $equipoId = 0): array
+    public function listActiveOrdersInCourse(int $plantaId, int $equipoId = 0, ?string $dateFilter = null): array
     {
         $wherePlanta = $plantaId > 0 ? " AND t2.win_plantaid = :planta_id" : "";
         $whereEquipo = $equipoId > 0 ? " AND t2.win_equipoid = :equipo_id" : "";
+
+        $whereDate = "";
+        $params = [];
+        if ($plantaId > 0) {
+            $params[':planta_id'] = $plantaId;
+        }
+        if ($equipoId > 0) {
+            $params[':equipo_id'] = $equipoId;
+        }
+
+        if ($dateFilter !== null && $dateFilter !== '' && $dateFilter !== 'all') {
+            $parsedTs = null;
+            if (preg_match('/^\d{2}\.\d{2}\.\d{4}$/', $dateFilter)) {
+                $pParts = explode('.', $dateFilter);
+                $parsedTs = mktime(0, 0, 0, (int)$pParts[1], (int)$pParts[0], (int)$pParts[2]);
+            } elseif (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFilter)) {
+                $pParts = explode('-', $dateFilter);
+                $parsedTs = mktime(0, 0, 0, (int)$pParts[1], (int)$pParts[2], (int)$pParts[0]);
+                $dateFilter = sprintf('%02d.%02d.%04d', (int)$pParts[2], (int)$pParts[1], (int)$pParts[0]);
+            }
+            if ($parsedTs !== null && $parsedTs > 0) {
+                $dayStart = mktime(0, 0, 0, (int)date('n', $parsedTs), (int)date('j', $parsedTs), (int)date('Y', $parsedTs));
+                $dayEnd = $dayStart + 86399;
+                $whereDate = " AND (t0.ag_date = :target_date OR (t0.ag_date_stamp BETWEEN :date_start AND :date_end))";
+                $params[':target_date'] = $dateFilter;
+                $params[':date_start'] = $dayStart;
+                $params[':date_end'] = $dayEnd;
+            } else {
+                $whereDate = " AND t0.ag_date = :target_date";
+                $params[':target_date'] = $dateFilter;
+            }
+        }
+
         $sql = "SELECT t1.id AS worker_ot_id, t1.wok_crtdat, t1.wok_status,
                        t2.win_equipoid, t7.equipo_name, t8.type_ant_title, t7.equipo_type_id, t7.equipo_prod_isprinter_flexo,
                        t9.wrk_firstname, t9.wrk_lastname,
-                       t0.id AS ag_id, t0.ag_amount, t0.ag_active,
+                       t0.id AS ag_id, t0.ag_amount, t0.ag_active, t0.ag_date, t0.ag_date_stamp,
                        t3x.prd_number,
                        t5.id AS req_id, t5.req_number, t4.cust_name, t2x.item_title, t2x.item_number_prod, t2x.item_prodcalc_fuelle_act,
                        t5.req_operador_tela_width, t5.req_rebo_type, t5.req_rebo_cc_genrefid,
@@ -4095,17 +4159,11 @@ final class ProductionService
                 WHERE t1.wok_status = 1
                   {$wherePlanta}
                   {$whereEquipo}
+                  {$whereDate}
                 ORDER BY t1.wok_crtdat DESC";
 
         try {
             $stmt = $this->erpPdo->prepare($sql);
-            $params = [];
-            if ($plantaId > 0) {
-                $params[':planta_id'] = $plantaId;
-            }
-            if ($equipoId > 0) {
-                $params[':equipo_id'] = $equipoId;
-            }
             $stmt->execute($params);
             $orders = $stmt->fetchAll();
             foreach ($orders as &$ord) {

@@ -200,12 +200,25 @@ function handleProductionRoutes(
         }
 
         $equipoId = (int)$activeInit['win_equipoid'];
-        $scheduledOrders = $prodService->listScheduledOrdersForMachine($equipoId, $plantaId);
+        $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
+        $isFlexo = ($equipoTypeId === 7
+            || (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
+            || stripos((string)($activeInit['type_ant_title'] ?? ''), 'flexo') !== false
+            || stripos((string)($activeInit['equipo_name'] ?? ''), 'flexo') !== false);
+
+        $dateFilter = trim((string)($_GET['plan_date'] ?? $_GET['date'] ?? ''));
+        if ($dateFilter === '' && $isFlexo) {
+            $dateFilter = date('d.m.Y');
+        } elseif ($dateFilter === 'all') {
+            $dateFilter = null;
+        }
+
+        $scheduledOrders = $prodService->listScheduledOrdersForMachine($equipoId, $plantaId, $dateFilter);
         $activeOt = $prodService->getOpenWorkerOt($workerId, $plantaId);
 
         $activeStandby = $prodService->getActiveMachineStandby($equipoId, (int)$activeInit['id']);
 
-        renderProductionNewWorkOrderScreen($activeInit, $scheduledOrders, $activeOt, $currentOperatorName, $plantaName, $activeStandby);
+        renderProductionNewWorkOrderScreen($activeInit, $scheduledOrders, $activeOt, $currentOperatorName, $plantaName, $activeStandby, $dateFilter);
         return true;
     }
 
@@ -577,12 +590,8 @@ function handleProductionRoutes(
 
             $prodService->recordEventApertura($workerOtId, $medFrom, $medTo, $comments, $eventId, true, $idAyudante);
 
-            if ($submode === 'end_and_autocontrol') {
-                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=autocontrol&alis_finished=1');
-                return true;
-            }
-
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&alis_finished=1');
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=autocontrol&alis_finished=1');
+            return true;
         } elseif ($eventId > 0) {
             $prodService->recordEventApertura($workerOtId, $medFrom, $medTo, $comments, $eventId, false, $idAyudante);
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&alis_updated=1');
@@ -1103,9 +1112,41 @@ function handleProductionRoutes(
         $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
         $showAll = !empty($_GET['all']);
         $filterEquipoId = (!$showAll && $activeInit !== null) ? (int)$activeInit['win_equipoid'] : 0;
-        $activeList = $prodService->listActiveOrdersInCourse($plantaId, $filterEquipoId);
+
+        $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
+        $isFlexo = ($equipoTypeId === 7
+            || (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
+            || stripos((string)($activeInit['type_ant_title'] ?? ''), 'flexo') !== false
+            || stripos((string)($activeInit['equipo_name'] ?? ''), 'flexo') !== false);
+
+        $dateFilter = null;
+        if ($isFlexo) {
+            $reqPlanDate = trim((string)($_GET['plan_date'] ?? ''));
+            if ($reqPlanDate === 'all') {
+                $dateFilter = null;
+            } elseif ($reqPlanDate !== '') {
+                if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $reqPlanDate, $m)) {
+                    $dateFilter = date('d.m.Y', strtotime($reqPlanDate));
+                } else {
+                    $dateFilter = $reqPlanDate;
+                }
+            } else {
+                $dateFilter = date('d.m.Y');
+            }
+        } else {
+            $reqPlanDate = trim((string)($_GET['plan_date'] ?? ''));
+            if ($reqPlanDate !== '' && $reqPlanDate !== 'all') {
+                if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $reqPlanDate, $m)) {
+                    $dateFilter = date('d.m.Y', strtotime($reqPlanDate));
+                } else {
+                    $dateFilter = $reqPlanDate;
+                }
+            }
+        }
+
+        $activeList = $prodService->listActiveOrdersInCourse($plantaId, $filterEquipoId, $dateFilter);
         $activeStandby = ($activeInit !== null) ? $prodService->getActiveMachineStandby((int)$activeInit['win_equipoid'], (int)$activeInit['id']) : null;
-        renderProductionActiveOrdersScreen($activeList, $currentOperatorName, $plantaName, $activeInit, $activeStandby);
+        renderProductionActiveOrdersScreen($activeList, $currentOperatorName, $plantaName, $activeInit, $activeStandby, $dateFilter);
         return true;
     }
 
@@ -1767,57 +1808,302 @@ function renderProductionOperatorConsole(
         </tr>
         </table>
 
-        <!-- Tarjeta 1: Información de la OT (autocontrol.form.php) -->
-        <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px">
-        <tr>
-            <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
+        <style>
+        .unibag-collapse-header {
+            background-color: #165552;
+            color: #FFFFFF;
+            padding: 8px 14px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+            font-weight: bold;
+            font-size: 13px;
+            transition: background-color 0.15s ease;
+        }
+        .unibag-collapse-header:hover {
+            background-color: #124341;
+        }
+        .unibag-collapse-btn {
+            font-size: 11px;
+            font-weight: normal;
+            opacity: 0.9;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(255,255,255,0.15);
+            padding: 3px 8px;
+            border-radius: 3px;
+        }
+        .unibag-collapse-header:hover .unibag-collapse-btn {
+            background: rgba(255,255,255,0.25);
+        }
+        </style>
+        <script>
+        function toggleCollapseSection(secId, iconId) {
+            var sec = document.getElementById(secId);
+            var icon = document.getElementById(iconId);
+            var lblId = iconId.replace('icon_', 'lbl_');
+            var lbl = document.getElementById(lblId);
+            if (!sec) return;
+
+            var isHidden = (sec.style.display === 'none');
+            if (isHidden) {
+                sec.style.display = '';
+                if (icon) icon.className = 'fa fa-chevron-up';
+                if (lbl) lbl.textContent = 'Minimizar';
+                try { localStorage.setItem('unibag_collapse_' + secId, '0'); } catch(e){}
+            } else {
+                sec.style.display = 'none';
+                if (icon) icon.className = 'fa fa-chevron-down';
+                if (lbl) lbl.textContent = 'Expandir';
+                try { localStorage.setItem('unibag_collapse_' + secId, '1'); } catch(e){}
+            }
+        }
+        </script>
+
+        <?php
+        $acImgHash = trim((string)($agenda['fab_design_imagehash'] ?? $agenda['item_img_hash'] ?? ''));
+        $acHasImg = ($acImgHash !== '' && $acImgHash !== 'dummy');
+        $acImgUrl = $acHasImg ? ('/production/design-image?folder=order&hash=' . rawurlencode($acImgHash)) : '';
+        $acProdSku = trim((string)($agenda['item_number_prod'] ?? ''));
+        $acProdTitle = trim((string)($agenda['item_title'] ?? ''));
+        $acDesignName = trim((string)($agenda['fab_design_name'] ?? ''));
+        $acFullDesign = ($acProdSku !== '' && $acProdTitle !== '') ? "{$acProdSku} | {$acProdTitle}" : ($acProdTitle ?: ($acProdSku ?: ($acDesignName ?: '-')));
+        $acW = (int)($agenda['fab_med_width'] ?? 0);
+        $acH = (int)($agenda['fab_med_height'] ?? 0);
+        $acFuelle = (int)($agenda['fab_med_fuelle'] ?? 0);
+        $acMedidasStr = $acW > 0 ? ("{$acW} x {$acH}" . ($acFuelle > 0 ? " + {$acFuelle}" : "") . " cm") : '-';
+        $acTelaWidth = (float)($agenda['req_operador_tela_width'] ?? 0);
+        ?>
+
+        <!-- Tarjeta 1: Información Cliente y Diseño para Autocontrol -->
+        <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
+            <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_cliente', 'icon_autoctrl_info_cliente')">
+                <span><i class="fa fa-fw fa-user"></i> 1. Información Cliente y Diseño</span>
+                <span class="unibag-collapse-btn">
+                    <span id="lbl_autoctrl_info_cliente">Minimizar</span>
+                    <i id="icon_autoctrl_info_cliente" class="fa fa-chevron-up"></i>
+                </span>
+            </div>
+            <div id="sec_autoctrl_info_cliente" style="padding:15px">
                 <table border="0" width="100%" cellpadding="6" cellspacing="0">
                 <colgroup>
-                    <col width="120">
-                    <col width="40%">
-                    <col width="120">
-                    <col width="40%">
+                    <col width="180">
+                    <col width="32%">
+                    <col width="160">
+                    <col>
                 </colgroup>
                 <tr>
-                    <td class="tdleft">Nº OT</td>
+                    <td class="tdleft">N° OT</td>
                     <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['prd_number'])?></b></td>
-                    <td class="tdleft">Nº CC</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['req_number'])?></b></td>
+                    <td class="tdleft">Color N° 1</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '-'))?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Cliente</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)$agenda['cust_name'])?></td>
+                    <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['cust_name'])?></b></td>
+                    <td class="tdleft">Color N° 2</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">N° CC</td>
+                    <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['req_number'])?></b></td>
+                    <td class="tdleft">Color N° 3</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Diseño</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_design_name'] !== '' ? $agenda['fab_design_name'] : $agenda['item_title']))?></td>
+                    <td class="tdleft">Color N° 4</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '-'))?></td>
+                </tr>
+                <tr>
                     <td class="tdleft">Producto</td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$agenda['item_number_prod'])?> | <?=htmlspecialchars((string)$agenda['item_title'])?></td>
+                    <td class="tdleft">Color N° 5</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_5'] ?? '-'))?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Medidas</td>
-                    <td class="tdnrm"><?=(int)$agenda['fab_med_width']?> x <?=(int)$agenda['fab_med_height']?></td>
-                    <td class="tdleft">Fuelle</td>
-                    <td class="tdnrm"><?=(int)$agenda['fab_med_fuelle']?></td>
+                    <td class="tdleft">Materialidad</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)$agenda['fab_type'])?></td>
+                    <td class="tdleft">Color N° 6</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_6'] ?? '-'))?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Area</td>
-                    <td class="tdnrm"><?=(int)$agenda['fab_print_width']?> x <?=(int)$agenda['fab_print_height']?></td>
-                    <td class="tdleft">Tela</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Manillas</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['manilla_color'] ?? '-'))?></td>
-                    <td class="tdleft">Colores</td>
+                    <td class="tdleft">Medidas (Ancho x Alto)</td>
+                    <td class="tdnrm"><b><?=(int)$agenda['fab_med_width']?> x <?=(int)$agenda['fab_med_height']?> cm</b></td>
+                    <td class="tdleft">Colores Resumen</td>
                     <td class="tdnrm"><?=htmlspecialchars($printcolors ?: '-')?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Cantidad</td>
+                    <td class="tdleft">Fuelle</td>
+                    <td class="tdnrm"><?=(int)$agenda['fab_med_fuelle']?> cm</td>
+                    <td class="tdleft">Fecha de Entrega</td>
+                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_despacho_desc'] !== '' ? $agenda['req_despacho_desc'] : $agenda['ag_date']))?></b></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Cantidad de Bolsas</td>
                     <td class="tdnrm"><b><?=$fmt($agenda['ag_amount'])?></b></td>
-                    <td class="tdleft">&nbsp;</td>
-                    <td class="tdnrm">&nbsp;</td>
+                    <td class="tdleft">Fecha solicitud cliché</td>
+                    <td class="tdnrm"><?=(int)($agenda['req_cliche_peli_solic_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_solic_dat']) : '-'?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Color Tela</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></td>
+                    <td class="tdleft">Fecha recepción cliché</td>
+                    <td class="tdnrm"><?=(int)($agenda['req_cliche_peli_recep_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_recep_dat']) : '-'?></td>
+                </tr>
+                <tr>
+                    <td colspan="4" style="background:#EDF0F6;padding:4px"></td>
+                </tr>
+                <tr>
+                    <td class="tdleft" valign="middle">Imagen Diseño</td>
+                    <td class="tdnrm" colspan="3" valign="middle">
+                        <?php if ($acHasImg): ?>
+                            <div style="display:inline-flex;align-items:center;gap:14px;flex-wrap:wrap">
+                                <div style="cursor:pointer;display:inline-flex;align-items:center;gap:12px;background:#F8FAFC;border:2px solid #0284C7;padding:8px 14px;border-radius:6px;box-shadow:0 2px 6px rgba(2,132,199,0.15)"
+                                     onclick="openDesignModal('<?=htmlspecialchars($acImgUrl)?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>')"
+                                     title="Clic para ver foto del diseño en ventana flotante">
+                                    <img src="<?=htmlspecialchars($acImgUrl)?>" alt="Foto Diseño" style="height:70px;max-width:120px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff">
+                                    <div>
+                                        <div style="font-size:13px;font-weight:700;color:#0284C7"><i class="fa fa-search-plus"></i> Abrir en Ventana Flotante</div>
+                                        <div style="font-size:11px;color:#64748B;margin-top:2px">Clic aquí para ampliar y revisar diseño</div>
+                                    </div>
+                                </div>
+                                <a href="<?=$acImgUrl?>" target="_blank" class="btngrey" style="padding:6px 12px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px">
+                                    <i class="fa fa-fw fa-external-link-alt" style="color:white;"></i> Pestaña nueva
+                                </a>
+                            </div>
+                        <?php else: ?>
+                            <span style="color:#999;font-style:italic">Sin imagen de diseño cargada</span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php for ($x = 0; $x < 5; $x++): ?>
+                    <?php if (!empty($agenda["req_prod_adjfile_{$x}"])): 
+                        $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+                        $isImg = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $adjFile);
+                        $adjUrl = "/docs/prod/" . rawurlencode($adjFile);
+                    ?>
+                        <tr>
+                            <td class="tdleft">Imagen Adjunta #<?=($x + 1)?></td>
+                            <td class="tdnrm" colspan="3">
+                                <div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
+                                    <?php if ($isImg): ?>
+                                        <img src="<?=$adjUrl?>" alt="Adjunto #<?=($x + 1)?>" style="height:48px;max-width:80px;object-fit:contain;border:1px solid #cbd5e1;border-radius:4px;background:#fff;cursor:pointer"
+                                             onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>')"
+                                             title="Clic para ampliar en ventana flotante">
+                                    <?php endif; ?>
+                                    <button type="button" class="btngrey" style="padding:4px 10px;font-size:12px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px"
+                                            onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>')">
+                                        <i class="fa fa-fw fa-<?= $isImg ? 'image' : 'file' ?>" style="color:white;"></i> <?= $isImg ? 'Ver Imagen #' . ($x + 1) : 'Descargar Adjunto #' . ($x + 1) ?>
+                                    </button>
+                                    <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
+                                        <span style="margin-left:6px;color:#475569;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
+                                    <?php endif; ?>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
+                <?php endfor; ?>
+                </table>
+            </div>
+        </div>
+
+        <!-- Tarjeta 2: Información de Fabricación para Autocontrol -->
+        <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
+            <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_fab', 'icon_autoctrl_info_fab')">
+                <span><i class="fa fa-fw fa-cogs"></i> 2. Información de Fabricación</span>
+                <span class="unibag-collapse-btn">
+                    <span id="lbl_autoctrl_info_fab">Minimizar</span>
+                    <i id="icon_autoctrl_info_fab" class="fa fa-chevron-up"></i>
+                </span>
+            </div>
+            <div id="sec_autoctrl_info_fab" style="padding:15px">
+                <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                <colgroup>
+                    <col width="180">
+                    <col width="32%">
+                    <col width="160">
+                    <col>
+                </colgroup>
+                <tr>
+                    <td class="tdleft">Rodillo a utilizar</td>
+                    <td class="tdnrm"><b style="color:#0284C7;font-size:14px">Z = <?=$fmt($corte_z, 0)?></b></td>
+                    <td class="tdleft">Unidad N° 1</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Corte de bolsa</td>
+                    <td class="tdnrm"><?=$fmt($corte_m2, 4)?> mtrs</td>
+                    <td class="tdleft">Unidad N° 2</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Ubicación Clisé</td>
+                    <td class="tdnrm"><b style="color:#0F766E"><?=htmlspecialchars((string)($agenda['req_infoaddprd_cliche_ubicacion'] ?? '-'))?></b></td>
+                    <td class="tdleft">Unidad N° 3</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Código Cliché</td>
+                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_infoaddprd_cliche_codigo'] ?? '-'))?></b></td>
+                    <td class="tdleft">Unidad N° 4</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Pie de Imprenta / Máquina</td>
+                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_pie_imprenta'] ?? '-'))?></b></td>
+                    <td class="tdleft">Unidad N° 5</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_5'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">N° Código de Barra</td>
+                    <td class="tdnrm"><b style="font-family:monospace;font-size:13px"><?=htmlspecialchars((string)($agenda['item_sellprice_barcodenumber'] ?? '-'))?></b></td>
+                    <td class="tdleft">Unidad N° 6</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_6'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Ancho Bobina / Tela</td>
+                    <td class="tdnrm"><b><?= $acTelaWidth > 0 ? $acTelaWidth . ' cm' : '-' ?></b></td>
+                    <td class="tdleft">Anilox N° 1</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[1] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Impresiones por desarrollo</td>
+                    <td class="tdnrm"><?=(int)($agenda['req_solic_devprints_cc'] ?? 0)?> impresiones</td>
+                    <td class="tdleft">Anilox N° 2</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[2] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">% de merma</td>
+                    <td class="tdnrm"><?=$fmt($agenda['req_operador_mermaperc'], 2)?> %</td>
+                    <td class="tdleft">Anilox N° 3</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[3] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Metros a imprimir</td>
+                    <td class="tdnrm"><b><?=$fmt($metrosAImprimir, 2)?> mtrs</b></td>
+                    <td class="tdleft">Anilox N° 4</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[4] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Color Tela</td>
+                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></b></td>
+                    <td class="tdleft">Anilox N° 5</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[5] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Tipo de Tela</td>
+                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['fab_type'] ?? '-'))?></b></td>
+                    <td class="tdleft">Anilox N° 6</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[6] ?? '-'))?></td>
                 </tr>
                 </table>
-            </td>
-        </tr>
-        </table>
+            </div>
+        </div>
 
         <!-- Tarjeta 2: AUTOCONTROL o APROBACIÓN DE PARTIDA -->
         <?php if ($showSupervisorApproval): ?>
@@ -1977,7 +2263,7 @@ function renderProductionOperatorConsole(
                             <col width="25%">
                         </colgroup>
                         <tr>
-                            <td class="tdleft" colspan="4" style="background-color:#FFFF00;border:0px;border-radius:4px;color:black;font-weight:bold;font-size:14px;padding:8px" align="center">
+                            <td class="tdleft" colspan="4" style="background-color:#FFFF00;border:0px;border-radius:4px;color:black;font-weight:bold;font-size:14px;padding:8px;text-align:center" align="center">
                                 AUTOCONTROL
                             </td>
                         </tr>
@@ -2025,8 +2311,8 @@ function renderProductionOperatorConsole(
 
                 <div id="idx_supervisor_btn_wrap" style="margin-bottom:12px">
                     <button type="submit" class="btngreen" id="idx_supervisor_btn"
-                            style="width:100%;box-sizing:border-box;background-color:#4597C2;color:white;font-weight:bold;font-size:14px;padding:10px 0;border:none;border-radius:4px;cursor:pointer;display:block;text-align:center"
-                            onclick="document.getElementById('autoctrl_submode').value='close';">
+                                style="width:100%;box-sizing:border-box;background-color:#4597C2;color:white;font-weight:bold;font-size:14px;padding:10px 0;border:none;border-radius:4px;cursor:pointer;display:block;text-align:center"
+                                onclick="document.getElementById('autoctrl_submode').value='close';">
                         <i class="fa fa-fw fa-envelope" style="color:white;"></i> Informa supervisor
                     </button>
                 </div>
@@ -2082,6 +2368,7 @@ function renderProductionOperatorConsole(
         </tr>
         </table>
         <?php
+        echo renderDesignPreviewModal();
         $content = ob_get_clean();
         renderProdwrkShell('Operar OT #' . $agenda['prd_number'], $content, 2, $currentOperatorName, $plantaName);
         return;
@@ -2413,12 +2700,19 @@ function renderProductionOperatorConsole(
                     <td class="tdleft" colspan="2">Imagen Diseño</td>
                     <td class="tdnrm" colspan="2">
                         <?php if (!empty($agenda['fab_design_imagehash']) && $agenda['fab_design_imagehash'] !== 'dummy'): ?>
-                            <?php $dUrl = '/production/design-image?folder=order&hash=' . rawurlencode((string)$agenda['fab_design_imagehash']); ?>
+                            <?php 
+                                $dUrl = '/production/design-image?folder=order&hash=' . rawurlencode((string)$agenda['fab_design_imagehash']); 
+                                $consFullDesign = trim((string)($agenda['prd_name'] ?? ''));
+                                $consMedidasStr = '';
+                                if (!empty($agenda['fab_cut_cm'])) $consMedidasStr .= 'Corte ' . (float)$agenda['fab_cut_cm'] . 'cm';
+                                if (!empty($agenda['fab_ancho_cm'])) $consMedidasStr .= ($consMedidasStr ? ' · ' : '') . 'Ancho ' . (float)$agenda['fab_ancho_cm'] . 'cm';
+                                if (!empty($agenda['fab_alto_cm'])) $consMedidasStr .= ($consMedidasStr ? ' · ' : '') . 'Alto ' . (float)$agenda['fab_alto_cm'] . 'cm';
+                            ?>
                             <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
-                                <a href="<?=$dUrl?>" target="_blank" title="Clic para ampliar foto de lo que se va a producir">
-                                    <img src="<?=$dUrl?>" alt="Foto Diseño" style="max-height:85px;max-width:130px;object-fit:contain;border:1px solid #cbd5e1;border-radius:6px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.12)">
+                                <a href="<?=$dUrl?>" target="_blank" onclick="openDesignModal('<?=$dUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($consFullDesign))?>', '<?=htmlspecialchars($consMedidasStr)?>'); return false;" title="Clic para ampliar foto de lo que se va a producir">
+                                    <img src="<?=$dUrl?>" alt="Foto Diseño" style="max-height:85px;max-width:130px;object-fit:contain;border:1px solid #cbd5e1;border-radius:6px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.12);cursor:pointer">
                                 </a>
-                                <a href="<?=$dUrl?>" target="_blank" class="btngrey" style="padding:6px 12px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px">
+                                <a href="<?=$dUrl?>" target="_blank" onclick="openDesignModal('<?=$dUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($consFullDesign))?>', '<?=htmlspecialchars($consMedidasStr)?>'); return false;" class="btngrey" style="padding:6px 12px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
                                     <i class="fa fa-fw fa-image" style="color:white;"></i> Ver Foto Completa
                                 </a>
                             </div>
@@ -2437,11 +2731,11 @@ function renderProductionOperatorConsole(
                             <td class="tdnrm" colspan="2">
                                 <div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
                                     <?php if ($isImg): ?>
-                                        <a href="/docs/prod/<?=htmlspecialchars($adjFile)?>" target="_blank" title="Clic para ampliar">
-                                            <img src="/docs/prod/<?=htmlspecialchars($adjFile)?>" alt="Adjunto #<?=($x + 1)?>" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #cbd5e1;border-radius:4px;background:#fff;vertical-align:middle">
+                                        <a href="/docs/prod/<?=htmlspecialchars($adjFile)?>" target="_blank" onclick="openDesignModal('/docs/prod/<?=htmlspecialchars(addslashes($adjFile))?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($consMedidasStr ?? '')?>'); return false;" title="Clic para ampliar">
+                                            <img src="/docs/prod/<?=htmlspecialchars($adjFile)?>" alt="Adjunto #<?=($x + 1)?>" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #cbd5e1;border-radius:4px;background:#fff;vertical-align:middle;cursor:pointer">
                                         </a>
                                     <?php endif; ?>
-                                    <a href="/docs/prod/<?=htmlspecialchars($adjFile)?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;display:inline-flex;align-items:center;gap:5px">
+                                    <a href="/docs/prod/<?=htmlspecialchars($adjFile)?>" target="_blank" <?= $isImg ? 'onclick="openDesignModal(\'/docs/prod/' . htmlspecialchars(addslashes($adjFile)) . '\', \'' . htmlspecialchars((string)$agenda['prd_number']) . '\', \'' . htmlspecialchars(addslashes((string)$agenda['cust_name'])) . '\', \'Adjunto #' . ($x + 1) . '\', \'' . htmlspecialchars($consMedidasStr ?? '') . '\'); return false;"' : '' ?> class="btngrey" style="padding:4px 10px;font-size:12px;display:inline-flex;align-items:center;gap:5px;cursor:pointer">
                                         <i class="fa fa-fw fa-<?= $isImg ? 'image' : 'file' ?>" style="color:white;"></i> <?= $isImg ? 'Ver Imagen #' . ($x + 1) : 'Descargar Adjunto #' . ($x + 1) ?>
                                     </a>
                                     <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
@@ -4540,14 +4834,11 @@ function renderProductionOperatorConsole(
                         </td>
                         <td width="50%" style="padding-left:5px" align="right">
                             <?php if ($isEvtOpen): ?>
-                                <div class="btnorange" onclick="document.getElementById('ap_submode').value='end';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;width:30%;cursor:pointer;text-align:center">
-                                    <i class="fa fa-fw fa-stop" style="color:white;"></i> Ir a Autocontrol
+                                <div class="btnorange" onclick="document.getElementById('ap_submode').value='end';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 16px;font-weight:bold">
+                                    <i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar alistamiento / Ir a Autocontrol
                                 </div>
-                                <div class="btngrey" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;width:25%;cursor:pointer;text-align:center">
-                                    <i class="fa fa-fw fa-save" style="color:white;"></i> Actualizar
-                                </div>
-                                <div class="btnred" onclick="document.getElementById('ap_submode').value='cerrar';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;width:25%;cursor:pointer;text-align:center">
-                                    <i class="fa fa-fw fa-check" style="color:white;"></i> Terminar
+                                <div class="btngrey" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 14px">
+                                    <i class="fa fa-fw fa-save" style="color:white;"></i> Actualizar datos
                                 </div>
                             <?php else: ?>
                                 <div class="btngreen" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').submit();" style="width:40%;cursor:pointer;text-align:center">
@@ -6869,6 +7160,7 @@ function renderProductionOperatorConsole(
     }
     </script>
     <?php
+    echo renderDesignPreviewModal();
     renderStandbyAndLunchModals($activeStandby, $machineInit, $currentOperatorName, '/production/work-orders/operate?agid=' . $agId);
     $content = ob_get_clean();
     renderProdwrkShell('Operar OT #' . $agenda['prd_number'], $content, 2, $currentOperatorName, $plantaName);
@@ -7262,7 +7554,8 @@ function renderProductionNewWorkOrderScreen(
     ?array $activeOt,
     string $operatorName,
     string $plantaName,
-    ?array $activeStandby = null
+    ?array $activeStandby = null,
+    ?string $dateFilter = null
 ): void {
     $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
     $isRebobinadora = ($equipoTypeId === 12 || stripos((string)($activeInit['type_ant_title'] ?? ''), 'rebobin') !== false || stripos((string)($activeInit['equipo_name'] ?? ''), 'rebobin') !== false);
@@ -7390,8 +7683,33 @@ function renderProductionNewWorkOrderScreen(
         </table>
 
         <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;overflow-x:auto">
-            <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:12px">
-                <i class="fa fa-fw fa-tasks"></i> OTs Programadas para esta Máquina
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
+                <div style="font-size:15px;font-weight:bold;color:#115452;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span><i class="fa fa-fw fa-tasks"></i> OTs Programadas para esta Máquina</span>
+                    <?php if (!empty($dateFilter)): ?>
+                        <span style="font-size:12px;background:#E0F2FE;color:#0369A1;padding:3px 10px;border-radius:12px;font-weight:600;border:1px solid #BAE6FD">
+                            <i class="fa fa-calendar-day"></i> Planificado para: <b><?=htmlspecialchars($dateFilter)?></b><?= $dateFilter === date('d.m.Y') ? ' (Hoy)' : '' ?>
+                        </span>
+                    <?php else: ?>
+                        <span style="font-size:12px;background:#F1F5F9;color:#475569;padding:3px 10px;border-radius:12px;font-weight:600">
+                            Todas las fechas
+                        </span>
+                    <?php endif; ?>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <form method="get" action="/production/work-orders/new" style="margin:0;display:inline-flex;align-items:center;gap:6px">
+                        <label style="font-size:12px;color:#64748B;font-weight:600"><i class="fa fa-calendar-alt"></i> Fecha:</label>
+                        <input type="date" name="plan_date" value="<?= !empty($dateFilter) && preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $dateFilter, $mD) ? "{$mD[3]}-{$mD[2]}-{$mD[1]}" : date('Y-m-d') ?>" style="padding:4px 8px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px" onchange="this.form.submit()">
+                        <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
+                            <a href="/production/work-orders/new" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
+                        <?php endif; ?>
+                        <?php if (!empty($dateFilter)): ?>
+                            <a href="/production/work-orders/new?plan_date=all" class="btngrey" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Todas</a>
+                        <?php else: ?>
+                            <a href="/production/work-orders/new" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
+                        <?php endif; ?>
+                    </form>
+                </div>
             </div>
             <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1150px">
             <colgroup>
@@ -7428,7 +7746,17 @@ function renderProductionNewWorkOrderScreen(
             </thead>
             <tbody>
             <?php if (empty($scheduledOrders)): ?>
-                <tr><td colspan="13" class="tdnrm" style="text-align:center;padding:25px;color:#999">No hay órdenes de trabajo programadas para esta máquina.</td></tr>
+                <tr>
+                    <td colspan="13" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                        <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
+                        No hay órdenes de trabajo planificadas para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
+                        <div style="margin-top:10px">
+                            <a href="/production/work-orders/new?plan_date=all" class="btnblue" style="font-size:12px;text-decoration:none;padding:5px 14px;display:inline-block">
+                                <i class="fa fa-list"></i> Ver todas las órdenes de la agenda
+                            </a>
+                        </div>
+                    </td>
+                </tr>
             <?php else: ?>
                 <?php foreach ($scheduledOrders as $so):
                     $imgHash = trim((string)($so['fab_design_imagehash'] ?? $so['item_img_hash'] ?? ''));
@@ -7704,7 +8032,8 @@ function renderProductionActiveOrdersScreen(
     string $operatorName,
     string $plantaName,
     ?array $activeInit = null,
-    ?array $activeStandby = null
+    ?array $activeStandby = null,
+    ?string $dateFilter = null
 ): void {
     $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
     $isRebobinadora = ($equipoTypeId === 12 || stripos((string)($activeInit['type_ant_title'] ?? ''), 'rebobin') !== false || stripos((string)($activeInit['equipo_name'] ?? ''), 'rebobin') !== false);
@@ -7827,10 +8156,38 @@ function renderProductionActiveOrdersScreen(
         </table>
 
         <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;overflow-x:auto">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
+                <div style="font-size:15px;font-weight:bold;color:#115452;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span><i class="fa fa-fw fa-play-circle"></i> OTs en Curso en esta Máquina</span>
+                    <?php if (!empty($dateFilter)): ?>
+                        <span style="font-size:12px;background:#E0F2FE;color:#0369A1;padding:3px 10px;border-radius:12px;font-weight:600;border:1px solid #BAE6FD">
+                            <i class="fa fa-calendar-day"></i> Planificado para: <b><?=htmlspecialchars($dateFilter)?></b><?= $dateFilter === date('d.m.Y') ? ' (Hoy)' : '' ?>
+                        </span>
+                    <?php else: ?>
+                        <span style="font-size:12px;background:#F1F5F9;color:#475569;padding:3px 10px;border-radius:12px;font-weight:600">
+                            Todas las fechas
+                        </span>
+                    <?php endif; ?>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <form method="get" action="/production/work-orders/active" style="margin:0;display:inline-flex;align-items:center;gap:6px">
+                        <label style="font-size:12px;color:#64748B;font-weight:600"><i class="fa fa-calendar-alt"></i> Fecha:</label>
+                        <input type="date" name="plan_date" value="<?= !empty($dateFilter) && preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $dateFilter, $mD) ? "{$mD[3]}-{$mD[2]}-{$mD[1]}" : date('Y-m-d') ?>" style="padding:4px 8px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px" onchange="this.form.submit()">
+                        <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
+                            <a href="/production/work-orders/active" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
+                        <?php endif; ?>
+                        <?php if (!empty($dateFilter)): ?>
+                            <a href="/production/work-orders/active?plan_date=all" class="btngrey" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Todas</a>
+                        <?php else: ?>
+                            <a href="/production/work-orders/active" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
+                        <?php endif; ?>
+                    </form>
+                </div>
+            </div>
             <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1150px">
             <colgroup>
                 <col width="90">
-                <col width="75">
+                <col width="85">
                 <col width="150">
                 <col width="170">
                 <col width="70">
@@ -7862,7 +8219,18 @@ function renderProductionActiveOrdersScreen(
             </thead>
             <tbody>
             <?php if (empty($activeList)): ?>
-                <tr><td colspan="13" class="tdnrm" style="text-align:center;padding:25px;color:#999">No hay órdenes en curso activas actualmente.</td></tr>
+                <tr>
+                    <td colspan="13" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                        <div style="font-size:16px;font-weight:bold;color:#334155;margin-bottom:6px">
+                            <i class="fa fa-info-circle" style="color:#0284C7"></i> No hay órdenes en curso <?= !empty($dateFilter) ? 'planificadas para el ' . htmlspecialchars($dateFilter) : 'activas actualmente' ?>.
+                        </div>
+                        <?php if (!empty($dateFilter)): ?>
+                            <div style="font-size:12.5px;color:#64748B;margin-top:6px">
+                                Puedes revisar <a href="/production/work-orders/active?plan_date=all" style="color:#0284C7;font-weight:600;text-decoration:underline">todas las fechas</a> o iniciar una orden planificada para hoy en <a href="/production/work-orders/new" style="color:#059669;font-weight:600;text-decoration:underline">Iniciar nueva OT</a>.
+                            </div>
+                        <?php endif; ?>
+                    </td>
+                </tr>
             <?php else: ?>
                 <?php foreach ($activeList as $row):
                     $imgHash = trim((string)($row['fab_design_imagehash'] ?? $row['item_img_hash'] ?? ''));
@@ -7897,7 +8265,14 @@ function renderProductionActiveOrdersScreen(
                 ?>
                     <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
                         <td class="tdnrm"><b><?=htmlspecialchars((string)$row['req_number'])?></b></td>
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$row['prd_number'])?></b></td>
+                        <td class="tdnrm">
+                            <b><?=htmlspecialchars((string)$row['prd_number'])?></b>
+                            <?php if (!empty($row['ag_date'])): ?>
+                                <div style="font-size:10.5px;color:#0284C7;font-weight:600;white-space:nowrap;margin-top:2px">
+                                    <i class="fa fa-calendar-day"></i> <?=htmlspecialchars((string)$row['ag_date'])?>
+                                </div>
+                            <?php endif; ?>
+                        </td>
                         <td class="tdnrm"><b><?=htmlspecialchars((string)$row['cust_name'])?></b></td>
                         <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($fullDesign)?></td>
                         <td class="tdnrm" align="center">
