@@ -22852,7 +22852,8 @@ SQL;
         }
 
         $whereSql = $where !== [] ? 'WHERE ' . implode(' AND ', $where) : '';
-        $sql = "SELECT * FROM traceability_warehouse_entries {$whereSql} ORDER BY id DESC LIMIT " . max(1, min(200, $limit));
+        $effectiveLimit = max(1, min(10000, $limit));
+        $sql = "SELECT * FROM traceability_warehouse_entries {$whereSql} ORDER BY id DESC LIMIT " . $effectiveLimit;
 
         try {
             $stmt = $this->pdo->prepare($sql);

@@ -1081,6 +1081,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $preSku = trim((string)($_GET['sku'] ?? ''));
     $preDesc = trim((string)($_GET['desc'] ?? ''));
     $preUnit = trim((string)($_GET['unit'] ?? 'UNID')) ?: 'UNID';
+    $initialQuery = trim((string)($_GET['q'] ?? ($_GET['filter'] ?? '')));
 
     // Obtener catálogo de artículos disponibles en esta bodega para autocompletar (SOLO con stock pendiente de etiquetar > 0)
     $items = [];
@@ -1141,7 +1142,12 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         }
     }
 
-    $recentEntries = $service->listWarehouseTraceabilityEntries($storehouseId > 0 ? $storehouseId : null, null, 500);
+    $recentEntriesLimit = $initialQuery !== '' ? 5000 : 500;
+    $recentEntries = $service->listWarehouseTraceabilityEntries(
+        $storehouseId > 0 ? $storehouseId : null,
+        $initialQuery !== '' ? $initialQuery : null,
+        $recentEntriesLimit
+    );
     $groupedRecentEntries = [];
     foreach ($recentEntries as $entry) {
         $groupSku = strtoupper(trim((string)($entry['item_code'] ?? '')));
@@ -1470,7 +1476,6 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '</div>';
 
     // Barra de búsqueda rápida en vivo y botón para borrar lote completo si se filtra
-    $initialQuery = trim((string)($_GET['q'] ?? ($_GET['filter'] ?? '')));
     $body .= '<div style="margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">';
     $body .= '<div style="flex:1;min-width:240px">';
     $body .= '<input type="text" id="trz-live-filter" placeholder="🔍 Buscar por SKU, descripción, código reciente u operador..." class="form-control" style="font-size:12.5px" value="' . h($initialQuery) . '" oninput="filterRecentEntries(this.value)">';
