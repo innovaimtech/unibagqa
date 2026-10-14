@@ -272,6 +272,9 @@ function handleProductionRoutes(
     // -------------------------------------------------------------------------
     // Guardar asignación de Anilox (editxid.php líneas 108-158)
     if (isset($_REQUEST['save_anilox']) && (int)$_REQUEST['save_anilox'] === 1) {
+        if ($method === 'POST') {
+            requireCsrf();
+        }
         $agId = (int)($_REQUEST['agid'] ?? 0);
         if ($agId <= 0) {
             $activeOt = $prodService->getOpenWorkerOt($workerId, $plantaId);
@@ -288,6 +291,47 @@ function handleProductionRoutes(
             }
         }
         $res = $prodService->saveAniloxAssignments($agId, $reqId, $aniloxMap, (int)($_SESSION['user_id'] ?? 0));
+        if ($res['ok'] && $method === 'POST') {
+            $openOt = $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
+            $workerOtId = (int)($openOt['id'] ?? 0);
+            $aniloxInkRows = [];
+            $unitCount = max(6, (int)($_REQUEST['anilox_unit_count'] ?? 0));
+            for ($x = 1; $x <= $unitCount; $x++) {
+                $row = [
+                    'unidad' => $x,
+                    'posicion' => $x,
+                    'color_label' => trim((string)($_REQUEST['color' . $x] ?? '')),
+                    'anilox_id' => (int)($aniloxMap[$x] ?? 0),
+                    'ink_item_id' => (int)($_REQUEST['ink_item_' . $x] ?? 0),
+                    'loaded_kg' => (float)str_replace(',', '.', (string)($_REQUEST['ink_loaded_' . $x] ?? 0)),
+                    'leftover_kg' => (float)str_replace(',', '.', (string)($_REQUEST['ink_leftover_' . $x] ?? 0)),
+                    'is_mixed' => !empty($_REQUEST['ink_is_mix_' . $x]) ? 1 : 0,
+                    'mixture_notes' => trim((string)($_REQUEST['mix_notes_' . $x] ?? '')),
+                    'components' => [],
+                ];
+
+                $componentItems = $_REQUEST['mix_component_item_' . $x] ?? [];
+                $componentQtys = $_REQUEST['mix_component_qty_' . $x] ?? [];
+                if (is_array($componentItems) || is_array($componentQtys)) {
+                    $componentItems = is_array($componentItems) ? $componentItems : [];
+                    $componentQtys = is_array($componentQtys) ? $componentQtys : [];
+                    $componentsCount = max(count($componentItems), count($componentQtys));
+                    for ($mixIdx = 0; $mixIdx < $componentsCount; $mixIdx++) {
+                        $row['components'][] = [
+                            'item_id' => (int)($componentItems[$mixIdx] ?? 0),
+                            'qty_kg' => (float)str_replace(',', '.', (string)($componentQtys[$mixIdx] ?? 0)),
+                        ];
+                    }
+                }
+
+                $aniloxInkRows[] = $row;
+            }
+
+            $inkRes = $prodService->saveFlexoAniloxInkConfig($agId, $reqId, $workerOtId, $aniloxInkRows);
+            if (!($inkRes['ok'] ?? false)) {
+                $res = $inkRes;
+            }
+        }
         $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
                || (isset($_REQUEST['ajax']) && (int)$_REQUEST['ajax'] === 1)
                || (isset($_SERVER['HTTP_ACCEPT']) && str_contains($_SERVER['HTTP_ACCEPT'], 'application/json'));
@@ -1033,6 +1077,47 @@ function handleProductionRoutes(
         return true;
     }
 
+    if ($path === '/production/work-orders/inks/manage' && $method === 'POST') {
+        requireCsrf();
+        $agId = (int)($_REQUEST['agid'] ?? 0);
+        $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
+        $inkAction = trim((string)($_REQUEST['ink_action'] ?? ''));
+        $comments = trim((string)($_REQUEST['comments'] ?? ''));
+
+        if ($workerOtId <= 0 && $agId > 0) {
+            $openOt = $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
+            if ($openOt !== null) {
+                $workerOtId = (int)($openOt['id'] ?? 0);
+            }
+        }
+
+        if ($workerOtId <= 0) {
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=tintas&error=' . rawurlencode('No se encontró la OT activa para registrar tintas.'));
+        }
+
+        if ($inkAction === 'load') {
+            $itemId = (int)($_POST['item_id'] ?? 0);
+            $qty = (float)str_replace(',', '.', (string)($_POST['qty_kg'] ?? 0));
+            $res = $prodService->loadInkToMachine($workerOtId, $agId, $itemId, $qty, $currentOperatorName, $comments, 16);
+            $param = $res['ok'] ? '&ink_loaded=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al cargar tinta a máquina.'));
+        } elseif ($inkAction === 'consume') {
+            $loadId = (int)($_POST['load_id'] ?? 0);
+            $qty = (float)str_replace(',', '.', (string)($_POST['qty_kg'] ?? 0));
+            $res = $prodService->consumeMachineInkLoad($loadId, $workerOtId, $qty, $currentOperatorName, $comments);
+            $param = $res['ok'] ? '&ink_consumed=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar consumo de tinta.'));
+        } elseif ($inkAction === 'return') {
+            $loadId = (int)($_POST['load_id'] ?? 0);
+            $qty = (float)str_replace(',', '.', (string)($_POST['qty_kg'] ?? 0));
+            $res = $prodService->returnMachineInkLoad($loadId, $workerOtId, $qty, $currentOperatorName, $comments);
+            $param = $res['ok'] ? '&ink_returned=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al devolver tinta a 3000 Insumos de Producción.'));
+        } else {
+            $param = '&error=' . rawurlencode('Acción de tinta no válida.');
+        }
+
+        redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=tintas' . $param);
+        return true;
+    }
+
     // Montaje / Desmontaje / Devolución de Bobina en Máquina
     if ($path === '/production/work-orders/materials/mount' && $method === 'POST') {
         requireCsrf();
@@ -1311,6 +1396,22 @@ function handleProductionRoutes(
         $ctx['colormode'] = $colorMode;
         $ctx['has_back_colors'] = $hasBackColors;
         $ctx['prod_service'] = $prodService;
+        $activeInitForInk = (isset($activeInit) && is_array($activeInit)) ? $activeInit : [];
+        $isFlexoContext = (int)($activeInitForInk['equipo_prod_isprinter_flexo'] ?? ($ctx['agenda']['equipo_prod_isprinter_flexo'] ?? 0)) === 1;
+        if ($isFlexoContext) {
+            $inkWarehouse = productionResolveInkWarehouseForAgenda($activeInitForInk, $ctx['agenda'] ?? null);
+            $ctx['ink_warehouse'] = $inkWarehouse;
+            $ctx['ink_items'] = $receptionService->listWarehouseItemsByErpStorehouseId(
+                (int)($inkWarehouse['erp_storehouse_id'] ?? 16),
+                true,
+                (string)($inkWarehouse['item_prefix'] ?? 'TIN')
+            );
+        } else {
+            $ctx['ink_warehouse'] = [];
+            $ctx['ink_items'] = [];
+        }
+        $ctx['machine_ink_loads'] = $workerOtId > 0 ? $prodService->listMachineInkLoadsForWorkOrder($workerOtId, false) : [];
+        $ctx['bodega3000_ink_items'] = $receptionService->listWarehouseItemsByErpStorehouseId(16, true, 'TIN');
 
         renderProductionOperatorConsole(
             $ctx,
@@ -1435,7 +1536,11 @@ function handleProductionRoutes(
 
         $assignedRolls = ($workerOtId > 0) ? ($prodService->getWorkOrderMaterialQuota($selectedAgId, $workerOtId)['assigned_rolls'] ?? []) : [];
         $inkWarehouse = productionResolveInkWarehouseForAgenda($activeInit, $selectedAgenda);
-        $chemicals = $receptionService->listWarehouseItemsByWarehouseCode((int)($inkWarehouse['code'] ?? 0), true);
+        $chemicals = $receptionService->listWarehouseItemsByErpStorehouseId(
+            (int)($inkWarehouse['erp_storehouse_id'] ?? 16),
+            true,
+            (string)($inkWarehouse['item_prefix'] ?? 'TIN')
+        );
 
         renderProductionMaterialsRequestScreen(
             $activeInit,
@@ -1912,6 +2017,11 @@ function renderProductionOperatorConsole(
     $itemAnilox = $ctx['item_anilox'] ?? [];
     $detalleAnilox = $ctx['detalle_anilox'] ?? [];
     $aniloxDescMap = $ctx['anilox_desc_map'] ?? [];
+    $aniloxInkConfigByUnit = $ctx['anilox_ink_config_by_unit'] ?? [];
+    $inkWarehouse = $ctx['ink_warehouse'] ?? [];
+    $inkItems = $ctx['ink_items'] ?? [];
+    $machineInkLoads = $ctx['machine_ink_loads'] ?? [];
+    $bodega3000InkItems = $ctx['bodega3000_ink_items'] ?? [];
     $mermatypes = $ctx['mermatypes'] ?? [];
     $repairtypes = $ctx['repairtypes'] ?? [];
 
@@ -2050,7 +2160,7 @@ function renderProductionOperatorConsole(
 
     // Si la OT requiere autocontrol y no está en un submodo auxiliar (materiales, cargar, mantencion, pause, terminarot),
     // se renderiza EXCLUSIVAMENTE la pantalla de Autocontrol (autocontrol.form.php) tal como en el sistema original de Unibag.
-    $isExclusiveAutocontrol = (!$isRebobinadora && ($gotoAutocontrol || $mode === 'autocontrol') && !in_array($mode, ['materiales', 'cargar', 'mantencion', 'pause', 'terminarot'], true));
+    $isExclusiveAutocontrol = (!$isRebobinadora && ($gotoAutocontrol || $mode === 'autocontrol') && !in_array($mode, ['materiales', 'cargar', 'tintas', 'mantencion', 'pause', 'terminarot'], true));
 
     // Detectar evento de producción abierto
     $openProdEvent = null;
@@ -3145,21 +3255,29 @@ function renderProductionOperatorConsole(
         <?php
         $autoHidePauseShortcut = ($isSeri || $isSeriPulpo);
         $autoMaterialsLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
+        $autoHasTintasShortcut = $isFlexo;
         ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">
         <tr>
-            <td width="<?=$autoHidePauseShortcut ? '50%' : '33%'?>" style="padding-right:3px">
+            <td width="<?=$autoHasTintasShortcut ? ($autoHidePauseShortcut ? '34%' : '25%') : ($autoHidePauseShortcut ? '50%' : '33%')?>" style="padding-right:3px">
                 <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#293865;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales&fromautocontrol=1'">
                     <i class="fa fa-fw <?= $isRebobinadora ? 'fa-dolly' : 'fa-cubes' ?>"></i> <?=$autoMaterialsLabel?>
                 </div>
             </td>
-            <td width="<?=$autoHidePauseShortcut ? '50%' : '34%'?>" style="padding:0 3px">
+            <?php if ($autoHasTintasShortcut): ?>
+                <td width="<?=$autoHidePauseShortcut ? '33%' : '25%'?>" style="padding:0 3px">
+                    <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#1D4ED8;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas&fromautocontrol=1'">
+                        <i class="fa fa-fw fa-tint"></i> Tintas
+                    </div>
+                </td>
+            <?php endif; ?>
+            <td width="<?=$autoHasTintasShortcut ? ($autoHidePauseShortcut ? '33%' : '25%') : ($autoHidePauseShortcut ? '50%' : '34%')?>" style="padding:0 3px">
                 <div class="btnred" style="width:100%;box-sizing:border-box;background-color:#D64141;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion&fromautocontrol=1'">
                     <i class="fa fa-fw fa-wrench"></i> Mantención
                 </div>
             </td>
             <?php if (!$autoHidePauseShortcut): ?>
-                <td width="33%" style="padding-left:3px">
+                <td width="<?=$autoHasTintasShortcut ? '25%' : '33%'?>" style="padding-left:3px">
                     <div class="btngrey" style="width:100%;box-sizing:border-box;background-color:#7F7F7F;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&fromautocontrol=1'">
                         <i class="fa fa-fw fa-coffee"></i> Pausa
                     </div>
@@ -3192,7 +3310,7 @@ function renderProductionOperatorConsole(
         </div>
     <?php elseif (isset($_GET['saved_anilox'])): ?>
         <div style="background:#E8F5E9;color:#2E7D32;padding:12px 18px;border-radius:4px;border:1px solid #A5D6A7;margin-bottom:12px;font-size:13px">
-            <i class="fa fa-check-circle"></i> <b>Conformación de Anilox guardada exitosamente.</b>
+            <i class="fa fa-check-circle"></i> <b>Conformación de Anilox y tintas guardada exitosamente.</b>
         </div>
     <?php elseif (isset($_GET['prod_started'])): ?>
         <div style="background:#E8F5E9;color:#1B5E20;padding:12px 18px;border-radius:4px;border:1px solid #81C784;margin-bottom:12px;font-size:13px">
@@ -3697,7 +3815,7 @@ function renderProductionOperatorConsole(
             </div>
         </div>
 
-        <!-- 3. CONFORMACIÓN DE ANILOX (editxid.php líneas 3829 - 3950) -->
+        <!-- 3. CONFORMACIÓN DE ANILOX Y CONSUMO DE TINTAS -->
         <style>
         .anilox-swap-highlight {
             background-color: #E8F5E9 !important;
@@ -3706,9 +3824,64 @@ function renderProductionOperatorConsole(
         .anilox-row-transition {
             transition: background-color 0.3s ease;
         }
+        .anilox-kg-badge {
+            display:inline-flex;
+            align-items:center;
+            justify-content:center;
+            min-width:92px;
+            padding:6px 10px;
+            border-radius:999px;
+            font-size:12px;
+            font-weight:bold;
+            background:#EFF6FF;
+            color:#1D4ED8;
+            border:1px solid #BFDBFE;
+        }
+        .anilox-mix-card {
+            background:#F8FAFC;
+            border:1px solid #D8E2EE;
+            border-radius:8px;
+            padding:12px;
+        }
+        .anilox-mix-grid {
+            display:grid;
+            grid-template-columns: minmax(220px, 1fr) 110px;
+            gap:8px;
+            align-items:center;
+        }
+        .anilox-mix-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 99995;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(15, 23, 42, 0.55);
+        }
+        .anilox-mix-modal-card {
+            width: min(920px, calc(100vw - 40px));
+            max-height: calc(100vh - 40px);
+            overflow: auto;
+            background: #FFFFFF;
+            border-radius: 14px;
+            box-shadow: 0 18px 48px rgba(15, 23, 42, 0.30);
+            border: 1px solid #CBD5E1;
+        }
+        .anilox-mix-slot {
+            display:none;
+            grid-template-columns: minmax(220px, 1fr) 110px 42px;
+            gap:8px;
+            align-items:center;
+            margin-bottom:8px;
+        }
+        .anilox-mix-slot.is-visible {
+            display:grid;
+        }
         </style>
         <script>
         var isAniloxMoving = false;
+        var aniloxMixSlots = 6;
 
         function showAniloxToast(msg, type) {
             var toast = document.getElementById('anilox_toast_msg');
@@ -3736,35 +3909,327 @@ function renderProductionOperatorConsole(
             }, 2600);
         }
 
+        function aniloxParseNumber(value) {
+            var parsed = parseFloat(String(value || '').replace(/,/g, '.'));
+            return isNaN(parsed) ? 0 : parsed;
+        }
+
+        function refreshAniloxSummaryLabel(unit) {
+            var sel = document.getElementById('id_anilox_' + unit);
+            var sumEl = document.getElementById('summary_anilox_' + unit);
+            if (!sel || !sumEl) return;
+            var selectedText = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : '-';
+            if (String(sel.value || '') === '') {
+                selectedText = '-';
+            }
+            sumEl.innerText = selectedText;
+        }
+
+        function calcAniloxInkConsumed(unit) {
+            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var leftoverInp = document.getElementById('ink_leftover_' + unit);
+            var badge = document.getElementById('ink_consumed_badge_' + unit);
+            var loaded = loadedInp ? aniloxParseNumber(loadedInp.value) : 0;
+            var leftover = leftoverInp ? aniloxParseNumber(leftoverInp.value) : 0;
+            var consumed = Math.max(0, loaded - leftover);
+            if (badge) {
+                badge.innerText = consumed.toFixed(2) + ' kg';
+                badge.style.backgroundColor = consumed > 0 ? '#ECFDF5' : '#EFF6FF';
+                badge.style.borderColor = consumed > 0 ? '#A7F3D0' : '#BFDBFE';
+                badge.style.color = consumed > 0 ? '#047857' : '#1D4ED8';
+            }
+        }
+
+        function calcAniloxMixTotal(unit) {
+            var total = 0;
+            var usedCount = 0;
+            for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var itemSel = document.getElementById('mix_component_item_' + unit + '_' + idx);
+                var qtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+                var qty = qtyInp ? aniloxParseNumber(qtyInp.value) : 0;
+                var itemId = itemSel ? String(itemSel.value || '') : '';
+                if (itemId !== '' || qty > 0) {
+                    usedCount++;
+                }
+                total += qty;
+            }
+
+            var totalEl = document.getElementById('mix_total_badge_' + unit);
+            var diffEl = document.getElementById('mix_diff_badge_' + unit);
+            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var mixChk = document.getElementById('ink_is_mix_' + unit);
+            var useMix = !!(mixChk && mixChk.checked);
+            if (loadedInp && useMix) {
+                loadedInp.value = total > 0 ? total.toFixed(2) : '';
+            }
+            var loaded = loadedInp ? aniloxParseNumber(loadedInp.value) : 0;
+            var diff = loaded - total;
+            var countEl = document.getElementById('mix_count_badge_' + unit);
+
+            if (totalEl) {
+                totalEl.innerText = 'Mezcla: ' + total.toFixed(2) + ' kg';
+            }
+            if (countEl) {
+                countEl.innerText = usedCount + ' componente(s)';
+            }
+            if (diffEl) {
+                if (loaded > 0) {
+                    diffEl.innerText = 'Dif.: ' + diff.toFixed(2) + ' kg';
+                    diffEl.style.color = Math.abs(diff) <= 0.05 ? '#047857' : '#B45309';
+                } else {
+                    diffEl.innerText = 'Dif.: 0.00 kg';
+                    diffEl.style.color = '#64748B';
+                }
+            }
+            calcAniloxInkConsumed(unit);
+            refreshAniloxMixSummary(unit);
+        }
+
+        function toggleAniloxMixRow(unit) {
+            var chk = document.getElementById('ink_is_mix_' + unit);
+            var singleWrap = document.getElementById('anilox_single_ink_wrap_' + unit);
+            var inkItemSel = document.getElementById('ink_item_' + unit);
+            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var openBtn = document.getElementById('btn_open_mix_' + unit);
+            var summary = document.getElementById('mix_summary_inline_' + unit);
+            var useMix = !!(chk && chk.checked);
+            if (singleWrap) {
+                singleWrap.style.display = useMix ? 'none' : 'block';
+            }
+            if (inkItemSel) {
+                inkItemSel.disabled = useMix;
+                if (useMix) {
+                    inkItemSel.value = '';
+                }
+            }
+            if (loadedInp) {
+                loadedInp.readOnly = useMix;
+                loadedInp.style.backgroundColor = useMix ? '#EFF6FF' : '#FFFFFF';
+            }
+            if (openBtn) {
+                openBtn.style.display = useMix ? 'inline-block' : 'none';
+            }
+            if (summary) {
+                summary.style.display = useMix ? 'inline-flex' : 'none';
+            }
+            if (!useMix) {
+                closeAniloxMixModal(unit);
+            }
+            normalizeAniloxMixSlots(unit);
+            calcAniloxMixTotal(unit);
+        }
+
+        function openAniloxMixModal(unit) {
+            var chk = document.getElementById('ink_is_mix_' + unit);
+            if (chk && !chk.checked) {
+                chk.checked = true;
+            }
+            toggleAniloxMixRow(unit);
+            var modal = document.getElementById('anilox_mix_modal_' + unit);
+            if (modal) {
+                modal.style.display = 'flex';
+            }
+        }
+
+        function closeAniloxMixModal(unit) {
+            var modal = document.getElementById('anilox_mix_modal_' + unit);
+            if (modal) {
+                modal.style.display = 'none';
+            }
+        }
+
+        function getUsedAniloxMixCount(unit) {
+            var usedCount = 0;
+            for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var itemSel = document.getElementById('mix_component_item_' + unit + '_' + idx);
+                var qtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+                var itemId = itemSel ? String(itemSel.value || '') : '';
+                var qty = qtyInp ? aniloxParseNumber(qtyInp.value) : 0;
+                if (itemId !== '' || qty > 0) {
+                    usedCount++;
+                }
+            }
+            return usedCount;
+        }
+
+        function setAniloxMixSlotVisibility(unit, idx, visible) {
+            var slot = document.getElementById('mix_slot_' + unit + '_' + idx);
+            if (!slot) return;
+            slot.classList.toggle('is-visible', !!visible);
+        }
+
+        function normalizeAniloxMixSlots(unit) {
+            var visibleCount = 0;
+            for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var itemSel = document.getElementById('mix_component_item_' + unit + '_' + idx);
+                var qtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+                var itemId = itemSel ? String(itemSel.value || '') : '';
+                var qty = qtyInp ? aniloxParseNumber(qtyInp.value) : 0;
+                var isUsed = itemId !== '' || qty > 0;
+                setAniloxMixSlotVisibility(unit, idx, isUsed);
+                if (isUsed) {
+                    visibleCount = idx + 1;
+                }
+            }
+            if (visibleCount === 0) {
+                setAniloxMixSlotVisibility(unit, 0, true);
+                visibleCount = 1;
+            }
+            for (var hideIdx = visibleCount; hideIdx < aniloxMixSlots; hideIdx++) {
+                var hideItemSel = document.getElementById('mix_component_item_' + unit + '_' + hideIdx);
+                var hideQtyInp = document.getElementById('mix_component_qty_' + unit + '_' + hideIdx);
+                if (hideIdx > 0 && hideItemSel && hideQtyInp && String(hideItemSel.value || '') === '' && aniloxParseNumber(hideQtyInp.value) <= 0) {
+                    setAniloxMixSlotVisibility(unit, hideIdx, false);
+                }
+            }
+            var addBtn = document.getElementById('btn_add_mix_slot_' + unit);
+            if (addBtn) {
+                addBtn.style.display = visibleCount >= aniloxMixSlots ? 'none' : 'inline-block';
+            }
+            refreshAniloxMixSummary(unit);
+        }
+
+        function addAniloxMixSlot(unit) {
+            for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var slot = document.getElementById('mix_slot_' + unit + '_' + idx);
+                if (slot && !slot.classList.contains('is-visible')) {
+                    setAniloxMixSlotVisibility(unit, idx, true);
+                    var itemSel = document.getElementById('mix_component_item_' + unit + '_' + idx);
+                    if (itemSel) itemSel.focus();
+                    break;
+                }
+            }
+            normalizeAniloxMixSlots(unit);
+        }
+
+        function clearAniloxMixSlot(unit, idx) {
+            var itemSel = document.getElementById('mix_component_item_' + unit + '_' + idx);
+            var qtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+            if (itemSel) itemSel.value = '';
+            if (qtyInp) qtyInp.value = '';
+            if (idx > 0) {
+                setAniloxMixSlotVisibility(unit, idx, false);
+            }
+            normalizeAniloxMixSlots(unit);
+            calcAniloxMixTotal(unit);
+        }
+
+        function refreshAniloxMixSummary(unit) {
+            var summary = document.getElementById('mix_summary_inline_' + unit);
+            if (!summary) return;
+            var usedCount = getUsedAniloxMixCount(unit);
+            var total = 0;
+            for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var qtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+                total += qtyInp ? aniloxParseNumber(qtyInp.value) : 0;
+            }
+            summary.innerText = usedCount > 0 ? (usedCount + ' comp. / ' + total.toFixed(2) + ' kg') : 'Sin mezcla';
+        }
+
+        function collectAniloxRowState(unit) {
+            var state = {
+                color: '',
+                colorHidden: '',
+                anilox: '',
+                inkItem: '',
+                loaded: '',
+                leftover: '',
+                isMix: false,
+                notes: '',
+                componentItems: [],
+                componentQtys: []
+            };
+
+            var colorInp = document.getElementById('color_' + unit);
+            var colorHiddenInp = document.getElementById('color_hidden_' + unit);
+            var aniloxSel = document.getElementById('id_anilox_' + unit);
+            var inkItemSel = document.getElementById('ink_item_' + unit);
+            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var leftoverInp = document.getElementById('ink_leftover_' + unit);
+            var mixChk = document.getElementById('ink_is_mix_' + unit);
+            var notesInp = document.getElementById('mix_notes_' + unit);
+
+            state.color = colorInp ? colorInp.value : '';
+            state.colorHidden = colorHiddenInp ? colorHiddenInp.value : '';
+            state.anilox = aniloxSel ? aniloxSel.value : '';
+            state.inkItem = inkItemSel ? inkItemSel.value : '';
+            state.loaded = loadedInp ? loadedInp.value : '';
+            state.leftover = leftoverInp ? leftoverInp.value : '';
+            state.isMix = mixChk ? !!mixChk.checked : false;
+            state.notes = notesInp ? notesInp.value : '';
+
+            for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var componentItemSel = document.getElementById('mix_component_item_' + unit + '_' + idx);
+                var componentQtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+                state.componentItems.push(componentItemSel ? componentItemSel.value : '');
+                state.componentQtys.push(componentQtyInp ? componentQtyInp.value : '');
+            }
+
+            return state;
+        }
+
+        function applyAniloxRowState(unit, state) {
+            var colorInp = document.getElementById('color_' + unit);
+            var colorHiddenInp = document.getElementById('color_hidden_' + unit);
+            var aniloxSel = document.getElementById('id_anilox_' + unit);
+            var inkItemSel = document.getElementById('ink_item_' + unit);
+            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var leftoverInp = document.getElementById('ink_leftover_' + unit);
+            var mixChk = document.getElementById('ink_is_mix_' + unit);
+            var notesInp = document.getElementById('mix_notes_' + unit);
+
+            if (colorInp) colorInp.value = state.color || '';
+            if (colorHiddenInp) colorHiddenInp.value = state.colorHidden || state.color || '';
+            if (aniloxSel) aniloxSel.value = state.anilox || '';
+            if (inkItemSel) inkItemSel.value = state.inkItem || '';
+            if (loadedInp) loadedInp.value = state.loaded || '';
+            if (leftoverInp) leftoverInp.value = state.leftover || '';
+            if (mixChk) mixChk.checked = !!state.isMix;
+            if (notesInp) notesInp.value = state.notes || '';
+
+            for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var componentItemSel = document.getElementById('mix_component_item_' + unit + '_' + idx);
+                var componentQtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+                if (componentItemSel) componentItemSel.value = state.componentItems[idx] || '';
+                if (componentQtyInp) componentQtyInp.value = state.componentQtys[idx] || '';
+            }
+
+            refreshAniloxSummaryLabel(unit);
+            calcAniloxInkConsumed(unit);
+            toggleAniloxMixRow(unit);
+        }
+
         function GrabaAnilox(unidadCount) {
             var saveBtn = document.getElementById('btn_grabar_anilox');
+            var form = document.getElementById('anilox_form');
             var origHtml = saveBtn ? saveBtn.innerHTML : '';
+            if (!form) {
+                alert('No se encontró el formulario de anilox.');
+                return;
+            }
+
             if (saveBtn) {
                 saveBtn.disabled = true;
                 saveBtn.innerHTML = '<i class="fa fa-fw fa-spinner fa-spin" style="color:white;"></i> Guardando...';
             }
 
-            var maxUnits = (typeof unidadCount === 'number' && unidadCount > 1) ? unidadCount : 7;
-            var params = new URLSearchParams();
-            params.append('agid', '<?=$agId?>');
-            params.append('save_anilox', '1');
-            params.append('ajax', '1');
-
-            for (var x = 1; x < maxUnits; x++) {
-                var rev = document.getElementById('id_anilox_' + x);
-                if (rev) {
-                    params.append('anilox' + x, rev.value);
-                    var sumEl = document.getElementById('summary_anilox_' + x);
-                    if (sumEl) {
-                        var selectedText = rev.options[rev.selectedIndex] ? rev.options[rev.selectedIndex].text : '-';
-                        if (rev.value === '') selectedText = '-';
-                        sumEl.innerText = selectedText;
-                    }
-                }
+            var maxUnits = (typeof unidadCount === 'number' && unidadCount > 1) ? unidadCount : <?=count($detalleAnilox)?>;
+            for (var x = 1; x <= maxUnits; x++) {
+                closeAniloxMixModal(x);
+                normalizeAniloxMixSlots(x);
+                refreshAniloxSummaryLabel(x);
+                calcAniloxInkConsumed(x);
+                calcAniloxMixTotal(x);
             }
 
-            fetch('/production/work-orders/operate?' + params.toString(), {
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            var formData = new FormData(form);
+            formData.append('save_anilox', '1');
+            formData.append('ajax', '1');
+
+            fetch('/production/work-orders/operate', {
+                method: 'POST',
+                headers: { 'X-Requested-With': 'XMLHttpRequest' },
+                body: formData
             })
             .then(function(res) {
                 if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -3772,9 +4237,9 @@ function renderProductionOperatorConsole(
             })
             .then(function(data) {
                 if (data && data.ok) {
-                    showAniloxToast('Conformación de Anilox guardada exitosamente.', 'success');
+                    showAniloxToast('Conformación de Anilox y tintas guardada exitosamente.', 'success');
                 } else {
-                    alert(data && data.error ? data.error : 'Error al guardar Anilox');
+                    alert(data && data.error ? data.error : 'Error al guardar Anilox y tintas.');
                 }
             })
             .catch(function(err) {
@@ -3804,39 +4269,17 @@ function renderProductionOperatorConsole(
 
             var targetUnidad = (ir === 1) ? (unidad - 1) : (unidad + 1);
 
-            var colCurr = document.getElementById('color_' + unidad);
-            var colTgt  = document.getElementById('color_' + targetUnidad);
-            var selCurr = document.getElementById('id_anilox_' + unidad);
-            var selTgt  = document.getElementById('id_anilox_' + targetUnidad);
-            var trCurr  = document.getElementById('tr_anilox_' + unidad);
-            var trTgt   = document.getElementById('tr_anilox_' + targetUnidad);
-            var sumCurr = document.getElementById('summary_anilox_' + unidad);
-            var sumTgt  = document.getElementById('summary_anilox_' + targetUnidad);
+            var trCurr = document.getElementById('tr_anilox_' + unidad);
+            var trTgt = document.getElementById('tr_anilox_' + targetUnidad);
+            var mixRowCurr = document.getElementById('tr_anilox_mix_' + unidad);
+            var mixRowTgt = document.getElementById('tr_anilox_mix_' + targetUnidad);
 
-            if (!colCurr || !colTgt || !selCurr || !selTgt) {
-                return;
-            }
+            var prevStateCurr = collectAniloxRowState(unidad);
+            var prevStateTgt = collectAniloxRowState(targetUnidad);
 
-            // Guardar valores previos para rollback si falla
-            var prevColCurr = colCurr.value;
-            var prevColTgt  = colTgt.value;
-            var prevSelCurr = selCurr.value;
-            var prevSelTgt  = selTgt.value;
-            var prevSumCurr = sumCurr ? sumCurr.innerText : '';
-            var prevSumTgt  = sumTgt ? sumTgt.innerText : '';
+            applyAniloxRowState(unidad, prevStateTgt);
+            applyAniloxRowState(targetUnidad, prevStateCurr);
 
-            // Intercambio instantáneo en DOM (0ms delay perceptible)
-            colCurr.value = prevColTgt;
-            colTgt.value  = prevColCurr;
-            selCurr.value = prevSelTgt;
-            selTgt.value  = prevSelCurr;
-
-            if (sumCurr && sumTgt) {
-                sumCurr.innerText = prevSumTgt;
-                sumTgt.innerText  = prevSumCurr;
-            }
-
-            // Animación visual de intercambio
             if (trCurr) {
                 trCurr.classList.add('anilox-swap-highlight');
                 setTimeout(function() { trCurr.classList.remove('anilox-swap-highlight'); }, 800);
@@ -3845,8 +4288,15 @@ function renderProductionOperatorConsole(
                 trTgt.classList.add('anilox-swap-highlight');
                 setTimeout(function() { trTgt.classList.remove('anilox-swap-highlight'); }, 800);
             }
+            if (mixRowCurr) {
+                mixRowCurr.classList.add('anilox-swap-highlight');
+                setTimeout(function() { mixRowCurr.classList.remove('anilox-swap-highlight'); }, 800);
+            }
+            if (mixRowTgt) {
+                mixRowTgt.classList.add('anilox-swap-highlight');
+                setTimeout(function() { mixRowTgt.classList.remove('anilox-swap-highlight'); }, 800);
+            }
 
-            // Bloquear temporalmente botones de movimiento para evitar condiciones de carrera
             isAniloxMoving = true;
             var allBtns = document.querySelectorAll('.btn-anilox-mover');
             allBtns.forEach(function(b) {
@@ -3854,7 +4304,6 @@ function renderProductionOperatorConsole(
                 b.style.cursor = 'not-allowed';
             });
 
-            // Sincronización en segundo plano con el servidor
             var url = '/production/work-orders/operate?agid=<?=$agId?>&mover=' + ir + '&unidad=' + unidad + '&ajax=1';
             fetch(url, {
                 headers: { 'X-Requested-With': 'XMLHttpRequest' }
@@ -3865,30 +4314,16 @@ function renderProductionOperatorConsole(
             })
             .then(function(data) {
                 if (!data || !data.ok) {
-                    // Revertir DOM si el backend reportó error
-                    colCurr.value = prevColCurr;
-                    colTgt.value  = prevColTgt;
-                    selCurr.value = prevSelCurr;
-                    selTgt.value  = prevSelTgt;
-                    if (sumCurr && sumTgt) {
-                        sumCurr.innerText = prevSumCurr;
-                        sumTgt.innerText  = prevSumTgt;
-                    }
+                    applyAniloxRowState(unidad, prevStateCurr);
+                    applyAniloxRowState(targetUnidad, prevStateTgt);
                     alert(data && data.error ? data.error : 'Error al mover anilox.');
                 } else {
                     showAniloxToast('Unidad ' + unidad + ' intercambiada con Unidad ' + targetUnidad, 'success');
                 }
             })
             .catch(function(err) {
-                // Revertir DOM si falló la red
-                colCurr.value = prevColCurr;
-                colTgt.value  = prevColTgt;
-                selCurr.value = prevSelCurr;
-                selTgt.value  = prevSelTgt;
-                if (sumCurr && sumTgt) {
-                    sumCurr.innerText = prevSumCurr;
-                    sumTgt.innerText  = prevSumTgt;
-                }
+                applyAniloxRowState(unidad, prevStateCurr);
+                applyAniloxRowState(targetUnidad, prevStateTgt);
                 alert('Error de conexión al mover anilox: ' + err.message);
             })
             .finally(function() {
@@ -3899,69 +4334,217 @@ function renderProductionOperatorConsole(
                 });
             });
         }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            var totalUnidades = <?=count($detalleAnilox)?>;
+            for (var x = 1; x <= totalUnidades; x++) {
+                refreshAniloxSummaryLabel(x);
+                calcAniloxInkConsumed(x);
+                toggleAniloxMixRow(x);
+            }
+        });
         </script>
         <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
             <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_info_anilox', 'icon_info_anilox')">
-                <span><i class="fa fa-fw fa-circle-notch"></i> Conformación de Anilox</span>
+                <span><i class="fa fa-fw fa-circle-notch"></i> Conformación de Anilox y Tintas</span>
                 <span class="unibag-collapse-btn">
                     <span id="lbl_info_anilox">Minimizar</span>
                     <i id="icon_info_anilox" class="fa fa-chevron-up"></i>
                 </span>
             </div>
             <div id="sec_info_anilox" style="padding:15px">
-                <table border="0" width="100%" cellpadding="6" cellspacing="0">
-                <colgroup>
-                    <col width="60">
-                    <col width="30%">
-                    <col>
-                    <col width="90">
-                </colgroup>
-                <tr>
-                    <td class="tdheader" align="center">Unidad</td>
-                    <td class="tdheader" align="center">Color</td>
-                    <td class="tdheader" align="center">Anilox</td>
-                    <td class="tdheader" align="center">Opciones</td>
-                </tr>
-                <?php
-                $xAni = 1;
-                foreach ($detalleAnilox as $ani):
-                ?>
-                <tr id="tr_anilox_<?=$ani['paow_unidad']?>" class="anilox-row-transition">
-                    <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center"><b><?=$ani['paow_unidad']?></b></td>
-                    <td class="tdnrm" style="border-left:1px solid #DDDDDD">
-                        <input type="text" class="inptxt" id="color_<?=$ani['paow_unidad']?>" name="color_<?=$ani['paow_unidad']?>" style="width:100%" value="<?=htmlspecialchars((string)$ani['paow_color'])?>" disabled>
-                    </td>
-                    <td class="tdnrm" style="border-left:1px solid #DDDDDD">
-                        <select name="id_anilox_<?=$ani['paow_unidad']?>" id="id_anilox_<?=$ani['paow_unidad']?>" class="inptxt" style="width:100%;background-color:#FFFFFF">
-                            <option value="">&lt; Seleccione Anilox &gt;</option>
-                            <?php foreach ($itemAnilox as $ia): ?>
-                                <option value="<?=$ia['id']?>" <?=(int)$ia['id'] === (int)$ani['paow_anilox'] ? 'selected' : ''?>>
-                                    <?=htmlspecialchars((string)($ia['item_number_prod'] . '-' . $ia['item_title']))?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </td>
-                    <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
-                        <button type="button" class="btngrey btn-anilox-mover" style="padding:4px 8px;font-size:12px;cursor:pointer" title="Mover arriba" onclick="MoverFlecha(1, <?=$ani['paow_unidad']?>)">
-                            <i class="fa fa-fw fa-arrow-up"></i>
-                        </button>
-                        <button type="button" class="btngrey btn-anilox-mover" style="padding:4px 8px;font-size:12px;cursor:pointer;margin-left:4px" title="Mover abajo" onclick="MoverFlecha(2, <?=$ani['paow_unidad']?>)">
-                            <i class="fa fa-fw fa-arrow-down"></i>
-                        </button>
-                    </td>
-                </tr>
-                <?php
-                $xAni++;
-                endforeach;
-                ?>
-                <tr>
-                    <td colspan="4" style="padding-top:10px">
-                        <button type="button" id="btn_grabar_anilox" class="btngreen" style="font-size:13px;padding:8px 22px;cursor:pointer" onclick="GrabaAnilox(<?=$xAni?>)">
-                            <i class="fa fa-fw fa-save" style="color:white;"></i> Registrar Anilox&nbsp;
-                        </button>
-                    </td>
-                </tr>
-                </table>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+                    <div style="font-size:12px;color:#334155">
+                        Bodega de tintas: <b><?=htmlspecialchars((string)($inkWarehouse['name'] ?? 'Sin definir'))?></b>
+                    </div>
+                    <div style="font-size:12px;color:#64748B">
+                        Registre carga, sobrante y mezcla por anilox.
+                    </div>
+                </div>
+                <form id="anilox_form" method="post" action="/production/work-orders/operate" onsubmit="return false;">
+                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                    <input type="hidden" name="agid" value="<?=$agId?>">
+                    <input type="hidden" name="anilox_unit_count" value="<?=count($detalleAnilox)?>">
+                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                    <colgroup>
+                        <col width="55">
+                        <col width="20%">
+                        <col width="19%">
+                        <col width="20%">
+                        <col width="90">
+                        <col width="95">
+                        <col width="105">
+                        <col width="95">
+                        <col width="92">
+                    </colgroup>
+                    <tr>
+                        <td class="tdheader" align="center">Unid.</td>
+                        <td class="tdheader" align="center">Color</td>
+                        <td class="tdheader" align="center">Anilox</td>
+                        <td class="tdheader" align="center">Tinta</td>
+                        <td class="tdheader" align="center">Carga kg</td>
+                        <td class="tdheader" align="center">Sobrante kg</td>
+                        <td class="tdheader" align="center">Consumido</td>
+                        <td class="tdheader" align="center">Mezcla</td>
+                        <td class="tdheader" align="center">Opciones</td>
+                    </tr>
+                    <?php
+                    $xAni = 1;
+                    foreach ($detalleAnilox as $ani):
+                        $unidadAnilox = (int)($ani['paow_unidad'] ?? 0);
+                        $savedInkConfig = $aniloxInkConfigByUnit[$unidadAnilox] ?? [];
+                        $savedInkItemId = (int)($savedInkConfig['ink_item_id'] ?? 0);
+                        $savedLoadedKg = (float)($savedInkConfig['loaded_kg'] ?? 0);
+                        $savedLeftoverKg = (float)($savedInkConfig['leftover_kg'] ?? 0);
+                        $savedConsumedKg = (float)($savedInkConfig['consumed_kg'] ?? max(0, $savedLoadedKg - $savedLeftoverKg));
+                        $savedIsMixed = (int)($savedInkConfig['is_mixed'] ?? 0) === 1;
+                        $savedMixNotes = trim((string)($savedInkConfig['mixture_notes'] ?? ''));
+                        $savedComponents = array_values($savedInkConfig['components'] ?? []);
+                    ?>
+                    <tr id="tr_anilox_<?=$unidadAnilox?>" class="anilox-row-transition">
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center"><b><?=$unidadAnilox?></b></td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD">
+                            <input type="text" class="inptxt" id="color_<?=$unidadAnilox?>" style="width:100%;background:#F8FAFC" value="<?=htmlspecialchars((string)($ani['paow_color'] ?? ''))?>" readonly>
+                            <input type="hidden" id="color_hidden_<?=$unidadAnilox?>" name="color<?=$unidadAnilox?>" value="<?=htmlspecialchars((string)($ani['paow_color'] ?? ''))?>">
+                        </td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD">
+                            <select name="anilox<?=$unidadAnilox?>" id="id_anilox_<?=$unidadAnilox?>" class="inptxt" style="width:100%;background-color:#FFFFFF">
+                                <option value="">&lt; Seleccione Anilox &gt;</option>
+                                <?php foreach ($itemAnilox as $ia): ?>
+                                    <option value="<?=$ia['id']?>" <?=(int)$ia['id'] === (int)($ani['paow_anilox'] ?? 0) ? 'selected' : ''?>>
+                                        <?=htmlspecialchars((string)($ia['item_number_prod'] . '-' . $ia['item_title']))?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD">
+                            <div id="anilox_single_ink_wrap_<?=$unidadAnilox?>">
+                                <select name="ink_item_<?=$unidadAnilox?>" id="ink_item_<?=$unidadAnilox?>" class="inptxt" style="width:100%;background-color:#FFFFFF">
+                                    <option value="">&lt; Seleccione Tinta &gt;</option>
+                                    <?php foreach ($inkItems as $inkItem): ?>
+                                        <?php
+                                        $inkItemId = (int)($inkItem['id'] ?? 0);
+                                        $inkItemCode = trim((string)($inkItem['code'] ?? ''));
+                                        $inkItemName = trim((string)($inkItem['name'] ?? ''));
+                                        ?>
+                                        <option value="<?=$inkItemId?>" <?=$inkItemId === $savedInkItemId ? 'selected' : ''?>>
+                                            <?=htmlspecialchars(trim($inkItemCode . ' - ' . $inkItemName, ' -'))?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                        </td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
+                            <input type="number" step="0.01" min="0" name="ink_loaded_<?=$unidadAnilox?>" id="ink_loaded_<?=$unidadAnilox?>" class="inptxt" style="width:82px;text-align:center" value="<?=$savedLoadedKg > 0 ? number_format($savedLoadedKg, 2, '.', '') : ''?>" placeholder="0.00" oninput="calcAniloxInkConsumed(<?=$unidadAnilox?>);calcAniloxMixTotal(<?=$unidadAnilox?>)">
+                        </td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
+                            <input type="number" step="0.01" min="0" name="ink_leftover_<?=$unidadAnilox?>" id="ink_leftover_<?=$unidadAnilox?>" class="inptxt" style="width:82px;text-align:center" value="<?=$savedLeftoverKg > 0 ? number_format($savedLeftoverKg, 2, '.', '') : ''?>" placeholder="0.00" oninput="calcAniloxInkConsumed(<?=$unidadAnilox?>)">
+                        </td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
+                            <span id="ink_consumed_badge_<?=$unidadAnilox?>" class="anilox-kg-badge"><?=number_format($savedConsumedKg, 2, '.', '')?> kg</span>
+                        </td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
+                            <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:bold;color:#1D4ED8;cursor:pointer">
+                                <input type="checkbox" name="ink_is_mix_<?=$unidadAnilox?>" id="ink_is_mix_<?=$unidadAnilox?>" value="1" <?=$savedIsMixed ? 'checked' : ''?> onchange="toggleAniloxMixRow(<?=$unidadAnilox?>)">
+                                Mezcla
+                            </label>
+                            <button type="button" id="btn_open_mix_<?=$unidadAnilox?>" class="btnblue" style="display:<?=$savedIsMixed ? 'inline-block' : 'none'?>;padding:4px 8px;font-size:11px;cursor:pointer;margin-left:6px" onclick="openAniloxMixModal(<?=$unidadAnilox?>)">
+                                <i class="fa fa-flask"></i> Abrir
+                            </button>
+                            <div id="mix_summary_inline_<?=$unidadAnilox?>" style="display:<?=$savedIsMixed ? 'inline-flex' : 'none'?>;margin-top:6px;font-size:10.5px;font-weight:bold;color:#475569;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:999px;padding:3px 8px">
+                                Sin mezcla
+                            </div>
+                        </td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
+                            <button type="button" class="btngrey btn-anilox-mover" style="padding:4px 8px;font-size:12px;cursor:pointer" title="Mover arriba" onclick="MoverFlecha(1, <?=$unidadAnilox?>)">
+                                <i class="fa fa-fw fa-arrow-up"></i>
+                            </button>
+                            <button type="button" class="btngrey btn-anilox-mover" style="padding:4px 8px;font-size:12px;cursor:pointer;margin-left:4px" title="Mover abajo" onclick="MoverFlecha(2, <?=$unidadAnilox?>)">
+                                <i class="fa fa-fw fa-arrow-down"></i>
+                            </button>
+                        </td>
+                    </tr>
+                    <tr id="tr_anilox_mix_<?=$unidadAnilox?>" style="height:0">
+                        <td colspan="9" class="tdnrm" style="padding:0;border:none;height:0;line-height:0">
+                            <div id="anilox_mix_modal_<?=$unidadAnilox?>" class="anilox-mix-modal" onclick="if(event.target===this){closeAniloxMixModal(<?=$unidadAnilox?>)}">
+                                <div class="anilox-mix-modal-card">
+                                    <div style="padding:16px 18px;border-bottom:1px solid #E2E8F0;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+                                        <div>
+                                            <div style="font-size:17px;font-weight:800;color:#0F172A">
+                                                Mezcla Unidad <?=$unidadAnilox?> · <?=htmlspecialchars((string)($ani['paow_color'] ?? 'Sin color'))?>
+                                            </div>
+                                            <div style="font-size:12px;color:#64748B;margin-top:3px">
+                                                La suma de componentes se carga automáticamente en <b>Carga kg</b>.
+                                            </div>
+                                        </div>
+                                        <button type="button" class="btngrey" style="padding:6px 12px;font-size:12px;cursor:pointer" onclick="closeAniloxMixModal(<?=$unidadAnilox?>)">
+                                            <i class="fa fa-times"></i> Cerrar
+                                        </button>
+                                    </div>
+                                    <div style="padding:16px 18px">
+                                        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+                                            <div style="font-size:12px;color:#475569">
+                                                Componentes tomados desde la misma bodega de tintas de esta OT.
+                                            </div>
+                                            <div style="display:flex;gap:8px;flex-wrap:wrap">
+                                                <span id="mix_count_badge_<?=$unidadAnilox?>" class="anilox-kg-badge" style="background:#F8FAFC;border-color:#E2E8F0;color:#475569">0 componente(s)</span>
+                                                <span id="mix_total_badge_<?=$unidadAnilox?>" class="anilox-kg-badge" style="background:#EEF2FF;border-color:#C7D2FE;color:#3730A3">Mezcla: 0.00 kg</span>
+                                                <span id="mix_diff_badge_<?=$unidadAnilox?>" class="anilox-kg-badge" style="background:#FFF7ED;border-color:#FED7AA;color:#B45309">Dif.: 0.00 kg</span>
+                                            </div>
+                                        </div>
+                                        <div style="display:flex;flex-direction:column;gap:0">
+                                            <?php for ($mixIdx = 0; $mixIdx < 6; $mixIdx++): ?>
+                                                <?php $savedComponent = $savedComponents[$mixIdx] ?? []; ?>
+                                                <div id="mix_slot_<?=$unidadAnilox?>_<?=$mixIdx?>" class="anilox-mix-slot<?=((int)($savedComponent['item_id'] ?? 0) > 0 || (float)($savedComponent['qty_kg'] ?? 0) > 0) ? ' is-visible' : ''?>">
+                                                    <select name="mix_component_item_<?=$unidadAnilox?>[]" id="mix_component_item_<?=$unidadAnilox?>_<?=$mixIdx?>" class="inptxt" style="width:100%" onchange="normalizeAniloxMixSlots(<?=$unidadAnilox?>);calcAniloxMixTotal(<?=$unidadAnilox?>)">
+                                                        <option value="">&lt; Componente <?=($mixIdx + 1)?> &gt;</option>
+                                                        <?php foreach ($inkItems as $inkItem): ?>
+                                                            <?php
+                                                            $inkItemId = (int)($inkItem['id'] ?? 0);
+                                                            $inkItemCode = trim((string)($inkItem['code'] ?? ''));
+                                                            $inkItemName = trim((string)($inkItem['name'] ?? ''));
+                                                            ?>
+                                                            <option value="<?=$inkItemId?>" <?=$inkItemId === (int)($savedComponent['item_id'] ?? 0) ? 'selected' : ''?>>
+                                                                <?=htmlspecialchars(trim($inkItemCode . ' - ' . $inkItemName, ' -'))?>
+                                                            </option>
+                                                        <?php endforeach; ?>
+                                                    </select>
+                                                    <input type="number" step="0.01" min="0" name="mix_component_qty_<?=$unidadAnilox?>[]" id="mix_component_qty_<?=$unidadAnilox?>_<?=$mixIdx?>" class="inptxt" style="width:100%;text-align:center" value="<?=!empty($savedComponent['qty_kg']) ? number_format((float)$savedComponent['qty_kg'], 2, '.', '') : ''?>" placeholder="kg" oninput="normalizeAniloxMixSlots(<?=$unidadAnilox?>);calcAniloxMixTotal(<?=$unidadAnilox?>)">
+                                                    <button type="button" class="btngrey" style="padding:6px 0;font-size:12px;cursor:pointer" onclick="clearAniloxMixSlot(<?=$unidadAnilox?>, <?=$mixIdx?>)">
+                                                        <i class="fa fa-times"></i>
+                                                    </button>
+                                                </div>
+                                            <?php endfor; ?>
+                                        </div>
+                                        <div style="margin-top:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+                                            <button type="button" id="btn_add_mix_slot_<?=$unidadAnilox?>" class="btnblue" style="padding:6px 12px;font-size:12px;cursor:pointer" onclick="addAniloxMixSlot(<?=$unidadAnilox?>)">
+                                                <i class="fa fa-plus"></i> Agregar componente
+                                            </button>
+                                            <div style="font-size:11.5px;color:#64748B">
+                                                Máximo 6 componentes
+                                            </div>
+                                        </div>
+                                        <div style="margin-top:10px">
+                                            <input type="text" name="mix_notes_<?=$unidadAnilox?>" id="mix_notes_<?=$unidadAnilox?>" class="inptxt" style="width:100%" value="<?=htmlspecialchars($savedMixNotes)?>" placeholder="Observación de mezcla">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                    <?php
+                    $xAni++;
+                    endforeach;
+                    ?>
+                    <tr>
+                        <td colspan="9" style="padding-top:10px">
+                            <button type="button" id="btn_grabar_anilox" class="btngreen" style="font-size:13px;padding:8px 22px;cursor:pointer" onclick="GrabaAnilox(<?=count($detalleAnilox)?>)">
+                                <i class="fa fa-fw fa-save" style="color:white;"></i> Guardar Anilox y Tintas
+                            </button>
+                        </td>
+                    </tr>
+                    </table>
+                </form>
             </div>
         </div>
 
@@ -6276,6 +6859,251 @@ function renderProductionOperatorConsole(
                 </table>
             </form>
         </div>
+
+    <?php elseif ($mode === 'tintas'): ?>
+        <?php
+        $availableInkRows = is_array($bodega3000InkItems) ? $bodega3000InkItems : [];
+        $activeMachineInkLoads = [];
+        $closedMachineInkLoads = [];
+        $totalInkLoadedQty = 0.0;
+        $totalInkAvailableQty = 0.0;
+        foreach ($machineInkLoads as $machineInkLoad) {
+            $availableQty = (float)($machineInkLoad['available_qty'] ?? 0);
+            $totalInkLoadedQty += (float)($machineInkLoad['loaded_qty'] ?? 0);
+            $totalInkAvailableQty += $availableQty;
+            if ($availableQty > 0.0001) {
+                $activeMachineInkLoads[] = $machineInkLoad;
+            } else {
+                $closedMachineInkLoads[] = $machineInkLoad;
+            }
+        }
+        ?>
+        <div style="margin-bottom:15px">
+            <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
+                <i class="fa fa-fw fa-arrow-left"></i> Volver al listado de eventos
+            </div>
+        </div>
+
+        <?php if (!empty($_GET['ink_loaded'])): ?>
+            <div style="background:#ECFDF5;border:1.5px solid #10B981;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#065F46;font-size:13px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-check-circle" style="font-size:18px;color:#059669"></i> Tinta cargada a máquina exitosamente desde 3000 Insumos de Producción.
+            </div>
+        <?php endif; ?>
+        <?php if (!empty($_GET['ink_consumed'])): ?>
+            <div style="background:#EFF6FF;border:1.5px solid #3B82F6;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#1E40AF;font-size:13px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-check-circle" style="font-size:18px;color:#2563EB"></i> Consumo de tinta registrado correctamente.
+            </div>
+        <?php endif; ?>
+        <?php if (!empty($_GET['ink_returned'])): ?>
+            <div style="background:#F8FAFC;border:1.5px solid #CBD5E1;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#475569;font-size:13px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-undo" style="font-size:16px"></i> Sobrante de tinta devuelto a 3000 Insumos de Producción.
+            </div>
+        <?php endif; ?>
+        <?php if (!empty($_GET['error'])): ?>
+            <div style="background:#FEF2F2;border:1.5px solid #EF4444;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#991B1B;font-size:13px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-exclamation-triangle" style="font-size:18px;color:#DC2626"></i>
+                <div><?=htmlspecialchars((string)$_GET['error'])?></div>
+            </div>
+        <?php endif; ?>
+
+        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:16px 20px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;box-shadow:0 1px 2px rgba(0,0,0,0.04)">
+            <div>
+                <div style="font-size:16px;font-weight:bold;color:#1E3A8A;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-tint"></i> Control de Tintas en Máquina &mdash; OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>
+                </div>
+                <div style="font-size:12.5px;color:#64748B;margin-top:3px">
+                    Cargue tintas desde <b>3000 Insumos de Producción</b> a la máquina, registre consumo parcial y devuelva el sobrante cuando corresponda.
+                </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <span style="background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;padding:6px 10px;border-radius:999px;font-size:11.5px;font-weight:800">
+                    <i class="fa fa-warehouse"></i> 3000 Insumos de Producción
+                </span>
+                <span style="background:#F8FAFC;color:#334155;border:1px solid #E2E8F0;padding:6px 10px;border-radius:999px;font-size:11.5px;font-weight:800">
+                    <i class="fa fa-flask"></i> En máquina: <?=number_format($totalInkAvailableQty, 2, ',', '.')?> kg
+                </span>
+            </div>
+        </div>
+
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,0.05);margin-bottom:18px">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:14px">
+                <div>
+                    <div style="font-size:17px;font-weight:800;color:#1E3A8A;display:flex;align-items:center;gap:9px;margin-bottom:4px">
+                        <span style="width:34px;height:34px;border-radius:10px;background:#DBEAFE;color:#1D4ED8;display:inline-flex;align-items:center;justify-content:center;font-size:15px">
+                            <i class="fa fa-warehouse"></i>
+                        </span>
+                        Tintas disponibles en 3000 Insumos de Producción
+                    </div>
+                    <div style="font-size:12.5px;color:#64748B;line-height:1.55;max-width:760px">
+                        Seleccione una tinta `TIN`, filtre por código o color y cargue solo los kilos que realmente entran a la máquina.
+                    </div>
+                </div>
+                <div style="font-size:11.5px;color:#64748B;font-weight:800">
+                    <?=count($availableInkRows)?> item(s) con stock
+                </div>
+            </div>
+
+            <div style="margin-bottom:12px">
+                <input type="text" id="filter_machine_inks" placeholder="Buscar por código, descripción o color..." class="inptxt" style="width:100%;max-width:380px;font-size:12px;padding:8px 12px;border-radius:8px;background:#FFF" onkeyup="filterMachineInkTable(this.value)">
+            </div>
+
+            <div style="overflow:auto;max-height:360px;border:1px solid #CBD5E1;border-radius:10px;background:#FFF">
+                <table id="tbl_machine_inks" border="0" width="100%" cellpadding="9" cellspacing="0" style="min-width:980px">
+                    <colgroup>
+                        <col width="150">
+                        <col>
+                        <col width="110">
+                        <col width="150">
+                        <col width="250">
+                    </colgroup>
+                    <thead style="position:sticky;top:0;background:#F8FAFC;z-index:1;box-shadow:0 1px 0 #E2E8F0">
+                        <tr>
+                            <td class="tdheader">Código</td>
+                            <td class="tdheader">Descripción</td>
+                            <td class="tdheader" align="right">Stock</td>
+                            <td class="tdheader" align="center">Cargar kg</td>
+                            <td class="tdheader" align="center">Acción</td>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php if (empty($availableInkRows)): ?>
+                        <tr>
+                            <td colspan="5" class="tdnrm" style="text-align:center;padding:18px;color:#64748B">
+                                No se encontraron tintas `TIN` con stock en 3000 Insumos de Producción.
+                            </td>
+                        </tr>
+                    <?php else: ?>
+                        <?php foreach ($availableInkRows as $inkRow): ?>
+                            <?php
+                            $inkItemId = (int)($inkRow['item_id'] ?? 0);
+                            $inkCode = trim((string)($inkRow['code'] ?? ''));
+                            $inkName = trim((string)($inkRow['name'] ?? ''));
+                            $inkStock = (float)($inkRow['available_qty'] ?? 0);
+                            $inkLoadFormId = 'ink_load_form_' . $inkItemId;
+                            ?>
+                            <tr style="border-bottom:1px solid #F1F5F9" onmouseover="this.style.backgroundColor='#F8FBFF'" onmouseout="this.style.backgroundColor=''">
+                                <td class="tdnrm"><b><?=htmlspecialchars($inkCode !== '' ? $inkCode : '-')?></b></td>
+                                <td class="tdnrm"><?=htmlspecialchars($inkName !== '' ? $inkName : '-')?></td>
+                                <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($inkStock, 2, ',', '.')?> kg</b></td>
+                                <td class="tdnrm" align="center">
+                                    <form id="<?=$inkLoadFormId?>" method="post" action="/production/work-orders/inks/manage" style="display:none;margin:0">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="agid" value="<?=$agId?>">
+                                        <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                        <input type="hidden" name="ink_action" value="load">
+                                        <input type="hidden" name="item_id" value="<?=$inkItemId?>">
+                                    </form>
+                                    <input form="<?=$inkLoadFormId?>" type="number" step="0.01" min="0.01" max="<?=htmlspecialchars(number_format($inkStock, 3, '.', ''))?>" name="qty_kg" class="inptxt" style="width:90px;text-align:center;font-weight:bold" value="">
+                                </td>
+                                <td class="tdnrm" align="center">
+                                        <input form="<?=$inkLoadFormId?>" type="text" name="comments" class="inptxt" style="width:120px" placeholder="Obs.">
+                                        <button form="<?=$inkLoadFormId?>" type="submit" class="btnblue" style="padding:5px 12px;font-size:12px;cursor:pointer" onclick="return confirm('¿Cargar esta tinta desde 3000 Insumos de Producción a la máquina?');">
+                                            <i class="fa fa-sign-in-alt"></i> Cargar
+                                        </button>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,0.05);margin-bottom:18px">
+            <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-flask"></i> Tintas actualmente cargadas en máquina
+                </div>
+                <div style="font-size:12.5px;color:#64748B;font-weight:normal">
+                    Activas: <b><?=count($activeMachineInkLoads)?></b> &bull; Cargadas históricas: <b><?=count($machineInkLoads)?></b>
+                </div>
+            </div>
+
+            <?php if (empty($machineInkLoads)): ?>
+                <div style="padding:15px;color:#64748B;font-size:13px;font-style:italic">
+                    Aún no hay tintas cargadas en esta OT. Use la tabla superior para cargar desde 3000 Insumos de Producción.
+                </div>
+            <?php else: ?>
+                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
+                    <thead>
+                        <tr style="background:#F1F5F9;color:#334155;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">
+                            <th class="tdheader" align="left">Tinta</th>
+                            <th class="tdheader" align="center">Cargado</th>
+                            <th class="tdheader" align="center">Consumido</th>
+                            <th class="tdheader" align="center">Devuelto</th>
+                            <th class="tdheader" align="center">Disponible</th>
+                            <th class="tdheader" align="center">Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($machineInkLoads as $inkLoad): ?>
+                        <?php
+                        $inkLoadId = (int)($inkLoad['id'] ?? 0);
+                        $inkAvailable = (float)($inkLoad['available_qty'] ?? 0);
+                        $inkIsOpen = $inkAvailable > 0.0001;
+                        ?>
+                        <tr style="border-bottom:1px solid #E2E8F0;background:<?=$inkIsOpen ? '#FFFFFF' : '#F8FAFC'?>">
+                            <td class="tdnrm">
+                                <div style="font-weight:700;color:#0F172A"><?=htmlspecialchars(trim((string)($inkLoad['item_code'] ?? '') . ' - ' . (string)($inkLoad['item_name'] ?? ''), ' -'))?></div>
+                                <div style="font-size:11px;color:#64748B;margin-top:2px">Carga #<?=$inkLoadId?></div>
+                            </td>
+                            <td class="tdnrm" align="center"><b><?=number_format((float)($inkLoad['loaded_qty'] ?? 0), 2, ',', '.')?> kg</b></td>
+                            <td class="tdnrm" align="center"><?=number_format((float)($inkLoad['consumed_qty'] ?? 0), 2, ',', '.')?> kg</td>
+                            <td class="tdnrm" align="center"><?=number_format((float)($inkLoad['returned_qty'] ?? 0), 2, ',', '.')?> kg</td>
+                            <td class="tdnrm" align="center">
+                                <span style="background:<?=$inkIsOpen ? '#DBEAFE' : '#E5E7EB'?>;color:<?=$inkIsOpen ? '#1D4ED8' : '#475569'?>;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">
+                                    <?=number_format($inkAvailable, 2, ',', '.')?> kg
+                                </span>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($inkIsOpen): ?>
+                                    <div style="display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap">
+                                        <form method="post" action="/production/work-orders/inks/manage" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0">
+                                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                            <input type="hidden" name="agid" value="<?=$agId?>">
+                                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                            <input type="hidden" name="ink_action" value="consume">
+                                            <input type="hidden" name="load_id" value="<?=$inkLoadId?>">
+                                            <input type="number" step="0.01" min="0.01" max="<?=htmlspecialchars(number_format($inkAvailable, 3, '.', ''))?>" name="qty_kg" class="inptxt" style="width:78px;text-align:center" placeholder="kg">
+                                            <button type="submit" class="btngreen" style="padding:4px 10px;font-size:11px;cursor:pointer" onclick="return confirm('¿Registrar consumo de esta tinta en la máquina?');">
+                                                <i class="fa fa-minus-circle"></i> Consumir
+                                            </button>
+                                        </form>
+                                        <form method="post" action="/production/work-orders/inks/manage" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0">
+                                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                            <input type="hidden" name="agid" value="<?=$agId?>">
+                                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                            <input type="hidden" name="ink_action" value="return">
+                                            <input type="hidden" name="load_id" value="<?=$inkLoadId?>">
+                                            <input type="number" step="0.01" min="0.01" max="<?=htmlspecialchars(number_format($inkAvailable, 3, '.', ''))?>" name="qty_kg" class="inptxt" style="width:78px;text-align:center" placeholder="kg">
+                                            <button type="submit" class="btngrey" style="padding:4px 10px;font-size:11px;cursor:pointer" onclick="return confirm('¿Devolver este sobrante a 3000 Insumos de Producción?');">
+                                                <i class="fa fa-undo"></i> Devolver
+                                            </button>
+                                        </form>
+                                    </div>
+                                <?php else: ?>
+                                    <span style="background:#DCFCE7;color:#166534;padding:4px 10px;border-radius:4px;font-size:11.5px;font-weight:bold;display:inline-block">
+                                        <i class="fa fa-check-circle"></i> CERRADA
+                                    </span>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
+
+        <script>
+        function filterMachineInkTable(query) {
+            query = String(query || '').toLowerCase().trim();
+            var rows = document.querySelectorAll('#tbl_machine_inks tbody tr');
+            rows.forEach(function (tr) {
+                var text = String(tr.innerText || tr.textContent || '').toLowerCase();
+                tr.style.display = (query === '' || text.indexOf(query) !== -1) ? '' : 'none';
+            });
+        }
+        </script>
 
     <?php elseif ($mode === 'materiales'): ?>
         <!-- SUBFORMULARIO: Materiales y Bobinas con Trazabilidad -->
@@ -9193,6 +10021,14 @@ function renderProductionOperatorConsole(
                 </div>
             </td>
 
+            <?php if ($isFlexo): ?>
+                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding-right:2px;width:25%'?>">
+                    <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#1D4ED8" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas'">
+                        <nobr><i class="fa fa-fw fa-tint" style="color:white;"></i> Tintas&nbsp;</nobr>
+                    </div>
+                </td>
+            <?php endif; ?>
+
             <?php if (!$isPrinter && $hasAlis && !$isRebobinadora): ?>
                 <td style="padding-right:4px;padding-left:4px">
                     <div class="btnorange" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=apertura'">
@@ -11803,8 +12639,10 @@ function productionNormalizeMaterialToken(string $value): string
     return trim($value);
 }
 
-function productionResolveInkWarehouseForAgenda(array $activeInit, ?array $selectedAgenda): array
+function productionResolveInkWarehouseForAgenda(?array $activeInit, ?array $selectedAgenda): array
 {
+    $activeInit = is_array($activeInit) ? $activeInit : [];
+    $selectedAgenda = is_array($selectedAgenda) ? $selectedAgenda : [];
     $machineText = implode(' ', array_filter([
         (string)($activeInit['equipo_name'] ?? ''),
         (string)($activeInit['type_ant_title'] ?? ''),
@@ -11819,16 +12657,16 @@ function productionResolveInkWarehouseForAgenda(array $activeInit, ?array $selec
         || str_contains($machineNorm, 'seri');
 
     if ($isFlexo) {
-        return ['code' => 900, 'name' => 'TINTAS FLEXOGRAFIA'];
+        return ['code' => 3000, 'name' => '3000 INSUMOS EN PRODUCCION', 'erp_storehouse_id' => 16, 'item_prefix' => 'TIN'];
     }
     if ($isPulpo) {
-        return ['code' => 920, 'name' => 'TINTAS PULPO SERIGRAFICO'];
+        return ['code' => 3000, 'name' => '3000 INSUMOS EN PRODUCCION', 'erp_storehouse_id' => 16, 'item_prefix' => 'TIN'];
     }
     if ($isSeri) {
-        return ['code' => 910, 'name' => 'TINTAS SERIGRAFIA'];
+        return ['code' => 3000, 'name' => '3000 INSUMOS EN PRODUCCION', 'erp_storehouse_id' => 16, 'item_prefix' => 'TIN'];
     }
 
-    return ['code' => 910, 'name' => 'TINTAS SERIGRAFIA'];
+    return ['code' => 3000, 'name' => '3000 INSUMOS EN PRODUCCION', 'erp_storehouse_id' => 16, 'item_prefix' => 'TIN'];
 }
 
 /**

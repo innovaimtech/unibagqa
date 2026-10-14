@@ -5440,6 +5440,47 @@ SQL;
         return $results;
     }
 
+    /**
+     * Retorna artículos de una bodega ERP específica, opcionalmente filtrados por prefijo de código.
+     *
+     * @return array<int, array{item_id:int, code:string, name:string, unit_name:string, available_qty:float, request_label:string}>
+     */
+    public function listWarehouseItemsByErpStorehouseId(int $erpStorehouseId, bool $onlyWithStock = true, string $codePrefix = ''): array
+    {
+        $erpStorehouseId = max(0, $erpStorehouseId);
+        if ($erpStorehouseId <= 0) {
+            return [];
+        }
+
+        $prefix = strtoupper(trim($codePrefix));
+        $items = $this->getErpStockByStorehouse($erpStorehouseId, null, $onlyWithStock);
+        $results = [];
+        foreach ($items as $item) {
+            $code = trim((string)($item['item_number_prod'] ?? ''));
+            $name = trim((string)($item['item_title'] ?? ''));
+            $unitName = trim((string)($item['unit_name'] ?? 'UNID'));
+            $availableQty = (float)($item['available_qty'] ?? 0);
+
+            if ($code === '' && $name === '') {
+                continue;
+            }
+            if ($prefix !== '' && strpos(strtoupper($code), $prefix) !== 0) {
+                continue;
+            }
+
+            $results[] = [
+                'item_id' => (int)($item['item_id'] ?? 0),
+                'code' => $code,
+                'name' => $name,
+                'unit_name' => $unitName,
+                'available_qty' => $availableQty,
+                'request_label' => trim(($code !== '' ? $code . ' - ' : '') . $name),
+            ];
+        }
+
+        return $results;
+    }
+
     public function listAniloxCatalog(): array
     {
         $stmt = $this->pdo->prepare(

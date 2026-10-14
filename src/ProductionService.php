@@ -5734,6 +5734,7 @@ final class ProductionService
         $itemAnilox = [];
         $detalleAnilox = [];
         $aniloxDescMap = [];
+        $aniloxInkConfigByUnit = [];
 
         try {
             // 1. Catálogo de anilox para la máquina
@@ -5853,6 +5854,8 @@ final class ProductionService
                     }
                 }
             }
+
+            $aniloxInkConfigByUnit = $this->getFlexoAniloxInkConfigByUnit($agId);
         } catch (Throwable) {
             // Ignore errors
         }
@@ -5861,7 +5864,651 @@ final class ProductionService
             'item_anilox' => $itemAnilox,
             'detalle_anilox' => $detalleAnilox,
             'anilox_desc_map' => $aniloxDescMap,
+            'anilox_ink_config_by_unit' => $aniloxInkConfigByUnit,
         ];
+    }
+
+    public function ensureFlexoAniloxInkSchema(): void
+    {
+        if ($this->trzPdo === null) {
+            return;
+        }
+
+        try {
+            $this->trzPdo->exec("
+                CREATE TABLE IF NOT EXISTS flexo_anilox_ink_configs (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    ag_id BIGINT UNSIGNED NOT NULL,
+                    req_id BIGINT UNSIGNED NULL,
+                    worker_ot_id BIGINT UNSIGNED NULL,
+                    unidad INT NOT NULL,
+                    posicion INT NOT NULL DEFAULT 0,
+                    color_label VARCHAR(180) NULL,
+                    anilox_id BIGINT UNSIGNED NULL,
+                    ink_item_id BIGINT UNSIGNED NULL,
+                    ink_code VARCHAR(80) NULL,
+                    ink_name VARCHAR(255) NULL,
+                    loaded_kg DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    leftover_kg DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    consumed_kg DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    is_mixed TINYINT(1) NOT NULL DEFAULT 0,
+                    mixture_notes VARCHAR(255) NULL,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uq_flexo_anilox_ink_ag_unit (ag_id, unidad),
+                    KEY idx_flexo_anilox_ink_req (req_id),
+                    KEY idx_flexo_anilox_ink_worker_ot (worker_ot_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ");
+            $this->trzPdo->exec("
+                CREATE TABLE IF NOT EXISTS flexo_anilox_ink_mix_components (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    config_id BIGINT UNSIGNED NOT NULL,
+                    position_no INT NOT NULL DEFAULT 0,
+                    item_id BIGINT UNSIGNED NULL,
+                    item_code VARCHAR(80) NULL,
+                    item_name VARCHAR(255) NULL,
+                    qty_kg DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    PRIMARY KEY (id),
+                    KEY idx_flexo_anilox_mix_cfg (config_id),
+                    KEY idx_flexo_anilox_mix_item (item_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ");
+        } catch (Throwable) {}
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function getFlexoAniloxInkConfigByUnit(int $agId): array
+    {
+        if ($agId <= 0 || $this->trzPdo === null) {
+            return [];
+        }
+
+        $this->ensureFlexoAniloxInkSchema();
+
+        $rowsByUnit = [];
+        try {
+            $stmt = $this->trzPdo->prepare("
+                SELECT *
+                FROM flexo_anilox_ink_configs
+                WHERE ag_id = :ag_id
+                ORDER BY unidad ASC
+            ");
+            $stmt->execute([':ag_id' => $agId]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            if ($rows === []) {
+                return [];
+            }
+
+            $configIds = [];
+            foreach ($rows as $row) {
+                $configId = (int)($row['id'] ?? 0);
+                $unidad = (int)($row['unidad'] ?? 0);
+                if ($configId <= 0 || $unidad <= 0) {
+                    continue;
+                }
+                $configIds[] = $configId;
+                $row['components'] = [];
+                $row['loaded_kg'] = (float)($row['loaded_kg'] ?? 0);
+                $row['leftover_kg'] = (float)($row['leftover_kg'] ?? 0);
+                $row['consumed_kg'] = (float)($row['consumed_kg'] ?? 0);
+                $row['is_mixed'] = (int)($row['is_mixed'] ?? 0);
+                $rowsByUnit[$unidad] = $row;
+            }
+
+            if ($configIds !== []) {
+                $placeholders = [];
+                $params = [];
+                foreach ($configIds as $idx => $configId) {
+                    $placeholder = ':cfg_' . $idx;
+                    $placeholders[] = $placeholder;
+                    $params[$placeholder] = $configId;
+                }
+                $stmtComponents = $this->trzPdo->prepare("
+                    SELECT *
+                    FROM flexo_anilox_ink_mix_components
+                    WHERE config_id IN (" . implode(', ', $placeholders) . ")
+                    ORDER BY config_id ASC, position_no ASC, id ASC
+                ");
+                $stmtComponents->execute($params);
+                $components = $stmtComponents->fetchAll(PDO::FETCH_ASSOC) ?: [];
+                foreach ($components as $component) {
+                    $configId = (int)($component['config_id'] ?? 0);
+                    foreach ($rowsByUnit as &$unitRow) {
+                        if ((int)($unitRow['id'] ?? 0) !== $configId) {
+                            continue;
+                        }
+                        $unitRow['components'][] = [
+                            'id' => (int)($component['id'] ?? 0),
+                            'position_no' => (int)($component['position_no'] ?? 0),
+                            'item_id' => (int)($component['item_id'] ?? 0),
+                            'item_code' => (string)($component['item_code'] ?? ''),
+                            'item_name' => (string)($component['item_name'] ?? ''),
+                            'qty_kg' => (float)($component['qty_kg'] ?? 0),
+                        ];
+                        break;
+                    }
+                    unset($unitRow);
+                }
+            }
+        } catch (Throwable) {
+            return [];
+        }
+
+        return $rowsByUnit;
+    }
+
+    public function saveFlexoAniloxInkConfig(
+        int $agId,
+        int $reqId,
+        int $workerOtId,
+        array $rows
+    ): array {
+        if ($agId <= 0) {
+            return ['ok' => false, 'error' => 'No se pudo identificar la agenda de anilox para guardar las tintas.'];
+        }
+        if ($this->trzPdo === null) {
+            return ['ok' => false, 'error' => 'Base de datos de trazabilidad no disponible para guardar tintas de anilox.'];
+        }
+
+        $this->ensureFlexoAniloxInkSchema();
+        $now = time();
+
+        try {
+            $itemIds = [];
+            foreach ($rows as $row) {
+                $baseItemId = (int)($row['ink_item_id'] ?? 0);
+                if ($baseItemId > 0) {
+                    $itemIds[] = $baseItemId;
+                }
+                foreach (($row['components'] ?? []) as $component) {
+                    $componentItemId = (int)($component['item_id'] ?? 0);
+                    if ($componentItemId > 0) {
+                        $itemIds[] = $componentItemId;
+                    }
+                }
+            }
+            $itemIds = array_values(array_unique($itemIds));
+
+            $itemsById = [];
+            if ($itemIds !== []) {
+                $placeholders = [];
+                $params = [];
+                foreach ($itemIds as $idx => $itemId) {
+                    $placeholder = ':item_' . $idx;
+                    $placeholders[] = $placeholder;
+                    $params[$placeholder] = $itemId;
+                }
+                $stmtItems = $this->erpPdo->prepare("
+                    SELECT id, item_number_prod, item_title
+                    FROM item
+                    WHERE id IN (" . implode(', ', $placeholders) . ")
+                ");
+                $stmtItems->execute($params);
+                $itemRows = $stmtItems->fetchAll(PDO::FETCH_ASSOC) ?: [];
+                foreach ($itemRows as $itemRow) {
+                    $itemsById[(int)$itemRow['id']] = [
+                        'code' => trim((string)($itemRow['item_number_prod'] ?? '')),
+                        'name' => trim((string)($itemRow['item_title'] ?? '')),
+                    ];
+                }
+            }
+
+            if ($this->trzPdo->inTransaction()) {
+                $this->trzPdo->rollBack();
+            }
+            $this->trzPdo->beginTransaction();
+
+            $stmtConfigIds = $this->trzPdo->prepare("
+                SELECT id FROM flexo_anilox_ink_configs WHERE ag_id = :ag_id
+            ");
+            $stmtConfigIds->execute([':ag_id' => $agId]);
+            $existingConfigIds = array_map('intval', $stmtConfigIds->fetchAll(PDO::FETCH_COLUMN) ?: []);
+            if ($existingConfigIds !== []) {
+                $placeholders = [];
+                $params = [];
+                foreach ($existingConfigIds as $idx => $configId) {
+                    $placeholder = ':cfg_' . $idx;
+                    $placeholders[] = $placeholder;
+                    $params[$placeholder] = $configId;
+                }
+                $this->trzPdo->prepare("
+                    DELETE FROM flexo_anilox_ink_mix_components
+                    WHERE config_id IN (" . implode(', ', $placeholders) . ")
+                ")->execute($params);
+            }
+
+            $this->trzPdo->prepare("
+                DELETE FROM flexo_anilox_ink_configs WHERE ag_id = :ag_id
+            ")->execute([':ag_id' => $agId]);
+
+            $stmtInsertConfig = $this->trzPdo->prepare("
+                INSERT INTO flexo_anilox_ink_configs
+                    (ag_id, req_id, worker_ot_id, unidad, posicion, color_label, anilox_id, ink_item_id, ink_code, ink_name, loaded_kg, leftover_kg, consumed_kg, is_mixed, mixture_notes, created_at, updated_at)
+                VALUES
+                    (:ag_id, :req_id, :worker_ot_id, :unidad, :posicion, :color_label, :anilox_id, :ink_item_id, :ink_code, :ink_name, :loaded_kg, :leftover_kg, :consumed_kg, :is_mixed, :mixture_notes, :created_at, :updated_at)
+            ");
+            $stmtInsertComponent = $this->trzPdo->prepare("
+                INSERT INTO flexo_anilox_ink_mix_components
+                    (config_id, position_no, item_id, item_code, item_name, qty_kg, created_at, updated_at)
+                VALUES
+                    (:config_id, :position_no, :item_id, :item_code, :item_name, :qty_kg, :created_at, :updated_at)
+            ");
+
+            foreach ($rows as $row) {
+                $unidad = (int)($row['unidad'] ?? 0);
+                if ($unidad <= 0) {
+                    continue;
+                }
+
+                $loadedKg = max(0.0, round((float)($row['loaded_kg'] ?? 0), 3));
+                $leftoverKg = max(0.0, round((float)($row['leftover_kg'] ?? 0), 3));
+                $consumedKg = max(0.0, round($loadedKg - $leftoverKg, 3));
+                $isMixed = !empty($row['is_mixed']) ? 1 : 0;
+                $mixtureNotes = trim((string)($row['mixture_notes'] ?? ''));
+                $inkItemId = (int)($row['ink_item_id'] ?? 0);
+                $colorLabel = trim((string)($row['color_label'] ?? ''));
+                $components = [];
+
+                foreach (($row['components'] ?? []) as $componentIndex => $component) {
+                    $componentItemId = (int)($component['item_id'] ?? 0);
+                    $componentQtyKg = max(0.0, round((float)($component['qty_kg'] ?? 0), 3));
+                    if ($componentItemId <= 0 && $componentQtyKg <= 0) {
+                        continue;
+                    }
+                    $componentItemMeta = $itemsById[$componentItemId] ?? ['code' => '', 'name' => ''];
+                    $components[] = [
+                        'position_no' => $componentIndex + 1,
+                        'item_id' => $componentItemId > 0 ? $componentItemId : null,
+                        'item_code' => (string)$componentItemMeta['code'],
+                        'item_name' => (string)$componentItemMeta['name'],
+                        'qty_kg' => $componentQtyKg,
+                    ];
+                }
+
+                $hasMeaningfulData = (
+                    $inkItemId > 0
+                    || $loadedKg > 0
+                    || $leftoverKg > 0
+                    || $isMixed === 1
+                    || $mixtureNotes !== ''
+                    || $components !== []
+                );
+                if (!$hasMeaningfulData) {
+                    continue;
+                }
+
+                $baseItemMeta = $itemsById[$inkItemId] ?? ['code' => '', 'name' => ''];
+                $stmtInsertConfig->execute([
+                    ':ag_id' => $agId,
+                    ':req_id' => $reqId > 0 ? $reqId : null,
+                    ':worker_ot_id' => $workerOtId > 0 ? $workerOtId : null,
+                    ':unidad' => $unidad,
+                    ':posicion' => (int)($row['posicion'] ?? $unidad),
+                    ':color_label' => $colorLabel !== '' ? $colorLabel : null,
+                    ':anilox_id' => (int)($row['anilox_id'] ?? 0) > 0 ? (int)$row['anilox_id'] : null,
+                    ':ink_item_id' => $inkItemId > 0 ? $inkItemId : null,
+                    ':ink_code' => $baseItemMeta['code'] !== '' ? $baseItemMeta['code'] : null,
+                    ':ink_name' => $baseItemMeta['name'] !== '' ? $baseItemMeta['name'] : null,
+                    ':loaded_kg' => $loadedKg,
+                    ':leftover_kg' => $leftoverKg,
+                    ':consumed_kg' => $consumedKg,
+                    ':is_mixed' => $isMixed,
+                    ':mixture_notes' => $mixtureNotes !== '' ? $mixtureNotes : null,
+                    ':created_at' => $now,
+                    ':updated_at' => $now,
+                ]);
+                $configId = (int)$this->trzPdo->lastInsertId();
+
+                foreach ($components as $component) {
+                    $stmtInsertComponent->execute([
+                        ':config_id' => $configId,
+                        ':position_no' => (int)$component['position_no'],
+                        ':item_id' => $component['item_id'],
+                        ':item_code' => $component['item_code'] !== '' ? $component['item_code'] : null,
+                        ':item_name' => $component['item_name'] !== '' ? $component['item_name'] : null,
+                        ':qty_kg' => (float)$component['qty_kg'],
+                        ':created_at' => $now,
+                        ':updated_at' => $now,
+                    ]);
+                }
+            }
+
+            $this->trzPdo->prepare("
+                INSERT INTO events (type, payload) VALUES (:type, :payload)
+            ")->execute([
+                ':type' => 'FLEXO_ANILOX_INK_CONFIG_SAVED',
+                ':payload' => json_encode([
+                    'ag_id' => $agId,
+                    'req_id' => $reqId,
+                    'worker_ot_id' => $workerOtId,
+                    'rows_count' => count($rows),
+                    'saved_at' => $now,
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            $this->trzPdo->commit();
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            if ($this->trzPdo->inTransaction()) {
+                $this->trzPdo->rollBack();
+            }
+            return ['ok' => false, 'error' => 'Error al guardar tintas por anilox: ' . $e->getMessage()];
+        }
+    }
+
+    public function ensureMachineInkLoadsSchema(): void
+    {
+        if ($this->trzPdo === null) {
+            return;
+        }
+
+        try {
+            $this->trzPdo->exec("
+                CREATE TABLE IF NOT EXISTS work_order_machine_ink_loads (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    worker_ot_id BIGINT UNSIGNED NOT NULL,
+                    ag_id BIGINT UNSIGNED NULL,
+                    warehouse_code INT NOT NULL DEFAULT 16,
+                    item_id BIGINT UNSIGNED NOT NULL,
+                    item_code VARCHAR(80) NULL,
+                    item_name VARCHAR(255) NULL,
+                    unit_name VARCHAR(40) NULL,
+                    loaded_qty DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    consumed_qty DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    returned_qty DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    operator_name VARCHAR(150) NULL,
+                    comments VARCHAR(255) NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    closed_at BIGINT NULL,
+                    PRIMARY KEY (id),
+                    KEY idx_wo_machine_ink_worker_ot (worker_ot_id),
+                    KEY idx_wo_machine_ink_ag (ag_id),
+                    KEY idx_wo_machine_ink_item (item_id),
+                    KEY idx_wo_machine_ink_status (status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ");
+        } catch (Throwable) {}
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    public function listMachineInkLoadsForWorkOrder(int $workerOtId, bool $onlyOpen = false): array
+    {
+        if ($workerOtId <= 0 || $this->trzPdo === null) {
+            return [];
+        }
+
+        $this->ensureMachineInkLoadsSchema();
+
+        try {
+            $sql = "
+                SELECT *,
+                       (loaded_qty - consumed_qty - returned_qty) AS available_qty
+                FROM work_order_machine_ink_loads
+                WHERE worker_ot_id = :worker_ot_id
+            ";
+            if ($onlyOpen) {
+                $sql .= " AND (loaded_qty - consumed_qty - returned_qty) > 0.0001";
+            }
+            $sql .= " ORDER BY status = 'ACTIVE' DESC, id DESC";
+
+            $stmt = $this->trzPdo->prepare($sql);
+            $stmt->execute([':worker_ot_id' => $workerOtId]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            foreach ($rows as &$row) {
+                $row['loaded_qty'] = (float)($row['loaded_qty'] ?? 0);
+                $row['consumed_qty'] = (float)($row['consumed_qty'] ?? 0);
+                $row['returned_qty'] = (float)($row['returned_qty'] ?? 0);
+                $row['available_qty'] = max(0.0, (float)($row['available_qty'] ?? 0));
+            }
+            unset($row);
+            return $rows;
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    public function loadInkToMachine(
+        int $workerOtId,
+        int $agId,
+        int $itemId,
+        float $qty,
+        string $operatorName,
+        string $comments = '',
+        int $warehouseCode = 16
+    ): array {
+        if ($workerOtId <= 0 || $itemId <= 0 || $qty <= 0) {
+            return ['ok' => false, 'error' => 'Datos inválidos para cargar tinta a máquina.'];
+        }
+        if ($this->trzPdo === null) {
+            return ['ok' => false, 'error' => 'Base de datos de trazabilidad no disponible para controlar tintas.'];
+        }
+
+        $this->ensureMachineInkLoadsSchema();
+        $now = time();
+
+        try {
+            $stmtItem = $this->erpPdo->prepare("
+                SELECT i.id, i.item_number_prod, i.item_title
+                FROM item i
+                WHERE i.id = :id
+                LIMIT 1
+            ");
+            $stmtItem->execute([':id' => $itemId]);
+            $item = $stmtItem->fetch(PDO::FETCH_ASSOC);
+            if (!$item) {
+                return ['ok' => false, 'error' => 'No se encontró la tinta seleccionada.'];
+            }
+
+            $itemCode = trim((string)($item['item_number_prod'] ?? ''));
+            $itemName = trim((string)($item['item_title'] ?? ''));
+            if ($itemCode === '' || stripos($itemCode, 'TIN') !== 0) {
+                return ['ok' => false, 'error' => 'Solo se pueden cargar tintas con código iniciado en TIN desde 3000 Insumos de Producción.'];
+            }
+
+            $stmt = $this->trzPdo->prepare("
+                INSERT INTO work_order_machine_ink_loads
+                    (worker_ot_id, ag_id, warehouse_code, item_id, item_code, item_name, unit_name, loaded_qty, consumed_qty, returned_qty, operator_name, comments, status, created_at, updated_at)
+                VALUES
+                    (:worker_ot_id, :ag_id, :warehouse_code, :item_id, :item_code, :item_name, :unit_name, :loaded_qty, 0, 0, :operator_name, :comments, 'ACTIVE', :created_at, :updated_at)
+            ");
+            $stmt->execute([
+                ':worker_ot_id' => $workerOtId,
+                ':ag_id' => $agId > 0 ? $agId : null,
+                ':warehouse_code' => $warehouseCode,
+                ':item_id' => $itemId,
+                ':item_code' => $itemCode !== '' ? $itemCode : null,
+                ':item_name' => $itemName !== '' ? $itemName : null,
+                ':unit_name' => 'KG',
+                ':loaded_qty' => round($qty, 3),
+                ':operator_name' => $operatorName !== '' ? $operatorName : null,
+                ':comments' => $comments !== '' ? $comments : null,
+                ':created_at' => $now,
+                ':updated_at' => $now,
+            ]);
+            $loadId = (int)$this->trzPdo->lastInsertId();
+
+            $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
+                ':type' => 'MACHINE_INK_LOAD_CREATED',
+                ':payload' => json_encode([
+                    'load_id' => $loadId,
+                    'worker_ot_id' => $workerOtId,
+                    'ag_id' => $agId,
+                    'warehouse_code' => $warehouseCode,
+                    'item_id' => $itemId,
+                    'item_code' => $itemCode,
+                    'item_name' => $itemName,
+                    'loaded_qty' => round($qty, 3),
+                    'operator' => $operatorName,
+                    'comments' => $comments,
+                    'timestamp' => $now,
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            $stmtErp = $this->erpPdo->prepare("
+                INSERT INTO prod_worker_ot_events
+                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                VALUES
+                    (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+            ");
+            $stmtErp->execute([
+                ':ot_id' => $workerOtId,
+                ':amt' => round($qty, 3),
+                ':crtdat' => $now,
+                ':enddat' => $now,
+                ':comments' => 'Carga tinta a máquina desde 3000 Insumos de Producción: '
+                    . ($itemCode !== '' ? $itemCode . ' - ' : '')
+                    . $itemName
+                    . ' / ' . number_format($qty, 3, '.', '') . ' kg'
+                    . ($comments !== '' ? ' (' . $comments . ')' : ''),
+            ]);
+
+            return ['ok' => true, 'load_id' => $loadId];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al cargar tinta a máquina: ' . $e->getMessage()];
+        }
+    }
+
+    public function consumeMachineInkLoad(
+        int $loadId,
+        int $workerOtId,
+        float $qty,
+        string $operatorName,
+        string $comments = ''
+    ): array {
+        return $this->adjustMachineInkLoad($loadId, $workerOtId, $qty, 'consume', $operatorName, $comments);
+    }
+
+    public function returnMachineInkLoad(
+        int $loadId,
+        int $workerOtId,
+        float $qty,
+        string $operatorName,
+        string $comments = ''
+    ): array {
+        return $this->adjustMachineInkLoad($loadId, $workerOtId, $qty, 'return', $operatorName, $comments);
+    }
+
+    private function adjustMachineInkLoad(
+        int $loadId,
+        int $workerOtId,
+        float $qty,
+        string $action,
+        string $operatorName,
+        string $comments = ''
+    ): array {
+        if ($loadId <= 0 || $workerOtId <= 0 || $qty <= 0) {
+            return ['ok' => false, 'error' => 'Datos inválidos para actualizar la tinta en máquina.'];
+        }
+        if ($this->trzPdo === null) {
+            return ['ok' => false, 'error' => 'Base de datos de trazabilidad no disponible para controlar tintas.'];
+        }
+
+        $this->ensureMachineInkLoadsSchema();
+        $now = time();
+
+        try {
+            $stmt = $this->trzPdo->prepare("
+                SELECT *
+                FROM work_order_machine_ink_loads
+                WHERE id = :id AND worker_ot_id = :worker_ot_id
+                LIMIT 1
+            ");
+            $stmt->execute([
+                ':id' => $loadId,
+                ':worker_ot_id' => $workerOtId,
+            ]);
+            $load = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$load) {
+                return ['ok' => false, 'error' => 'No se encontró la carga de tinta indicada.'];
+            }
+
+            $loadedQty = (float)($load['loaded_qty'] ?? 0);
+            $consumedQty = (float)($load['consumed_qty'] ?? 0);
+            $returnedQty = (float)($load['returned_qty'] ?? 0);
+            $availableQty = max(0.0, $loadedQty - $consumedQty - $returnedQty);
+            if ($qty > $availableQty + 0.0001) {
+                return ['ok' => false, 'error' => 'La cantidad excede lo disponible actualmente en máquina.'];
+            }
+
+            $newConsumedQty = $consumedQty;
+            $newReturnedQty = $returnedQty;
+            if ($action === 'consume') {
+                $newConsumedQty += $qty;
+            } else {
+                $newReturnedQty += $qty;
+            }
+            $remainingQty = max(0.0, $loadedQty - $newConsumedQty - $newReturnedQty);
+            $newStatus = $remainingQty > 0.0001 ? 'ACTIVE' : 'CLOSED';
+
+            $stmtUpd = $this->trzPdo->prepare("
+                UPDATE work_order_machine_ink_loads
+                SET consumed_qty = :consumed_qty,
+                    returned_qty = :returned_qty,
+                    status = :status,
+                    updated_at = :updated_at,
+                    closed_at = :closed_at
+                WHERE id = :id
+            ");
+            $stmtUpd->execute([
+                ':consumed_qty' => round($newConsumedQty, 3),
+                ':returned_qty' => round($newReturnedQty, 3),
+                ':status' => $newStatus,
+                ':updated_at' => $now,
+                ':closed_at' => $newStatus === 'CLOSED' ? $now : null,
+                ':id' => $loadId,
+            ]);
+
+            $eventType = $action === 'consume' ? 'MACHINE_INK_LOAD_CONSUMED' : 'MACHINE_INK_LOAD_RETURNED';
+            $warehouseLabel = ((int)($load['warehouse_code'] ?? 0) === 16) ? '3000 Insumos de Producción' : ('Bodega ' . (string)($load['warehouse_code'] ?? ''));
+            $label = $action === 'consume' ? 'Consumo tinta en máquina' : 'Devolución tinta a ' . $warehouseLabel;
+
+            $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
+                ':type' => $eventType,
+                ':payload' => json_encode([
+                    'load_id' => $loadId,
+                    'worker_ot_id' => $workerOtId,
+                    'item_id' => (int)($load['item_id'] ?? 0),
+                    'item_code' => (string)($load['item_code'] ?? ''),
+                    'item_name' => (string)($load['item_name'] ?? ''),
+                    'qty' => round($qty, 3),
+                    'remaining_qty' => round($remainingQty, 3),
+                    'operator' => $operatorName,
+                    'comments' => $comments,
+                    'timestamp' => $now,
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            $stmtErp = $this->erpPdo->prepare("
+                INSERT INTO prod_worker_ot_events
+                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                VALUES
+                    (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+            ");
+            $stmtErp->execute([
+                ':ot_id' => $workerOtId,
+                ':amt' => round($qty, 3),
+                ':crtdat' => $now,
+                ':enddat' => $now,
+                ':comments' => $label . ': '
+                    . trim((string)($load['item_code'] ?? '') . ' - ' . (string)($load['item_name'] ?? ''), ' -')
+                    . ' / ' . number_format($qty, 3, '.', '') . ' kg'
+                    . ($comments !== '' ? ' (' . $comments . ')' : ''),
+            ]);
+
+            return ['ok' => true, 'remaining_qty' => $remainingQty];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al actualizar la carga de tinta: ' . $e->getMessage()];
+        }
     }
 
     /**
