@@ -1438,11 +1438,13 @@ final class ProductionService
         }
 
         $totProducedAll = 0.0;
+        $totMetersAll = 0.0;
         $totPulpoFrenteAgenda = $totPulpoFrenteThis;
         $totPulpoDorsoAgenda = $totPulpoDorsoThis;
         try {
             $stmtAgTot = $this->erpPdo->prepare(
                 "SELECT SUM(t3.evt_amount) AS tot_all,
+                        SUM(t3.evt_amount_metros_lineales) AS tot_meters,
                         SUM(t3.evt_amount_pulpo_frente) AS tot_frente,
                         SUM(t3.evt_amount_pulpo_dorso) AS tot_dorso
                  FROM prod_worker_ot t2
@@ -1455,11 +1457,13 @@ final class ProductionService
             $agRow = $stmtAgTot->fetch();
             if (is_array($agRow)) {
                 $totProducedAll = (float)($agRow['tot_all'] ?? 0);
+                $totMetersAll = (float)($agRow['tot_meters'] ?? 0);
                 $totPulpoFrenteAgenda = (float)($agRow['tot_frente'] ?? 0);
                 $totPulpoDorsoAgenda = (float)($agRow['tot_dorso'] ?? 0);
             }
         } catch (Throwable) {
             $totProducedAll = $totProducedThis;
+            $totMetersAll = $totMetersThis;
         }
 
         $surplusFrente = max(0.0, $totPulpoFrenteAgenda - $totPulpoDorsoAgenda);
@@ -1564,6 +1568,31 @@ final class ProductionService
             || strpos($equipoName, 'REBOB') !== false;
         $isSelladora = strpos($typeAntTitle, 'SELLADORA') !== false;
         $isEmbalaje = !empty($openInit['type_createstock_act']);
+
+        $targetAmountThis = $agAmount;
+        $orderAmountDisplay = (float)($agendaData['item_amount'] ?? $agAmount);
+        $displayProducedThis = $totProducedThis;
+        $displayProducedAll = $totProducedAll;
+        if ($isFlexo) {
+            $orderBagAmount = (float)($agendaData['item_amount'] ?? $agAmount);
+            $orderMlinProg = round($orderBagAmount * $corteM2);
+            $orderMlinAddi = round(($orderMlinProg / 100) * $mermaPerc);
+            $orderMetersTarget = round($orderMlinProg + $orderMlinAddi);
+            if ($orderMetersTarget <= 0) {
+                $orderMetersTarget = $metrosAImprimir;
+            }
+            $targetAmountThis = (float)$metrosAImprimir;
+            $orderAmountDisplay = (float)$orderMetersTarget;
+            $displayProducedThis = $totMetersThis;
+            $displayProducedAll = $totMetersAll;
+        }
+        $saldoTotal = max(0.0, $orderAmountDisplay - $displayProducedAll);
+        $percentCompletedThis = $targetAmountThis > 0
+            ? round(($displayProducedThis / $targetAmountThis) * 100, 2)
+            : 0;
+        $percentCompletedAll = $orderAmountDisplay > 0
+            ? round(($displayProducedAll / $orderAmountDisplay) * 100, 2)
+            : 0;
 
         // Carga de información completa de Rebobinadora (editxid.php 2370-2600 y 4381-4465)
         $reboOrder = [];
@@ -1709,25 +1738,22 @@ final class ProductionService
                 'is_embalaje' => $isEmbalaje,
             ],
             'stats' => [
-                'total_produced_this' => $totProducedThis,
-                'total_produced_all' => $totProducedAll,
+                'total_produced_this' => $displayProducedThis,
+                'total_produced_all' => $displayProducedAll,
                 'total_meters' => $totMetersThis,
                 'total_kilos' => $totKilosThis,
-                'target_amount' => $agAmount,
-                'order_amount' => (float)($agendaData['item_amount'] ?? $agAmount),
-                'percent_completed_this' => $agAmount > 0
-                    ? round(($totProducedThis / $agAmount) * 100, 2)
-                    : 0,
-                'percent_completed_all' => (float)($agendaData['item_amount'] ?? 0) > 0
-                    ? round(($totProducedAll / (float)$agendaData['item_amount']) * 100, 2)
-                    : 0,
-                'saldo_total' => max(0.0, (float)($agendaData['item_amount'] ?? 0) - $totProducedAll),
+                'target_amount' => $targetAmountThis,
+                'order_amount' => $orderAmountDisplay,
+                'percent_completed_this' => $percentCompletedThis,
+                'percent_completed_all' => $percentCompletedAll,
+                'saldo_total' => $saldoTotal,
                 'total_pulpo_frente_agenda' => $totPulpoFrenteAgenda,
                 'total_pulpo_dorso_agenda' => $totPulpoDorsoAgenda,
                 'total_pulpo_frente_this' => $totPulpoFrenteThis,
                 'total_pulpo_dorso_this' => $totPulpoDorsoThis,
                 'surplus_frente' => $surplusFrente,
                 'surplus_dorso' => $surplusDorso,
+                'total_meters_all' => $totMetersAll,
             ],
         ];
     }
@@ -1908,9 +1934,6 @@ final class ProductionService
                 }
                 if ($metrosLineales <= 0) {
                     $metrosLineales = (int)round($prSummary['total_meters']);
-                }
-                if ($amount <= 0.0 && ($metroType === 'metros_lineales' || empty($metroType))) {
-                    $amount = (float)$metrosLineales;
                 }
             }
         }
@@ -3843,16 +3866,51 @@ final class ProductionService
             }
             $normalizedSourceRollIds = array_values(array_unique($normalizedSourceRollIds));
 
+            $skuCode = trim($skuCode);
+            if ($skuCode === '' && $parentRollId !== null && $parentRollId > 0) {
+                $stmtParentSku = $this->trzPdo->prepare("
+                    SELECT s.code
+                    FROM rolls r
+                    LEFT JOIN skus s ON r.sku_id = s.id
+                    WHERE r.id = :id
+                    LIMIT 1
+                ");
+                $stmtParentSku->execute([':id' => $parentRollId]);
+                $skuCode = trim((string)$stmtParentSku->fetchColumn());
+            }
+            if ($skuCode === '') {
+                $skuCode = 'OT-' . $workerOtId;
+            }
+            if (strlen($skuCode) > 60) {
+                if ($parentRollId !== null && $parentRollId > 0) {
+                    $stmtParentSku = $this->trzPdo->prepare("
+                        SELECT s.code
+                        FROM rolls r
+                        LEFT JOIN skus s ON r.sku_id = s.id
+                        WHERE r.id = :id
+                        LIMIT 1
+                    ");
+                    $stmtParentSku->execute([':id' => $parentRollId]);
+                    $parentSkuCode = trim((string)$stmtParentSku->fetchColumn());
+                    if ($parentSkuCode !== '') {
+                        $skuCode = $parentSkuCode;
+                    }
+                }
+                if (strlen($skuCode) > 60) {
+                    $skuCode = substr($skuCode, 0, 60);
+                }
+            }
+
             // Resolver o crear el SKU local
             $skuId = 1;
             $stmtSku = $this->trzPdo->prepare("SELECT id FROM skus WHERE code = :code LIMIT 1");
-            $stmtSku->execute([':code' => trim($skuCode)]);
+            $stmtSku->execute([':code' => $skuCode]);
             $foundSku = $stmtSku->fetch();
             if ($foundSku) {
                 $skuId = (int)$foundSku['id'];
             } else {
                 $insSku = $this->trzPdo->prepare("INSERT INTO skus (code, description, is_active) VALUES (:c, :d, 1)");
-                $insSku->execute([':c' => trim($skuCode), ':d' => trim($skuCode)]);
+                $insSku->execute([':c' => $skuCode, ':d' => $skuCode]);
                 $skuId = (int)$this->trzPdo->lastInsertId();
             }
 

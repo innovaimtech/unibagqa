@@ -462,7 +462,6 @@ function handleProductionRoutes(
             if (!empty($prSummary['rolls_count']) && $prSummary['rolls_count'] > 0) {
                 if ($bobinaKg <= 0) $bobinaKg = (float)$prSummary['total_weight_kg'];
                 if ($mlin <= 0) $mlin = (int)round($prSummary['total_meters']);
-                if ($amount <= 0 && $mtype === 'metros_lineales') $amount = (float)$mlin;
             }
         }
 
@@ -1157,9 +1156,9 @@ function handleProductionRoutes(
         $comments = trim((string)($_REQUEST['comments'] ?? ''));
         $createOutputRoll = !empty($_REQUEST['create_output_roll']);
         $consumeAgenda = $agId > 0 ? $prodService->getWorkOrderAgendaDetails($agId) : null;
-        $outputSkuCode = trim((string)($consumeAgenda['item_title'] ?? $consumeAgenda['fab_type'] ?? ''));
+        $outputSkuCode = trim((string)($_REQUEST['output_sku_code'] ?? ''));
         if ($outputSkuCode === '') {
-            $outputSkuCode = trim((string)($_REQUEST['output_sku_code'] ?? ''));
+            $outputSkuCode = trim((string)($consumeAgenda['item_number_prod'] ?? $consumeAgenda['item_title'] ?? $consumeAgenda['fab_type'] ?? ''));
         }
         $outputMeters = (float)str_replace(',', '.', (string)($_REQUEST['output_meters'] ?? 0));
         $autoPrintOutput = !empty($_REQUEST['auto_print_output']);
@@ -3763,20 +3762,20 @@ function renderProductionOperatorConsole(
                     <td class="tdnrm" id="summary_anilox_3"><?=htmlspecialchars((string)($aniloxDescMap[3] ?? '-'))?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Bolsas producidas / en curso</td>
-                    <td class="tdnrm"><?=$fmt($stats['total_produced_this'])?> de <?=$fmt($agenda['ag_amount'])?> (<?=$fmt($stats['percent_completed_this'], 2)?> %)</td>
+                    <td class="tdleft"><?=$isFlexo ? 'Metros producidos / en curso' : 'Bolsas producidas / en curso'?></td>
+                    <td class="tdnrm"><?=$fmt($stats['total_produced_this'])?> de <?=$fmt($stats['target_amount'] ?? $agenda['ag_amount'])?> (<?=$fmt($stats['percent_completed_this'], 2)?> %)<?=$isFlexo ? ' mtrs' : ''?></td>
                     <td class="tdleft">Anilox N° 4</td>
                     <td class="tdnrm" id="summary_anilox_4"><?=htmlspecialchars((string)($aniloxDescMap[4] ?? '-'))?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Bolsas producidas / total</td>
-                    <td class="tdnrm"><?=$fmt($stats['total_produced_all'])?> de <?=$fmt($agenda['item_amount'])?> (<?=$fmt($stats['percent_completed_all'], 2)?> %)</td>
+                    <td class="tdleft"><?=$isFlexo ? 'Metros producidos / total' : 'Bolsas producidas / total'?></td>
+                    <td class="tdnrm"><?=$fmt($stats['total_produced_all'])?> de <?=$fmt($stats['order_amount'] ?? $agenda['item_amount'])?> (<?=$fmt($stats['percent_completed_all'], 2)?> %)<?=$isFlexo ? ' mtrs' : ''?></td>
                     <td class="tdleft">Anilox N° 5</td>
                     <td class="tdnrm" id="summary_anilox_5"><?=htmlspecialchars((string)($aniloxDescMap[5] ?? '-'))?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Saldo total</td>
-                    <td class="tdnrm"><b><?=$fmt($stats['saldo_total'])?> unidades</b></td>
+                    <td class="tdnrm"><b><?=$fmt($stats['saldo_total'])?> <?=$isFlexo ? 'mtrs' : 'unidades'?></b></td>
                     <td class="tdleft">Anilox N° 6</td>
                     <td class="tdnrm" id="summary_anilox_6"><?=htmlspecialchars((string)($aniloxDescMap[6] ?? '-'))?></td>
                 </tr>
@@ -4149,6 +4148,17 @@ function renderProductionOperatorConsole(
             calcAniloxMixTotal(unit);
         }
 
+        function clearAniloxMixQtys(unit) {
+            for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var qtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+                if (qtyInp) {
+                    qtyInp.value = '';
+                }
+            }
+            normalizeAniloxMixSlots(unit);
+            calcAniloxMixTotal(unit);
+        }
+
         function refreshAniloxMixSummary(unit) {
             var summary = document.getElementById('mix_summary_inline_' + unit);
             if (!summary) return;
@@ -4288,18 +4298,13 @@ function renderProductionOperatorConsole(
                         var totalInp = document.getElementById('ink_total_loaded_' + x);
                         var baseInp = document.getElementById('ink_loaded_base_' + x);
                         var loadNowInp = document.getElementById('ink_load_now_' + x);
-                        var mixChk = document.getElementById('ink_is_mix_' + x);
                         if (baseInp && totalInp) {
                             baseInp.value = totalInp.value || '';
                         }
                         if (loadNowInp) {
                             loadNowInp.value = '';
                         }
-                        if (mixChk && mixChk.checked) {
-                            for (var mixIdx = 0; mixIdx < aniloxMixSlots; mixIdx++) {
-                                clearAniloxMixSlot(x, mixIdx);
-                            }
-                        }
+                        clearAniloxMixQtys(x);
                         calcAniloxLoadTotal(x);
                         calcAniloxMixTotal(x);
                     }
@@ -4467,7 +4472,7 @@ function renderProductionOperatorConsole(
                         $savedConsumedKg = (float)($savedInkConfig['consumed_kg'] ?? max(0, $savedLoadedKg - $savedLeftoverKg));
                         $savedIsMixed = (int)($savedInkConfig['is_mixed'] ?? 0) === 1;
                         $savedMixNotes = trim((string)($savedInkConfig['mixture_notes'] ?? ''));
-                        $savedComponents = [];
+                        $savedComponents = array_values($savedInkConfig['components'] ?? []);
                     ?>
                     <tr id="tr_anilox_<?=$unidadAnilox?>" class="anilox-row-transition">
                         <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center"><b><?=$unidadAnilox?></b></td>
@@ -4738,16 +4743,16 @@ function renderProductionOperatorConsole(
                     <td class="tdnrm" colspan="2"><?=$fmt($agenda['req_operador_mermaperc'], 2)?> %</td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Bolsas producidas / en curso</td>
-                    <td class="tdnrm" colspan="3"><?=$fmt($stats['total_produced_this'])?> de <?=$fmt($agenda['ag_amount'])?> (<?=$fmt($stats['percent_completed_this'], 2)?> %)</td>
+                    <td class="tdleft"><?=$isFlexo ? 'Metros producidos / en curso' : 'Bolsas producidas / en curso'?></td>
+                    <td class="tdnrm" colspan="3"><?=$fmt($stats['total_produced_this'])?> de <?=$fmt($stats['target_amount'] ?? $agenda['ag_amount'])?> (<?=$fmt($stats['percent_completed_this'], 2)?> %)<?=$isFlexo ? ' mtrs' : ''?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Bolsas producidas / total</td>
-                    <td class="tdnrm" colspan="3"><?=$fmt($stats['total_produced_all'])?> de <?=$fmt($agenda['item_amount'])?> (<?=$fmt($stats['percent_completed_all'], 2)?> %)</td>
+                    <td class="tdleft"><?=$isFlexo ? 'Metros producidos / total' : 'Bolsas producidas / total'?></td>
+                    <td class="tdnrm" colspan="3"><?=$fmt($stats['total_produced_all'])?> de <?=$fmt($stats['order_amount'] ?? $agenda['item_amount'])?> (<?=$fmt($stats['percent_completed_all'], 2)?> %)<?=$isFlexo ? ' mtrs' : ''?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Saldo total</td>
-                    <td class="tdnrm" colspan="3"><b><?=$fmt($stats['saldo_total'])?> unidades</b></td>
+                    <td class="tdnrm" colspan="3"><b><?=$fmt($stats['saldo_total'])?> <?=$isFlexo ? 'mtrs' : 'unidades'?></b></td>
                 </tr>
                 <?php if ($isSeriPulpo): ?>
                     <tr>
@@ -6267,7 +6272,7 @@ function renderProductionOperatorConsole(
                     <?php if ($isFlexo): ?>
                         <input type="hidden" name="evt_metrotype" value="metros_lineales">
                         <input type="hidden" name="evt_amount_metros_maquina" value="<?=$valMmaq?>">
-                        <input type="hidden" name="prod_amount" id="inp_flexo_amount" value="<?=$valAmount > 0 ? (int)$valAmount : 0?>">
+                        <input type="hidden" name="prod_amount" id="inp_flexo_amount" value="0">
                         <?php if (!empty($printedRollsSummary['rolls_count']) && $printedRollsSummary['rolls_count'] > 0): ?>
                             <tr>
                                 <td colspan="2" style="padding:0 0 14px 0">
@@ -6583,7 +6588,7 @@ function renderProductionOperatorConsole(
                     var amtInp = document.getElementById('inp_flexo_amount');
                     if (mlinInp) mlinInp.value = Math.round(PRINTED_ROLLS_TOTAL_METERS);
                     if (kgsInp) kgsInp.value = PRINTED_ROLLS_TOTAL_KG.toFixed(2);
-                    if (amtInp) amtInp.value = Math.round(PRINTED_ROLLS_TOTAL_METERS);
+                    if (amtInp) amtInp.value = 0;
                 }
 
                 function calcFlexoKgs() {
@@ -6598,9 +6603,7 @@ function renderProductionOperatorConsole(
                         var kgs = (mlin * PROD_METER_WEIGHT_KG).toFixed(2);
                         kgsInp.value = kgs;
                     }
-                    if (amtInp) {
-                        amtInp.value = Math.round(mlin);
-                    }
+                    if (amtInp) amtInp.value = 0;
                 }
 
                 function calcSeriUnitsFromCounters() {
@@ -7333,7 +7336,7 @@ function renderProductionOperatorConsole(
 
         <?php if (!$isSeriPulpo): ?>
         <?php
-        $printerOutputDefaultSku = trim((string)($agenda['item_title'] ?? $agenda['fab_type'] ?? 'BOBINA-IMPRESA'));
+        $printerOutputDefaultSku = trim((string)($agenda['item_number_prod'] ?? $agenda['item_title'] ?? $agenda['fab_type'] ?? 'BOBINA-IMPRESA'));
         $printerOutputSuggestedMeters = (float)($metros_a_imprimir ?? ($stats['total_meters'] ?? 0));
         $printerTelaWidth = (float)($agenda['req_operador_tela_width'] ?? ($agenda['fab_med_width'] ?? 80));
         if ($printerTelaWidth <= 0) {
