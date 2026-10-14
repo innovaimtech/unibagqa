@@ -946,6 +946,7 @@ function handleProductionRoutes(
         requireCsrf();
         $agId = (int)($_REQUEST['agid'] ?? 0);
         $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
+        $actionMode = trim((string)($_REQUEST['action_mode'] ?? ''));
         $comments = trim((string)($_REQUEST['comments'] ?? ''));
         $supUser = trim((string)($_REQUEST['sup_user'] ?? ''));
         $supPass = trim((string)($_REQUEST['sup_pass'] ?? ''));
@@ -969,7 +970,21 @@ function handleProductionRoutes(
             }
         }
 
-        if (!empty($rollIds)) {
+        if ($actionMode === 'take_bodega3000' && !empty($rollIds)) {
+            $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
+            $equipoId = $activeInit !== null ? (int)($activeInit['win_equipoid'] ?? 0) : 0;
+            $weightKg = (float)str_replace(',', '.', (string)($_REQUEST['weight_kg'] ?? 0));
+            $res = $prodService->assignBodega3000RollToMachine(
+                $workerOtId,
+                (string)$rollIds[0],
+                $weightKg,
+                $currentOperatorName,
+                $equipoId,
+                $comments,
+                false,
+                $agId
+            );
+        } elseif (!empty($rollIds)) {
             $res = $prodService->requestRollsForWorkOrder(
                 $workerOtId,
                 $rollIds,
@@ -1240,13 +1255,12 @@ function handleProductionRoutes(
             $mode = 'materiales';
         }
         if ($mode === 'materiales' || $mode === 'cargar') {
-            $availableRolls = $prodService->listAvailableRollsForProduction(
-                null,
+            $availableRolls = $prodService->listAvailableRollsInBodega3000(
+                $agId,
                 150,
-                $targetColor,
-                $targetWidth,
-                $targetMaterial,
-                $targetGrammage
+                null,
+                (int)($ctx['machine_init']['win_equipoid'] ?? 0),
+                true
             );
 
             $materialQuota = $prodService->getWorkOrderMaterialQuota($agId, $workerOtId);
@@ -1504,7 +1518,7 @@ function handleProductionRoutes(
             $reqSup = !empty($_POST['requires_supervisor']);
             $res = $prodService->requestRollsForWorkOrder($workerOtId, $rollIds, $comments, $currentOperatorName, $supUser, $supPass, $reqSup);
             if ($res['ok']) {
-                redirectResponse('/production/materials/request?agid=' . $agId . '&saved_material=1');
+                redirectResponse('/production/materials/request?agid=' . $agId . '&saved_request=1&request_type=rolls');
             } else {
                 redirectResponse('/production/materials/request?agid=' . $agId . '&error=' . rawurlencode((string)($res['error'] ?? 'Error al solicitar bobinas.')));
             }
@@ -6277,6 +6291,16 @@ function renderProductionOperatorConsole(
                 $otherRolls[] = $r;
             }
         }
+        $availableBodega3000Rolls = $compatibleRolls;
+        $availableBodega3000Count = count($availableBodega3000Rolls);
+        $availableBodega3000Kg = 0.0;
+        foreach ($availableBodega3000Rolls as $availableRoll) {
+            $unitKg = (float)($availableRoll['weight_kg'] ?? $availableRoll['current_weight_kg'] ?? 0);
+            $qty = max(1.0, (float)($availableRoll['stock_qty'] ?? 1));
+            $availableBodega3000Kg += (!empty($availableRoll['source']) && $availableRoll['source'] === 'ERP')
+                ? ($unitKg * $qty)
+                : $unitKg;
+        }
         ?>
         <div style="margin-bottom:15px">
             <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
@@ -6487,7 +6511,7 @@ function renderProductionOperatorConsole(
                     <i class="fa fa-link"></i> Control de Montaje y Salida de Bobinas &mdash; OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>
                 </div>
                 <div style="font-size:12.5px;color:#64748B;margin-top:3px">
-                    Las bobinas se solicitan previamente a Bodega 3000 desde el módulo exterior. Aquí registre el peso de ingreso al montar en desbobinador y la salida de bobinas procesadas.
+                    Las bobinas primero se traspasan a <b>Bodega 3000</b>. Desde aquí se toma la bobina compatible para la OT, se monta en máquina y luego se registra su salida o sobrante.
                 </div>
             </div>
             <div>
@@ -6497,11 +6521,115 @@ function renderProductionOperatorConsole(
             </div>
         </div>
 
+        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:20px;margin-bottom:18px">
+            <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-fw fa-warehouse"></i> Stock disponible en Bodega 3000 para esta OT
+                </div>
+                <div style="font-size:12.5px;color:#64748B;font-weight:normal">
+                    Disponibles: <b><?=$availableBodega3000Count?></b> bobina(s) &bull; Stock estimado: <b><?=number_format($availableBodega3000Kg, 1, ',', '.')?></b> kg
+                </div>
+            </div>
+
+            <?php if (empty($availableBodega3000Rolls)): ?>
+                <div style="background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:6px;padding:24px 20px;text-align:center;color:#64748B">
+                    <i class="fa fa-box-open" style="font-size:28px;color:#94A3B8;margin-bottom:10px;display:block"></i>
+                    No hay bobinas compatibles disponibles ahora mismo en <b>Bodega 3000</b> para esta OT.<br>
+                    Solicite más material desde el módulo exterior o espere el traspaso desde bodega.
+                </div>
+            <?php else: ?>
+                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
+                    <thead>
+                        <tr style="background:#F1F5F9;color:#334155;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">
+                            <th class="tdheader" align="left" style="padding:10px 8px">Código / SKU</th>
+                            <th class="tdheader" align="left" style="padding:10px 8px">Descripción</th>
+                            <th class="tdheader" align="center" style="padding:10px 8px">Trazabilidad</th>
+                            <th class="tdheader" align="center" style="padding:10px 8px">Color</th>
+                            <th class="tdheader" align="center" style="padding:10px 8px">Ancho</th>
+                            <th class="tdheader" align="center" style="padding:10px 8px">Stock 3000</th>
+                            <th class="tdheader" align="center" style="padding:10px 8px">Peso Ref.</th>
+                            <th class="tdheader" align="center" width="210" style="padding:10px 8px">Acción</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($availableBodega3000Rolls as $b3000Roll):
+                        $b3000Id = (string)($b3000Roll['id'] ?? $b3000Roll['raw_id'] ?? '');
+                        $b3000Code = (string)($b3000Roll['roll_code'] ?? $b3000Roll['sku_code'] ?? '-');
+                        $b3000Desc = (string)($b3000Roll['sku_desc'] ?? '-');
+                        $b3000Color = (string)($b3000Roll['color'] ?? '-');
+                        $b3000Width = (float)($b3000Roll['width_cm'] ?? round(((float)($b3000Roll['width_mm'] ?? 0)) / 10, 1));
+                        $b3000Weight = (float)($b3000Roll['weight_kg'] ?? $b3000Roll['current_weight_kg'] ?? 0);
+                        $b3000Qty = max(1.0, (float)($b3000Roll['stock_qty'] ?? 1));
+                        $b3000Source = (string)($b3000Roll['source'] ?? '');
+                        $b3000HasTraceability = ($b3000Source === 'TRZ');
+                        $b3000ActionLabel = $b3000HasTraceability ? 'Tomar código' : 'Crear código y tomar';
+                        $b3000ConfirmText = $b3000HasTraceability
+                            ? ('¿Tomar el código trazable ' . addslashes($b3000Code) . ' desde Bodega 3000 para esta OT?')
+                            : ('¿Tomar stock sin trazabilidad individual de Bodega 3000 y generar un código nuevo para esta OT a partir de ' . addslashes($b3000Code) . '?');
+                    ?>
+                        <tr style="border-bottom:1px solid #E2E8F0">
+                            <td class="tdnrm">
+                                <div style="font-weight:700;color:#0F172A"><?=htmlspecialchars($b3000Code)?></div>
+                                <div style="font-size:11px;color:#64748B;margin-top:2px"><?=htmlspecialchars((string)($b3000Roll['warehouse_name'] ?? 'Bodega 3000'))?></div>
+                            </td>
+                            <td class="tdnrm"><?=htmlspecialchars($b3000Desc)?></td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($b3000HasTraceability): ?>
+                                    <div>
+                                        <span style="background:#DCFCE7;color:#166534;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">SI</span>
+                                    </div>
+                                    <div style="margin-top:4px;font-size:11px;color:#166534;font-family:monospace;font-weight:700">
+                                        <?=htmlspecialchars($b3000Code)?>
+                                    </div>
+                                    <div style="margin-top:2px;font-size:10.5px;color:#64748B">
+                                        Se descuenta este codigo exacto
+                                    </div>
+                                <?php else: ?>
+                                    <div>
+                                        <span style="background:#FEF3C7;color:#92400E;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">NO</span>
+                                    </div>
+                                    <div style="margin-top:4px;font-size:10.5px;color:#64748B;line-height:1.35">
+                                        Stock general en 3000.<br>Al tomarlo se genera un codigo trazable nuevo.
+                                    </div>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center"><?=htmlspecialchars($b3000Color)?></td>
+                            <td class="tdnrm" align="center"><?=$b3000Width > 0 ? number_format($b3000Width, 1, ',', '.') . ' cm' : '-'?></td>
+                            <td class="tdnrm" align="center">
+                                <span style="background:#ECFDF5;color:#166534;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:800">
+                                    <?=htmlspecialchars(number_format($b3000Qty, 0, ',', '.'))?>
+                                </span>
+                            </td>
+                            <td class="tdnrm" align="center"><b><?=number_format($b3000Weight, 1, ',', '.')?> kg</b></td>
+                            <td class="tdnrm" align="center">
+                                <form method="post" action="/production/work-orders/materials/assign" style="margin:0" onsubmit="return confirm('<?=htmlspecialchars($b3000ConfirmText)?>');">
+                                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                    <input type="hidden" name="agid" value="<?=$agId?>">
+                                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                    <input type="hidden" name="action_mode" value="take_bodega3000">
+                                    <input type="hidden" name="roll_id" value="<?=htmlspecialchars($b3000Id)?>">
+                                    <input type="hidden" name="traceability_source" value="<?=htmlspecialchars($b3000Source)?>">
+                                    <input type="hidden" name="weight_kg" value="<?=htmlspecialchars(number_format($b3000Weight, 2, '.', ''))?>">
+                                    <button type="submit" class="btngreen" style="font-size:12px;padding:6px 12px;cursor:pointer;font-weight:bold">
+                                        <i class="fa fa-sign-in-alt"></i> <?=$b3000ActionLabel?>
+                                    </button>
+                                </form>
+                                <div style="font-size:10.5px;color:#64748B;margin-top:4px">
+                                    <?=$b3000HasTraceability ? 'Bobina trazable 3000' : 'Stock general 3000'?>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
+
         <!-- TABLA DE TRAZABILIDAD: BOBINAS DE LA OT (MONTAJE Y SALIDA) -->
         <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:20px">
             <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
                 <div style="display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-fw fa-industry"></i> Bobinas Asignadas a esta Orden de Trabajo
+                    <i class="fa fa-fw fa-industry"></i> Bobinas tomadas / consumidas en esta Orden de Trabajo
                 </div>
                 <div style="font-size:12.5px;color:#64748B;font-weight:normal">
                     Total: <b><?=count($assignedRolls)?></b> bobina(s) registradas
@@ -6511,10 +6639,10 @@ function renderProductionOperatorConsole(
             <?php if (empty($assignedRolls)): ?>
                 <div style="background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:6px;padding:30px 20px;text-align:center;color:#64748B">
                     <i class="fa fa-boxes" style="font-size:32px;color:#94A3B8;margin-bottom:10px;display:block"></i>
-                    <div style="font-size:14px;font-weight:bold;color:#334155;margin-bottom:4px">No hay bobinas asignadas en este momento</div>
+                    <div style="font-size:14px;font-weight:bold;color:#334155;margin-bottom:4px">Aún no se toma ninguna bobina para esta OT</div>
                     <div style="font-size:12.5px">
-                        Solicite las bobinas desde el módulo exterior de <b>Solicitud de Materiales (Bodega 3000)</b>.<br>
-                        Una vez despachadas por bodega, aparecerán aquí para realizar su montaje y pesaje.
+                        Use primero el bloque superior de <b>Stock disponible en Bodega 3000</b> para tomar una bobina compatible.<br>
+                        Cuando la tome, quedará ligada a esta OT y dejará de estar disponible para otras máquinas.
                     </div>
                     <div style="margin-top:14px">
                         <a href="/production/materials/request?agid=<?=$agId?>" class="btnblue" style="text-decoration:none;font-size:13px;padding:7px 16px;display:inline-flex;align-items:center;gap:6px">
@@ -11675,6 +11803,9 @@ function renderProductionMaterialsRequestScreen(
                 <?php if ($savedRequestType === 'chemical'): ?>
                     <b>Solicitud de tinta registrada correctamente.</b>
                     La OT quedó solicitada contra la bodega sugerida <?=$inkWarehouseCode > 0 ? '<b>' . htmlspecialchars((string)$inkWarehouseCode) . '</b>' : ''?><?=($inkWarehouseName !== '' ? ' (' . htmlspecialchars($inkWarehouseName) . ')' : '')?>.
+                <?php elseif ($savedRequestType === 'rolls'): ?>
+                    <b>Solicitud de bobina registrada correctamente.</b>
+                    La bobina quedó traspasada y disponible en <b>Bodega 3000</b> para que luego la tome la máquina que la vaya a consumir.
                 <?php else: ?>
                     <b>Solicitud de material registrada correctamente.</b>
                 <?php endif; ?>
@@ -12056,7 +12187,7 @@ function renderProductionMaterialsRequestScreen(
                 <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:6px;padding:12px 16px;margin-bottom:15px;color:#1E40AF;font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
                     <div>
                         <i class="fa fa-info-circle"></i> <b>Stock disponible en Bodega Central (100 PLA / 200 PP).</b>
-                        Seleccione las bobinas compatibles que requiere transferir a la máquina (Bodega 3000) para su uso en esta OT.
+                        Seleccione las bobinas compatibles que requiere <b>traspasar a Bodega 3000</b>. Luego la máquina las tomará desde el stock de producción cuando corresponda.
                     </div>
                     <div>
                         <input type="text" placeholder="🔍 Filtrar stock central..." class="inptxt" style="width:240px;font-size:12px;padding:6px 10px" onkeyup="filterTable('tbl_central', this.value)">

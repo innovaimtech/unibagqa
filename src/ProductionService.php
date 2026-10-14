@@ -2595,6 +2595,39 @@ final class ProductionService
             $lastRollCode = '';
             $lastWeightKg = 0.0;
             $now = time();
+            $productionStorehouseId = 16;
+            $productionStorehouseName = '3000 INSUMOS EN PRODUCCION';
+
+            try {
+                $stmtProdWh = $this->erpPdo->query("
+                    SELECT id, st_name
+                    FROM company_shops_storehouses
+                    WHERE id IN (16, 27) OR st_name LIKE '%3000%'
+                    ORDER BY CASE WHEN id = 16 THEN 0 ELSE 1 END, id ASC
+                    LIMIT 1
+                ");
+                $prodWh = $stmtProdWh ? $stmtProdWh->fetch(PDO::FETCH_ASSOC) : false;
+                if ($prodWh) {
+                    $productionStorehouseId = (int)($prodWh['id'] ?? 16);
+                    $productionStorehouseName = trim((string)($prodWh['st_name'] ?? '')) ?: $productionStorehouseName;
+                }
+            } catch (Throwable) {}
+
+            $stmtWh3000 = $this->trzPdo->prepare("
+                INSERT INTO warehouses (code, name, erp_storehouse_id)
+                VALUES (3000, :name, :erpid)
+                ON DUPLICATE KEY UPDATE name = VALUES(name), erp_storehouse_id = VALUES(erp_storehouse_id)
+            ");
+            $stmtWh3000->execute([
+                ':name' => $productionStorehouseName,
+                ':erpid' => $productionStorehouseId,
+            ]);
+            $productionWarehouseId = (int)$this->trzPdo->lastInsertId();
+            if ($productionWarehouseId <= 0) {
+                $stW3000 = $this->trzPdo->prepare("SELECT id FROM warehouses WHERE code = 3000 LIMIT 1");
+                $stW3000->execute();
+                $productionWarehouseId = (int)$stW3000->fetchColumn();
+            }
 
             foreach ($rollIds as $rawRollId) {
                 $rawRollId = trim((string)$rawRollId);
@@ -2653,20 +2686,6 @@ final class ProductionService
                         $skuId = (int)$stSk->fetchColumn();
                     }
 
-                    // Asegurar Warehouse en TRZ
-                    $stmtWh = $this->trzPdo->prepare("
-                        INSERT INTO warehouses (code, name, erp_storehouse_id)
-                        VALUES (:code, :name, :erpid)
-                        ON DUPLICATE KEY UPDATE name = VALUES(name), erp_storehouse_id = VALUES(erp_storehouse_id)
-                    ");
-                    $stmtWh->execute([':code' => $whCode, ':name' => $whName, ':erpid' => $stId]);
-                    $whId = (int)$this->trzPdo->lastInsertId();
-                    if ($whId <= 0) {
-                        $stW = $this->trzPdo->prepare("SELECT id FROM warehouses WHERE code = :code LIMIT 1");
-                        $stW->execute([':code' => $whCode]);
-                        $whId = (int)$stW->fetchColumn();
-                    }
-
                     $reqQty = isset($rollQuantities[$rawRollId]) ? max(1, (int)$rollQuantities[$rawRollId]) : 1;
                     for ($q = 1; $q <= $reqQty; $q++) {
                         $rollCode = "BOB-{$sku}-" . date('ymd') . "-" . strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
@@ -2674,18 +2693,17 @@ final class ProductionService
                             INSERT INTO rolls
                                 (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, microns, width_mm, color, meters, status, current_work_order_id, process_stage, created_at)
                             VALUES
-                                (:code, :sku_id, :wh_id, :weight_kg, 1, 'ERP_STOCK', :microns, :width_mm, :color, :meters, 'IN_PROCESS', :ot_id, 'PRODUCTION', NOW())
+                                (:code, :sku_id, :wh_id, :weight_kg, 1, 'ERP_STOCK', :microns, :width_mm, :color, :meters, 'RECEIVED', NULL, 'PRODUCTION', NOW())
                         ");
                         $insRoll->execute([
                             ':code' => $rollCode,
                             ':sku_id' => $skuId,
-                            ':wh_id' => $whId,
+                            ':wh_id' => $productionWarehouseId,
                             ':weight_kg' => $weightKg,
                             ':microns' => (int)$gramms,
                             ':width_mm' => $widthMm,
                             ':color' => $color,
                             ':meters' => $meters,
-                            ':ot_id' => $workerOtId,
                         ]);
                         $rollId = (int)$this->trzPdo->lastInsertId();
                         $lastRollCode = $rollCode;
@@ -2694,23 +2712,27 @@ final class ProductionService
                         // Evento en TRZ
                         $stmtEvent = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
                         $stmtEvent->execute([
-                            ':type' => 'ROLL_LOADED_TO_OT',
+                            ':type' => 'ROLL_TRANSFERRED_TO_BODEGA_3000',
                             ':payload' => json_encode([
                                 'roll_id' => $rollId,
                                 'roll_code' => $rollCode,
                                 'sku_code' => $sku,
                                 'weight_kg' => $weightKg,
-                                'worker_ot_id' => $workerOtId,
-                                'operator' => $operatorName,
+                                'requested_worker_ot_id' => $workerOtId,
+                                'requested_by' => $operatorName,
                                 'supervisor_auth' => $requiresSupervisor ? $supervisorUser : null,
                                 'comments' => $comments,
                                 'timestamp' => $now,
-                                'action' => 'REQUESTED_FROM_ERP_WAREHOUSE',
+                                'from_warehouse_code' => $whCode,
+                                'from_warehouse_name' => $whName,
+                                'to_warehouse_code' => 3000,
+                                'to_warehouse_name' => $productionStorehouseName,
+                                'action' => 'REQUESTED_TO_BODEGA_3000',
                             ], JSON_UNESCAPED_UNICODE),
                         ]);
 
                         // Evento en prod_worker_ot_events (ERP remoto)
-                        $erpComment = "Solicitud Bobina {$rollCode} [{$sku}] - {$desc} desde Bodega {$whName} ({$weightKg} kg)";
+                        $erpComment = "Solicitud Bobina {$rollCode} [{$sku}] - {$desc} traspasada a Bodega 3000 desde {$whName} por {$operatorName}";
                         if ($requiresSupervisor && $supervisorUser !== '') {
                             $erpComment .= " [Aut. Supervisor: {$supervisorUser}]";
                         }
@@ -2732,13 +2754,41 @@ final class ProductionService
                             ':comments' => $erpComment,
                         ]);
 
-                        // Actualizar reserva en el ERP
+                        // Reflejar el traspaso físico al stock de Bodega 3000 en ERP
                         try {
-                            $this->erpPdo->prepare("
+                            if ($stId !== $productionStorehouseId) {
+                                $this->erpPdo->prepare("
+                                    UPDATE item_shops_storehouses
+                                    SET iss_inventory = GREATEST(0, iss_inventory - 1)
+                                    WHERE item_id = :itid AND st_id = :stid
+                                ")->execute([':itid' => $itemId, ':stid' => $stId]);
+                            }
+
+                            $upd3000 = $this->erpPdo->prepare("
                                 UPDATE item_shops_storehouses
-                                SET iss_inventory_reserved = iss_inventory_reserved + 1
+                                SET iss_inventory = iss_inventory + 1
                                 WHERE item_id = :itid AND st_id = :stid
-                            ")->execute([':itid' => $itemId, ':stid' => $stId]);
+                            ");
+                            $upd3000->execute([':itid' => $itemId, ':stid' => $productionStorehouseId]);
+                            if ($upd3000->rowCount() === 0) {
+                                $shopId = 1;
+                                try {
+                                    $stShop = $this->erpPdo->query("SELECT id FROM company_shops ORDER BY id ASC LIMIT 1");
+                                    $shopId = (int)($stShop ? $stShop->fetchColumn() : 1);
+                                    if ($shopId <= 0) {
+                                        $shopId = 1;
+                                    }
+                                } catch (Throwable) {}
+
+                                $this->erpPdo->prepare("
+                                    INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_inventory)
+                                    VALUES (:itid, :shopid, :stid, 1)
+                                ")->execute([
+                                    ':itid' => $itemId,
+                                    ':shopid' => $shopId,
+                                    ':stid' => $productionStorehouseId,
+                                ]);
+                            }
                         } catch (Throwable) {}
 
                         $assignedCount++;
@@ -2769,12 +2819,14 @@ final class ProductionService
 
                 $updateRoll = $this->trzPdo->prepare(
                     "UPDATE rolls
-                     SET status = 'IN_PROCESS',
-                         current_work_order_id = :ot_id
+                     SET status = 'RECEIVED',
+                         current_work_order_id = NULL,
+                         warehouse_id = :wh_id,
+                         process_stage = 'PRODUCTION'
                      WHERE id = :id"
                 );
                 $updateRoll->execute([
-                    ':ot_id' => $workerOtId,
+                    ':wh_id' => $productionWarehouseId,
                     ':id' => $rollId,
                 ]);
 
@@ -2782,22 +2834,24 @@ final class ProductionService
                     "INSERT INTO events (type, payload) VALUES (:type, :payload)"
                 );
                 $stmtEvent->execute([
-                    ':type' => 'ROLL_LOADED_TO_OT',
+                    ':type' => 'ROLL_TRANSFERRED_TO_BODEGA_3000',
                     ':payload' => json_encode([
                         'roll_id' => $rollId,
                         'roll_code' => $rollCode,
                         'sku_code' => $skuCode,
                         'weight_kg' => $weightKg,
-                        'worker_ot_id' => $workerOtId,
-                        'operator' => $operatorName,
+                        'requested_worker_ot_id' => $workerOtId,
+                        'requested_by' => $operatorName,
                         'supervisor_auth' => $requiresSupervisor ? $supervisorUser : null,
                         'comments' => $comments,
                         'timestamp' => $now,
-                        'action' => 'REQUESTED_FROM_WAREHOUSE',
+                        'to_warehouse_code' => 3000,
+                        'to_warehouse_name' => $productionStorehouseName,
+                        'action' => 'REQUESTED_TO_BODEGA_3000',
                     ], JSON_UNESCAPED_UNICODE),
                 ]);
 
-                $erpComment = "Solicitud Bobina {$rollCode} [{$skuCode}] - {$weightKg} kg";
+                $erpComment = "Solicitud Bobina {$rollCode} [{$skuCode}] traspasada a Bodega 3000 por {$operatorName}";
                 if ($requiresSupervisor && $supervisorUser !== '') {
                     $erpComment .= " [Aut. Supervisor: {$supervisorUser}]";
                 }
@@ -3334,8 +3388,24 @@ final class ProductionService
         }
         try {
             $now = time();
+            $stmtRoll = $this->trzPdo->prepare("
+                SELECT r.roll_code, s.code AS sku_code
+                FROM rolls r
+                LEFT JOIN skus s ON r.sku_id = s.id
+                WHERE r.id = :id AND r.current_work_order_id = :ot_id
+                LIMIT 1
+            ");
+            $stmtRoll->execute([':id' => $rollId, ':ot_id' => $workerOtId]);
+            $roll = $stmtRoll->fetch(PDO::FETCH_ASSOC);
+            if (!$roll) {
+                return ['ok' => false, 'error' => 'La bobina no está tomada por esta OT.'];
+            }
+
             $stmt = $this->trzPdo->prepare("UPDATE rolls SET status = 'RECEIVED', current_work_order_id = NULL WHERE id = :id AND current_work_order_id = :ot_id");
             $stmt->execute([':id' => $rollId, ':ot_id' => $workerOtId]);
+            if ($stmt->rowCount() > 0 && !empty($roll['sku_code'])) {
+                $this->adjustBodega3000InventoryBySku((string)$roll['sku_code'], 1);
+            }
 
             $stmtEvent = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
             $stmtEvent->execute([
@@ -7845,8 +7915,9 @@ final class ProductionService
                     FROM rolls r
                     LEFT JOIN skus s ON r.sku_id = s.id
                     LEFT JOIN warehouses w ON r.warehouse_id = w.id
-                    WHERE (w.code IN (3000, 16, 27) OR w.name LIKE '%3000%' OR r.process_stage = 'PRODUCTION')
+                    WHERE (w.code IN (3000, 16, 27) OR w.name LIKE '%3000%')
                       AND r.status != 'CONSUMED'
+                      AND r.current_work_order_id IS NULL
                       {$whereTrzTel}
                     ORDER BY r.id DESC
                     LIMIT :lim
@@ -7936,6 +8007,89 @@ final class ProductionService
         }
 
         return $rolls;
+    }
+
+    private function adjustBodega3000InventoryBySku(string $skuCode, int $delta): bool
+    {
+        $skuCode = trim($skuCode);
+        if ($skuCode === '' || $delta === 0) {
+            return false;
+        }
+
+        try {
+            $stmtItem = $this->erpPdo->prepare("
+                SELECT id
+                FROM item
+                WHERE item_number_prod = :sku OR item_number = :sku
+                LIMIT 1
+            ");
+            $stmtItem->execute([':sku' => $skuCode]);
+            $itemId = (int)$stmtItem->fetchColumn();
+            if ($itemId <= 0) {
+                return false;
+            }
+
+            $stmtRow = $this->erpPdo->prepare("
+                SELECT iss.st_id, COALESCE(iss.shop_id, 1) AS shop_id
+                FROM item_shops_storehouses iss
+                INNER JOIN company_shops_storehouses css ON css.id = iss.st_id
+                WHERE iss.item_id = :item_id
+                  AND (iss.st_id IN (16, 27) OR css.st_name LIKE '%3000%')
+                ORDER BY iss.iss_inventory DESC, iss.st_id ASC
+                LIMIT 1
+            ");
+            $stmtRow->execute([':item_id' => $itemId]);
+            $row = $stmtRow->fetch(PDO::FETCH_ASSOC) ?: [];
+
+            $stId = (int)($row['st_id'] ?? 16);
+            $shopId = (int)($row['shop_id'] ?? 1);
+
+            if ($delta < 0) {
+                $qty = abs($delta);
+                $stmtUpd = $this->erpPdo->prepare("
+                    UPDATE item_shops_storehouses
+                    SET iss_inventory = GREATEST(0, iss_inventory - :qty)
+                    WHERE item_id = :item_id
+                      AND st_id = :st_id
+                      AND iss_inventory >= :qty
+                ");
+                $stmtUpd->execute([
+                    ':qty' => $qty,
+                    ':item_id' => $itemId,
+                    ':st_id' => $stId,
+                ]);
+                return $stmtUpd->rowCount() > 0;
+            }
+
+            $stmtUpd = $this->erpPdo->prepare("
+                UPDATE item_shops_storehouses
+                SET iss_inventory = iss_inventory + :qty
+                WHERE item_id = :item_id
+                  AND st_id = :st_id
+            ");
+            $stmtUpd->execute([
+                ':qty' => $delta,
+                ':item_id' => $itemId,
+                ':st_id' => $stId,
+            ]);
+            if ($stmtUpd->rowCount() > 0) {
+                return true;
+            }
+
+            $stmtIns = $this->erpPdo->prepare("
+                INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_inventory)
+                VALUES (:item_id, :shop_id, :st_id, :qty)
+            ");
+            $stmtIns->execute([
+                ':item_id' => $itemId,
+                ':shop_id' => $shopId,
+                ':st_id' => $stId,
+                ':qty' => $delta,
+            ]);
+            return true;
+        } catch (Throwable) {
+            return false;
+        }
     }
 
     /**
@@ -8043,6 +8197,21 @@ final class ProductionService
             $wKg = $weightKg > 0 ? $weightKg : (float)($item['item_reg_kg'] ?: 85.0);
             $rollCode = "BOB-{$sku}-" . date('ymd') . "-" . strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
 
+            $stmtConsume3000 = $this->erpPdo->prepare("
+                UPDATE item_shops_storehouses
+                SET iss_inventory = GREATEST(0, iss_inventory - 1)
+                WHERE item_id = :item_id
+                  AND st_id = :st_id
+                  AND iss_inventory >= 1
+            ");
+            $stmtConsume3000->execute([
+                ':item_id' => $itemId,
+                ':st_id' => $stId,
+            ]);
+            if ($stmtConsume3000->rowCount() <= 0) {
+                return ['ok' => false, 'error' => 'La bobina ya no tiene stock disponible en Bodega 3000.'];
+            }
+
             // Si TRZ disponible, crear roll en TRZ en Bodega 3000 con estado IN_PROCESS
             if ($this->trzPdo !== null) {
                 try {
@@ -8135,6 +8304,11 @@ final class ProductionService
             $stR->execute([':id' => $trzRollId]);
             $roll = $stR->fetch(PDO::FETCH_ASSOC);
             if ($roll) {
+                $existingOtId = (int)($roll['current_work_order_id'] ?? 0);
+                if ($existingOtId > 0 && $existingOtId !== $workerOtId) {
+                    return ['ok' => false, 'error' => 'La bobina ya fue tomada por otra OT y no está disponible en Bodega 3000.'];
+                }
+
                 $sku = (string)($roll['sku_code'] ?? 'S/C');
                 $rCode = (string)$roll['roll_code'];
                 if ($isFlexoSeriPulpo && !str_starts_with(strtoupper($sku), 'TEL') && !str_starts_with(strtoupper($rCode), 'TEL')) {
@@ -8158,6 +8332,10 @@ final class ProductionService
                 $wKg = (float)$roll['weight_kg'];
                 $rCode = (string)$roll['roll_code'];
                 $sku = (string)($roll['sku_code'] ?? 'S/C');
+
+                if ($sku !== '' && !$this->adjustBodega3000InventoryBySku($sku, -1)) {
+                    return ['ok' => false, 'error' => 'No se pudo descontar la bobina del stock de Bodega 3000.'];
+                }
 
                 // Actualizar estado en TRZ
                 $this->trzPdo->prepare("
