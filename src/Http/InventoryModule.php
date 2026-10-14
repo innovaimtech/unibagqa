@@ -497,6 +497,11 @@ function unibagRenderStockPage(ReceptionService $service): void
         $isFullyTagged = ($inv > 0 && $alreadyTagged >= ($inv - 0.0001));
         $isPartiallyTagged = ($alreadyTagged > 0 && $pendingQty > 0.0001);
         $trzCat = ($inv <= 0) ? 'exhausted' : ($isFullyTagged ? 'tagged' : 'pending');
+        $viewCodesUrl = '/stock/traceability-entry?bodega=' . $storehouseId
+            . '&q=' . rawurlencode($sku)
+            . '&sku=' . rawurlencode($sku)
+            . '&desc=' . rawurlencode((string)$it['item_title'])
+            . '&unit=' . rawurlencode((string)$it['unit_name']);
 
         if ($disp <= 0 && $inv <= 0) {
             $statusBadge = '<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#f1f5f9;color:#64748b">Agotado</span>';
@@ -510,12 +515,14 @@ function unibagRenderStockPage(ReceptionService $service): void
         if ($isFullyTagged) {
             $trzButton = '<div style="display:inline-flex;align-items:center;gap:6px">';
             $trzButton .= '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11.5px;font-weight:700;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0" title="Todo el stock físico está rotulado con código de trazabilidad (' . number_format($alreadyTagged, 1, ',', '.') . ' / ' . number_format($inv, 1, ',', '.') . ' ' . h((string)$it['unit_name']) . ')">✅ Rotulado</span>';
-            $trzButton .= '<a class="btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '&q=' . rawurlencode($sku) . '" style="padding:3px 7px;font-size:11px;font-weight:700;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver y borrar bultos registrados por error para ' . h($sku) . '">🗑️ Borrar</a>';
+            $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:3px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver todos los códigos de trazabilidad registrados para ' . h($sku) . '">🔎 Códigos</a>';
+            $trzButton .= '<a class="btn" href="' . $viewCodesUrl . '" style="padding:3px 7px;font-size:11px;font-weight:700;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver y borrar bultos registrados por error para ' . h($sku) . '">🗑️ Borrar</a>';
             $trzButton .= '</div>';
         } elseif ($isPartiallyTagged) {
             $trzButton = '<div style="display:inline-flex;align-items:center;gap:6px">';
             $trzButton .= '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#fffbeb;color:#b45309;border:1px solid #fde68a;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Faltan ' . number_format($pendingQty, 1, ',', '.') . ' por rotular de ' . number_format($inv, 1, ',', '.') . '">📦 +Trazable <span style="font-size:10px;background:#fef3c7;padding:1px 5px;border-radius:4px">(' . number_format($pendingQty, 0, ',', '.') . ' pend)</span></a>';
-            $trzButton .= '<a class="btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '&q=' . rawurlencode($sku) . '" style="padding:4px 7px;font-size:11px;font-weight:700;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver y borrar bultos ya rotulados de este artículo">🗑️</a>';
+            $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:4px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver todos los códigos de trazabilidad ya rotulados para ' . h($sku) . '">🔎 Códigos</a>';
+            $trzButton .= '<a class="btn" href="' . $viewCodesUrl . '" style="padding:4px 7px;font-size:11px;font-weight:700;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver y borrar bultos ya rotulados de este artículo">🗑️</a>';
             $trzButton .= '</div>';
         } elseif ($inv > 0) {
             $trzButton = '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#f0fdfa;color:#0f766e;border:1px solid #ccfbf1;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Ingresar bulto a bodega con código de trazabilidad">📦 +Trazable</a>';
