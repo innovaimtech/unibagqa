@@ -303,7 +303,7 @@ function handleProductionRoutes(
                     'color_label' => trim((string)($_REQUEST['color' . $x] ?? '')),
                     'anilox_id' => (int)($aniloxMap[$x] ?? 0),
                     'ink_item_id' => (int)($_REQUEST['ink_item_' . $x] ?? 0),
-                    'loaded_kg' => (float)str_replace(',', '.', (string)($_REQUEST['ink_loaded_' . $x] ?? 0)),
+                    'loaded_kg' => (float)str_replace(',', '.', (string)($_REQUEST['ink_total_loaded_' . $x] ?? $_REQUEST['ink_loaded_' . $x] ?? 0)),
                     'leftover_kg' => (float)str_replace(',', '.', (string)($_REQUEST['ink_leftover_' . $x] ?? 0)),
                     'is_mixed' => !empty($_REQUEST['ink_is_mix_' . $x]) ? 1 : 0,
                     'mixture_notes' => trim((string)($_REQUEST['mix_notes_' . $x] ?? '')),
@@ -3926,7 +3926,7 @@ function renderProductionOperatorConsole(
         }
 
         function calcAniloxInkConsumed(unit) {
-            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var loadedInp = document.getElementById('ink_total_loaded_' + unit);
             var leftoverInp = document.getElementById('ink_leftover_' + unit);
             var badge = document.getElementById('ink_consumed_badge_' + unit);
             var loaded = loadedInp ? aniloxParseNumber(loadedInp.value) : 0;
@@ -3938,6 +3938,43 @@ function renderProductionOperatorConsole(
                 badge.style.borderColor = consumed > 0 ? '#A7F3D0' : '#BFDBFE';
                 badge.style.color = consumed > 0 ? '#047857' : '#1D4ED8';
             }
+        }
+
+        function calcAniloxLoadTotal(unit) {
+            var baseInp = document.getElementById('ink_loaded_base_' + unit);
+            var totalInp = document.getElementById('ink_total_loaded_' + unit);
+            var totalDisplayInp = document.getElementById('ink_total_loaded_display_' + unit);
+            var loadNowInp = document.getElementById('ink_load_now_' + unit);
+            var mixChk = document.getElementById('ink_is_mix_' + unit);
+            var useMix = !!(mixChk && mixChk.checked);
+            var baseLoaded = baseInp ? aniloxParseNumber(baseInp.value) : 0;
+            var loadNow = 0;
+
+            if (useMix) {
+                for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                    var qtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
+                    loadNow += qtyInp ? aniloxParseNumber(qtyInp.value) : 0;
+                }
+                if (loadNowInp) {
+                    loadNowInp.value = loadNow > 0 ? loadNow.toFixed(2) : '';
+                }
+            } else {
+                loadNow = loadNowInp ? aniloxParseNumber(loadNowInp.value) : 0;
+            }
+
+            var totalLoaded = Math.max(0, baseLoaded + loadNow);
+            if (totalInp) {
+                totalInp.value = totalLoaded > 0 ? totalLoaded.toFixed(2) : '';
+            }
+            if (totalDisplayInp) {
+                totalDisplayInp.value = totalLoaded > 0 ? totalLoaded.toFixed(2) : '';
+            }
+            calcAniloxInkConsumed(unit);
+            return {
+                baseLoaded: baseLoaded,
+                loadNow: loadNow,
+                totalLoaded: totalLoaded
+            };
         }
 
         function calcAniloxMixTotal(unit) {
@@ -3956,32 +3993,24 @@ function renderProductionOperatorConsole(
 
             var totalEl = document.getElementById('mix_total_badge_' + unit);
             var diffEl = document.getElementById('mix_diff_badge_' + unit);
-            var loadedInp = document.getElementById('ink_loaded_' + unit);
-            var mixChk = document.getElementById('ink_is_mix_' + unit);
-            var useMix = !!(mixChk && mixChk.checked);
-            if (loadedInp && useMix) {
-                loadedInp.value = total > 0 ? total.toFixed(2) : '';
-            }
-            var loaded = loadedInp ? aniloxParseNumber(loadedInp.value) : 0;
-            var diff = loaded - total;
             var countEl = document.getElementById('mix_count_badge_' + unit);
+            var totals = calcAniloxLoadTotal(unit);
 
             if (totalEl) {
-                totalEl.innerText = 'Mezcla: ' + total.toFixed(2) + ' kg';
+                totalEl.innerText = 'A cargar: ' + total.toFixed(2) + ' kg';
             }
             if (countEl) {
                 countEl.innerText = usedCount + ' componente(s)';
             }
             if (diffEl) {
-                if (loaded > 0) {
-                    diffEl.innerText = 'Dif.: ' + diff.toFixed(2) + ' kg';
-                    diffEl.style.color = Math.abs(diff) <= 0.05 ? '#047857' : '#B45309';
+                if (totals.totalLoaded > 0) {
+                    diffEl.innerText = 'Total: ' + totals.totalLoaded.toFixed(2) + ' kg';
+                    diffEl.style.color = '#047857';
                 } else {
-                    diffEl.innerText = 'Dif.: 0.00 kg';
+                    diffEl.innerText = 'Total: 0.00 kg';
                     diffEl.style.color = '#64748B';
                 }
             }
-            calcAniloxInkConsumed(unit);
             refreshAniloxMixSummary(unit);
         }
 
@@ -3989,7 +4018,7 @@ function renderProductionOperatorConsole(
             var chk = document.getElementById('ink_is_mix_' + unit);
             var singleWrap = document.getElementById('anilox_single_ink_wrap_' + unit);
             var inkItemSel = document.getElementById('ink_item_' + unit);
-            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var loadNowInp = document.getElementById('ink_load_now_' + unit);
             var openBtn = document.getElementById('btn_open_mix_' + unit);
             var summary = document.getElementById('mix_summary_inline_' + unit);
             var useMix = !!(chk && chk.checked);
@@ -4002,9 +4031,9 @@ function renderProductionOperatorConsole(
                     inkItemSel.value = '';
                 }
             }
-            if (loadedInp) {
-                loadedInp.readOnly = useMix;
-                loadedInp.style.backgroundColor = useMix ? '#EFF6FF' : '#FFFFFF';
+            if (loadNowInp) {
+                loadNowInp.readOnly = useMix;
+                loadNowInp.style.backgroundColor = useMix ? '#EFF6FF' : '#FFFFFF';
             }
             if (openBtn) {
                 openBtn.style.display = useMix ? 'inline-block' : 'none';
@@ -4059,22 +4088,28 @@ function renderProductionOperatorConsole(
         }
 
         function normalizeAniloxMixSlots(unit) {
-            var visibleCount = 0;
+            var highestUsedCount = 0;
+            var currentVisibleCount = 0;
             for (var idx = 0; idx < aniloxMixSlots; idx++) {
+                var slot = document.getElementById('mix_slot_' + unit + '_' + idx);
                 var itemSel = document.getElementById('mix_component_item_' + unit + '_' + idx);
                 var qtyInp = document.getElementById('mix_component_qty_' + unit + '_' + idx);
                 var itemId = itemSel ? String(itemSel.value || '') : '';
                 var qty = qtyInp ? aniloxParseNumber(qtyInp.value) : 0;
                 var isUsed = itemId !== '' || qty > 0;
-                setAniloxMixSlotVisibility(unit, idx, isUsed);
                 if (isUsed) {
-                    visibleCount = idx + 1;
+                    highestUsedCount = idx + 1;
+                }
+                if (slot && slot.classList.contains('is-visible')) {
+                    currentVisibleCount = idx + 1;
                 }
             }
-            if (visibleCount === 0) {
-                setAniloxMixSlotVisibility(unit, 0, true);
-                visibleCount = 1;
+
+            var visibleCount = Math.max(1, highestUsedCount, currentVisibleCount);
+            for (var showIdx = 0; showIdx < aniloxMixSlots; showIdx++) {
+                setAniloxMixSlotVisibility(unit, showIdx, showIdx < visibleCount);
             }
+
             for (var hideIdx = visibleCount; hideIdx < aniloxMixSlots; hideIdx++) {
                 var hideItemSel = document.getElementById('mix_component_item_' + unit + '_' + hideIdx);
                 var hideQtyInp = document.getElementById('mix_component_qty_' + unit + '_' + hideIdx);
@@ -4133,6 +4168,8 @@ function renderProductionOperatorConsole(
                 anilox: '',
                 inkItem: '',
                 loaded: '',
+                loadedBase: '',
+                loadNow: '',
                 leftover: '',
                 isMix: false,
                 notes: '',
@@ -4144,7 +4181,9 @@ function renderProductionOperatorConsole(
             var colorHiddenInp = document.getElementById('color_hidden_' + unit);
             var aniloxSel = document.getElementById('id_anilox_' + unit);
             var inkItemSel = document.getElementById('ink_item_' + unit);
-            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var loadedInp = document.getElementById('ink_total_loaded_' + unit);
+            var loadedBaseInp = document.getElementById('ink_loaded_base_' + unit);
+            var loadNowInp = document.getElementById('ink_load_now_' + unit);
             var leftoverInp = document.getElementById('ink_leftover_' + unit);
             var mixChk = document.getElementById('ink_is_mix_' + unit);
             var notesInp = document.getElementById('mix_notes_' + unit);
@@ -4154,6 +4193,8 @@ function renderProductionOperatorConsole(
             state.anilox = aniloxSel ? aniloxSel.value : '';
             state.inkItem = inkItemSel ? inkItemSel.value : '';
             state.loaded = loadedInp ? loadedInp.value : '';
+            state.loadedBase = loadedBaseInp ? loadedBaseInp.value : '';
+            state.loadNow = loadNowInp ? loadNowInp.value : '';
             state.leftover = leftoverInp ? leftoverInp.value : '';
             state.isMix = mixChk ? !!mixChk.checked : false;
             state.notes = notesInp ? notesInp.value : '';
@@ -4173,7 +4214,10 @@ function renderProductionOperatorConsole(
             var colorHiddenInp = document.getElementById('color_hidden_' + unit);
             var aniloxSel = document.getElementById('id_anilox_' + unit);
             var inkItemSel = document.getElementById('ink_item_' + unit);
-            var loadedInp = document.getElementById('ink_loaded_' + unit);
+            var loadedInp = document.getElementById('ink_total_loaded_' + unit);
+            var loadedDisplayInp = document.getElementById('ink_total_loaded_display_' + unit);
+            var loadedBaseInp = document.getElementById('ink_loaded_base_' + unit);
+            var loadNowInp = document.getElementById('ink_load_now_' + unit);
             var leftoverInp = document.getElementById('ink_leftover_' + unit);
             var mixChk = document.getElementById('ink_is_mix_' + unit);
             var notesInp = document.getElementById('mix_notes_' + unit);
@@ -4183,6 +4227,9 @@ function renderProductionOperatorConsole(
             if (aniloxSel) aniloxSel.value = state.anilox || '';
             if (inkItemSel) inkItemSel.value = state.inkItem || '';
             if (loadedInp) loadedInp.value = state.loaded || '';
+            if (loadedDisplayInp) loadedDisplayInp.value = state.loaded || '';
+            if (loadedBaseInp) loadedBaseInp.value = state.loadedBase || '';
+            if (loadNowInp) loadNowInp.value = state.loadNow || '';
             if (leftoverInp) leftoverInp.value = state.leftover || '';
             if (mixChk) mixChk.checked = !!state.isMix;
             if (notesInp) notesInp.value = state.notes || '';
@@ -4237,6 +4284,25 @@ function renderProductionOperatorConsole(
             })
             .then(function(data) {
                 if (data && data.ok) {
+                    for (var x = 1; x <= maxUnits; x++) {
+                        var totalInp = document.getElementById('ink_total_loaded_' + x);
+                        var baseInp = document.getElementById('ink_loaded_base_' + x);
+                        var loadNowInp = document.getElementById('ink_load_now_' + x);
+                        var mixChk = document.getElementById('ink_is_mix_' + x);
+                        if (baseInp && totalInp) {
+                            baseInp.value = totalInp.value || '';
+                        }
+                        if (loadNowInp) {
+                            loadNowInp.value = '';
+                        }
+                        if (mixChk && mixChk.checked) {
+                            for (var mixIdx = 0; mixIdx < aniloxMixSlots; mixIdx++) {
+                                clearAniloxMixSlot(x, mixIdx);
+                            }
+                        }
+                        calcAniloxLoadTotal(x);
+                        calcAniloxMixTotal(x);
+                    }
                     showAniloxToast('Conformación de Anilox y tintas guardada exitosamente.', 'success');
                 } else {
                     alert(data && data.error ? data.error : 'Error al guardar Anilox y tintas.');
@@ -4372,6 +4438,7 @@ function renderProductionOperatorConsole(
                         <col width="19%">
                         <col width="20%">
                         <col width="90">
+                        <col width="90">
                         <col width="95">
                         <col width="105">
                         <col width="95">
@@ -4382,7 +4449,8 @@ function renderProductionOperatorConsole(
                         <td class="tdheader" align="center">Color</td>
                         <td class="tdheader" align="center">Anilox</td>
                         <td class="tdheader" align="center">Tinta</td>
-                        <td class="tdheader" align="center">Carga kg</td>
+                        <td class="tdheader" align="center">Total kg</td>
+                        <td class="tdheader" align="center">Cargar kg</td>
                         <td class="tdheader" align="center">Sobrante kg</td>
                         <td class="tdheader" align="center">Consumido</td>
                         <td class="tdheader" align="center">Mezcla</td>
@@ -4399,7 +4467,7 @@ function renderProductionOperatorConsole(
                         $savedConsumedKg = (float)($savedInkConfig['consumed_kg'] ?? max(0, $savedLoadedKg - $savedLeftoverKg));
                         $savedIsMixed = (int)($savedInkConfig['is_mixed'] ?? 0) === 1;
                         $savedMixNotes = trim((string)($savedInkConfig['mixture_notes'] ?? ''));
-                        $savedComponents = array_values($savedInkConfig['components'] ?? []);
+                        $savedComponents = [];
                     ?>
                     <tr id="tr_anilox_<?=$unidadAnilox?>" class="anilox-row-transition">
                         <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center"><b><?=$unidadAnilox?></b></td>
@@ -4435,7 +4503,12 @@ function renderProductionOperatorConsole(
                             </div>
                         </td>
                         <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
-                            <input type="number" step="0.01" min="0" name="ink_loaded_<?=$unidadAnilox?>" id="ink_loaded_<?=$unidadAnilox?>" class="inptxt" style="width:82px;text-align:center" value="<?=$savedLoadedKg > 0 ? number_format($savedLoadedKg, 2, '.', '') : ''?>" placeholder="0.00" oninput="calcAniloxInkConsumed(<?=$unidadAnilox?>);calcAniloxMixTotal(<?=$unidadAnilox?>)">
+                            <input type="hidden" name="ink_loaded_base_<?=$unidadAnilox?>" id="ink_loaded_base_<?=$unidadAnilox?>" value="<?=$savedLoadedKg > 0 ? number_format($savedLoadedKg, 2, '.', '') : ''?>">
+                            <input type="hidden" name="ink_total_loaded_<?=$unidadAnilox?>" id="ink_total_loaded_<?=$unidadAnilox?>" value="<?=$savedLoadedKg > 0 ? number_format($savedLoadedKg, 2, '.', '') : ''?>">
+                            <input type="number" step="0.01" min="0" id="ink_total_loaded_display_<?=$unidadAnilox?>" class="inptxt" style="width:82px;text-align:center;background:#F8FAFC" value="<?=$savedLoadedKg > 0 ? number_format($savedLoadedKg, 2, '.', '') : ''?>" placeholder="0.00" readonly>
+                        </td>
+                        <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
+                            <input type="number" step="0.01" min="0" name="ink_load_now_<?=$unidadAnilox?>" id="ink_load_now_<?=$unidadAnilox?>" class="inptxt" style="width:82px;text-align:center" value="" placeholder="0.00" oninput="calcAniloxLoadTotal(<?=$unidadAnilox?>);calcAniloxMixTotal(<?=$unidadAnilox?>)">
                         </td>
                         <td class="tdnrm" style="border-left:1px solid #DDDDDD;text-align:center">
                             <input type="number" step="0.01" min="0" name="ink_leftover_<?=$unidadAnilox?>" id="ink_leftover_<?=$unidadAnilox?>" class="inptxt" style="width:82px;text-align:center" value="<?=$savedLeftoverKg > 0 ? number_format($savedLeftoverKg, 2, '.', '') : ''?>" placeholder="0.00" oninput="calcAniloxInkConsumed(<?=$unidadAnilox?>)">
@@ -4465,7 +4538,7 @@ function renderProductionOperatorConsole(
                         </td>
                     </tr>
                     <tr id="tr_anilox_mix_<?=$unidadAnilox?>" style="height:0">
-                        <td colspan="9" class="tdnrm" style="padding:0;border:none;height:0;line-height:0">
+                        <td colspan="10" class="tdnrm" style="padding:0;border:none;height:0;line-height:0">
                             <div id="anilox_mix_modal_<?=$unidadAnilox?>" class="anilox-mix-modal" onclick="if(event.target===this){closeAniloxMixModal(<?=$unidadAnilox?>)}">
                                 <div class="anilox-mix-modal-card">
                                     <div style="padding:16px 18px;border-bottom:1px solid #E2E8F0;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
