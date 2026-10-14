@@ -1105,7 +1105,7 @@ final class ProductionService
                        t1.req_embalaje_medidas_caja, t1.req_embalaje_cajas_por_pallet_amt,
                        t1.req_embalaje_bolsas_por_caja_amt,
                        t1.req_caja_impresa, t1.req_embalaje_cajas_completas_amt, t1.req_embalaje_caja_final,
-                       t1.req_pie_imprenta, t1.req_despacho_desc,
+                       t1.req_pie_imprenta, t1.req_despacho_desc, t1.req_desc_intern,
                        to1.req_number AS reqnum_mezcla_1, to2.req_number AS reqnum_mezcla_2,
                        to3.req_number AS reqnum_mezcla_3, t1.req_rebo_cc_genrefid,
                        teq.equipo_name, teq.equipo_prod_isprinter_flexo, teq.equipo_prod_isprinter_seri,

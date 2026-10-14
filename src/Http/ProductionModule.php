@@ -2045,6 +2045,10 @@ function renderProductionOperatorConsole(
         if ($blankIfNull && ($formatted === '0' || $formatted === '')) return '&nbsp;';
         return $formatted;
     };
+    $internalFabricationNote = trim((string)($agenda['req_desc_intern'] ?? ''));
+    $internalFabricationNoteHtml = $internalFabricationNote !== ''
+        ? nl2br(htmlspecialchars($internalFabricationNote))
+        : '<span style="color:#999">-</span>';
 
     // Cálculos de desarrollo, corte, metros y kg
     $corte_m2 = 0.0;
@@ -2461,6 +2465,10 @@ function renderProductionOperatorConsole(
                         </tr>
                         <?php endif; ?>
                     <?php endfor; ?>
+                    <tr>
+                        <td class="tdleft" colspan="2">Observación interna</td>
+                        <td class="tdnrm" colspan="2" style="white-space:normal;line-height:1.45"><?=$internalFabricationNoteHtml?></td>
+                    </tr>
                     </table>
                 </div>
             </div>
@@ -2845,6 +2853,10 @@ function renderProductionOperatorConsole(
                         <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_mat_gramms'] ?? '70'))?> gr</td>
                         <td class="tdleft">&nbsp;</td>
                         <td class="tdnrm">&nbsp;</td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Observación interna</td>
+                        <td class="tdnrm" colspan="3" style="white-space:normal;line-height:1.45"><?=$internalFabricationNoteHtml?></td>
                     </tr>
                     </table>
                 </div>
@@ -3642,6 +3654,10 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">&nbsp;</td>
                     <td class="tdnrm">&nbsp;</td>
                 </tr>
+                <tr>
+                    <td class="tdleft">Observación interna</td>
+                    <td class="tdnrm" colspan="3" style="white-space:normal;line-height:1.45"><?=$internalFabricationNoteHtml?></td>
+                </tr>
                 </table>
             </div>
         </div>
@@ -4152,6 +4168,10 @@ function renderProductionOperatorConsole(
                         <i class="fa fa-check-circle"></i> Información de Fabricación guardada exitosamente para lado <?=htmlspecialchars($colorMode)?>.
                     </div>
                 <?php endif; ?>
+                <div style="margin-bottom:12px;background:#F8FAFC;border:1px solid #CBD5E1;border-radius:4px;padding:10px 12px">
+                    <div class="tdleft" style="margin-bottom:4px">Observación interna</div>
+                    <div class="tdnrm" style="white-space:normal;line-height:1.45"><?=$internalFabricationNoteHtml?></div>
+                </div>
                 <form method="post" action="/production/work-orders/events/pulpo-fabricacion">
                     <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
                     <input type="hidden" name="agid" value="<?=$agId?>">
@@ -4549,6 +4569,10 @@ function renderProductionOperatorConsole(
                     </tr>
                     <?php endif; ?>
                 <?php endfor; ?>
+                <tr>
+                    <td class="tdleft" colspan="2">Observación interna</td>
+                    <td class="tdnrm" colspan="2" style="white-space:normal;line-height:1.45"><?=$internalFabricationNoteHtml?></td>
+                </tr>
                 </table>
             </div>
         </div>
