@@ -8092,6 +8092,19 @@ final class ProductionService
         }
     }
 
+    private function normalizeTraceabilityCode(string $code): string
+    {
+        $code = trim($code);
+        if ($code === '') {
+            return '';
+        }
+
+        $code = str_replace(["\r", "\n", "\t", ' '], '', $code);
+        $code = str_replace(["'", '`', '´', '’', '‘', '‛'], '-', $code);
+
+        return strtoupper($code);
+    }
+
     /**
      * Asigna una bobina de Bodega 3000 a la máquina y operario para una OT.
      * Soporta tanto trazabilidad estándar como saltarse la trazabilidad si la bobina no tiene código.
@@ -8104,7 +8117,8 @@ final class ProductionService
         int $machineId,
         string $comments = '',
         bool $skipTraceability = false,
-        ?int $agId = null
+        ?int $agId = null,
+        string $confirmedTraceabilityCode = ''
     ): array {
         if ($workerOtId <= 0) {
             return ['ok' => false, 'error' => 'Orden de trabajo inválida.'];
@@ -8332,6 +8346,18 @@ final class ProductionService
                 $wKg = (float)$roll['weight_kg'];
                 $rCode = (string)$roll['roll_code'];
                 $sku = (string)($roll['sku_code'] ?? 'S/C');
+                $normalizedConfirmedTraceabilityCode = $this->normalizeTraceabilityCode($confirmedTraceabilityCode);
+                $normalizedRollCode = $this->normalizeTraceabilityCode($rCode);
+
+                if ($normalizedRollCode === '') {
+                    return ['ok' => false, 'error' => 'La bobina trazable no tiene código válido para consumo.'];
+                }
+                if ($normalizedConfirmedTraceabilityCode === '') {
+                    return ['ok' => false, 'error' => 'Debe escanear o ingresar el código de trazabilidad de la bobina que va a consumir.'];
+                }
+                if ($normalizedConfirmedTraceabilityCode !== $normalizedRollCode) {
+                    return ['ok' => false, 'error' => 'El código de trazabilidad ingresado no corresponde a la bobina seleccionada.'];
+                }
 
                 if ($sku !== '' && !$this->adjustBodega3000InventoryBySku($sku, -1)) {
                     return ['ok' => false, 'error' => 'No se pudo descontar la bobina del stock de Bodega 3000.'];

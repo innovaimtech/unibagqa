@@ -2747,6 +2747,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $dispatchedWeight = (float)($_GET['weight'] ?? 0);
     $movedFromWarehouse = trim((string)($_GET['from_wh'] ?? ''));
     $movedToWarehouse = trim((string)($_GET['to_wh'] ?? ''));
+    $movedTraceabilityOnly = isset($_GET['trace_only']) && (string)$_GET['trace_only'] === '1';
     $errorMessage = trim((string)($_GET['error'] ?? ''));
 
     $prefillOt = trim((string)($_GET['prefill_ot'] ?? ''));
@@ -2847,7 +2848,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         $body .= '    <div>';
         $body .= '      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
         $body .= '        <span style="font-size:22px">✅</span>';
-        $body .= '        <span style="font-size:17px;font-weight:800;color:#1d4ed8">¡Traspaso entre bodegas registrado exitosamente!</span>';
+        $body .= '        <span style="font-size:17px;font-weight:800;color:#1d4ed8">' . ($movedTraceabilityOnly ? '¡Traspaso solo de trazabilidad registrado exitosamente!' : '¡Traspaso entre bodegas registrado exitosamente!') . '</span>';
         $body .= '      </div>';
         $body .= '      <div style="font-size:13.5px;color:#1e3a8a;line-height:1.6">';
         $body .= '        Bobina: <span style="display:inline-block;background:#0f172a;color:#fff;font-family:monospace;font-size:14px;font-weight:700;padding:2px 8px;border-radius:4px;letter-spacing:0.5px">' . h($dispatchedRollCode) . '</span>';
@@ -2859,6 +2860,9 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         }
         if ($dispatchedWeight > 0) {
             $body .= ' &nbsp;|&nbsp; <strong>Peso:</strong> ' . number_format($dispatchedWeight, 2, ',', '.') . ' kg';
+        }
+        if ($movedTraceabilityOnly) {
+            $body .= ' &nbsp;|&nbsp; <strong>Modo:</strong> Solo trazabilidad (sin impacto en inventario)';
         }
         $body .= '      </div>';
         $body .= '    </div>';
@@ -3152,6 +3156,13 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '            <input type="text" name="transfer_operator_name" id="inp_transfer_operator" value="' . h($currentOperatorName) . '" style="' . $transferOperatorFieldStyle . '"' . $transferOperatorFieldAttrs . ' required>';
     $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">' . h($transferOperatorHelp) . '</div>';
     $body .= '          </div>';
+    $body .= '          <label style="display:flex;align-items:flex-start;gap:8px;padding:10px 12px;background:#f8fafc;border:1px solid #dbeafe;border-radius:8px;margin-bottom:10px;cursor:pointer">';
+    $body .= '            <input type="checkbox" name="traceability_only" id="chk_traceability_only" value="1" style="margin-top:2px">';
+    $body .= '            <span style="font-size:12.5px;color:#334155;line-height:1.45">';
+    $body .= '              <strong>Solo mover trazabilidad</strong><br>';
+    $body .= '              Use esta opción cuando el traslado físico ya se hizo en el sistema antiguo y aquí solo necesita mover el código trazable a la bodega destino, sin tocar inventario.';
+    $body .= '            </span>';
+    $body .= '          </label>';
     $body .= '        </div>';
 
     // Botón de Confirmación Destacado
@@ -3672,6 +3683,7 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
             $fromWarehouseId = (int)($_POST['from_warehouse_id'] ?? 0);
             $skuCode = trim((string)($_POST['sku'] ?? $_POST['sku_manual'] ?? ''));
             $skuDescription = trim((string)($_POST['sku_desc'] ?? $_POST['sku_desc_manual'] ?? ''));
+            $traceabilityOnly = !empty($_POST['traceability_only']);
 
             if ($rollId <= 0 && $scanCode !== '') {
                 $ensureResult = $service->ensureTransferableRollByCode(
@@ -3704,9 +3716,11 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
                 return true;
             }
 
-            $result = $service->transferRoll($rollId, $toWarehouseId, $effectiveTransferOperator, null);
+            $result = $traceabilityOnly
+                ? $service->transferRollTraceabilityOnly($rollId, $toWarehouseId, $effectiveTransferOperator)
+                : $service->transferRoll($rollId, $toWarehouseId, $effectiveTransferOperator, null);
             if (($result['ok'] ?? false) !== true) {
-                $err = !empty($result['errors']) ? implode(', ', (array)$result['errors']) : 'Error al registrar traspaso entre bodegas.';
+                $err = !empty($result['errors']) ? implode(', ', (array)$result['errors']) : ($traceabilityOnly ? 'Error al registrar traspaso solo de trazabilidad.' : 'Error al registrar traspaso entre bodegas.');
                 redirectResponse('/stock/transfers?error=' . rawurlencode($err));
                 return true;
             }
@@ -3719,6 +3733,7 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
                 'to_wh' => $toWarehouseName,
                 'weight' => (float)($roll['weight_kg'] ?? 0),
                 'saco' => $effectiveTransferOperator,
+                'trace_only' => $traceabilityOnly ? 1 : 0,
             ]);
             redirectResponse('/stock/transfers?' . $params);
             return true;

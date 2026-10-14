@@ -974,6 +974,7 @@ function handleProductionRoutes(
             $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
             $equipoId = $activeInit !== null ? (int)($activeInit['win_equipoid'] ?? 0) : 0;
             $weightKg = (float)str_replace(',', '.', (string)($_REQUEST['weight_kg'] ?? 0));
+            $confirmedTraceabilityCode = trim((string)($_REQUEST['confirmed_traceability_code'] ?? ''));
             $res = $prodService->assignBodega3000RollToMachine(
                 $workerOtId,
                 (string)$rollIds[0],
@@ -982,7 +983,8 @@ function handleProductionRoutes(
                 $equipoId,
                 $comments,
                 false,
-                $agId
+                $agId,
+                $confirmedTraceabilityCode
             );
         } elseif (!empty($rollIds)) {
             $res = $prodService->requestRollsForWorkOrder(
@@ -1490,6 +1492,7 @@ function handleProductionRoutes(
             }
             $weightKg = (float)str_replace(',', '.', (string)($_POST['weight_kg'] ?? 0));
             $comments = trim((string)($_POST['comments'] ?? ''));
+            $confirmedTraceabilityCode = trim((string)($_POST['confirmed_traceability_code'] ?? ''));
 
             $lastRes = ['ok' => false, 'error' => 'No se seleccionó ninguna bobina de Bodega 3000.'];
             foreach ($rollIds as $rid) {
@@ -1501,7 +1504,8 @@ function handleProductionRoutes(
                     $equipoId,
                     $comments,
                     false,
-                    $agId
+                    $agId,
+                    $confirmedTraceabilityCode
                 );
             }
             if ($lastRes['ok']) {
@@ -6609,7 +6613,19 @@ function renderProductionOperatorConsole(
                                     <input type="hidden" name="action_mode" value="take_bodega3000">
                                     <input type="hidden" name="roll_id" value="<?=htmlspecialchars($b3000Id)?>">
                                     <input type="hidden" name="traceability_source" value="<?=htmlspecialchars($b3000Source)?>">
+                                    <input type="hidden" name="expected_traceability_code" value="<?=htmlspecialchars($b3000Code)?>">
                                     <input type="hidden" name="weight_kg" value="<?=htmlspecialchars(number_format($b3000Weight, 2, '.', ''))?>">
+                                    <?php if ($b3000HasTraceability): ?>
+                                        <input
+                                            type="text"
+                                            name="confirmed_traceability_code"
+                                            value=""
+                                            placeholder="Escanee / escriba el codigo"
+                                            autocomplete="off"
+                                            required
+                                            style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px;font-family:monospace;text-transform:uppercase"
+                                        >
+                                    <?php endif; ?>
                                     <button type="submit" class="btngreen" style="font-size:12px;padding:6px 12px;cursor:pointer;font-weight:bold">
                                         <i class="fa fa-sign-in-alt"></i> <?=$b3000ActionLabel?>
                                     </button>

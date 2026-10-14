@@ -16017,6 +16017,90 @@ SQL;
         }
     }
 
+    public function transferRollTraceabilityOnly(int $rollId, int $toWarehouseId, string $operatorName = ''): array
+    {
+        $errors = [];
+        $operatorName = trim($operatorName);
+
+        $roll = $this->getRoll($rollId);
+        if ($roll === null) {
+            return ['ok' => false, 'errors' => ['roll' => 'Bobina no existe.']];
+        }
+
+        $fromWarehouseId = (int)$roll['warehouse_id'];
+        if ($toWarehouseId <= 0) {
+            $errors['warehouse_id'] = 'Bodega destino es obligatoria.';
+        } elseif ($toWarehouseId === $fromWarehouseId) {
+            $errors['warehouse_id'] = 'Bodega destino debe ser distinta a la actual.';
+        } else {
+            $stmt = $this->pdo->prepare('SELECT id FROM warehouses WHERE id = :id');
+            $stmt->execute([':id' => $toWarehouseId]);
+            if ($stmt->fetch() === false) {
+                $errors['warehouse_id'] = 'Bodega destino no existe.';
+            }
+        }
+        if ($operatorName === '') {
+            $errors['operator_name'] = 'Operador es obligatorio.';
+        }
+
+        $rollStatus = strtoupper(trim((string)($roll['status'] ?? '')));
+        $rollCurrentWorkOrderId = (int)($roll['current_work_order_id'] ?? 0);
+        if ($rollCurrentWorkOrderId > 0) {
+            $errors['roll'] = 'La bobina está asignada a una OT y no se puede mover solo en trazabilidad.';
+        } elseif (!in_array($rollStatus, ['RECEIVED'], true)) {
+            $errors['roll'] = 'Solo se pueden mover en trazabilidad bobinas disponibles.';
+        }
+
+        if ($errors !== []) {
+            return ['ok' => false, 'errors' => $errors];
+        }
+
+        $this->pdo->beginTransaction();
+        try {
+            $stmt = $this->pdo->prepare('UPDATE rolls SET warehouse_id = :to, current_work_order_id = NULL, status = :status WHERE id = :id');
+            $stmt->execute([
+                ':to' => $toWarehouseId,
+                ':status' => 'RECEIVED',
+                ':id' => $rollId,
+            ]);
+
+            $stmt = $this->pdo->prepare(
+                'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                 VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+            );
+            $stmt->execute([
+                ':entity_type' => 'ROLL',
+                ':entity_id' => $rollId,
+                ':movement_type' => 'TRACEABILITY_TRANSFER',
+                ':from_warehouse_id' => $fromWarehouseId,
+                ':to_warehouse_id' => $toWarehouseId,
+                ':payload' => json_encode([
+                    'operator_name' => $operatorName,
+                    'traceability_only' => true,
+                    'inventory_impact' => false,
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            $this->insertEvent('ROLL_TRACEABILITY_TRANSFERRED', [
+                'roll_id' => $rollId,
+                'roll_code' => (string)($roll['roll_code'] ?? ''),
+                'from_warehouse_id' => $fromWarehouseId,
+                'to_warehouse_id' => $toWarehouseId,
+                'operator_name' => $operatorName,
+                'traceability_only' => true,
+                'inventory_impact' => false,
+            ]);
+
+            $this->syncRollWarehouseTraceabilityEntry($rollId, $operatorName);
+
+            $this->pdo->commit();
+            return ['ok' => true, 'errors' => []];
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
     /**
      * Traspasa una bobina desde Bodega Central a la Planta de Producción (Bodega 3000).
      * Registra en la base de datos de trazabilidad (TRZ) y en ERP quién la solicitó,
