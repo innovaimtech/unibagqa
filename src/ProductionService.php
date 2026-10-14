@@ -1153,6 +1153,125 @@ final class ProductionService
         }
     }
 
+    private function resolveTraceabilityWorkOrderId(int $workerOtId, ?int $agId = null, bool $createIfMissing = false): int
+    {
+        if ($this->trzPdo === null || $workerOtId <= 0) {
+            return 0;
+        }
+
+        $agendaData = ($agId !== null && $agId > 0) ? $this->getWorkOrderAgendaDetails($agId) : null;
+        if ($agendaData === null && $this->erpPdo !== null) {
+            try {
+                $stmt = $this->erpPdo->prepare("
+                    SELECT pwo.id AS worker_ot_id, pa.id AS ag_id, pa.ag_amount, ph.prd_number, o.req_number,
+                           i.item_number_prod, i.item_title
+                    FROM prod_worker_ot pwo
+                    LEFT JOIN prod_agenda pa ON pwo.wok_ag_id = pa.id
+                    LEFT JOIN prod_header ph ON pa.ag_prdid = ph.id
+                    LEFT JOIN orders o ON pa.ag_reqid = o.id
+                    LEFT JOIN orders_items oi ON o.id = oi.req_id
+                    LEFT JOIN item i ON oi.item_id = i.id
+                    WHERE pwo.id = :worker_ot_id
+                    LIMIT 1
+                ");
+                $stmt->execute([':worker_ot_id' => $workerOtId]);
+                $agendaData = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+            } catch (Throwable) {
+                $agendaData = null;
+            }
+        }
+
+        $otCodeCandidates = [];
+        foreach ([
+            (string)($agendaData['prd_number'] ?? ''),
+            (string)($agendaData['req_number'] ?? ''),
+            'WOT-' . $workerOtId,
+        ] as $candidate) {
+            $candidate = strtoupper(trim($candidate));
+            if ($candidate === '') {
+                continue;
+            }
+            $candidate = substr($candidate, 0, 40);
+            if (!in_array($candidate, $otCodeCandidates, true)) {
+                $otCodeCandidates[] = $candidate;
+            }
+        }
+
+        if ($otCodeCandidates === []) {
+            return 0;
+        }
+
+        $skuFinal = trim((string)($agendaData['item_number_prod'] ?? $agendaData['item_title'] ?? 'OT-' . $workerOtId));
+        if ($skuFinal === '') {
+            $skuFinal = 'OT-' . $workerOtId;
+        }
+        $targetQty = null;
+        if (isset($agendaData['ag_amount']) && (float)$agendaData['ag_amount'] > 0) {
+            $targetQty = (int)round((float)$agendaData['ag_amount']);
+        }
+
+        try {
+            foreach ($otCodeCandidates as $otCode) {
+                $stmtFind = $this->trzPdo->prepare("SELECT id FROM work_orders WHERE ot_code = :ot_code LIMIT 1");
+                $stmtFind->execute([':ot_code' => $otCode]);
+                $existingId = (int)$stmtFind->fetchColumn();
+                if ($existingId > 0) {
+                    $stmtUpdate = $this->trzPdo->prepare("
+                        UPDATE work_orders
+                        SET sku_final = :sku_final,
+                            target_qty = :target_qty,
+                            status = 'ACTIVE'
+                        WHERE id = :id
+                    ");
+                    $stmtUpdate->execute([
+                        ':id' => $existingId,
+                        ':sku_final' => substr($skuFinal, 0, 80),
+                        ':target_qty' => $targetQty,
+                    ]);
+                    return $existingId;
+                }
+            }
+
+            if (!$createIfMissing) {
+                return 0;
+            }
+
+            $primaryOtCode = $otCodeCandidates[0];
+            $stmtInsert = $this->trzPdo->prepare("
+                INSERT INTO work_orders (ot_code, sku_final, target_qty, status)
+                VALUES (:ot_code, :sku_final, :target_qty, 'ACTIVE')
+            ");
+            $stmtInsert->execute([
+                ':ot_code' => $primaryOtCode,
+                ':sku_final' => substr($skuFinal, 0, 80),
+                ':target_qty' => $targetQty,
+            ]);
+            return (int)$this->trzPdo->lastInsertId();
+        } catch (Throwable) {
+            return 0;
+        }
+    }
+
+    private function resolveBodega3000WarehouseId(): int
+    {
+        if ($this->trzPdo === null) {
+            return 0;
+        }
+
+        try {
+            $this->trzPdo->prepare("
+                INSERT INTO warehouses (code, name, erp_storehouse_id)
+                VALUES (3000, '3000 INSUMOS EN PRODUCCION', 3000)
+                ON DUPLICATE KEY UPDATE name = VALUES(name)
+            ")->execute();
+            $stmt = $this->trzPdo->prepare("SELECT id FROM warehouses WHERE code IN (3000, 16, 27) ORDER BY FIELD(code, 3000, 16, 27), id ASC LIMIT 1");
+            $stmt->execute();
+            return (int)$stmt->fetchColumn();
+        } catch (Throwable) {
+            return 0;
+        }
+    }
+
     /**
      * Retorna todo el contexto técnico, especificaciones y métricas para la consola del operario.
      *
@@ -2472,15 +2591,24 @@ final class ProductionService
             $assignedRolls = [];
             $assignedKg = 0.0;
             if ($this->trzPdo !== null && $workerOtId > 0) {
+                $traceabilityWorkOrderId = $this->resolveTraceabilityWorkOrderId($workerOtId, $agId, false);
                 $stmtRolls = $this->trzPdo->prepare("
                     SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                     FROM rolls r
                     INNER JOIN skus s ON r.sku_id = s.id
                     LEFT JOIN warehouses w ON r.warehouse_id = w.id
-                    WHERE (r.current_work_order_id = :ot_id OR (r.source_work_order_id = :ot_id2 AND r.status = 'CONSUMED'))
+                    WHERE (
+                            r.current_work_order_id = :ot_id
+                            OR (:trz_ot_id > 0 AND r.current_work_order_id = :trz_ot_id)
+                            OR (r.source_work_order_id = :ot_id2 AND r.status = 'CONSUMED')
+                    )
                     ORDER BY r.id ASC
                 ");
-                $stmtRolls->execute([':ot_id' => $workerOtId, ':ot_id2' => $workerOtId]);
+                $stmtRolls->execute([
+                    ':ot_id' => $workerOtId,
+                    ':trz_ot_id' => $traceabilityWorkOrderId,
+                    ':ot_id2' => $workerOtId,
+                ]);
                 $assignedRolls = $stmtRolls->fetchAll(PDO::FETCH_ASSOC) ?: [];
                 foreach ($assignedRolls as &$ar) {
                     $assignedKg += (float)($ar['weight_kg'] ?? 0);
@@ -3294,6 +3422,7 @@ final class ProductionService
         }
         try {
             $now = time();
+            $traceabilityWorkOrderId = $this->resolveTraceabilityWorkOrderId($workerOtId, null, false);
             $stmtRoll = $this->trzPdo->prepare("
                 SELECT roll_code, weight_kg, current_work_order_id
                 FROM rolls
@@ -3309,7 +3438,7 @@ final class ProductionService
             $rollCode = trim((string)($roll['roll_code'] ?? ''));
             $rollWeightKg = (float)($roll['weight_kg'] ?? 0);
             $currentWorkOrderId = (int)($roll['current_work_order_id'] ?? 0);
-            if ($currentWorkOrderId > 0 && $currentWorkOrderId !== $workerOtId) {
+            if ($currentWorkOrderId > 0 && $currentWorkOrderId !== $workerOtId && $currentWorkOrderId !== $traceabilityWorkOrderId) {
                 return ['ok' => false, 'error' => 'La bobina pertenece a otra OT activa.'];
             }
 
@@ -3388,22 +3517,51 @@ final class ProductionService
         }
         try {
             $now = time();
+            $traceabilityWorkOrderId = $this->resolveTraceabilityWorkOrderId($workerOtId, null, false);
+            $warehouse3000Id = $this->resolveBodega3000WarehouseId();
             $stmtRoll = $this->trzPdo->prepare("
-                SELECT r.roll_code, s.code AS sku_code
+                SELECT r.roll_code, r.reception_mode, s.code AS sku_code
                 FROM rolls r
                 LEFT JOIN skus s ON r.sku_id = s.id
-                WHERE r.id = :id AND r.current_work_order_id = :ot_id
+                WHERE r.id = :id
+                  AND (
+                        r.current_work_order_id = :ot_id
+                        OR (:trz_ot_id > 0 AND r.current_work_order_id = :trz_ot_id)
+                  )
                 LIMIT 1
             ");
-            $stmtRoll->execute([':id' => $rollId, ':ot_id' => $workerOtId]);
+            $stmtRoll->execute([
+                ':id' => $rollId,
+                ':ot_id' => $workerOtId,
+                ':trz_ot_id' => $traceabilityWorkOrderId,
+            ]);
             $roll = $stmtRoll->fetch(PDO::FETCH_ASSOC);
             if (!$roll) {
                 return ['ok' => false, 'error' => 'La bobina no está tomada por esta OT.'];
             }
 
-            $stmt = $this->trzPdo->prepare("UPDATE rolls SET status = 'RECEIVED', current_work_order_id = NULL WHERE id = :id AND current_work_order_id = :ot_id");
-            $stmt->execute([':id' => $rollId, ':ot_id' => $workerOtId]);
-            if ($stmt->rowCount() > 0 && !empty($roll['sku_code'])) {
+            $stmt = $this->trzPdo->prepare("
+                UPDATE rolls
+                SET status = 'RECEIVED',
+                    current_work_order_id = NULL,
+                    warehouse_id = CASE WHEN :warehouse_3000_id > 0 THEN :warehouse_3000_id ELSE warehouse_id END
+                WHERE id = :id
+                  AND (
+                        current_work_order_id = :ot_id
+                        OR (:trz_ot_id > 0 AND current_work_order_id = :trz_ot_id)
+                  )
+            ");
+            $stmt->execute([
+                ':warehouse_3000_id' => $warehouse3000Id,
+                ':id' => $rollId,
+                ':ot_id' => $workerOtId,
+                ':trz_ot_id' => $traceabilityWorkOrderId,
+            ]);
+            if (
+                $stmt->rowCount() > 0
+                && !empty($roll['sku_code'])
+                && strtoupper((string)($roll['reception_mode'] ?? '')) !== 'MANUAL_NO_TRACEABILITY'
+            ) {
                 $this->adjustBodega3000InventoryBySku((string)$roll['sku_code'], 1);
             }
 
@@ -8133,6 +8291,15 @@ final class ProductionService
 
         // 1. MODO: SALTARSEN LA TRAZABILIDAD (Bobina sin código QR o código de trazabilidad)
         if ($skipTraceability) {
+            $traceabilityWorkOrderId = $this->resolveTraceabilityWorkOrderId($workerOtId, $agId, true);
+            if ($traceabilityWorkOrderId <= 0) {
+                return ['ok' => false, 'error' => 'No se pudo resolver la OT local de trazabilidad para registrar la bobina manual.'];
+            }
+            $manualWarehouseId = $this->resolveBodega3000WarehouseId();
+            if ($manualWarehouseId <= 0) {
+                return ['ok' => false, 'error' => 'No se pudo resolver la Bodega 3000 en trazabilidad.'];
+            }
+
             $rollCodeDisplay = trim($rollIdentifier) !== '' ? trim($rollIdentifier) : 'BOBINA-MANUAL-' . date('ymd-His');
             $wKg = $weightKg > 0 ? $weightKg : 80.0;
             $manualMaterial = 'MANUAL';
@@ -8182,23 +8349,11 @@ final class ProductionService
                     return ['ok' => false, 'error' => 'No se pudo resolver el SKU interno para la bobina manual.'];
                 }
 
-                $this->trzPdo->prepare("
-                    INSERT INTO warehouses (code, name, erp_storehouse_id)
-                    VALUES (3000, '3000 INSUMOS EN PRODUCCION', 3000)
-                    ON DUPLICATE KEY UPDATE name = VALUES(name)
-                ")->execute();
-                $stWarehouseManual = $this->trzPdo->prepare("SELECT id FROM warehouses WHERE code = 3000 LIMIT 1");
-                $stWarehouseManual->execute();
-                $manualWarehouseId = (int)$stWarehouseManual->fetchColumn();
-                if ($manualWarehouseId <= 0) {
-                    return ['ok' => false, 'error' => 'No se pudo resolver la Bodega 3000 en trazabilidad.'];
-                }
-
                 $stmtInsManualRoll = $this->trzPdo->prepare("
                     INSERT INTO rolls
-                        (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, width_mm, color, meters, status, current_work_order_id, process_stage, created_at)
+                        (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, width_mm, color, meters, status, current_work_order_id, source_work_order_id, process_stage, created_at)
                     VALUES
-                        (:code, :sku_id, :warehouse_id, :weight_kg, 1, 'MANUAL_NO_TRACEABILITY', :width_mm, :color, :meters, 'IN_PROCESS', :ot_id, 'PRODUCTION', NOW())
+                        (:code, :sku_id, :warehouse_id, :weight_kg, 1, 'MANUAL_NO_TRACEABILITY', :width_mm, :color, :meters, 'IN_PROCESS', :ot_id, :source_ot_id, 'PRODUCTION', NOW())
                 ");
                 $stmtInsManualRoll->execute([
                     ':code' => $manualRollCode,
@@ -8208,7 +8363,8 @@ final class ProductionService
                     ':width_mm' => $manualWidthMm,
                     ':color' => $manualColor,
                     ':meters' => $manualMeters,
-                    ':ot_id' => $workerOtId,
+                    ':ot_id' => $traceabilityWorkOrderId,
+                    ':source_ot_id' => $workerOtId,
                 ]);
                 $newRollId = (int)$this->trzPdo->lastInsertId();
                 if ($newRollId <= 0) {
@@ -8260,6 +8416,10 @@ final class ProductionService
         // 2. MODO: CON TRAZABILIDAD (Seleccionada desde Bodega 3000 o código QR)
         $agDetails = ($agId !== null && $agId > 0) ? $this->getWorkOrderAgendaDetails($agId) : null;
         $isFlexoSeriPulpo = $this->isFlexoSeriPulpoMachine($machineId, $agDetails);
+        $traceabilityWorkOrderId = $this->resolveTraceabilityWorkOrderId($workerOtId, $agId, true);
+        if ($traceabilityWorkOrderId <= 0) {
+            return ['ok' => false, 'error' => 'No se pudo resolver la OT local de trazabilidad para registrar la bobina.'];
+        }
 
         // Caso A: Selección desde ERP_stId_itemId o BOD3000_stId_itemId
         if (preg_match('/^(?:BOD3000|ERP)_(\d+)_(\d+)$/', $rollIdentifier, $m)) {
@@ -8379,31 +8539,25 @@ final class ProductionService
                     }
 
                     // Asegurar Warehouse Bodega 3000
-                    $this->trzPdo->prepare("
-                        INSERT INTO warehouses (code, name, erp_storehouse_id)
-                        VALUES (3000, '3000 INSUMOS EN PRODUCCION', :stid)
-                        ON DUPLICATE KEY UPDATE name = VALUES(name)
-                    ")->execute([':stid' => $stId]);
-                    $whId = (int)$this->trzPdo->lastInsertId();
+                    $whId = $this->resolveBodega3000WarehouseId();
                     if ($whId <= 0) {
-                        $stW = $this->trzPdo->prepare("SELECT id FROM warehouses WHERE code = 3000 LIMIT 1");
-                        $stW->execute();
-                        $whId = (int)$stW->fetchColumn();
+                        throw new RuntimeException('No se pudo resolver la Bodega 3000 en trazabilidad.');
                     }
 
                     // Insertar roll
                     $insRoll = $this->trzPdo->prepare("
                         INSERT INTO rolls
-                            (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, status, current_work_order_id, process_stage, created_at)
+                            (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, status, current_work_order_id, source_work_order_id, process_stage, created_at)
                         VALUES
-                            (:code, :sku_id, :wh_id, :weight_kg, 1, 'BODEGA_3000', 'IN_PROCESS', :ot_id, 'PRODUCTION', NOW())
+                            (:code, :sku_id, :wh_id, :weight_kg, 1, 'BODEGA_3000', 'IN_PROCESS', :ot_id, :source_ot_id, 'PRODUCTION', NOW())
                     ");
                     $insRoll->execute([
                         ':code' => $rollCode,
                         ':sku_id' => $skuId,
                         ':wh_id' => $whId,
                         ':weight_kg' => $wKg,
-                        ':ot_id' => $workerOtId,
+                        ':ot_id' => $traceabilityWorkOrderId,
+                        ':source_ot_id' => $workerOtId,
                     ]);
                     $newRollId = (int)$this->trzPdo->lastInsertId();
 
@@ -8467,7 +8621,7 @@ final class ProductionService
             $roll = $stR->fetch(PDO::FETCH_ASSOC);
             if ($roll) {
                 $existingOtId = (int)($roll['current_work_order_id'] ?? 0);
-                if ($existingOtId > 0 && $existingOtId !== $workerOtId) {
+                if ($existingOtId > 0 && $existingOtId !== $workerOtId && $existingOtId !== $traceabilityWorkOrderId) {
                     return ['ok' => false, 'error' => 'La bobina ya fue tomada por otra OT y no está disponible en Bodega 3000.'];
                 }
 
@@ -8516,7 +8670,7 @@ final class ProductionService
                     UPDATE rolls
                     SET status = 'IN_PROCESS', current_work_order_id = :ot_id, process_stage = 'PRODUCTION'
                     WHERE id = :id
-                ")->execute([':ot_id' => $workerOtId, ':id' => $trzRollId]);
+                ")->execute([':ot_id' => $traceabilityWorkOrderId, ':id' => $trzRollId]);
 
                 // Registrar evento en TRZ
                 $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([

@@ -6917,6 +6917,9 @@ function renderProductionOperatorConsole(
                                             </button>
                                         </form>
                                     </div>
+                                    <div style="margin-top:6px;font-size:10.5px;color:#64748B">
+                                        Si fue tomada por error, primero desmóntela y luego use <b>Devolver a Bodega 3000</b>.
+                                    </div>
                                 </div>
                             <?php else: ?>
                                 <!-- FORMULARIO PARA MONTAR EN MÁQUINA (PIDIENDO PESO DE INGRESO) -->
@@ -6945,8 +6948,8 @@ function renderProductionOperatorConsole(
                                         <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
                                         <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
                                         <input type="hidden" name="action_type" value="unassign">
-                                        <button type="submit" class="btngrey" style="font-size:11px;padding:3px 8px;cursor:pointer" onclick="return confirm('¿Devolver esta bobina a bodega?')">
-                                            <i class="fa fa-undo"></i> Devolver a bodega
+                                        <button type="submit" class="btngrey" style="font-size:11px;padding:3px 8px;cursor:pointer" onclick="return confirm('¿Devolver esta bobina a Bodega 3000 y dejarla nuevamente disponible?')">
+                                            <i class="fa fa-undo"></i> Devolver a Bodega 3000
                                         </button>
                                     </form>
                                 </div>
