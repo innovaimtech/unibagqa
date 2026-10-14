@@ -6295,6 +6295,19 @@ function renderProductionOperatorConsole(
                 $otherRolls[] = $r;
             }
         }
+        usort($compatibleRolls, static function (array $a, array $b): int {
+            $aSource = (string)($a['source'] ?? '');
+            $bSource = (string)($b['source'] ?? '');
+            $aPriority = $aSource === 'TRZ' ? 0 : 1;
+            $bPriority = $bSource === 'TRZ' ? 0 : 1;
+            if ($aPriority !== $bPriority) {
+                return $aPriority <=> $bPriority;
+            }
+
+            $aCode = (string)($a['roll_code'] ?? $a['sku_code'] ?? '');
+            $bCode = (string)($b['roll_code'] ?? $b['sku_code'] ?? '');
+            return strcasecmp($aCode, $bCode);
+        });
         $availableBodega3000Rolls = $compatibleRolls;
         $availableBodega3000Count = count($availableBodega3000Rolls);
         $availableBodega3000Kg = 0.0;
@@ -6547,6 +6560,7 @@ function renderProductionOperatorConsole(
                         <tr style="background:#F1F5F9;color:#334155;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">
                             <th class="tdheader" align="left" style="padding:10px 8px">Código / SKU</th>
                             <th class="tdheader" align="left" style="padding:10px 8px">Descripción</th>
+                            <th class="tdheader" align="center" style="padding:10px 8px">Compatibilidad</th>
                             <th class="tdheader" align="center" style="padding:10px 8px">Trazabilidad</th>
                             <th class="tdheader" align="center" style="padding:10px 8px">Color</th>
                             <th class="tdheader" align="center" style="padding:10px 8px">Ancho</th>
@@ -6566,6 +6580,7 @@ function renderProductionOperatorConsole(
                         $b3000Qty = max(1.0, (float)($b3000Roll['stock_qty'] ?? 1));
                         $b3000Source = (string)($b3000Roll['source'] ?? '');
                         $b3000HasTraceability = ($b3000Source === 'TRZ');
+                        $b3000IsCompatible = !empty($b3000Roll['is_compatible']);
                         $b3000ActionLabel = $b3000HasTraceability ? 'Tomar código' : 'Crear código y tomar';
                         $b3000ConfirmText = $b3000HasTraceability
                             ? ('¿Tomar el código trazable ' . addslashes($b3000Code) . ' desde Bodega 3000 para esta OT?')
@@ -6577,6 +6592,19 @@ function renderProductionOperatorConsole(
                                 <div style="font-size:11px;color:#64748B;margin-top:2px"><?=htmlspecialchars((string)($b3000Roll['warehouse_name'] ?? 'Bodega 3000'))?></div>
                             </td>
                             <td class="tdnrm"><?=htmlspecialchars($b3000Desc)?></td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($b3000IsCompatible): ?>
+                                    <div>
+                                        <span style="background:#DBEAFE;color:#1D4ED8;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">COMPATIBLE</span>
+                                    </div>
+                                    <div style="margin-top:4px;font-size:10.5px;color:#64748B">Lista para esta OT</div>
+                                <?php else: ?>
+                                    <div>
+                                        <span style="background:#FEE2E2;color:#B91C1C;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">NO COMPATIBLE</span>
+                                    </div>
+                                    <div style="margin-top:4px;font-size:10.5px;color:#64748B">Existe en 3000, pero no calza con esta OT</div>
+                                <?php endif; ?>
+                            </td>
                             <td class="tdnrm" align="center">
                                 <?php if ($b3000HasTraceability): ?>
                                     <div>
@@ -6606,30 +6634,36 @@ function renderProductionOperatorConsole(
                             </td>
                             <td class="tdnrm" align="center"><b><?=number_format($b3000Weight, 1, ',', '.')?> kg</b></td>
                             <td class="tdnrm" align="center">
-                                <form method="post" action="/production/work-orders/materials/assign" style="margin:0" onsubmit="return confirm('<?=htmlspecialchars($b3000ConfirmText)?>');">
-                                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                    <input type="hidden" name="agid" value="<?=$agId?>">
-                                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                                    <input type="hidden" name="action_mode" value="take_bodega3000">
-                                    <input type="hidden" name="roll_id" value="<?=htmlspecialchars($b3000Id)?>">
-                                    <input type="hidden" name="traceability_source" value="<?=htmlspecialchars($b3000Source)?>">
-                                    <input type="hidden" name="expected_traceability_code" value="<?=htmlspecialchars($b3000Code)?>">
-                                    <input type="hidden" name="weight_kg" value="<?=htmlspecialchars(number_format($b3000Weight, 2, '.', ''))?>">
-                                    <?php if ($b3000HasTraceability): ?>
-                                        <input
-                                            type="text"
-                                            name="confirmed_traceability_code"
-                                            value=""
-                                            placeholder="Escanee / escriba el codigo"
-                                            autocomplete="off"
-                                            required
-                                            style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px;font-family:monospace;text-transform:uppercase"
-                                        >
-                                    <?php endif; ?>
-                                    <button type="submit" class="btngreen" style="font-size:12px;padding:6px 12px;cursor:pointer;font-weight:bold">
-                                        <i class="fa fa-sign-in-alt"></i> <?=$b3000ActionLabel?>
+                                <?php if ($b3000IsCompatible): ?>
+                                    <form method="post" action="/production/work-orders/materials/assign" style="margin:0" onsubmit="return confirm('<?=htmlspecialchars($b3000ConfirmText)?>');">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="agid" value="<?=$agId?>">
+                                        <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                        <input type="hidden" name="action_mode" value="take_bodega3000">
+                                        <input type="hidden" name="roll_id" value="<?=htmlspecialchars($b3000Id)?>">
+                                        <input type="hidden" name="traceability_source" value="<?=htmlspecialchars($b3000Source)?>">
+                                        <input type="hidden" name="expected_traceability_code" value="<?=htmlspecialchars($b3000Code)?>">
+                                        <input type="hidden" name="weight_kg" value="<?=htmlspecialchars(number_format($b3000Weight, 2, '.', ''))?>">
+                                        <?php if ($b3000HasTraceability): ?>
+                                            <input
+                                                type="text"
+                                                name="confirmed_traceability_code"
+                                                value=""
+                                                placeholder="Escanee / escriba el codigo"
+                                                autocomplete="off"
+                                                required
+                                                style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px;font-family:monospace;text-transform:uppercase"
+                                            >
+                                        <?php endif; ?>
+                                        <button type="submit" class="btngreen" style="font-size:12px;padding:6px 12px;cursor:pointer;font-weight:bold">
+                                            <i class="fa fa-sign-in-alt"></i> <?=$b3000ActionLabel?>
+                                        </button>
+                                    </form>
+                                <?php else: ?>
+                                    <button type="button" class="btngrey" style="font-size:12px;padding:6px 12px;font-weight:bold;opacity:.75;cursor:not-allowed" disabled>
+                                        <i class="fa fa-ban"></i> No tomar
                                     </button>
-                                </form>
+                                <?php endif; ?>
                                 <div style="font-size:10.5px;color:#64748B;margin-top:4px">
                                     <?=$b3000HasTraceability ? 'Bobina trazable 3000' : 'Stock general 3000'?>
                                 </div>
