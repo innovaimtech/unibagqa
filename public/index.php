@@ -24044,7 +24044,10 @@ if (preg_match('#^/boxes/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     }
 
     $barcodeValue = strtoupper(trim((string)$box['box_code']));
-    $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
+    $barcodeSvg = code128Svg($barcodeValue, 92, 1.8);
+    if ($barcodeSvg === '') {
+        $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
+    }
     $destinationLabel = (string)$box['destination_mode'] === 'CUSTOMER_ORDER'
         ? 'OC cliente: ' . (string)($box['customer_order_ref'] ?? '-')
         : 'Bodega: ' . (string)($box['warehouse_code'] ?? '-');
@@ -24140,7 +24143,10 @@ if (preg_match('#^/pallets/(\d+)/label$#', $path, $m) === 1 && $method === 'GET'
     }
 
     $barcodeValue = strtoupper(trim((string)$pallet['pallet_code']));
-    $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
+    $barcodeSvg = code128Svg($barcodeValue, 92, 1.8);
+    if ($barcodeSvg === '') {
+        $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
+    }
     $destinationLabel = (string)$pallet['destination_mode'] === 'CUSTOMER_ORDER'
         ? 'OC cliente: ' . (string)($pallet['customer_order_ref'] ?? '-')
         : 'Bodega: ' . (string)($pallet['warehouse_code'] ?? '-');
@@ -24239,7 +24245,10 @@ if (preg_match('#^/work-orders/(\d+)/box-label$#', $path, $m) === 1 && $method =
         }
     }
     $barcodeValue = strtoupper(trim((string)$ot['ot_code']));
-    $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
+    $barcodeSvg = code128Svg($barcodeValue, 92, 1.8);
+    if ($barcodeSvg === '') {
+        $barcodeSvg = code39Svg($barcodeValue, 92, 3, 6);
+    }
 
     echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
     echo '<title>Etiqueta cajas</title>';

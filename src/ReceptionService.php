@@ -14659,6 +14659,23 @@ SQL;
         return $stmt->fetchAll();
     }
 
+    /**
+     * Normaliza códigos escaneados desde pistolas/lectores que a veces
+     * transforman el guion en apóstrofe según layout o simbología.
+     */
+    private function normalizeScannedInventoryCode(string $code): string
+    {
+        $code = trim($code);
+        if ($code === '') {
+            return '';
+        }
+
+        $code = str_replace(["\r", "\n", "\t", ' '], '', $code);
+        $code = str_replace(["'", '`', '´', '’', '‘', '‛'], '-', $code);
+
+        return strtoupper($code);
+    }
+
     public function listWarehousesForCut(): array
     {
         $all = $this->listWarehouses();
@@ -15795,7 +15812,7 @@ SQL;
 
     public function getRollByScanCode(string $code): ?array
     {
-        $code = trim($code);
+        $code = $this->normalizeScannedInventoryCode($code);
         if ($code === '') {
             return null;
         }
@@ -15804,7 +15821,7 @@ SQL;
             return $this->getRoll((int)$code);
         }
 
-        $stmt = $this->pdo->prepare('SELECT id FROM rolls WHERE roll_code = :code LIMIT 1');
+        $stmt = $this->pdo->prepare('SELECT id FROM rolls WHERE UPPER(roll_code) = :code LIMIT 1');
         $stmt->execute([':code' => $code]);
         $row = $stmt->fetch();
         if ($row === false) {

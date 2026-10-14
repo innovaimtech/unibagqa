@@ -2706,12 +2706,17 @@ function unibagRenderStockTraceabilityTreePage(ReceptionService $service, ?Produ
 function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?ProductionService $prodService, string $currentOperatorName): void
 {
     $availableRolls = $service->listAvailableRollsForTransfer(150);
+    $warehouses = array_values(array_filter(
+        $service->listWarehouses(),
+        static fn(array $warehouse): bool => (int)($warehouse['id'] ?? 0) > 0
+    ));
     $workOrders = $service->listWorkOrdersForTransfer();
     $machines = $service->listProductionMachines();
     $pendingRequests = $service->listPendingMaterialRequestsFromProduction(30);
     $history = $service->listProductionTransferHistory(50);
 
     $isDispatched = isset($_GET['dispatched']) && (string)$_GET['dispatched'] === '1';
+    $isWarehouseMoved = isset($_GET['moved']) && (string)$_GET['moved'] === '1';
     $dispatchedRollId = (int)($_GET['roll_id'] ?? 0);
     $dispatchedRollCode = trim((string)($_GET['roll_code'] ?? ''));
     $dispatchedOt = trim((string)($_GET['ot'] ?? ''));
@@ -2719,13 +2724,15 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $dispatchedSolicito = trim((string)($_GET['solicito'] ?? ''));
     $dispatchedSaco = trim((string)($_GET['saco'] ?? ''));
     $dispatchedWeight = (float)($_GET['weight'] ?? 0);
+    $movedFromWarehouse = trim((string)($_GET['from_wh'] ?? ''));
+    $movedToWarehouse = trim((string)($_GET['to_wh'] ?? ''));
     $errorMessage = trim((string)($_GET['error'] ?? ''));
 
     $prefillOt = trim((string)($_GET['prefill_ot'] ?? ''));
     $prefillMachine = trim((string)($_GET['prefill_machine'] ?? ''));
     $prefillSolicitante = trim((string)($_GET['prefill_solicitante'] ?? ''));
     $prefillAmount = trim((string)($_GET['prefill_amount'] ?? ''));
-    $activeTab = trim((string)($_GET['tab'] ?? ($isDispatched ? 'historial' : 'nuevo')));
+    $activeTab = trim((string)($_GET['tab'] ?? (($isDispatched || $isWarehouseMoved) ? 'historial' : 'nuevo')));
 
     $body = '<div class="transfers-shell" style="max-width:1280px;margin:0 auto;padding:12px 16px 40px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
 
@@ -2733,12 +2740,12 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e2e8f0">';
     $body .= '  <div>';
     $body .= '    <div style="display:flex;align-items:center;gap:10px">';
-    $body .= '      <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;letter-spacing:-0.5px">🔄 Traspasos a Producción (Bodega 3000)</h1>';
-    $body .= '      <span style="background:#e0f2fe;color:#0369a1;font-size:12px;font-weight:700;padding:3px 9px;border-radius:12px">Bodega 3000</span>';
+    $body .= '      <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;letter-spacing:-0.5px">🔄 Traspasos de Bodega</h1>';
+    $body .= '      <span style="background:#e0f2fe;color:#0369a1;font-size:12px;font-weight:700;padding:3px 9px;border-radius:12px">Producción y entre bodegas</span>';
     $body .= '    </div>';
     $body .= '    <p style="margin:6px 0 0;font-size:13.5px;color:#64748b;max-width:820px">';
-    $body .= '      Despacho de bobinas y materias primas a planta. Toda bobina que sale queda registrada con su <strong>código único de trazabilidad</strong>, ';
-    $body .= '      <strong>quién la solicitó</strong>, <strong>quién la sacó</strong>, <strong>para qué máquina</strong> y <strong>en qué OT</strong> se ocupará.';
+    $body .= '      Mueva bobinas con trazabilidad completa. Puede despacharlas a <strong>producción (Bodega 3000)</strong> o hacer un ';
+    $body .= '      <strong>traspaso directo entre bodegas</strong> cuando todavía no exista máquina ni OT definidas.';
     $body .= '    </p>';
     $body .= '  </div>';
     $body .= '  <div style="display:flex;align-items:center;gap:8px">';
@@ -2805,12 +2812,55 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         $body .= '</div>';
     }
 
+    if ($isWarehouseMoved) {
+        $body .= '<div style="background:linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);border:1px solid #93c5fd;border-radius:12px;padding:18px 22px;margin-bottom:22px;box-shadow:0 4px 12px rgba(37,99,235,0.08)">';
+        $body .= '  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px">';
+        $body .= '    <div>';
+        $body .= '      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
+        $body .= '        <span style="font-size:22px">✅</span>';
+        $body .= '        <span style="font-size:17px;font-weight:800;color:#1d4ed8">¡Traspaso entre bodegas registrado exitosamente!</span>';
+        $body .= '      </div>';
+        $body .= '      <div style="font-size:13.5px;color:#1e3a8a;line-height:1.6">';
+        $body .= '        Bobina: <span style="display:inline-block;background:#0f172a;color:#fff;font-family:monospace;font-size:14px;font-weight:700;padding:2px 8px;border-radius:4px;letter-spacing:0.5px">' . h($dispatchedRollCode) . '</span>';
+        if ($movedFromWarehouse !== '') {
+            $body .= ' &nbsp;|&nbsp; <strong>Desde:</strong> ' . h($movedFromWarehouse);
+        }
+        if ($movedToWarehouse !== '') {
+            $body .= ' &nbsp;|&nbsp; <strong>Hacia:</strong> ' . h($movedToWarehouse);
+        }
+        if ($dispatchedWeight > 0) {
+            $body .= ' &nbsp;|&nbsp; <strong>Peso:</strong> ' . number_format($dispatchedWeight, 2, ',', '.') . ' kg';
+        }
+        $body .= '      </div>';
+        $body .= '    </div>';
+        $body .= '    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+        if ($dispatchedRollId > 0) {
+            $body .= '      <a href="/rolls/' . $dispatchedRollId . '/label?server_print=1" target="_blank" class="btn" style="background:#15803d;color:#fff;font-size:13px;padding:9px 16px;border-radius:6px;font-weight:700;display:inline-flex;align-items:center;gap:6px">';
+            $body .= '        <span>🖨️ Imprimir Zebra (100×70)</span>';
+            $body .= '      </a>';
+            $body .= '      <a href="/rolls/' . $dispatchedRollId . '/label" target="_blank" class="btn secondary" style="font-size:13px;padding:9px 14px;border-radius:6px">';
+            $body .= '        <span>👁️ Vista Previa</span>';
+            $body .= '      </a>';
+        }
+        if ($dispatchedRollCode !== '') {
+            $body .= '      <a href="/stock/traceability?q=' . urlencode($dispatchedRollCode) . '" class="btn secondary" style="font-size:13px;padding:9px 14px;border-radius:6px">';
+            $body .= '        <span>🌳 Ver Trazabilidad</span>';
+            $body .= '      </a>';
+        }
+        $body .= '      <a href="/stock/transfers" class="btn" style="background:#0f172a;color:#fff;font-size:13px;padding:9px 14px;border-radius:6px">';
+        $body .= '        <span>➕ Otro Traspaso</span>';
+        $body .= '      </a>';
+        $body .= '    </div>';
+        $body .= '  </div>';
+        $body .= '</div>';
+    }
+
     // Mini KPIs informativos
     $body .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:20px">';
     $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
-    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Bodega Destino</div>';
-    $body .= '    <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:2px">Bodega 3000</div>';
-    $body .= '    <div style="font-size:11.5px;color:#0369a1;margin-top:2px">Planta de Producción</div>';
+    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Modo Rápido</div>';
+    $body .= '    <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:2px">Producción o Bodega</div>';
+    $body .= '    <div style="font-size:11.5px;color:#0369a1;margin-top:2px">Despacho flexible según necesidad</div>';
     $body .= '  </div>';
     $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
     $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">OTs Disponibles</div>';
@@ -2832,7 +2882,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     // Barra de Navegación por Pestañas
     $body .= '<div style="display:flex;gap:8px;border-bottom:2px solid #e2e8f0;margin-bottom:20px">';
     $body .= '  <button type="button" class="tab-btn" id="btn_tab_nuevo" onclick="switchTransferTab(\'nuevo\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
-    $body .= '    🚚 Nuevo Traspaso a Bodega 3000';
+    $body .= '    🚚 Nuevo Traspaso';
     $body .= '  </button>';
     $body .= '  <button type="button" class="tab-btn" id="btn_tab_solicitudes" onclick="switchTransferTab(\'solicitudes\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
     $body .= '    📥 Solicitudes y Agenda Planta <span style="background:#e2e8f0;color:#334155;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($pendingRequests) . '</span>';
@@ -2848,7 +2898,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '<div id="panel_tab_nuevo" class="transfer-panel">';
     $body .= '  <form method="post" action="/stock/transfers" id="form_transfer_prod" onsubmit="return validateTransferForm()">';
     $body .= '    <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
-    $body .= '    <input type="hidden" name="action_mode" value="to_production">';
+    $body .= '    <input type="hidden" name="action_mode" id="hid_action_mode" value="to_production">';
     $body .= '    <input type="hidden" name="roll_id" id="hid_roll_id" value="">';
     $body .= '    <input type="hidden" name="code" id="hid_roll_code" value="">';
     $body .= '    <input type="hidden" name="sku" id="hid_sku" value="">';
@@ -2973,8 +3023,19 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '      <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
     $body .= '        <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #f1f5f9">';
     $body .= '          <span style="font-size:18px">🏭</span>';
-    $body .= '          <h2 style="margin:0;font-size:16px;font-weight:800;color:#0f172a">2. Destino en Planta & Trazabilidad 360°</h2>';
+    $body .= '          <h2 style="margin:0;font-size:16px;font-weight:800;color:#0f172a">2. Destino del Traspaso & Trazabilidad</h2>';
     $body .= '        </div>';
+    $body .= '        <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">';
+    $body .= '          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:#334155;cursor:pointer">';
+    $body .= '            <input type="radio" name="destination_mode" value="production" checked onchange="toggleDestinationMode(\'production\')"> A Producción (Bodega 3000)
+    ';
+    $body .= '          </label>';
+    $body .= '          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:#334155;cursor:pointer">';
+    $body .= '            <input type="radio" name="destination_mode" value="warehouse" onchange="toggleDestinationMode(\'warehouse\')"> Entre Bodegas
+    ';
+    $body .= '          </label>';
+    $body .= '        </div>';
+    $body .= '        <div id="destination_block_production">';
 
     // OT Destino
     $body .= '        <div style="margin-bottom:12px">';
@@ -3038,12 +3099,36 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Observaciones / Motivo</label>';
     $body .= '          <textarea name="comments" rows="2" placeholder="Notas adicionales de entrega a planta..." style="width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:12.5px"></textarea>';
     $body .= '        </div>';
+    $body .= '        </div>';
+    $body .= '        <div id="destination_block_warehouse" style="display:none">';
+    $body .= '          <div style="margin-bottom:12px">';
+    $body .= '            <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Bodega Destino <span style="color:#ef4444">*</span></label>';
+    $body .= '            <select name="to_warehouse_id" id="sel_destination_warehouse" style="width:100%;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px">';
+    $body .= '              <option value="">-- Seleccionar bodega destino --</option>';
+    foreach ($warehouses as $warehouse) {
+        $whId = (int)($warehouse['id'] ?? 0);
+        $whCode = trim((string)($warehouse['code'] ?? ''));
+        $whName = trim((string)($warehouse['name'] ?? ''));
+        if ($whId <= 0) {
+            continue;
+        }
+        $body .= '              <option value="' . $whId . '">' . h(($whCode !== '' ? $whCode . ' - ' : '') . $whName) . '</option>';
+    }
+    $body .= '            </select>';
+    $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">Use este modo cuando aún no existe máquina ni OT de destino.</div>';
+    $body .= '          </div>';
+    $body .= '          <div style="margin-bottom:12px">';
+    $body .= '            <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Quién mueve la bobina <span style="color:#ef4444">*</span></label>';
+    $body .= '            <input type="text" id="inp_transfer_operator" value="' . h($currentOperatorName) . '" readonly style="width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;background:#f8fafc;color:#334155">';
+    $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">Se registrará este operador en el movimiento entre bodegas.</div>';
+    $body .= '          </div>';
+    $body .= '        </div>';
 
     // Botón de Confirmación Destacado
     $body .= '        <button type="submit" class="btn" style="width:100%;background:#15803d;color:#fff;font-size:15px;font-weight:800;padding:12px 20px;border-radius:8px;display:flex;justify-content:center;align-items:center;gap:8px;box-shadow:0 4px 10px rgba(21,128,61,0.25)">';
-    $body .= '          <span>🚀 Confirmar Traspaso y Despachar a Bodega 3000</span>';
+    $body .= '          <span id="transfer_submit_label">🚀 Confirmar Traspaso y Despachar a Bodega 3000</span>';
     $body .= '        </button>';
-    $body .= '        <div style="text-align:center;font-size:11.5px;color:#64748b;margin-top:8px">';
+    $body .= '        <div id="transfer_submit_help" style="text-align:center;font-size:11.5px;color:#64748b;margin-top:8px">';
     $body .= '          Se actualizará automáticamente la bodega del rollo a Bodega 3000 y se registrará el evento de trazabilidad auditado.';
     $body .= '        </div>';
     $body .= '      </div>';
@@ -3250,6 +3335,37 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         }
       }
 
+      function normalizeScannedCode(value) {
+        return (value || "")
+          .trim()
+          .replace(/[\\s\\r\\n\\t]+/g, "")
+          .replace(/[\'`´’‘‛]/g, "-")
+          .toUpperCase();
+      }
+
+      function toggleDestinationMode(mode) {
+        var isProduction = mode === "production";
+        var selWo = document.getElementById("sel_work_order");
+        var selMachine = document.getElementById("sel_machine");
+        var inpSolicito = document.getElementById("inp_quien_solicito");
+        var inpSaco = document.getElementById("inp_quien_saco");
+        var selWarehouse = document.getElementById("sel_destination_warehouse");
+        document.getElementById("destination_block_production").style.display = isProduction ? "block" : "none";
+        document.getElementById("destination_block_warehouse").style.display = isProduction ? "none" : "block";
+        document.getElementById("hid_action_mode").value = isProduction ? "to_production" : "to_warehouse";
+        if (selWo) selWo.required = isProduction;
+        if (selMachine) selMachine.required = isProduction;
+        if (inpSolicito) inpSolicito.required = isProduction;
+        if (inpSaco) inpSaco.required = isProduction;
+        if (selWarehouse) selWarehouse.required = !isProduction;
+        document.getElementById("transfer_submit_label").textContent = isProduction
+          ? "🚀 Confirmar Traspaso y Despachar a Bodega 3000"
+          : "🚚 Confirmar Traspaso Entre Bodegas";
+        document.getElementById("transfer_submit_help").textContent = isProduction
+          ? "Se actualizará automáticamente la bodega del rollo a Bodega 3000 y se registrará el evento de trazabilidad auditado."
+          : "Se actualizará la bodega actual del rollo y el movimiento quedará registrado para trazabilidad e informe de stock.";
+      }
+
       function onAvailableRollSelected(select) {
         var opt = select.options[select.selectedIndex];
         if (!opt || !opt.value) {
@@ -3345,16 +3461,17 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
       }
 
       function lookupScannedRoll() {
-        var code = (document.getElementById("inp_scan_code").value || "").trim();
+        var code = normalizeScannedCode(document.getElementById("inp_scan_code").value || "");
         if (!code) {
           alert("Por favor ingrese o escanee un código de bobina.");
           return;
         }
+        document.getElementById("inp_scan_code").value = code;
         var sel = document.getElementById("sel_available_roll");
         var found = false;
         for (var i = 0; i < sel.options.length; i++) {
           var opt = sel.options[i];
-          if ((opt.getAttribute("data-code") || "").toUpperCase() === code.toUpperCase() || opt.value === code) {
+          if (normalizeScannedCode(opt.getAttribute("data-code") || "") === code || opt.value === code) {
             sel.selectedIndex = i;
             onAvailableRollSelected(sel);
             found = true;
@@ -3424,6 +3541,29 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
       }
 
       function validateTransferForm() {
+        var actionMode = document.getElementById("hid_action_mode").value || "to_production";
+        var rollId = parseInt(document.getElementById("hid_roll_id").value || "0", 10);
+        if (actionMode === "to_warehouse") {
+          if (!rollId || rollId <= 0) {
+            alert("Para traspasar entre bodegas debe seleccionar o escanear una bobina ya registrada.");
+            return false;
+          }
+          var whSel = document.getElementById("sel_destination_warehouse");
+          if (!whSel.value) {
+            alert("Debe seleccionar la bodega destino.");
+            whSel.focus();
+            return false;
+          }
+        }
+        if (actionMode !== "to_production") {
+          var kgDirect = parseFloat(document.getElementById("inp_weight_kg").value || "0");
+          if (kgDirect <= 0) {
+            alert("Debe ingresar un peso válido en Kg para la bobina.");
+            document.getElementById("inp_weight_kg").focus();
+            return false;
+          }
+          return true;
+        }
         var selWo = document.getElementById("sel_work_order");
         if (!selWo.value) {
           alert("Debe seleccionar una OT de destino en planta.");
@@ -3459,11 +3599,12 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
 
       // Inicializar pestaña activa
       switchTransferTab("' . h($activeTab) . '");
+      toggleDestinationMode("production");
     </script>';
 
     $body .= '</div>'; // Fin transfers-shell
 
-    render('Traspasos a Producción (Bodega 3000)', $body);
+    render('Traspasos de Bodega', $body);
 }
 
 /**
@@ -3486,6 +3627,43 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
             || !empty($_POST['machine_name'])
             || !empty($_POST['ot_number'])
             || !empty($_POST['ot_id']);
+
+        if ($actionMode === 'to_warehouse') {
+            $rollId = (int)($_POST['roll_id'] ?? 0);
+            $toWarehouseId = (int)($_POST['to_warehouse_id'] ?? 0);
+            $roll = $rollId > 0 ? $service->getRoll($rollId) : null;
+            $fromWarehouseName = trim((string)($roll['warehouse_name'] ?? ''));
+            $toWarehouseName = '';
+            foreach ($service->listWarehouses() as $warehouse) {
+                if ((int)($warehouse['id'] ?? 0) === $toWarehouseId) {
+                    $toWarehouseName = trim((string)(($warehouse['code'] ?? '') . ' - ' . ($warehouse['name'] ?? '')));
+                    break;
+                }
+            }
+
+            if ($rollId <= 0 || $toWarehouseId <= 0) {
+                redirectResponse('/stock/transfers?error=' . rawurlencode('Debe seleccionar una bobina existente y una bodega destino.'));
+                return true;
+            }
+
+            $result = $service->transferRoll($rollId, $toWarehouseId, $currentOperatorName, null);
+            if (($result['ok'] ?? false) !== true) {
+                $err = !empty($result['errors']) ? implode(', ', (array)$result['errors']) : 'Error al registrar traspaso entre bodegas.';
+                redirectResponse('/stock/transfers?error=' . rawurlencode($err));
+                return true;
+            }
+
+            $params = http_build_query([
+                'moved' => 1,
+                'roll_id' => $rollId,
+                'roll_code' => (string)($roll['roll_code'] ?? ''),
+                'from_wh' => $fromWarehouseName,
+                'to_wh' => $toWarehouseName,
+                'weight' => (float)($roll['weight_kg'] ?? 0),
+            ]);
+            redirectResponse('/stock/transfers?' . $params);
+            return true;
+        }
 
         if ($isToProd) {
             $res = $service->dispatchWarehouseTransferToProduction($_POST, $currentOperatorName);
