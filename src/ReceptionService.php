@@ -9412,11 +9412,15 @@ SQL;
                 'notes' => $notes,
             ]);
 
-            $this->pdo->commit();
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->commit();
+            }
             return ['ok' => true, 'errors' => []];
         } catch (Throwable $e) {
-            $this->pdo->rollBack();
-            throw $e;
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return ['ok' => false, 'errors' => ['transfer' => 'No se pudo registrar el traspaso entre bodegas: ' . $e->getMessage()]];
         }
     }
 
@@ -16099,7 +16103,9 @@ SQL;
 
             $this->syncRollWarehouseTraceabilityEntry($rollId, $operatorName);
 
-            $this->pdo->commit();
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->commit();
+            }
             return ['ok' => true, 'errors' => []];
         } catch (Throwable $e) {
             if ($this->pdo->inTransaction()) {
