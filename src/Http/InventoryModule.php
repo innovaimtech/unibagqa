@@ -3677,66 +3677,71 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
             || !empty($_POST['ot_id']);
 
         if ($actionMode === 'to_warehouse') {
-            $rollId = (int)($_POST['roll_id'] ?? 0);
-            $toWarehouseId = (int)($_POST['to_warehouse_id'] ?? 0);
-            $scanCode = trim((string)($_POST['code'] ?? ''));
-            $fromWarehouseId = (int)($_POST['from_warehouse_id'] ?? 0);
-            $skuCode = trim((string)($_POST['sku'] ?? $_POST['sku_manual'] ?? ''));
-            $skuDescription = trim((string)($_POST['sku_desc'] ?? $_POST['sku_desc_manual'] ?? ''));
-            $traceabilityOnly = !empty($_POST['traceability_only']);
+            try {
+                $rollId = (int)($_POST['roll_id'] ?? 0);
+                $toWarehouseId = (int)($_POST['to_warehouse_id'] ?? 0);
+                $scanCode = trim((string)($_POST['code'] ?? ''));
+                $fromWarehouseId = (int)($_POST['from_warehouse_id'] ?? 0);
+                $skuCode = trim((string)($_POST['sku'] ?? $_POST['sku_manual'] ?? ''));
+                $skuDescription = trim((string)($_POST['sku_desc'] ?? $_POST['sku_desc_manual'] ?? ''));
+                $traceabilityOnly = !empty($_POST['traceability_only']);
 
-            if ($rollId <= 0 && $scanCode !== '') {
-                $ensureResult = $service->ensureTransferableRollByCode(
-                    $scanCode,
-                    $fromWarehouseId,
-                    $effectiveTransferOperator,
-                    $skuCode,
-                    $skuDescription
-                );
-                if (($ensureResult['ok'] ?? false) !== true) {
-                    $err = !empty($ensureResult['errors']) ? implode(', ', (array)$ensureResult['errors']) : 'No se pudo registrar la bobina escaneada para el traspaso.';
+                if ($rollId <= 0 && $scanCode !== '') {
+                    $ensureResult = $service->ensureTransferableRollByCode(
+                        $scanCode,
+                        $fromWarehouseId,
+                        $effectiveTransferOperator,
+                        $skuCode,
+                        $skuDescription
+                    );
+                    if (($ensureResult['ok'] ?? false) !== true) {
+                        $err = !empty($ensureResult['errors']) ? implode(', ', (array)$ensureResult['errors']) : 'No se pudo registrar la bobina escaneada para el traspaso.';
+                        redirectResponse('/stock/transfers?error=' . rawurlencode($err));
+                        return true;
+                    }
+                    $rollId = (int)($ensureResult['roll_id'] ?? 0);
+                }
+
+                $roll = $rollId > 0 ? $service->getRoll($rollId) : null;
+                $fromWarehouseName = trim((string)($roll['warehouse_name'] ?? ''));
+                $toWarehouseName = '';
+                foreach ($service->listWarehouses() as $warehouse) {
+                    if ((int)($warehouse['id'] ?? 0) === $toWarehouseId) {
+                        $toWarehouseName = trim((string)(($warehouse['code'] ?? '') . ' - ' . ($warehouse['name'] ?? '')));
+                        break;
+                    }
+                }
+
+                if ($rollId <= 0 || $toWarehouseId <= 0) {
+                    redirectResponse('/stock/transfers?error=' . rawurlencode('Debe seleccionar o escanear una bobina y definir la bodega destino.'));
+                    return true;
+                }
+
+                $result = $traceabilityOnly
+                    ? $service->transferRollTraceabilityOnly($rollId, $toWarehouseId, $effectiveTransferOperator)
+                    : $service->transferRoll($rollId, $toWarehouseId, $effectiveTransferOperator, null);
+                if (($result['ok'] ?? false) !== true) {
+                    $err = !empty($result['errors']) ? implode(', ', (array)$result['errors']) : ($traceabilityOnly ? 'Error al registrar traspaso solo de trazabilidad.' : 'Error al registrar traspaso entre bodegas.');
                     redirectResponse('/stock/transfers?error=' . rawurlencode($err));
                     return true;
                 }
-                $rollId = (int)($ensureResult['roll_id'] ?? 0);
-            }
 
-            $roll = $rollId > 0 ? $service->getRoll($rollId) : null;
-            $fromWarehouseName = trim((string)($roll['warehouse_name'] ?? ''));
-            $toWarehouseName = '';
-            foreach ($service->listWarehouses() as $warehouse) {
-                if ((int)($warehouse['id'] ?? 0) === $toWarehouseId) {
-                    $toWarehouseName = trim((string)(($warehouse['code'] ?? '') . ' - ' . ($warehouse['name'] ?? '')));
-                    break;
-                }
-            }
-
-            if ($rollId <= 0 || $toWarehouseId <= 0) {
-                redirectResponse('/stock/transfers?error=' . rawurlencode('Debe seleccionar o escanear una bobina y definir la bodega destino.'));
+                $params = http_build_query([
+                    'moved' => 1,
+                    'roll_id' => $rollId,
+                    'roll_code' => (string)($roll['roll_code'] ?? ''),
+                    'from_wh' => $fromWarehouseName,
+                    'to_wh' => $toWarehouseName,
+                    'weight' => (float)($roll['weight_kg'] ?? 0),
+                    'saco' => $effectiveTransferOperator,
+                    'trace_only' => $traceabilityOnly ? 1 : 0,
+                ]);
+                redirectResponse('/stock/transfers?' . $params);
+                return true;
+            } catch (Throwable $e) {
+                redirectResponse('/stock/transfers?error=' . rawurlencode('Error interno al registrar el traspaso: ' . $e->getMessage()));
                 return true;
             }
-
-            $result = $traceabilityOnly
-                ? $service->transferRollTraceabilityOnly($rollId, $toWarehouseId, $effectiveTransferOperator)
-                : $service->transferRoll($rollId, $toWarehouseId, $effectiveTransferOperator, null);
-            if (($result['ok'] ?? false) !== true) {
-                $err = !empty($result['errors']) ? implode(', ', (array)$result['errors']) : ($traceabilityOnly ? 'Error al registrar traspaso solo de trazabilidad.' : 'Error al registrar traspaso entre bodegas.');
-                redirectResponse('/stock/transfers?error=' . rawurlencode($err));
-                return true;
-            }
-
-            $params = http_build_query([
-                'moved' => 1,
-                'roll_id' => $rollId,
-                'roll_code' => (string)($roll['roll_code'] ?? ''),
-                'from_wh' => $fromWarehouseName,
-                'to_wh' => $toWarehouseName,
-                'weight' => (float)($roll['weight_kg'] ?? 0),
-                'saco' => $effectiveTransferOperator,
-                'trace_only' => $traceabilityOnly ? 1 : 0,
-            ]);
-            redirectResponse('/stock/transfers?' . $params);
-            return true;
         }
 
         if ($isToProd) {

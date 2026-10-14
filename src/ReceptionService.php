@@ -1118,8 +1118,10 @@ final class ReceptionService
 
             $this->pdo->commit();
         } catch (Throwable $e) {
-            $this->pdo->rollBack();
-            throw $e;
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return;
         }
     }
 
@@ -5279,8 +5281,10 @@ SQL;
             ]);
             $this->pdo->commit();
         } catch (Throwable $e) {
-            $this->pdo->rollBack();
-            throw $e;
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return;
         }
     }
 
@@ -8466,8 +8470,10 @@ SQL;
                 'output_roll_id' => $outputRollId,
             ];
         } catch (Throwable $e) {
-            $this->pdo->rollBack();
-            throw $e;
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return ['ok' => false, 'errors' => ['transfer' => 'No se pudo registrar el traspaso entre bodegas: ' . $e->getMessage()]];
         }
     }
 
@@ -16071,7 +16077,7 @@ SQL;
             $stmt->execute([
                 ':entity_type' => 'ROLL',
                 ':entity_id' => $rollId,
-                ':movement_type' => 'TRACEABILITY_TRANSFER',
+                ':movement_type' => 'TRANSFER',
                 ':from_warehouse_id' => $fromWarehouseId,
                 ':to_warehouse_id' => $toWarehouseId,
                 ':payload' => json_encode([
@@ -16096,8 +16102,10 @@ SQL;
             $this->pdo->commit();
             return ['ok' => true, 'errors' => []];
         } catch (Throwable $e) {
-            $this->pdo->rollBack();
-            throw $e;
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return ['ok' => false, 'errors' => ['transfer' => 'No se pudo registrar el traspaso solo de trazabilidad: ' . $e->getMessage()]];
         }
     }
 
