@@ -16030,7 +16030,7 @@ SQL;
             $skuClean = strtoupper(preg_replace('/[^A-Z0-9]/', '', $sku ?: 'BOB'));
             $rollCode = "BOB-{$skuClean}-" . date('ymd') . "-" . strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
             if ($weightKg <= 0) {
-                $weightKg = 85.0;
+                $weightKg = 0.0;
             }
 
             // Asegurar SKU en TRZ

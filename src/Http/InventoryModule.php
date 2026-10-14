@@ -2703,6 +2703,15 @@ function unibagRenderStockTraceabilityTreePage(ReceptionService $service, ?Produ
  * Renderiza la pantalla completa de Traspasos a Producción (Bodega 3000)
  * con registro trazable de solicitante, despachador, máquina y orden de trabajo.
  */
+function unibagCanOverrideTransferOperator(string $operatorName): bool
+{
+    $normalized = strtoupper(trim($operatorName));
+    return $normalized !== '' && (
+        strpos($normalized, 'JAVIER') !== false
+        || strpos($normalized, 'HECTOR') !== false
+    );
+}
+
 function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?ProductionService $prodService, string $currentOperatorName): void
 {
     $availableRolls = $service->listAvailableRollsForTransfer(150);
@@ -2732,6 +2741,14 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $prefillMachine = trim((string)($_GET['prefill_machine'] ?? ''));
     $prefillSolicitante = trim((string)($_GET['prefill_solicitante'] ?? ''));
     $prefillAmount = trim((string)($_GET['prefill_amount'] ?? ''));
+    $canOverrideTransferOperator = unibagCanOverrideTransferOperator($currentOperatorName);
+    $transferOperatorFieldAttrs = $canOverrideTransferOperator ? '' : ' readonly';
+    $transferOperatorFieldStyle = $canOverrideTransferOperator
+        ? 'width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px'
+        : 'width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;background:#f8fafc;color:#334155';
+    $transferOperatorHelp = $canOverrideTransferOperator
+        ? 'Puede ajustar manualmente el operador del traspaso.'
+        : 'Se registrará automáticamente el operador actual.';
     $activeTab = trim((string)($_GET['tab'] ?? (($isDispatched || $isWarehouseMoved) ? 'historial' : 'nuevo')));
 
     $body = '<div class="transfers-shell" style="max-width:1280px;margin:0 auto;padding:12px 16px 40px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
@@ -2985,8 +3002,8 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '              <input type="number" step="any" name="meters" id="inp_meters_manual" placeholder="Ej: 1400" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px" oninput="calcManualRollDims(\'meters\')">';
     $body .= '            </div>';
     $body .= '            <div>';
-    $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#0f766e;margin-bottom:3px">Peso (Kg) *</label>';
-    $body .= '              <input type="number" step="0.01" min="0.1" name="manual_weight_kg" id="inp_weight_manual" placeholder="Ej: 85.0" style="width:100%;padding:7px 10px;border:1.5px solid #0f766e;border-radius:5px;font-size:13px;font-weight:700" oninput="calcManualRollDims(\'weight\')">';
+    $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#0f766e;margin-bottom:3px">Peso (Kg) opcional</label>';
+    $body .= '              <input type="number" step="0.01" name="manual_weight_kg" id="inp_weight_manual" placeholder="Ej: 85.0" style="width:100%;padding:7px 10px;border:1.5px solid #0f766e;border-radius:5px;font-size:13px;font-weight:700" oninput="calcManualRollDims(\'weight\')">';
     $body .= '            </div>';
     $body .= '          </div>';
     $body .= '        </div>';
@@ -3003,17 +3020,17 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '';
     $body .= '          <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #cbd5e1">';
     $body .= '            <label style="display:block;font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px">';
-    $body .= '              ⚖️ Peso Real de Balanza a Traspasar (Kg) <span style="color:#ef4444">*</span>';
+    $body .= '              ⚖️ Peso Real de Balanza a Traspasar (Kg) <span style="color:#64748b;font-weight:600">(opcional)</span>';
     $body .= '            </label>';
     $body .= '            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
-    $body .= '              <input type="number" step="0.01" min="0.1" name="weight_kg" id="inp_weight_kg" placeholder="0.00" style="width:140px;padding:8px 12px;border:1.5px solid #0284c7;border-radius:6px;font-size:16px;font-weight:800;color:#0f172a;background:#fff" required>';
+    $body .= '              <input type="number" step="0.01" name="weight_kg" id="inp_weight_kg" placeholder="0.00" style="width:140px;padding:8px 12px;border:1.5px solid #0284c7;border-radius:6px;font-size:16px;font-weight:800;color:#0f172a;background:#fff">';
     $body .= '              <span style="font-size:13px;font-weight:700;color:#475569">Kg</span>';
     $body .= '              <button type="button" class="btn secondary" id="btn_scale_transfer" onclick="captureTransferScaleWeight()" style="padding:7px 12px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px">';
     $body .= '                <span>⚖️ Balanza en Vivo</span>';
     $body .= '              </button>';
     $body .= '            </div>';
     $body .= '            <div id="transfer_scale_msg" style="font-size:11.5px;color:#64748b;margin-top:4px">';
-    $body .= '              Verifique o ajuste el peso pesado en balanza antes de despachar a la planta.';
+    $body .= '              Si la bobina antigua no tiene peso registrado, puede continuar igual y pesarlo después.';
     $body .= '            </div>';
     $body .= '          </div>';
     $body .= '        </div>';
@@ -3080,18 +3097,19 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '          </div>';
     $body .= '          <div>';
     $body .= '            <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Quién la sacó (Bodeguero) <span style="color:#ef4444">*</span></label>';
-    $body .= '            <input type="text" name="quien_la_saco" id="inp_quien_saco" value="' . h($currentOperatorName) . '" placeholder="Operador de bodega" style="width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px" required>';
-    $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">Persona que entrega físicamente el rollo</div>';
+    $body .= '            <input type="text" name="quien_la_saco" id="inp_quien_saco" value="' . h($currentOperatorName) . '" placeholder="Operador de bodega" style="' . $transferOperatorFieldStyle . '"' . $transferOperatorFieldAttrs . ' required>';
+    $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">' . h($transferOperatorHelp) . '</div>';
     $body .= '          </div>';
     $body .= '        </div>';
 
     // Kilos a despachar
     $body .= '        <div style="margin-bottom:12px">';
-    $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Peso a Traspasar (Kg) <span style="color:#ef4444">*</span></label>';
+    $body .= '          <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Peso a Traspasar (Kg) <span style="color:#64748b;font-weight:600">(opcional)</span></label>';
     $body .= '          <div style="display:flex;align-items:center;gap:6px">';
-    $body .= '            <input type="number" step="0.001" name="weight_kg" id="inp_weight_kg" value="' . h($prefillAmount) . '" placeholder="0.00" style="flex:1;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px;font-weight:700" required>';
+    $body .= '            <input type="number" step="0.001" name="weight_kg" id="inp_weight_kg" value="' . h($prefillAmount) . '" placeholder="0.00" style="flex:1;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:14px;font-weight:700">';
     $body .= '            <span style="font-size:13px;font-weight:700;color:#64748b">Kg</span>';
     $body .= '          </div>';
+    $body .= '          <div style="font-size:11px;color:#64748b;margin-top:2px">Para bobinas antiguas etiquetadas sin peso, puede dejarlo vacío.</div>';
     $body .= '        </div>';
 
     // Observaciones / Comentarios
@@ -3119,8 +3137,8 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '          </div>';
     $body .= '          <div style="margin-bottom:12px">';
     $body .= '            <label style="display:block;font-size:12.5px;font-weight:700;color:#475569;margin-bottom:4px">Quién mueve la bobina <span style="color:#ef4444">*</span></label>';
-    $body .= '            <input type="text" id="inp_transfer_operator" value="' . h($currentOperatorName) . '" readonly style="width:100%;padding:8px 11px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;background:#f8fafc;color:#334155">';
-    $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">Se registrará este operador en el movimiento entre bodegas.</div>';
+    $body .= '            <input type="text" name="transfer_operator_name" id="inp_transfer_operator" value="' . h($currentOperatorName) . '" style="' . $transferOperatorFieldStyle . '"' . $transferOperatorFieldAttrs . ' required>';
+    $body .= '            <div style="font-size:11px;color:#64748b;margin-top:2px">' . h($transferOperatorHelp) . '</div>';
     $body .= '          </div>';
     $body .= '        </div>';
 
@@ -3350,6 +3368,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         var inpSolicito = document.getElementById("inp_quien_solicito");
         var inpSaco = document.getElementById("inp_quien_saco");
         var selWarehouse = document.getElementById("sel_destination_warehouse");
+        var inpWarehouseOperator = document.getElementById("inp_transfer_operator");
         document.getElementById("destination_block_production").style.display = isProduction ? "block" : "none";
         document.getElementById("destination_block_warehouse").style.display = isProduction ? "none" : "block";
         document.getElementById("hid_action_mode").value = isProduction ? "to_production" : "to_warehouse";
@@ -3358,6 +3377,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         if (inpSolicito) inpSolicito.required = isProduction;
         if (inpSaco) inpSaco.required = isProduction;
         if (selWarehouse) selWarehouse.required = !isProduction;
+        if (inpWarehouseOperator) inpWarehouseOperator.required = !isProduction;
         document.getElementById("transfer_submit_label").textContent = isProduction
           ? "🚀 Confirmar Traspaso y Despachar a Bodega 3000"
           : "🚚 Confirmar Traspaso Entre Bodegas";
@@ -3554,14 +3574,14 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
             whSel.focus();
             return false;
           }
-        }
-        if (actionMode !== "to_production") {
-          var kgDirect = parseFloat(document.getElementById("inp_weight_kg").value || "0");
-          if (kgDirect <= 0) {
-            alert("Debe ingresar un peso válido en Kg para la bobina.");
-            document.getElementById("inp_weight_kg").focus();
+          var warehouseOperator = document.getElementById("inp_transfer_operator");
+          if (warehouseOperator && !warehouseOperator.value.trim()) {
+            alert("Debe indicar quién realiza el traspaso.");
+            warehouseOperator.focus();
             return false;
           }
+        }
+        if (actionMode !== "to_production") {
           return true;
         }
         var selWo = document.getElementById("sel_work_order");
@@ -3586,12 +3606,6 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         if (!sac) {
           alert("Debe ingresar quién sacó/despachó la bobina de bodega.");
           document.getElementById("inp_quien_saco").focus();
-          return false;
-        }
-        var kg = parseFloat(document.getElementById("inp_weight_kg").value || "0");
-        if (kg <= 0) {
-          alert("Debe ingresar un peso válido en Kg para la bobina.");
-          document.getElementById("inp_weight_kg").focus();
           return false;
         }
         return true;
@@ -3622,6 +3636,11 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
     if (($path === '/stock/transfers' || $path === '/stock/traspasos') && $method === 'POST') {
         requireCsrf();
         $actionMode = (string)($_POST['action_mode'] ?? '');
+        $canOverrideTransferOperator = unibagCanOverrideTransferOperator($currentOperatorName);
+        $postedTransferOperator = trim((string)($_POST['transfer_operator_name'] ?? $_POST['quien_la_saco'] ?? ''));
+        $effectiveTransferOperator = $canOverrideTransferOperator && $postedTransferOperator !== ''
+            ? $postedTransferOperator
+            : $currentOperatorName;
         $isToProd = $actionMode === 'to_production'
             || !empty($_POST['quien_la_solicito'])
             || !empty($_POST['machine_name'])
@@ -3646,7 +3665,7 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
                 return true;
             }
 
-            $result = $service->transferRoll($rollId, $toWarehouseId, $currentOperatorName, null);
+            $result = $service->transferRoll($rollId, $toWarehouseId, $effectiveTransferOperator, null);
             if (($result['ok'] ?? false) !== true) {
                 $err = !empty($result['errors']) ? implode(', ', (array)$result['errors']) : 'Error al registrar traspaso entre bodegas.';
                 redirectResponse('/stock/transfers?error=' . rawurlencode($err));
@@ -3660,12 +3679,14 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
                 'from_wh' => $fromWarehouseName,
                 'to_wh' => $toWarehouseName,
                 'weight' => (float)($roll['weight_kg'] ?? 0),
+                'saco' => $effectiveTransferOperator,
             ]);
             redirectResponse('/stock/transfers?' . $params);
             return true;
         }
 
         if ($isToProd) {
+            $_POST['quien_la_saco'] = $effectiveTransferOperator;
             $res = $service->dispatchWarehouseTransferToProduction($_POST, $currentOperatorName);
             if (!$res['ok']) {
                 $err = !empty($res['errors']) ? implode(', ', (array)$res['errors']) : 'Error al registrar traspaso a producción.';
@@ -3691,7 +3712,7 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
         $rollId = (int)($_POST['roll_id'] ?? 0);
         $workOrderId = !empty($_POST['work_order_id']) ? (int)$_POST['work_order_id'] : null;
         if ($toWarehouseId > 0 && $rollId > 0) {
-            $result = $service->transferRoll($rollId, $toWarehouseId, $currentOperatorName, $workOrderId);
+            $result = $service->transferRoll($rollId, $toWarehouseId, $effectiveTransferOperator, $workOrderId);
             if ($result['ok'] === true) {
                 redirectResponse('/rolls/' . $rollId);
                 return true;
