@@ -8135,9 +8135,104 @@ final class ProductionService
         if ($skipTraceability) {
             $rollCodeDisplay = trim($rollIdentifier) !== '' ? trim($rollIdentifier) : 'BOBINA-MANUAL-' . date('ymd-His');
             $wKg = $weightKg > 0 ? $weightKg : 80.0;
+            $manualMaterial = 'MANUAL';
+            if (preg_match('/Material:\s*([A-Z0-9]+)/i', $comments, $mMaterial) === 1) {
+                $manualMaterial = strtoupper(trim((string)$mMaterial[1]));
+            } elseif (preg_match('/BOBINA-MANUAL-([A-Z0-9]+)/i', $rollCodeDisplay, $mMaterial) === 1) {
+                $manualMaterial = strtoupper(trim((string)$mMaterial[1]));
+            }
+            $manualColor = '';
+            if (preg_match('/Color:\s*([^,\.]+)/i', $comments, $mColor) === 1) {
+                $manualColor = trim((string)$mColor[1]);
+            }
+            $manualWidthMm = 0;
+            if (preg_match('/Ancho:\s*([\d\.,]+)\s*cm/i', $comments, $mWidth) === 1) {
+                $manualWidthMm = (int)round(((float)str_replace(',', '.', (string)$mWidth[1])) * 10);
+            }
+            $manualMeters = 0.0;
+            if (preg_match('/Metros:\s*([\d\.,]+)/i', $comments, $mMeters) === 1) {
+                $manualMeters = (float)str_replace(',', '.', (string)$mMeters[1]);
+            }
+            $manualSkuCode = 'MANUAL-' . preg_replace('/[^A-Z0-9]+/', '-', strtoupper($manualMaterial));
+            $manualSkuDesc = 'Bobina manual sin trazabilidad - ' . $manualMaterial;
+            $manualRollCode = 'MAN-' . preg_replace('/[^A-Z0-9]+/', '-', strtoupper($manualMaterial)) . '-' . date('ymd') . '-' . strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
             $evtComment = "Carga de bobina sin código de trazabilidad: {$rollCodeDisplay} ({$wKg} kg) asignada a máquina por {$operatorName}";
             if (trim($comments) !== '') {
                 $evtComment .= " [Detalle: " . trim($comments) . "]";
+            }
+
+            // Crear una bobina real ligada a la OT para que aparezca en "bobinas para trabajar"
+            $newRollId = 0;
+            if ($this->trzPdo === null) {
+                return ['ok' => false, 'error' => 'La base de datos de trazabilidad no está disponible para registrar la bobina manual.'];
+            }
+            try {
+                $this->trzPdo->prepare("
+                    INSERT INTO skus (code, description, is_active)
+                    VALUES (:c, :d, 1)
+                    ON DUPLICATE KEY UPDATE description = VALUES(description)
+                ")->execute([
+                    ':c' => $manualSkuCode,
+                    ':d' => $manualSkuDesc,
+                ]);
+                $stSkuManual = $this->trzPdo->prepare("SELECT id FROM skus WHERE code = :c LIMIT 1");
+                $stSkuManual->execute([':c' => $manualSkuCode]);
+                $manualSkuId = (int)$stSkuManual->fetchColumn();
+                if ($manualSkuId <= 0) {
+                    return ['ok' => false, 'error' => 'No se pudo resolver el SKU interno para la bobina manual.'];
+                }
+
+                $this->trzPdo->prepare("
+                    INSERT INTO warehouses (code, name, erp_storehouse_id)
+                    VALUES (3000, '3000 INSUMOS EN PRODUCCION', 3000)
+                    ON DUPLICATE KEY UPDATE name = VALUES(name)
+                ")->execute();
+                $stWarehouseManual = $this->trzPdo->prepare("SELECT id FROM warehouses WHERE code = 3000 LIMIT 1");
+                $stWarehouseManual->execute();
+                $manualWarehouseId = (int)$stWarehouseManual->fetchColumn();
+                if ($manualWarehouseId <= 0) {
+                    return ['ok' => false, 'error' => 'No se pudo resolver la Bodega 3000 en trazabilidad.'];
+                }
+
+                $stmtInsManualRoll = $this->trzPdo->prepare("
+                    INSERT INTO rolls
+                        (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, width_mm, color, meters, status, current_work_order_id, process_stage, created_at)
+                    VALUES
+                        (:code, :sku_id, :warehouse_id, :weight_kg, 1, 'MANUAL_NO_TRACEABILITY', :width_mm, :color, :meters, 'IN_PROCESS', :ot_id, 'PRODUCTION', NOW())
+                ");
+                $stmtInsManualRoll->execute([
+                    ':code' => $manualRollCode,
+                    ':sku_id' => $manualSkuId,
+                    ':warehouse_id' => $manualWarehouseId,
+                    ':weight_kg' => $wKg,
+                    ':width_mm' => $manualWidthMm,
+                    ':color' => $manualColor,
+                    ':meters' => $manualMeters,
+                    ':ot_id' => $workerOtId,
+                ]);
+                $newRollId = (int)$this->trzPdo->lastInsertId();
+                if ($newRollId <= 0) {
+                    return ['ok' => false, 'error' => 'No se pudo registrar la bobina manual en trazabilidad.'];
+                }
+
+                $stmtEvtTrz = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
+                $stmtEvtTrz->execute([
+                    ':type' => 'ROLL_LOADED_WITHOUT_TRACEABILITY',
+                    ':payload' => json_encode([
+                        'roll_id' => $newRollId,
+                        'roll_code' => $manualRollCode,
+                        'worker_ot_id' => $workerOtId,
+                        'roll_identifier' => $rollCodeDisplay,
+                        'weight_kg' => $wKg,
+                        'operator' => $operatorName,
+                        'machine_id' => $machineId,
+                        'comments' => $comments,
+                        'timestamp' => $now,
+                        'note' => 'Cargada con salto de trazabilidad autorizado',
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+            } catch (Throwable $e) {
+                return ['ok' => false, 'error' => 'Error al registrar la bobina manual en trazabilidad: ' . $e->getMessage()];
             }
 
             // Registrar en eventos de la OT (ERP)
@@ -8159,27 +8254,7 @@ final class ProductionService
                 return ['ok' => false, 'error' => 'Error al registrar evento en ERP: ' . $e->getMessage()];
             }
 
-            // Registrar auditoría en TRZ si está disponible
-            if ($this->trzPdo !== null) {
-                try {
-                    $stmtEvtTrz = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
-                    $stmtEvtTrz->execute([
-                        ':type' => 'ROLL_LOADED_WITHOUT_TRACEABILITY',
-                        ':payload' => json_encode([
-                            'worker_ot_id' => $workerOtId,
-                            'roll_identifier' => $rollCodeDisplay,
-                            'weight_kg' => $wKg,
-                            'operator' => $operatorName,
-                            'machine_id' => $machineId,
-                            'comments' => $comments,
-                            'timestamp' => $now,
-                            'note' => 'Cargada con salto de trazabilidad autorizado',
-                        ], JSON_UNESCAPED_UNICODE),
-                    ]);
-                } catch (Throwable) {}
-            }
-
-            return ['ok' => true, 'roll_code' => $rollCodeDisplay, 'message' => 'Bobina sin trazabilidad cargada exitosamente a la máquina y OT.'];
+            return ['ok' => true, 'roll_id' => $newRollId, 'roll_code' => $manualRollCode, 'message' => 'Bobina sin trazabilidad cargada exitosamente a la máquina y OT.'];
         }
 
         // 2. MODO: CON TRAZABILIDAD (Seleccionada desde Bodega 3000 o código QR)
@@ -8286,6 +8361,12 @@ final class ProductionService
             if ($this->trzPdo !== null) {
                 try {
                     // Asegurar SKU
+                    if (trim($sku) === '') {
+                        $sku = trim((string)($item['item_number'] ?? ''));
+                    }
+                    if (trim($sku) === '') {
+                        $sku = 'ERP-ITEM-' . $itemId;
+                    }
                     $this->trzPdo->prepare("
                         INSERT INTO skus (code, description, is_active) VALUES (:c, :d, 1)
                         ON DUPLICATE KEY UPDATE description = VALUES(description)
@@ -8342,7 +8423,18 @@ final class ProductionService
                             'warehouse' => 'Bodega 3000',
                         ], JSON_UNESCAPED_UNICODE),
                     ]);
-                } catch (Throwable) {}
+                } catch (Throwable $e) {
+                    $this->erpPdo->prepare("
+                        UPDATE item_shops_storehouses
+                        SET iss_inventory = iss_inventory + 1
+                        WHERE item_id = :item_id
+                          AND st_id = :st_id
+                    ")->execute([
+                        ':item_id' => $itemId,
+                        ':st_id' => $stId,
+                    ]);
+                    return ['ok' => false, 'error' => 'No se pudo registrar la bobina en trazabilidad: ' . $e->getMessage()];
+                }
             }
 
             // Registrar en eventos de la OT (ERP)
