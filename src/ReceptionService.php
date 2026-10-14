@@ -15831,6 +15831,80 @@ SQL;
         return $this->getRoll((int)$row['id']);
     }
 
+    public function ensureTransferableRollByCode(
+        string $code,
+        int $warehouseId,
+        string $operatorName = '',
+        string $skuCode = '',
+        string $skuDescription = ''
+    ): array {
+        $code = $this->normalizeScannedInventoryCode($code);
+        if ($code === '') {
+            return ['ok' => false, 'errors' => ['code' => 'Debe indicar un código de bobina válido.']];
+        }
+
+        $existing = $this->getRollByScanCode($code);
+        if ($existing !== null) {
+            return ['ok' => true, 'roll_id' => (int)$existing['id'], 'roll' => $existing, 'created' => false];
+        }
+
+        $stmtWarehouse = $this->pdo->prepare('SELECT id FROM warehouses WHERE id = :id LIMIT 1');
+        $stmtWarehouse->execute([':id' => $warehouseId]);
+        if ($stmtWarehouse->fetch() === false) {
+            $warehouseId = $this->findWarehouseIdByCode(100) ?? 1;
+        }
+
+        $skuCode = trim($skuCode) !== '' ? trim($skuCode) : 'LEGACY-ROLL';
+        $skuDescription = trim($skuDescription) !== '' ? trim($skuDescription) : 'Bobina legacy registrada desde traspaso';
+
+        $stmtSku = $this->pdo->prepare('SELECT id FROM skus WHERE code = :code LIMIT 1');
+        $stmtSku->execute([':code' => $skuCode]);
+        $skuId = (int)$stmtSku->fetchColumn();
+        if ($skuId <= 0) {
+            $stmtInsertSku = $this->pdo->prepare(
+                'INSERT INTO skus (code, description, is_active, created_at) VALUES (:code, :description, 1, NOW())'
+            );
+            $stmtInsertSku->execute([
+                ':code' => $skuCode,
+                ':description' => $skuDescription,
+            ]);
+            $skuId = (int)$this->pdo->lastInsertId();
+        }
+
+        $stmtInsertRoll = $this->pdo->prepare(
+            'INSERT INTO rolls (
+                roll_code, sku_id, warehouse_id, weight_kg, received_qty, microns, width_mm, color, meters,
+                reception_mode, status, process_stage, created_at
+            ) VALUES (
+                :roll_code, :sku_id, :warehouse_id, 0, 1, 0, 0, :color, 0,
+                :reception_mode, :status, :process_stage, NOW()
+            )'
+        );
+        $stmtInsertRoll->execute([
+            ':roll_code' => $code,
+            ':sku_id' => $skuId > 0 ? $skuId : 1,
+            ':warehouse_id' => $warehouseId,
+            ':color' => '-',
+            ':reception_mode' => 'LEGACY_TRANSFER',
+            ':status' => 'RECEIVED',
+            ':process_stage' => 'RAW',
+        ]);
+
+        $rollId = (int)$this->pdo->lastInsertId();
+        $this->insertEvent('ROLL_REGISTERED_FROM_SCAN', [
+            'roll_id' => $rollId,
+            'roll_code' => $code,
+            'operator_name' => trim($operatorName),
+            'warehouse_id' => $warehouseId,
+            'sku_code' => $skuCode,
+            'sku_description' => $skuDescription,
+        ]);
+        $this->syncRollWarehouseTraceabilityEntry($rollId, trim($operatorName));
+
+        $roll = $this->getRoll($rollId);
+        return ['ok' => $roll !== null, 'roll_id' => $rollId, 'roll' => $roll, 'created' => true];
+    }
+
     public function transferRoll(int $rollId, int $toWarehouseId, string $operatorName = '', ?int $workOrderId = null): array
     {
         $errors = [];

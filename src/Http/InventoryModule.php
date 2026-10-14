@@ -3565,8 +3565,14 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         var rollId = parseInt(document.getElementById("hid_roll_id").value || "0", 10);
         if (actionMode === "to_warehouse") {
           if (!rollId || rollId <= 0) {
-            alert("Para traspasar entre bodegas debe seleccionar o escanear una bobina ya registrada.");
-            return false;
+            var hiddenCode = normalizeScannedCode(document.getElementById("hid_roll_code").value || "");
+            var scanInput = normalizeScannedCode(document.getElementById("inp_scan_code").value || "");
+            var fallbackCode = hiddenCode || scanInput;
+            if (!fallbackCode) {
+              alert("Para traspasar entre bodegas debe seleccionar una bobina o escanear su código.");
+              return false;
+            }
+            document.getElementById("hid_roll_code").value = fallbackCode;
           }
           var whSel = document.getElementById("sel_destination_warehouse");
           if (!whSel.value) {
@@ -3650,6 +3656,27 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
         if ($actionMode === 'to_warehouse') {
             $rollId = (int)($_POST['roll_id'] ?? 0);
             $toWarehouseId = (int)($_POST['to_warehouse_id'] ?? 0);
+            $scanCode = trim((string)($_POST['code'] ?? ''));
+            $fromWarehouseId = (int)($_POST['from_warehouse_id'] ?? 0);
+            $skuCode = trim((string)($_POST['sku'] ?? $_POST['sku_manual'] ?? ''));
+            $skuDescription = trim((string)($_POST['sku_desc'] ?? $_POST['sku_desc_manual'] ?? ''));
+
+            if ($rollId <= 0 && $scanCode !== '') {
+                $ensureResult = $service->ensureTransferableRollByCode(
+                    $scanCode,
+                    $fromWarehouseId,
+                    $effectiveTransferOperator,
+                    $skuCode,
+                    $skuDescription
+                );
+                if (($ensureResult['ok'] ?? false) !== true) {
+                    $err = !empty($ensureResult['errors']) ? implode(', ', (array)$ensureResult['errors']) : 'No se pudo registrar la bobina escaneada para el traspaso.';
+                    redirectResponse('/stock/transfers?error=' . rawurlencode($err));
+                    return true;
+                }
+                $rollId = (int)($ensureResult['roll_id'] ?? 0);
+            }
+
             $roll = $rollId > 0 ? $service->getRoll($rollId) : null;
             $fromWarehouseName = trim((string)($roll['warehouse_name'] ?? ''));
             $toWarehouseName = '';
@@ -3661,7 +3688,7 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
             }
 
             if ($rollId <= 0 || $toWarehouseId <= 0) {
-                redirectResponse('/stock/transfers?error=' . rawurlencode('Debe seleccionar una bobina existente y una bodega destino.'));
+                redirectResponse('/stock/transfers?error=' . rawurlencode('Debe seleccionar o escanear una bobina y definir la bodega destino.'));
                 return true;
             }
 
