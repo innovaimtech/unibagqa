@@ -975,6 +975,7 @@ function handleProductionRoutes(
             $equipoId = $activeInit !== null ? (int)($activeInit['win_equipoid'] ?? 0) : 0;
             $weightKg = (float)str_replace(',', '.', (string)($_REQUEST['weight_kg'] ?? 0));
             $confirmedTraceabilityCode = trim((string)($_REQUEST['confirmed_traceability_code'] ?? ''));
+            $traceabilityMode = trim((string)($_REQUEST['traceability_mode'] ?? 'auto'));
             $res = $prodService->assignBodega3000RollToMachine(
                 $workerOtId,
                 (string)$rollIds[0],
@@ -984,7 +985,8 @@ function handleProductionRoutes(
                 $comments,
                 false,
                 $agId,
-                $confirmedTraceabilityCode
+                $confirmedTraceabilityCode,
+                $traceabilityMode
             );
         } elseif (!empty($rollIds)) {
             $res = $prodService->requestRollsForWorkOrder(
@@ -1493,6 +1495,7 @@ function handleProductionRoutes(
             $weightKg = (float)str_replace(',', '.', (string)($_POST['weight_kg'] ?? 0));
             $comments = trim((string)($_POST['comments'] ?? ''));
             $confirmedTraceabilityCode = trim((string)($_POST['confirmed_traceability_code'] ?? ''));
+            $traceabilityMode = trim((string)($_POST['traceability_mode'] ?? 'auto'));
 
             $lastRes = ['ok' => false, 'error' => 'No se seleccionó ninguna bobina de Bodega 3000.'];
             foreach ($rollIds as $rid) {
@@ -1505,7 +1508,8 @@ function handleProductionRoutes(
                     $comments,
                     false,
                     $agId,
-                    $confirmedTraceabilityCode
+                    $confirmedTraceabilityCode,
+                    $traceabilityMode
                 );
             }
             if ($lastRes['ok']) {
@@ -6572,6 +6576,7 @@ function renderProductionOperatorConsole(
                     <tbody>
                     <?php foreach ($availableBodega3000Rolls as $b3000Roll):
                         $b3000Id = (string)($b3000Roll['id'] ?? $b3000Roll['raw_id'] ?? '');
+                        $b3000RowKey = md5($b3000Id . '|' . (string)($b3000Roll['roll_code'] ?? $b3000Roll['sku_code'] ?? ''));
                         $b3000Code = (string)($b3000Roll['roll_code'] ?? $b3000Roll['sku_code'] ?? '-');
                         $b3000Desc = (string)($b3000Roll['sku_desc'] ?? '-');
                         $b3000Color = (string)($b3000Roll['color'] ?? '-');
@@ -6581,7 +6586,7 @@ function renderProductionOperatorConsole(
                         $b3000Source = (string)($b3000Roll['source'] ?? '');
                         $b3000HasTraceability = ($b3000Source === 'TRZ');
                         $b3000IsCompatible = !empty($b3000Roll['is_compatible']);
-                        $b3000ActionLabel = $b3000HasTraceability ? 'Tomar código' : 'Crear código y tomar';
+                        $b3000ActionLabel = $b3000HasTraceability ? 'Tomar código' : 'Ingresar a máquina';
                         $b3000ConfirmText = $b3000HasTraceability
                             ? ('¿Tomar el código trazable ' . addslashes($b3000Code) . ' desde Bodega 3000 para esta OT?')
                             : ('¿Tomar stock sin trazabilidad individual de Bodega 3000 y generar un código nuevo para esta OT a partir de ' . addslashes($b3000Code) . '?');
@@ -6618,10 +6623,10 @@ function renderProductionOperatorConsole(
                                     </div>
                                 <?php else: ?>
                                     <div>
-                                        <span style="background:#FEF3C7;color:#92400E;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">NO</span>
+                                        <span style="background:#E0F2FE;color:#0369A1;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">ELEGIR</span>
                                     </div>
                                     <div style="margin-top:4px;font-size:10.5px;color:#64748B;line-height:1.35">
-                                        Stock general en 3000.<br>Al tomarlo se genera un codigo trazable nuevo.
+                                        Indique si la unidad a ingresar<br>tiene o no tiene trazabilidad.
                                     </div>
                                 <?php endif; ?>
                             </td>
@@ -6645,6 +6650,7 @@ function renderProductionOperatorConsole(
                                         <input type="hidden" name="expected_traceability_code" value="<?=htmlspecialchars($b3000Code)?>">
                                         <input type="hidden" name="weight_kg" value="<?=htmlspecialchars(number_format($b3000Weight, 2, '.', ''))?>">
                                         <?php if ($b3000HasTraceability): ?>
+                                            <input type="hidden" name="traceability_mode" value="with">
                                             <input
                                                 type="text"
                                                 name="confirmed_traceability_code"
@@ -6654,6 +6660,26 @@ function renderProductionOperatorConsole(
                                                 required
                                                 style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px;font-family:monospace;text-transform:uppercase"
                                             >
+                                        <?php else: ?>
+                                            <select
+                                                name="traceability_mode"
+                                                id="traceability_mode_<?=$b3000RowKey?>"
+                                                onchange="toggleBodega3000TraceabilitySelection('<?=$b3000RowKey?>', this.value)"
+                                                style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px"
+                                            >
+                                                <option value="without" selected>Sin trazabilidad</option>
+                                                <option value="with">Con trazabilidad</option>
+                                            </select>
+                                            <div id="traceability_scan_wrap_<?=$b3000RowKey?>" style="display:none">
+                                                <input
+                                                    type="text"
+                                                    name="confirmed_traceability_code"
+                                                    value=""
+                                                    placeholder="Escanee codigo trazable"
+                                                    autocomplete="off"
+                                                    style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px;font-family:monospace;text-transform:uppercase"
+                                                >
+                                            </div>
                                         <?php endif; ?>
                                         <button type="submit" class="btngreen" style="font-size:12px;padding:6px 12px;cursor:pointer;font-weight:bold">
                                             <i class="fa fa-sign-in-alt"></i> <?=$b3000ActionLabel?>
@@ -6672,6 +6698,23 @@ function renderProductionOperatorConsole(
                     <?php endforeach; ?>
                     </tbody>
                 </table>
+                <script>
+                function toggleBodega3000TraceabilitySelection(rowKey, mode) {
+                    var wrap = document.getElementById('traceability_scan_wrap_' + rowKey);
+                    if (!wrap) return;
+                    var input = wrap.querySelector('input[name="confirmed_traceability_code"]');
+                    var useTraceability = String(mode || '').toLowerCase() === 'with';
+                    wrap.style.display = useTraceability ? 'block' : 'none';
+                    if (input) {
+                        input.required = useTraceability;
+                        if (!useTraceability) {
+                            input.value = '';
+                        } else {
+                            input.focus();
+                        }
+                    }
+                }
+                </script>
             <?php endif; ?>
         </div>
 

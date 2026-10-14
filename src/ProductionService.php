@@ -8118,13 +8118,18 @@ final class ProductionService
         string $comments = '',
         bool $skipTraceability = false,
         ?int $agId = null,
-        string $confirmedTraceabilityCode = ''
+        string $confirmedTraceabilityCode = '',
+        string $traceabilityMode = 'auto'
     ): array {
         if ($workerOtId <= 0) {
             return ['ok' => false, 'error' => 'Orden de trabajo inválida.'];
         }
 
         $now = time();
+        $traceabilityMode = strtolower(trim($traceabilityMode));
+        if (!in_array($traceabilityMode, ['auto', 'with', 'without'], true)) {
+            $traceabilityMode = 'auto';
+        }
 
         // 1. MODO: SALTARSEN LA TRAZABILIDAD (Bobina sin código QR o código de trazabilidad)
         if ($skipTraceability) {
@@ -8210,6 +8215,57 @@ final class ProductionService
             $desc = (string)$item['item_title'];
             $wKg = $weightKg > 0 ? $weightKg : (float)($item['item_reg_kg'] ?: 85.0);
             $rollCode = "BOB-{$sku}-" . date('ymd') . "-" . strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
+            $normalizedConfirmedTraceabilityCode = $this->normalizeTraceabilityCode($confirmedTraceabilityCode);
+            $mustUseExistingTraceability = $traceabilityMode === 'with'
+                || ($traceabilityMode === 'auto' && $normalizedConfirmedTraceabilityCode !== '');
+
+            if ($mustUseExistingTraceability) {
+                if ($normalizedConfirmedTraceabilityCode === '') {
+                    return ['ok' => false, 'error' => 'Debe escanear o ingresar el código de trazabilidad de la bobina que va a consumir.'];
+                }
+                if ($this->trzPdo === null) {
+                    return ['ok' => false, 'error' => 'La base de trazabilidad no está disponible para validar ese código.'];
+                }
+
+                $stmtExistingTraceableRoll = $this->trzPdo->prepare("
+                    SELECT r.id, s.code AS sku_code
+                    FROM rolls r
+                    LEFT JOIN skus s ON r.sku_id = s.id
+                    LEFT JOIN warehouses w ON r.warehouse_id = w.id
+                    WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r.roll_code, ' ', ''), '\r', ''), '\n', ''), '\t', ''), '''', '-'), '`', '-')) = :code
+                      AND r.current_work_order_id IS NULL
+                      AND r.status != 'CONSUMED'
+                      AND (w.code IN (3000, 16, 27) OR w.name LIKE '%3000%')
+                    ORDER BY r.id DESC
+                    LIMIT 1
+                ");
+                $stmtExistingTraceableRoll->execute([
+                    ':code' => $normalizedConfirmedTraceabilityCode,
+                ]);
+                $existingTraceableRoll = $stmtExistingTraceableRoll->fetch(PDO::FETCH_ASSOC) ?: null;
+
+                if ($existingTraceableRoll === null) {
+                    return ['ok' => false, 'error' => 'No existe una bobina trazable disponible en Bodega 3000 con ese código.'];
+                }
+
+                $existingTraceableSku = strtoupper(trim((string)($existingTraceableRoll['sku_code'] ?? '')));
+                if ($existingTraceableSku !== '' && strtoupper(trim($sku)) !== '' && $existingTraceableSku !== strtoupper(trim($sku))) {
+                    return ['ok' => false, 'error' => 'El código trazable escaneado no corresponde al SKU seleccionado para esta OT.'];
+                }
+
+                return $this->assignBodega3000RollToMachine(
+                    $workerOtId,
+                    (string)((int)$existingTraceableRoll['id']),
+                    $weightKg,
+                    $operatorName,
+                    $machineId,
+                    $comments,
+                    false,
+                    $agId,
+                    $confirmedTraceabilityCode,
+                    'with'
+                );
+            }
 
             $stmtConsume3000 = $this->erpPdo->prepare("
                 UPDATE item_shops_storehouses
