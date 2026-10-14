@@ -3125,7 +3125,8 @@ final class ProductionService
         array $mermasDetail = [],
         bool $createOutputRoll = false,
         string $outputSkuCode = '',
-        float $outputMeters = 0.0
+        float $outputMeters = 0.0,
+        array $mergedSourceRollIds = []
     ): array {
         if ($rollId <= 0 || $workerOtId <= 0) {
             return ['ok' => false, 'error' => 'Parámetros inválidos para registrar salida de bobina.'];
@@ -3135,6 +3136,9 @@ final class ProductionService
         }
         if ($createOutputRoll && $outputBobinaKg <= 0) {
             return ['ok' => false, 'error' => 'Debes registrar el peso de la nueva bobina saliente para generar su etiqueta.'];
+        }
+        if (!empty($mergedSourceRollIds) && !$createOutputRoll) {
+            return ['ok' => false, 'error' => 'Para unir varias bobinas en una sola debe generar una bobina saliente con etiqueta.'];
         }
 
         // Si se informaron mermas por tipo pero scrapKg vino en 0, calcular total
@@ -3162,25 +3166,119 @@ final class ProductionService
                 return ['ok' => false, 'error' => 'Bobina no encontrada en trazabilidad.'];
             }
 
+            $traceabilityWorkOrderId = $this->resolveTraceabilityWorkOrderId($workerOtId, null, false);
             $rollCode = (string)$roll['roll_code'];
             $skuId = (int)($roll['sku_id'] ?? 0);
             $skuCode = trim((string)($roll['sku_code'] ?? 'TEL'));
             $entryWeight = (float)($roll['weight_kg'] ?? 0);
+            $currentWorkOrderId = (int)($roll['current_work_order_id'] ?? 0);
+            if (
+                $currentWorkOrderId > 0
+                && $currentWorkOrderId !== $workerOtId
+                && $currentWorkOrderId !== $traceabilityWorkOrderId
+            ) {
+                return ['ok' => false, 'error' => 'La bobina principal pertenece a otra OT activa.'];
+            }
+
+            $normalizedMergedSourceRollIds = [];
+            foreach ($mergedSourceRollIds as $mergedSourceRollId) {
+                $mergedSourceRollId = (int)$mergedSourceRollId;
+                if ($mergedSourceRollId > 0 && $mergedSourceRollId !== $rollId) {
+                    $normalizedMergedSourceRollIds[] = $mergedSourceRollId;
+                }
+            }
+            $normalizedMergedSourceRollIds = array_values(array_unique($normalizedMergedSourceRollIds));
+
+            $resolveMountedEntryWeight = function (int $sourceRollId, float $fallbackWeight) use ($workerOtId): float {
+                $resolvedWeight = $fallbackWeight;
+                $stMount = $this->trzPdo->prepare("
+                    SELECT payload FROM events
+                    WHERE type = 'ROLL_MOUNTED_ON_MACHINE'
+                      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stMount->execute([
+                    ':rid' => (string)$sourceRollId,
+                    ':otid' => (string)$workerOtId,
+                ]);
+                $mountEvent = $stMount->fetch(PDO::FETCH_ASSOC);
+                if ($mountEvent && !empty($mountEvent['payload'])) {
+                    $mountPayload = json_decode((string)$mountEvent['payload'], true);
+                    if (!empty($mountPayload['entry_weight_kg'])) {
+                        $resolvedWeight = (float)$mountPayload['entry_weight_kg'];
+                    }
+                }
+                return $resolvedWeight;
+            };
 
             // Buscar peso de ingreso en el último evento de montaje si existe
-            $stM = $this->trzPdo->prepare("
-                SELECT payload FROM events
-                WHERE type = 'ROLL_MOUNTED_ON_MACHINE'
-                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
-                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
-                ORDER BY id DESC LIMIT 1
-            ");
-            $stM->execute([':rid' => (string)$rollId, ':otid' => (string)$workerOtId]);
-            $evMount = $stM->fetch(PDO::FETCH_ASSOC);
-            if ($evMount && !empty($evMount['payload'])) {
-                $pData = json_decode((string)$evMount['payload'], true);
-                if (!empty($pData['entry_weight_kg'])) {
-                    $entryWeight = (float)$pData['entry_weight_kg'];
+            $entryWeight = $resolveMountedEntryWeight($rollId, $entryWeight);
+
+            $mergedSourceRolls = [];
+            $mergedSourceCodes = [];
+            $mergedSourceWeightKg = 0.0;
+            if (!empty($normalizedMergedSourceRollIds)) {
+                $placeholders = [];
+                $mergeParams = [];
+                foreach ($normalizedMergedSourceRollIds as $idx => $mergedSourceRollId) {
+                    $placeholder = ':merge_id_' . $idx;
+                    $placeholders[] = $placeholder;
+                    $mergeParams[$placeholder] = $mergedSourceRollId;
+                }
+
+                $stmtMerge = $this->trzPdo->prepare("
+                    SELECT r.*, s.code AS sku_code, s.description AS sku_desc
+                    FROM rolls r
+                    LEFT JOIN skus s ON r.sku_id = s.id
+                    WHERE r.id IN (" . implode(', ', $placeholders) . ")
+                ");
+                $stmtMerge->execute($mergeParams);
+                $mergeRows = $stmtMerge->fetchAll(PDO::FETCH_ASSOC);
+                if (count($mergeRows) !== count($normalizedMergedSourceRollIds)) {
+                    return ['ok' => false, 'error' => 'Una o más bobinas adicionales ya no existen en trazabilidad.'];
+                }
+
+                $mergeRowsById = [];
+                foreach ($mergeRows as $mergeRow) {
+                    $mergeRowsById[(int)$mergeRow['id']] = $mergeRow;
+                }
+
+                foreach ($normalizedMergedSourceRollIds as $mergedSourceRollId) {
+                    $mergeRoll = $mergeRowsById[$mergedSourceRollId] ?? null;
+                    if ($mergeRoll === null) {
+                        return ['ok' => false, 'error' => 'No se pudo resolver una de las bobinas adicionales seleccionadas.'];
+                    }
+
+                    $mergeCurrentOtId = (int)($mergeRoll['current_work_order_id'] ?? 0);
+                    if (
+                        $mergeCurrentOtId > 0
+                        && $mergeCurrentOtId !== $workerOtId
+                        && $mergeCurrentOtId !== $traceabilityWorkOrderId
+                    ) {
+                        return ['ok' => false, 'error' => 'Una de las bobinas adicionales pertenece a otra OT activa.'];
+                    }
+
+                    $mergeStatus = strtoupper((string)($mergeRoll['status'] ?? ''));
+                    if (in_array($mergeStatus, ['CONSUMED', 'BLOCKED'], true)) {
+                        return ['ok' => false, 'error' => 'Una de las bobinas adicionales ya no está disponible para esta salida.'];
+                    }
+
+                    $mergeRollCode = trim((string)($mergeRoll['roll_code'] ?? ''));
+                    $mergeEntryWeight = $resolveMountedEntryWeight(
+                        $mergedSourceRollId,
+                        (float)($mergeRoll['weight_kg'] ?? 0)
+                    );
+
+                    $mergedSourceRolls[] = [
+                        'id' => $mergedSourceRollId,
+                        'roll_code' => $mergeRollCode,
+                        'sku_code' => trim((string)($mergeRoll['sku_code'] ?? '')),
+                        'entry_weight_kg' => $mergeEntryWeight,
+                        'status' => $mergeStatus,
+                    ];
+                    $mergedSourceCodes[] = $mergeRollCode !== '' ? $mergeRollCode : ('#' . $mergedSourceRollId);
+                    $mergedSourceWeightKg += $mergeEntryWeight;
                 }
             }
 
@@ -3199,7 +3297,8 @@ final class ProductionService
                     $outputBobinaKg,
                     $outputMeters,
                     500,
-                    $operatorName
+                    $operatorName,
+                    array_merge([$rollId], $normalizedMergedSourceRollIds)
                 );
                 if (($outputRes['ok'] ?? false) !== true) {
                     return ['ok' => false, 'error' => (string)($outputRes['error'] ?? 'No se pudo generar la bobina saliente.')];
@@ -3221,8 +3320,7 @@ final class ProductionService
                 }
 
                 // Resolver Bodega 3000
-                $stWh = $this->trzPdo->query("SELECT id FROM warehouses WHERE code IN (3000, 16) OR name LIKE '%3000%' ORDER BY id ASC LIMIT 1");
-                $whId = (int)($stWh ? $stWh->fetchColumn() : 0);
+                $whId = $this->resolveBodega3000WarehouseId();
                 if ($whId <= 0) {
                     $whId = (int)($roll['warehouse_id'] ?? 1);
                 }
@@ -3278,8 +3376,39 @@ final class ProductionService
                 WHERE id = :id
             ")->execute([':id' => $rollId, ':src_ot' => $workerOtId]);
 
+            foreach ($mergedSourceRolls as $mergedSourceRoll) {
+                $this->trzPdo->prepare("
+                    UPDATE rolls
+                    SET status = 'CONSUMED',
+                        source_work_order_id = :src_ot,
+                        current_work_order_id = NULL
+                    WHERE id = :id
+                ")->execute([
+                    ':id' => (int)$mergedSourceRoll['id'],
+                    ':src_ot' => $workerOtId,
+                ]);
+
+                $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
+                    ':type' => 'ROLL_MERGED_IN_OUTPUT',
+                    ':payload' => json_encode([
+                        'roll_id' => (int)$mergedSourceRoll['id'],
+                        'roll_code' => (string)$mergedSourceRoll['roll_code'],
+                        'entry_weight_kg' => (float)$mergedSourceRoll['entry_weight_kg'],
+                        'merged_into_roll_id' => $outputRollId,
+                        'merged_into_roll_code' => $outputRollCode,
+                        'primary_roll_id' => $rollId,
+                        'primary_roll_code' => $rollCode,
+                        'worker_ot_id' => $workerOtId,
+                        'operator' => $operatorName,
+                        'comments' => $comments,
+                        'timestamp' => $now,
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+            }
+
             // Kilos consumidos reales de tela = ingreso - sobrante
             $netConsumedKg = max(0.0, round($entryWeight - $leftoverKg, 2));
+            $totalNetConsumedKg = round($netConsumedKg + $mergedSourceWeightKg, 2);
 
             // Registrar evento de salida de bobina en TRZ
             $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
@@ -3297,8 +3426,13 @@ final class ProductionService
                     'leftover_kg' => $leftoverKg,
                     'leftover_roll_id' => $newRollId,
                     'leftover_roll_code' => $leftoverRollCode,
+                    'merged_source_roll_ids' => array_column($mergedSourceRolls, 'id'),
+                    'merged_source_roll_codes' => $mergedSourceCodes,
+                    'merged_source_rolls' => $mergedSourceRolls,
+                    'merged_source_weight_kg' => round($mergedSourceWeightKg, 2),
                     'mermas_detail' => $mermasDetail,
                     'net_consumed_kg' => $netConsumedKg,
+                    'total_net_consumed_kg' => $totalNetConsumedKg,
                     'worker_ot_id' => $workerOtId,
                     'operator' => $operatorName,
                     'comments' => $comments,
@@ -3308,6 +3442,9 @@ final class ProductionService
 
             // 3. REGISTRAR EVENTOS EN ERP (prod_worker_ot_events)
             $descMat = "Salida Bobina {$rollCode}: Ingreso {$entryWeight} kg -> Bobina: {$outputBobinaKg} kg, Mermas: {$scrapKg} kg";
+            if (!empty($mergedSourceCodes)) {
+                $descMat .= ', Unida con: ' . implode(', ', $mergedSourceCodes);
+            }
             if ($leftoverKg > 0) {
                 $descMat .= ", Sobrante: {$leftoverKg} kg (Código: {$leftoverRollCode})";
             } else {
@@ -3325,7 +3462,7 @@ final class ProductionService
             ");
             $stmtErpMat->execute([
                 ':ot_id' => $workerOtId,
-                ':amt' => $netConsumedKg,
+                ':amt' => $totalNetConsumedKg,
                 ':crtdat' => $now,
                 ':enddat' => $now,
                 ':comments' => $descMat,
@@ -3405,7 +3542,11 @@ final class ProductionService
                 'scrap_kg' => $scrapKg,
                 'mermas_detail' => $mermasDetail,
                 'net_consumed_kg' => $netConsumedKg,
-                'message' => "Salida de bobina {$rollCode} registrada exitosamente." . ($leftoverRollCode !== '' ? " Se generó sobrante {$leftoverRollCode} ({$leftoverKg} kg) con trazabilidad en Bodega 3000." : "")
+                'total_net_consumed_kg' => $totalNetConsumedKg,
+                'merged_source_rolls' => $mergedSourceRolls,
+                'message' => "Salida de bobina {$rollCode} registrada exitosamente."
+                    . (!empty($mergedSourceCodes) ? ' Se consolidaron también: ' . implode(', ', $mergedSourceCodes) . '.' : '')
+                    . ($leftoverRollCode !== '' ? " Se generó sobrante {$leftoverRollCode} ({$leftoverKg} kg) con trazabilidad en Bodega 3000." : "")
             ];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al registrar salida de bobina: ' . $e->getMessage()];
@@ -3678,7 +3819,8 @@ final class ProductionService
         float $weightKg,
         float $meters,
         int $warehouseCode = 500,
-        string $operatorName = ''
+        string $operatorName = '',
+        array $sourceRollIds = []
     ): array {
         if ($workerOtId <= 0 || $weightKg <= 0) {
             return ['ok' => false, 'error' => 'Peso y OT inválidos para generar bobina semielaborada.'];
@@ -3689,6 +3831,18 @@ final class ProductionService
         }
 
         try {
+            $normalizedSourceRollIds = [];
+            foreach ($sourceRollIds as $sourceRollId) {
+                $sourceRollId = (int)$sourceRollId;
+                if ($sourceRollId > 0) {
+                    $normalizedSourceRollIds[] = $sourceRollId;
+                }
+            }
+            if ($parentRollId !== null && $parentRollId > 0) {
+                array_unshift($normalizedSourceRollIds, $parentRollId);
+            }
+            $normalizedSourceRollIds = array_values(array_unique($normalizedSourceRollIds));
+
             // Resolver o crear el SKU local
             $skuId = 1;
             $stmtSku = $this->trzPdo->prepare("SELECT id FROM skus WHERE code = :code LIMIT 1");
@@ -3715,6 +3869,7 @@ final class ProductionService
             $parentWidth = null;
             $parentMicrons = null;
             $parentColor = null;
+            $sourceRollCodes = [];
             if ($parentRollId !== null && $parentRollId > 0) {
                 $stParent = $this->trzPdo->prepare("SELECT width_mm, microns, color FROM rolls WHERE id = :id LIMIT 1");
                 $stParent->execute([':id' => $parentRollId]);
@@ -3723,6 +3878,29 @@ final class ProductionService
                     $parentWidth = $pRow['width_mm'] ?? null;
                     $parentMicrons = $pRow['microns'] ?? null;
                     $parentColor = $pRow['color'] ?? null;
+                }
+            }
+            if (!empty($normalizedSourceRollIds)) {
+                $placeholders = [];
+                $sourceParams = [];
+                foreach ($normalizedSourceRollIds as $idx => $sourceRollId) {
+                    $placeholder = ':src_roll_' . $idx;
+                    $placeholders[] = $placeholder;
+                    $sourceParams[$placeholder] = $sourceRollId;
+                }
+                $stmtSources = $this->trzPdo->prepare("
+                    SELECT id, roll_code
+                    FROM rolls
+                    WHERE id IN (" . implode(', ', $placeholders) . ")
+                    ORDER BY id ASC
+                ");
+                $stmtSources->execute($sourceParams);
+                $sourceRows = $stmtSources->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($sourceRows as $sourceRow) {
+                    $sourceCode = trim((string)($sourceRow['roll_code'] ?? ''));
+                    if ($sourceCode !== '') {
+                        $sourceRollCodes[] = $sourceCode;
+                    }
                 }
             }
 
@@ -3770,6 +3948,9 @@ final class ProductionService
                     'child_roll_id' => $childId,
                     'child_roll_code' => $childRollCode,
                     'parent_roll_id' => $parentRollId,
+                    'source_roll_ids' => $normalizedSourceRollIds,
+                    'source_roll_codes' => $sourceRollCodes,
+                    'source_roll_count' => count($normalizedSourceRollIds),
                     'weight_kg' => $weightKg,
                     'meters' => $meters,
                     'worker_ot_id' => $workerOtId,
@@ -3792,7 +3973,8 @@ final class ProductionService
                 ':mlin' => $meters,
                 ':crtdat' => $now,
                 ':enddat' => $now,
-                ':comments' => "Bobina Semielaborada {$childRollCode} ({$weightKg} kg, {$meters} m)",
+                ':comments' => "Bobina Semielaborada {$childRollCode} ({$weightKg} kg, {$meters} m)"
+                    . (!empty($sourceRollCodes) ? ' desde: ' . implode(', ', $sourceRollCodes) : ''),
             ]);
 
             return [

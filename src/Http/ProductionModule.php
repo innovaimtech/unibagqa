@@ -1098,6 +1098,16 @@ function handleProductionRoutes(
         if ($totalScrapDetail > 0) {
             $scrapKg = $totalScrapDetail;
         }
+        $mergedSourceRollIds = [];
+        if (!empty($_POST['source_roll_ids']) && is_array($_POST['source_roll_ids'])) {
+            foreach ($_POST['source_roll_ids'] as $sourceRollId) {
+                $sourceRollId = (int)$sourceRollId;
+                if ($sourceRollId > 0 && $sourceRollId !== $rollId) {
+                    $mergedSourceRollIds[] = $sourceRollId;
+                }
+            }
+            $mergedSourceRollIds = array_values(array_unique($mergedSourceRollIds));
+        }
 
         $res = $prodService->recordRollOutputAndLeftover(
             $workerOtId,
@@ -1110,7 +1120,8 @@ function handleProductionRoutes(
             $mermasDetail,
             $createOutputRoll,
             $outputSkuCode,
-            $outputMeters
+            $outputMeters,
+            $mergedSourceRollIds
         );
 
         if ($res['ok']) {
@@ -6322,6 +6333,20 @@ function renderProductionOperatorConsole(
                 ? ($unitKg * $qty)
                 : $unitKg;
         }
+        $mountedMergeCandidates = [];
+        foreach ($assignedRolls as $candidateRoll) {
+            $candidateStatus = (string)($candidateRoll['status'] ?? 'ASSIGNED');
+            $candidateClosed = in_array($candidateStatus, ['CONSUMED', 'RETURNED'], true);
+            if (empty($candidateRoll['is_mounted']) || $candidateClosed) {
+                continue;
+            }
+            $mountedMergeCandidates[] = [
+                'id' => (int)($candidateRoll['id'] ?? 0),
+                'roll_code' => (string)($candidateRoll['roll_code'] ?? ('#' . (int)($candidateRoll['id'] ?? 0))),
+                'sku_code' => (string)($candidateRoll['sku_code'] ?? ''),
+                'weight_kg' => (float)($candidateRoll['entry_weight_kg'] ?? $candidateRoll['weight_kg'] ?? 0),
+            ];
+        }
         ?>
         <div style="margin-bottom:15px">
             <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
@@ -7038,6 +7063,52 @@ function renderProductionOperatorConsole(
                         <input type="hidden" name="output_bobina_kg" value="0">
                     <?php endif; ?>
 
+                    <div style="background:#EFF6FF;border:1.5px solid #93C5FD;border-radius:8px;padding:14px;margin-bottom:16px">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px">
+                            <div>
+                                <label style="font-size:13.5px;font-weight:bold;color:#1D4ED8;display:flex;align-items:center;gap:6px">
+                                    <i class="fa fa-random"></i> Bobinas que se unieron a esta salida
+                                </label>
+                                <div style="font-size:12px;color:#1E40AF">
+                                    Si esta nueva bobina terminada se formó usando 2, 3 o más bobinas montadas, márquelas aquí para cerrarlas juntas en una sola salida.
+                                </div>
+                            </div>
+                            <div style="background:#DBEAFE;border:1px solid #93C5FD;padding:4px 10px;border-radius:5px;font-size:12px;font-weight:bold;color:#1D4ED8" id="modal_merge_count_badge">
+                                Adicionales: 0
+                            </div>
+                        </div>
+                        <?php if (!empty($mountedMergeCandidates)): ?>
+                            <div id="modal_merge_rolls_list" style="display:flex;flex-direction:column;gap:8px;max-height:180px;overflow:auto;padding-right:2px">
+                                <?php foreach ($mountedMergeCandidates as $mergeCandidate): ?>
+                                    <label
+                                        class="modal-merge-roll-row"
+                                        data-roll-id="<?=$mergeCandidate['id']?>"
+                                        style="background:#FFFFFF;border:1px solid #BFDBFE;border-radius:6px;padding:8px 10px;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer"
+                                    >
+                                        <div style="display:flex;align-items:center;gap:10px;min-width:0">
+                                            <input type="checkbox" class="modal-merge-roll-checkbox" name="source_roll_ids[]" value="<?=$mergeCandidate['id']?>" onchange="updateMergeRollSelection()" style="transform:scale(1.1)">
+                                            <div style="min-width:0">
+                                                <div style="font-size:12.5px;font-weight:bold;color:#0F172A;word-break:break-all">
+                                                    <?=htmlspecialchars($mergeCandidate['roll_code'])?>
+                                                </div>
+                                                <div style="font-size:11px;color:#475569">
+                                                    <?=htmlspecialchars($mergeCandidate['sku_code'] !== '' ? $mergeCandidate['sku_code'] : 'Sin SKU')?> · <?=number_format((float)$mergeCandidate['weight_kg'], 2, ',', '.')?> kg
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="modal-merge-roll-hint" style="font-size:11px;font-weight:bold;color:#2563EB;white-space:nowrap">
+                                            Sumar a esta salida
+                                        </div>
+                                    </label>
+                                <?php endforeach; ?>
+                            </div>
+                        <?php else: ?>
+                            <div style="background:#FFFFFF;border:1px dashed #93C5FD;border-radius:6px;padding:10px 12px;font-size:12px;color:#1E40AF">
+                                No hay otras bobinas montadas disponibles para combinar en esta salida.
+                            </div>
+                        <?php endif; ?>
+                    </div>
+
                     <!-- SECCIÓN 1: DESGLOSE DE MERMAS POR TIPO -->
                     <div style="background:#FFF1F2;border:1.5px solid #FECDD3;border-radius:8px;padding:14px;margin-bottom:16px">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:8px">
@@ -7121,6 +7192,43 @@ function renderProductionOperatorConsole(
         </div>
 
         <script>
+        function resetMergeRollSelection(currentRollId) {
+            var rows = document.querySelectorAll('.modal-merge-roll-row');
+            rows.forEach(function(row) {
+                var rowRollId = parseInt(row.getAttribute('data-roll-id') || '0', 10);
+                var checkbox = row.querySelector('.modal-merge-roll-checkbox');
+                var hint = row.querySelector('.modal-merge-roll-hint');
+                if (!checkbox) return;
+                checkbox.checked = false;
+                if (rowRollId === currentRollId) {
+                    checkbox.disabled = true;
+                    row.style.opacity = '0.65';
+                    row.style.background = '#E2E8F0';
+                    if (hint) hint.innerText = 'Bobina principal';
+                } else {
+                    checkbox.disabled = false;
+                    row.style.opacity = '1';
+                    row.style.background = '#FFFFFF';
+                    if (hint) hint.innerText = 'Sumar a esta salida';
+                }
+            });
+            updateMergeRollSelection();
+        }
+
+        function updateMergeRollSelection() {
+            var count = 0;
+            var checkboxes = document.querySelectorAll('.modal-merge-roll-checkbox');
+            checkboxes.forEach(function(checkbox) {
+                if (checkbox.checked && !checkbox.disabled) {
+                    count++;
+                }
+            });
+            var badge = document.getElementById('modal_merge_count_badge');
+            if (badge) {
+                badge.innerText = 'Adicionales: ' + count;
+            }
+        }
+
         function openRollOutputModal(rollId, rollCode, entryKg) {
             document.getElementById('modal_roll_id').value = rollId;
             document.getElementById('modal_roll_code_txt').innerText = rollCode;
@@ -7136,6 +7244,7 @@ function renderProductionOperatorConsole(
             if (createChk) createChk.checked = true;
             toggleOutputRollSection();
             recalcModalOutputMeters();
+            resetMergeRollSelection(parseInt(rollId, 10) || 0);
             
             // Reset mermas
             var mInputs = document.querySelectorAll('.modal-merma-input');
@@ -7194,7 +7303,18 @@ function renderProductionOperatorConsole(
         }
 
         function validateRollOutputModal() {
+            var selectedMergeCount = 0;
+            var mergeCheckboxes = document.querySelectorAll('.modal-merge-roll-checkbox');
+            mergeCheckboxes.forEach(function(checkbox) {
+                if (checkbox.checked && !checkbox.disabled) {
+                    selectedMergeCount++;
+                }
+            });
             var createChk = document.getElementById('modal_create_output_roll');
+            if (selectedMergeCount > 0 && (!createChk || !createChk.checked)) {
+                alert('Para convertir varias bobinas en una sola, debe generar una bobina saliente con etiqueta.');
+                return false;
+            }
             if (createChk && createChk.checked) {
                 var outputKg = parseFloat(String(document.getElementById('modal_output_bobina_kg').value || '').replace(',', '.')) || 0;
                 if (outputKg <= 0) {
@@ -7202,7 +7322,10 @@ function renderProductionOperatorConsole(
                     return false;
                 }
             }
-            return confirm('¿Confirmar registro de desmontaje y cierre de esta bobina?');
+            var confirmMessage = selectedMergeCount > 0
+                ? '¿Confirmar registro de desmontaje y unir esta salida con ' + selectedMergeCount + ' bobina(s) adicional(es)?'
+                : '¿Confirmar registro de desmontaje y cierre de esta bobina?';
+            return confirm(confirmMessage);
         }
 
         // Cerrar con Escape
