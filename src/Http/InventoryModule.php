@@ -1276,7 +1276,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap">';
     $body .= '<a class="btn secondary" href="/stock?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">← Volver a Stock</a>';
     $body .= '<a class="btn secondary" href="/stock/inventory-counts?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">Toma de Inventario</a>';
-    $body .= '<a class="btn" href="/stock/traceability?bodega=' . $storehouseId . '" style="background:#0f766e;display:inline-flex;align-items:center;gap:6px">🌳 Árbol Trazabilidad</a>';
+    $body .= '<a class="btn" href="/stock/traceability?bodega=' . $storehouseId . '" style="background:#0f766e;display:inline-flex;align-items:center;gap:6px">Trazabilidad</a>';
     $body .= '</div>';
     $body .= '</div>';
 
@@ -2244,6 +2244,8 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
     $query = (string)($treeData['query'] ?? '');
     $whEntry = $treeData['warehouse_entry'] ?? null;
     $roll = $treeData['roll'] ?? null;
+    $parentRoll = $treeData['parent_roll'] ?? null;
+    $virginRoll = $treeData['virgin_roll'] ?? null;
     $pallet = $treeData['pallet'] ?? null;
     $box = $treeData['box'] ?? null;
     $po = $treeData['purchase_order'] ?? null;
@@ -2252,6 +2254,7 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
     $events = (array)($treeData['events'] ?? []);
     $childRolls = (array)($treeData['child_rolls'] ?? []);
     $boxes = (array)($treeData['boxes'] ?? []);
+    $pallets = (array)($treeData['pallets'] ?? []);
     $movements = (array)($treeData['movements'] ?? []);
 
     $code = (string)($whEntry['traceability_code'] ?? $roll['roll_code'] ?? $box['box_code'] ?? $pallet['pallet_code'] ?? $query);
@@ -2267,10 +2270,110 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
     $width = !empty($whEntry['width_mm']) ? (float)$whEntry['width_mm'] : (!empty($roll['width_mm']) ? (float)$roll['width_mm'] : 0);
     $microns = !empty($whEntry['microns']) ? (float)$whEntry['microns'] : (!empty($roll['microns']) ? (float)$roll['microns'] : 0);
     $meters = !empty($whEntry['meters']) ? (float)$whEntry['meters'] : (!empty($roll['meters']) ? (float)$roll['meters'] : 0);
+    $weightKg = !empty($roll['weight_kg']) ? (float)$roll['weight_kg'] : 0.0;
+
+    $fmtQty = static function (float $value, int $decimals = 0): string {
+        return number_format($value, $decimals, ',', '.');
+    };
+    $fmtDate = static function ($value): string {
+        if (empty($value)) {
+            return '-';
+        }
+        if (is_numeric($value)) {
+            $ts = (int)$value;
+            return $ts > 0 ? date('d/m/Y H:i', $ts) : '-';
+        }
+        $ts = strtotime((string)$value);
+        return $ts ? date('d/m/Y H:i', $ts) : '-';
+    };
+    $eventLabel = static function (string $evtType): string {
+        return match ($evtType) {
+            'apertura' => 'Alistamiento',
+            'prod', 'prodsericolor' => 'Producción',
+            'pause' => 'Pausa',
+            'mantencion' => 'Mantención',
+            'merma' => 'Merma',
+            'material' => 'Material',
+            'colacion' => 'Colación',
+            default => ucfirst(strtolower(str_replace('_', ' ', $evtType))),
+        };
+    };
+    $eventBadge = static function (string $evtType): array {
+        return match ($evtType) {
+            'apertura' => ['#DBEAFE', '#1D4ED8'],
+            'prod', 'prodsericolor' => ['#DCFCE7', '#166534'],
+            'pause' => ['#FEE2E2', '#B91C1C'],
+            'mantencion' => ['#F3E8FF', '#7E22CE'],
+            'merma' => ['#FFE4E6', '#BE123C'],
+            'material' => ['#FEF3C7', '#B45309'],
+            'colacion' => ['#E0F2FE', '#0369A1'],
+            default => ['#E2E8F0', '#334155'],
+        };
+    };
+
+    $plannedQty = (float)($wo['planned_qty'] ?? $wo['ag_amount'] ?? 0);
+    $totalProducedQty = (float)($wo['total_produced_qty'] ?? 0);
+    $totalOutputKg = (float)($wo['total_output_kg'] ?? 0);
+    $totalOutputMeters = (float)($wo['total_output_meters'] ?? 0);
+    $totalMermaUnits = (float)($wo['total_merma_units'] ?? 0);
+    $totalMermaKg = (float)($wo['total_merma_kg'] ?? 0);
+    if ($totalProducedQty <= 0 || $totalOutputKg <= 0 || $totalOutputMeters <= 0) {
+        foreach ($events as $eventRow) {
+            $evtType = (string)($eventRow['evt_type'] ?? '');
+            if (!in_array($evtType, ['prod', 'prodsericolor'], true)) {
+                continue;
+            }
+            if ($totalProducedQty <= 0) {
+                $totalProducedQty += (float)($eventRow['evt_amount'] ?? 0);
+            }
+            if ($totalOutputKg <= 0) {
+                $totalOutputKg += (float)($eventRow['prod_bobina_kg'] ?? 0);
+            }
+            if ($totalOutputMeters <= 0) {
+                $totalOutputMeters += (float)($eventRow['evt_amount_metros_lineales'] ?? 0);
+            }
+        }
+    }
+    $completionPct = ($plannedQty > 0 && $totalProducedQty > 0) ? min(999.0, ($totalProducedQty / $plannedQty) * 100) : 0.0;
+
+    $childRollCount = count($childRolls);
+    $childRollKg = 0.0;
+    $childRollMeters = 0.0;
+    foreach ($childRolls as $cRoll) {
+        $childRollKg += (float)($cRoll['weight_kg'] ?? 0);
+        $childRollMeters += (float)($cRoll['meters'] ?? 0);
+    }
+
+    $boxCount = count($boxes);
+    $boxUnits = 0.0;
+    foreach ($boxes as $bx) {
+        $boxUnits += (float)($bx['units_qty'] ?? 0);
+    }
+
+    $allPallets = [];
+    if (!empty($pallet)) {
+        $allPallets[] = $pallet;
+    }
+    foreach ($pallets as $pal) {
+        $allPallets[] = $pal;
+    }
+    foreach ($boxes as $bx) {
+        if (!empty($bx['pallet_id'])) {
+            $allPallets[] = ['id' => (int)$bx['pallet_id']];
+        }
+    }
+    $uniquePallets = [];
+    foreach ($allPallets as $pal) {
+        $palKey = (string)($pal['pallet_code'] ?? ('ID-' . (int)($pal['id'] ?? 0)));
+        if ($palKey === 'ID-0') {
+            continue;
+        }
+        $uniquePallets[$palKey] = $pal;
+    }
+    $palletCount = count($uniquePallets);
 
     $html = '<div class="tree-flow-wrap" style="font-family:inherit">';
 
-    // Banner de identificación
     $html .= '<div style="background:linear-gradient(135deg, #0f172a, #1e293b);color:#fff;padding:16px 20px;border-radius:12px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">';
     $html .= '<div>';
     $html .= '<div style="font-size:11px;font-weight:700;color:#38bdf8;text-transform:uppercase;letter-spacing:.05em">Consulta de Trazabilidad 360°</div>';
@@ -2284,14 +2387,20 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
     $html .= '</div>';
     $html .= '</div>';
 
+    $html .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px;margin:0 0 18px 0">';
+    $html .= '<div class="trz-card" style="padding:14px;background:#fff;border:1px solid #E2E8F0"><div style="font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase">Ubicación actual</div><div style="font-size:16px;font-weight:900;color:#0F172A;margin-top:4px">' . h($whName) . '</div><div style="font-size:12px;color:#64748B;margin-top:3px">' . h($statusText) . '</div></div>';
+    $html .= '<div class="trz-card" style="padding:14px;background:#fff;border:1px solid #E2E8F0"><div style="font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase">Cantidad actual</div><div style="font-size:16px;font-weight:900;color:#0F172A;margin-top:4px">' . $fmtQty($qty, 2) . ' <span style="font-size:11px;color:#64748B">' . h($unit) . '</span></div><div style="font-size:12px;color:#64748B;margin-top:3px">' . ($weightKg > 0 ? ($fmtQty($weightKg, 2) . ' kg') : 'Material trazado') . '</div></div>';
+    $html .= '<div class="trz-card" style="padding:14px;background:#fff;border:1px solid #E2E8F0"><div style="font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase">Producido OT</div><div style="font-size:16px;font-weight:900;color:#166534;margin-top:4px">' . $fmtQty($totalProducedQty, 0) . ' un</div><div style="font-size:12px;color:#64748B;margin-top:3px">' . ($plannedQty > 0 ? ('Plan: ' . $fmtQty($plannedQty, 0) . ' · ' . $fmtQty($completionPct, 1) . ' %') : 'Sin meta planificada') . '</div></div>';
+    $html .= '<div class="trz-card" style="padding:14px;background:#fff;border:1px solid #E2E8F0"><div style="font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase">Salida generada</div><div style="font-size:16px;font-weight:900;color:#6D28D9;margin-top:4px">' . $childRollCount . ' bob. · ' . $boxCount . ' cajas</div><div style="font-size:12px;color:#64748B;margin-top:3px">' . $palletCount . ' pallets · ' . $fmtQty($boxUnits, 0) . ' un embaladas</div></div>';
+    $html .= '</div>';
+
     $html .= '<div style="display:flex;flex-direction:column;gap:14px">';
 
-    // NODO 1: Origen / Compra
     $html .= '<div class="trz-card" style="padding:16px;background:#fff">';
     $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-    $html .= '<span style="font-size:11.5px;font-weight:800;color:#0369a1;background:#e0f2fe;border:1px solid #bae6fd;padding:3px 10px;border-radius:6px">🏢 1. Origen & Adquisición</span>';
+    $html .= '<span style="font-size:11.5px;font-weight:800;color:#0369a1;background:#e0f2fe;border:1px solid #bae6fd;padding:3px 10px;border-radius:6px">1. Origen y adquisición</span>';
     if ($po && !empty($po['date'])) {
-        $html .= '<span style="font-size:11.5px;font-weight:700;color:#64748b">📅 ' . h((string)$po['date']) . '</span>';
+        $html .= '<span style="font-size:11.5px;font-weight:700;color:#64748b">' . h((string)$po['date']) . '</span>';
     }
     $html .= '</div>';
 
@@ -2299,21 +2408,36 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
         $html .= '<div style="font-size:14px;font-weight:800;color:#0f172a">' . h((string)($supplier['name'] ?? 'Proveedor Nacional')) . '</div>';
         $html .= '<div style="font-size:12px;color:#64748b;margin-top:2px">RUT: <strong>' . h((string)($supplier['rut'] ?? '-')) . '</strong> · País: <strong>' . h((string)($supplier['country'] ?? 'Chile')) . '</strong></div>';
         if ($po && !empty($po['po_code'])) {
-            $html .= '<div style="margin-top:8px;font-size:12.5px;color:#0369a1;background:#f0f9ff;padding:5px 10px;border-radius:6px;font-weight:700;display:inline-block">📄 Orden de Compra ERP: ' . h((string)$po['po_code']) . '</div>';
+            $html .= '<div style="margin-top:8px;font-size:12.5px;color:#0369a1;background:#f0f9ff;padding:5px 10px;border-radius:6px;font-weight:700;display:inline-block">Orden de Compra ERP: ' . h((string)$po['po_code']) . '</div>';
         }
     } else {
         $html .= '<div style="font-size:12.5px;color:#475569">Ingreso directo a existencias en bodega / Catálogo ERP (sin orden de compra importada asociada).</div>';
     }
+
+    if ($virginRoll || $parentRoll || $roll) {
+        $html .= '<div style="margin-top:12px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px 12px">';
+        $html .= '<div style="font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase;margin-bottom:6px">Cadena del material</div>';
+        $chainParts = [];
+        if ($virginRoll) {
+            $chainParts[] = '<span style="font-family:monospace;font-weight:800;color:#0F172A">' . h((string)($virginRoll['roll_code'] ?? '')) . '</span><span style="color:#64748B"> Bobina virgen</span>';
+        }
+        if ($parentRoll && (!$virginRoll || (int)($parentRoll['id'] ?? 0) !== (int)($virginRoll['id'] ?? 0))) {
+            $chainParts[] = '<span style="font-family:monospace;font-weight:800;color:#0F172A">' . h((string)($parentRoll['roll_code'] ?? '')) . '</span><span style="color:#64748B"> Bobina madre</span>';
+        }
+        if ($roll) {
+            $chainParts[] = '<span style="font-family:monospace;font-weight:800;color:#0F766E">' . h((string)($roll['roll_code'] ?? '')) . '</span><span style="color:#64748B"> Elemento consultado</span>';
+        }
+        $html .= '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:12.5px">' . implode('<span style="color:#94A3B8">→</span>', $chainParts) . '</div>';
+        $html .= '</div>';
+    }
     $html .= '</div>';
 
-    // Conector
     $html .= '<div style="text-align:center;color:#00A9A6;font-size:18px;margin:-8px 0;user-select:none">⬇</div>';
 
-    // NODO 2: Existencia FÍSICA en Bodega (Tarjeta Principal)
     $html .= '<div class="trz-card" style="padding:18px;border:2px solid #00A9A6;background:#fcfefe">';
     $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">';
-    $html .= '<span style="font-size:11.5px;font-weight:800;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;padding:3px 10px;border-radius:6px">📦 2. Bulto / Existencia Física en Bodega</span>';
-    $html .= '<span style="font-size:12px;font-weight:700;color:#0f766e">📍 ' . h($whName) . '</span>';
+    $html .= '<span style="font-size:11.5px;font-weight:800;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;padding:3px 10px;border-radius:6px">2. Existencia física y bodega</span>';
+    $html .= '<span style="font-size:12px;font-weight:700;color:#0f766e">' . h($whName) . '</span>';
     $html .= '</div>';
 
     $html .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">';
@@ -2339,39 +2463,90 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
 
     $comments = trim((string)($whEntry['comments'] ?? ''));
     if ($comments !== '') {
-        $html .= '<div style="margin-top:10px;font-size:12px;color:#64748b;background:#f8fafc;padding:6px 10px;border-radius:6px">💬 Observaciones: ' . h($comments) . '</div>';
+        $html .= '<div style="margin-top:10px;font-size:12px;color:#64748b;background:#f8fafc;padding:6px 10px;border-radius:6px">Observaciones: ' . h($comments) . '</div>';
     }
 
     $html .= '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;font-size:11.5px;color:#64748b">';
-    $html .= '<span>👤 Operador Responsable: <strong>' . h($operator) . '</strong></span>';
-    $html .= '<span>📅 Fecha de Ingreso: <strong>' . h($date) . '</strong></span>';
+    $html .= '<span>Operador Responsable: <strong>' . h($operator) . '</strong></span>';
+    $html .= '<span>Fecha de Ingreso: <strong>' . h($date) . '</strong></span>';
     $html .= '</div>';
     $html .= '</div>';
 
-    // Conector
     $html .= '<div style="text-align:center;color:#00A9A6;font-size:18px;margin:-8px 0;user-select:none">⬇</div>';
 
-    // NODO 3: Transformación en Planta / OT
     $html .= '<div class="trz-card" style="padding:16px;background:#fff">';
     $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-    $html .= '<span style="font-size:11.5px;font-weight:800;color:#b45309;background:#fffbeb;border:1px solid #fde68a;padding:3px 10px;border-radius:6px">⚙️ 3. Procesamiento en Planta (OT)</span>';
+    $html .= '<span style="font-size:11.5px;font-weight:800;color:#b45309;background:#fffbeb;border:1px solid #fde68a;padding:3px 10px;border-radius:6px">3. Producción y transformación</span>';
     if ($wo) {
         $html .= '<span style="font-size:12px;font-weight:800;color:#b45309">OT #' . h((string)($wo['prd_number'] ?? '')) . '</span>';
     } else {
-        $html .= '<span style="font-size:11.5px;font-weight:700;color:#0f766e">✅ En Stock Bodega</span>';
+        $html .= '<span style="font-size:11.5px;font-weight:700;color:#0f766e">En Stock Bodega</span>';
     }
     $html .= '</div>';
 
     if ($wo) {
+        $html .= '<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start">';
+        $html .= '<div>';
         $html .= '<div style="font-size:13.5px;font-weight:800;color:#0f172a">Máquina: ' . h((string)($wo['equipo_name'] ?? '')) . ' <span style="font-size:12px;color:#64748b">(' . h((string)($wo['type_ant_title'] ?? '')) . ')</span></div>';
-        $html .= '<div style="font-size:12px;color:#475569;margin-top:2px">Operador OT: <strong>' . h((string)(($wo['wrk_firstname'] ?? '') . ' ' . ($wo['wrk_lastname'] ?? ''))) . '</strong></div>';
+        $html .= '<div style="font-size:12px;color:#475569;margin-top:2px">Operador OT: <strong>' . h(trim((string)(($wo['wrk_firstname'] ?? '') . ' ' . ($wo['wrk_lastname'] ?? '')))) . '</strong> · Pedido: <strong>' . h((string)($wo['req_number'] ?? '-')) . '</strong></div>';
+        $html .= '</div>';
+        $html .= '<div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:8px;padding:8px 10px;min-width:190px">';
+        $html .= '<div style="font-size:11px;font-weight:800;color:#9A3412;text-transform:uppercase">Cumplimiento OT</div>';
+        $html .= '<div style="font-size:18px;font-weight:900;color:#9A3412;margin-top:3px">' . $fmtQty($completionPct, 1) . ' %</div>';
+        $html .= '<div style="font-size:11.5px;color:#7C2D12;margin-top:2px">' . $fmtQty($totalProducedQty, 0) . ' / ' . ($plannedQty > 0 ? $fmtQty($plannedQty, 0) : '-') . ' un</div>';
+        $html .= '</div>';
+        $html .= '</div>';
+
+        $html .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:12px">';
+        $summaryCards = [
+            ['label' => 'Planificado', 'value' => ($plannedQty > 0 ? $fmtQty($plannedQty, 0) . ' un' : '-'), 'sub' => 'Meta programada OT', 'bg' => '#F8FAFC', 'border' => '#E2E8F0', 'color' => '#0F172A'],
+            ['label' => 'Producido real', 'value' => $fmtQty($totalProducedQty, 0) . ' un', 'sub' => ($totalOutputMeters > 0 ? $fmtQty($totalOutputMeters, 0) . ' m lineales' : 'Sin metros registrados'), 'bg' => '#ECFDF5', 'border' => '#A7F3D0', 'color' => '#166534'],
+            ['label' => 'Salida en kg', 'value' => $fmtQty($totalOutputKg, 2) . ' kg', 'sub' => ($childRollCount > 0 ? ($childRollCount . ' bobinas hijas') : 'Sin bobinas hijas'), 'bg' => '#EFF6FF', 'border' => '#BFDBFE', 'color' => '#1D4ED8'],
+            ['label' => 'Merma registrada', 'value' => $fmtQty($totalMermaKg, 2) . ' kg', 'sub' => ($totalMermaUnits > 0 ? ($fmtQty($totalMermaUnits, 0) . ' un') : 'Sin unidades de merma'), 'bg' => '#FFF1F2', 'border' => '#FECDD3', 'color' => '#BE123C'],
+        ];
+        foreach ($summaryCards as $card) {
+            $html .= '<div style="background:' . $card['bg'] . ';border:1px solid ' . $card['border'] . ';border-radius:10px;padding:12px 14px">';
+            $html .= '<div style="font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase">' . h($card['label']) . '</div>';
+            $html .= '<div style="font-size:18px;font-weight:900;color:' . $card['color'] . ';margin-top:4px">' . h($card['value']) . '</div>';
+            $html .= '<div style="font-size:11.5px;color:#64748B;margin-top:3px">' . h($card['sub']) . '</div>';
+            $html .= '</div>';
+        }
+        $html .= '</div>';
+
         if ($events !== []) {
-            $html .= '<div style="margin-top:10px;background:#f8fafc;border-radius:8px;padding:8px 12px;font-size:11.5px">';
-            $html .= '<div style="font-weight:700;color:#334155;margin-bottom:4px">Historial de eventos de máquina:</div>';
-            foreach ($events as $ev) {
-                $evTime = !empty($ev['evt_startdat']) ? date('H:i d/m', strtotime((string)$ev['evt_startdat'])) : '';
-                $html .= '<div style="color:#64748b;margin-bottom:2px">⏱️ ' . h($evTime) . ' · ' . h((string)($ev['evt_desc'] ?? '')) . '</div>';
+            $recentEvents = array_slice(array_reverse($events), 0, 8);
+            $html .= '<div style="margin-top:12px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:10px 12px;font-size:11.5px">';
+            $html .= '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">';
+            $html .= '<div style="font-weight:800;color:#334155">Eventos relevantes de la OT</div>';
+            $html .= '<div style="font-size:11px;color:#64748B">' . count($events) . ' registros</div>';
+            $html .= '</div>';
+            $html .= '<div style="display:flex;flex-direction:column;gap:6px">';
+            foreach ($recentEvents as $ev) {
+                $evtType = (string)($ev['evt_type'] ?? '');
+                [$badgeBg, $badgeColor] = $eventBadge($evtType);
+                $evtAmount = (float)($ev['evt_amount'] ?? 0);
+                $evtKg = (float)($ev['prod_bobina_kg'] ?? 0);
+                $evtMts = (float)($ev['evt_amount_metros_lineales'] ?? 0);
+                $evtMetrics = [];
+                if (in_array($evtType, ['prod', 'prodsericolor'], true) && $evtAmount > 0) {
+                    $evtMetrics[] = $fmtQty($evtAmount, 0) . ' un';
+                }
+                if ($evtKg > 0) {
+                    $evtMetrics[] = $fmtQty($evtKg, 2) . ' kg';
+                }
+                if ($evtMts > 0) {
+                    $evtMetrics[] = $fmtQty($evtMts, 0) . ' m';
+                }
+                $evtStatusText = ((int)($ev['evt_status'] ?? 0) === 1) ? 'Abierto' : 'Cerrado';
+                $html .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;background:#fff;border:1px solid #E2E8F0;border-radius:8px;padding:8px 10px">';
+                $html .= '<div style="display:flex;gap:8px;align-items:flex-start;min-width:220px;flex:1">';
+                $html .= '<span style="background:' . $badgeBg . ';color:' . $badgeColor . ';border-radius:999px;padding:4px 8px;font-size:10.5px;font-weight:800;white-space:nowrap">' . h($eventLabel($evtType)) . '</span>';
+                $html .= '<div><div style="font-size:12px;font-weight:700;color:#0F172A">' . h((string)($ev['evt_desc'] ?? $eventLabel($evtType))) . '</div><div style="font-size:11px;color:#64748B;margin-top:2px">' . h($fmtDate($ev['evt_crtdat'] ?? null)) . ' · ' . h($evtStatusText) . '</div></div>';
+                $html .= '</div>';
+                $html .= '<div style="font-size:11.5px;font-weight:700;color:#334155">' . h(!empty($evtMetrics) ? implode(' · ', $evtMetrics) : 'Sin cantidad asociada') . '</div>';
+                $html .= '</div>';
             }
+            $html .= '</div>';
             $html .= '</div>';
         }
     } else {
@@ -2379,47 +2554,69 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
     }
     $html .= '</div>';
 
-    // NODO 4: Bultos Hijos Resultantes (si aplica)
-    if ($childRolls !== [] || $boxes !== []) {
+    if ($childRolls !== [] || $boxes !== [] || $palletCount > 0) {
         $html .= '<div style="text-align:center;color:#00A9A6;font-size:18px;margin:-8px 0;user-select:none">⬇</div>';
         $html .= '<div class="trz-card" style="padding:16px;background:#fff">';
         $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-        $html .= '<span style="font-size:11.5px;font-weight:800;color:#6d28d9;background:#f5f3ff;border:1px solid #ddd6fe;padding:3px 10px;border-radius:6px">📦 4. Bultos Hijos Resultantes</span>';
-        $html .= '<span style="font-size:11.5px;font-weight:700;color:#6d28d9">' . (count($childRolls) + count($boxes)) . ' generados</span>';
+        $html .= '<span style="font-size:11.5px;font-weight:800;color:#6d28d9;background:#f5f3ff;border:1px solid #ddd6fe;padding:3px 10px;border-radius:6px">4. Salida generada</span>';
+        $html .= '<span style="font-size:11.5px;font-weight:700;color:#6d28d9">' . ($childRollCount + $boxCount + $palletCount) . ' registros de salida</span>';
         $html .= '</div>';
-        $html .= '<div style="display:flex;flex-direction:column;gap:6px">';
+        $html .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-bottom:12px">';
+        $html .= '<div style="background:#FAF5FF;border:1px solid #E9D5FF;border-radius:10px;padding:12px"><div style="font-size:11px;font-weight:800;color:#7C3AED;text-transform:uppercase">Bobinas hijas</div><div style="font-size:18px;font-weight:900;color:#6D28D9;margin-top:4px">' . $childRollCount . '</div><div style="font-size:11.5px;color:#6B7280;margin-top:3px">' . $fmtQty($childRollKg, 2) . ' kg · ' . $fmtQty($childRollMeters, 0) . ' m</div></div>';
+        $html .= '<div style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:10px;padding:12px"><div style="font-size:11px;font-weight:800;color:#B45309;text-transform:uppercase">Cajas</div><div style="font-size:18px;font-weight:900;color:#B45309;margin-top:4px">' . $boxCount . '</div><div style="font-size:11.5px;color:#6B7280;margin-top:3px">' . $fmtQty($boxUnits, 0) . ' unidades embaladas</div></div>';
+        $html .= '<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:12px"><div style="font-size:11px;font-weight:800;color:#1D4ED8;text-transform:uppercase">Pallets</div><div style="font-size:18px;font-weight:900;color:#1D4ED8;margin-top:4px">' . $palletCount . '</div><div style="font-size:11.5px;color:#6B7280;margin-top:3px">Consolidación de despacho</div></div>';
+        $html .= '</div>';
+
+        $html .= '<div style="display:flex;flex-direction:column;gap:8px">';
         foreach ($childRolls as $cRoll) {
-            $html .= '<div style="background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;font-size:12px">';
-            $html .= '<div><span style="font-weight:800;color:#6d28d9">🌀 Bobina Hija: ' . h((string)$cRoll['roll_code']) . '</span> <span style="color:#64748b">(' . h((string)($cRoll['sku_code'] ?? '')) . ')</span></div>';
-            $html .= '<div style="font-weight:800;color:#0f172a">' . number_format((float)($cRoll['received_qty'] ?? 1), 2, ',', '.') . '</div>';
+            $html .= '<div style="background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;font-size:12px;flex-wrap:wrap;gap:8px">';
+            $html .= '<div><span style="font-weight:800;color:#6d28d9">Bobina hija: ' . h((string)$cRoll['roll_code']) . '</span> <span style="color:#64748b">(' . h((string)($cRoll['sku_code'] ?? '')) . ')</span><div style="font-size:11px;color:#64748B;margin-top:2px">' . h((string)($cRoll['status'] ?? '')) . '</div></div>';
+            $html .= '<div style="font-weight:800;color:#0f172a;text-align:right">' . $fmtQty((float)($cRoll['weight_kg'] ?? 0), 2) . ' kg<div style="font-size:11px;color:#64748B;margin-top:2px">' . $fmtQty((float)($cRoll['meters'] ?? 0), 0) . ' m</div></div>';
             $html .= '</div>';
         }
         foreach ($boxes as $bx) {
-            $html .= '<div style="background:#fffbeb;border:1px solid #fef3c7;border-radius:8px;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;font-size:12px">';
-            $html .= '<div><span style="font-weight:800;color:#b45309">📦 Caja: ' . h((string)$bx['box_code']) . '</span> <span style="color:#64748b">(' . h((string)($bx['final_sku'] ?? '')) . ')</span></div>';
-            $html .= '<div style="font-weight:800;color:#0f172a">' . number_format((float)($bx['units_qty'] ?? 1), 0, ',', '.') . ' un</div>';
+            $boxPalletRef = !empty($bx['pallet_id']) ? (' · pallet #' . (int)$bx['pallet_id']) : '';
+            $html .= '<div style="background:#fffbeb;border:1px solid #fef3c7;border-radius:8px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;font-size:12px;flex-wrap:wrap;gap:8px">';
+            $html .= '<div><span style="font-weight:800;color:#b45309">Caja: ' . h((string)$bx['box_code']) . '</span> <span style="color:#64748b">(' . h((string)($bx['final_sku'] ?? '')) . ')</span><div style="font-size:11px;color:#64748B;margin-top:2px">' . h((string)($bx['status'] ?? '')) . $boxPalletRef . '</div></div>';
+            $html .= '<div style="font-weight:800;color:#0f172a">' . $fmtQty((float)($bx['units_qty'] ?? 1), 0) . ' un</div>';
+            $html .= '</div>';
+        }
+        foreach ($uniquePallets as $pal) {
+            $palCode = (string)($pal['pallet_code'] ?? ('PALLET #' . (int)($pal['id'] ?? 0)));
+            $palBoxCount = (int)($pal['box_count'] ?? 0);
+            $html .= '<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;font-size:12px;flex-wrap:wrap;gap:8px">';
+            $html .= '<div><span style="font-weight:800;color:#1D4ED8">Pallet: ' . h($palCode) . '</span> <span style="color:#64748b">(' . h((string)($pal['final_sku'] ?? $sku)) . ')</span><div style="font-size:11px;color:#64748B;margin-top:2px">' . h((string)($pal['status'] ?? '')) . '</div></div>';
+            $html .= '<div style="font-weight:800;color:#0f172a">' . ($palBoxCount > 0 ? ($palBoxCount . ' cajas') : 'Consolidado') . '</div>';
             $html .= '</div>';
         }
         $html .= '</div>';
         $html .= '</div>';
     }
 
-    // NODO 5: Auditoría de Movimientos
     if ($movements !== []) {
         $html .= '<div style="text-align:center;color:#00A9A6;font-size:18px;margin:-8px 0;user-select:none">⬇</div>';
         $html .= '<div class="trz-card" style="padding:16px;background:#fff">';
         $html .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-        $html .= '<span style="font-size:11.5px;font-weight:800;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;padding:3px 10px;border-radius:6px">📜 5. Cadena de Custodia & Movimientos</span>';
+        $html .= '<span style="font-size:11.5px;font-weight:800;color:#334155;background:#f1f5f9;border:1px solid #cbd5e1;padding:3px 10px;border-radius:6px">5. Cadena de custodia y movimientos</span>';
         $html .= '<span style="font-size:11.5px;font-weight:700;color:#64748b">' . count($movements) . ' registros</span>';
         $html .= '</div>';
         $html .= '<div style="display:flex;flex-direction:column;gap:6px">';
         foreach ($movements as $m) {
             $mDate = !empty($m['created_at']) ? date('d/m/Y H:i', strtotime((string)$m['created_at'])) : '-';
             $mType = (string)($m['movement_type'] ?? 'MOVIMIENTO');
+            $mPayload = [];
+            if (!empty($m['payload'])) {
+                $decoded = json_decode((string)$m['payload'], true);
+                if (is_array($decoded)) {
+                    $mPayload = $decoded;
+                }
+            }
+            $mOperator = trim((string)($mPayload['operator_name'] ?? $mPayload['operator'] ?? ''));
             $toWh = (int)($m['to_warehouse_id'] ?? 0);
+            $fromWh = (int)($m['from_warehouse_id'] ?? 0);
             $html .= '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;font-size:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">';
-            $html .= '<div><strong style="color:#0f766e">' . h($mType) . '</strong>' . ($toWh > 0 ? (' <span style="color:#64748b">→ Bodega #' . $toWh . '</span>') : '') . '</div>';
-            $html .= '<div style="font-size:11px;color:#94a3b8">📅 ' . h($mDate) . '</div>';
+            $html .= '<div><strong style="color:#0f766e">' . h($mType) . '</strong>' . ($fromWh > 0 ? (' <span style="color:#64748b">Bodega #' . $fromWh . '</span>') : '') . ($toWh > 0 ? (' <span style="color:#64748b">→ Bodega #' . $toWh . '</span>') : '') . ($mOperator !== '' ? (' <span style="color:#94A3B8">· ' . h($mOperator) . '</span>') : '') . '</div>';
+            $html .= '<div style="font-size:11px;color:#94a3b8">' . h($mDate) . '</div>';
             $html .= '</div>';
         }
         $html .= '</div>';
@@ -2452,15 +2649,12 @@ function unibagRenderStockTraceabilityTreePage(ReceptionService $service, ?Produ
         }
     }
 
-    $recentEntries = $service->listWarehouseTraceabilityEntries($bodegaId > 0 ? $bodegaId : null, null, 15);
-
     $body = '<div class="trz-shell">';
 
     // Header
     $body .= '<div class="trz-header">';
     $body .= '<div>';
-    $body .= '<div class="trz-title"><span>🌳</span> Árbol Genealógico de Trazabilidad 360°</div>';
-    $body .= '<div class="trz-sub">Auditoría completa e integral de existencias: origen en OC, rotulación en bodega, transformaciones en máquinas y bultos resultantes.</div>';
+    $body .= '<div class="trz-title">Trazabilidad</div>';
     $body .= '</div>';
     $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap">';
     $body .= '<a class="btn secondary" href="/stock' . ($bodegaId > 0 ? ('?bodega=' . $bodegaId) : '') . '">← Volver a Stock</a>';
@@ -2484,17 +2678,6 @@ function unibagRenderStockTraceabilityTreePage(ReceptionService $service, ?Produ
     }
     $body .= '</form>';
 
-    // Chips de accesos rápidos recientes
-    if ($recentEntries !== []) {
-        $body .= '<div style="margin-top:14px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">';
-        $body .= '<span style="font-size:11.5px;font-weight:700;color:#64748b">Bultos recientes en bodega:</span>';
-        foreach (array_slice($recentEntries, 0, 8) as $re) {
-            $rCode = (string)$re['traceability_code'];
-            $rSku = (string)$re['item_code'];
-            $body .= '<a href="/stock/traceability?q=' . rawurlencode($rCode) . ($bodegaId > 0 ? ('&bodega=' . $bodegaId) : '') . '" class="trz-tag-code" style="font-size:11.5px;padding:2px 8px" title="' . h($rSku) . '">' . h($rCode) . '</a>';
-        }
-        $body .= '</div>';
-    }
     $body .= '</div>';
 
     // Alertas o Resultados
@@ -2560,7 +2743,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '  </div>';
     $body .= '  <div style="display:flex;align-items:center;gap:8px">';
     $body .= '    <a href="/stock" class="btn secondary" style="font-size:13px;padding:8px 14px">📦 Consulta de Stock</a>';
-    $body .= '    <a href="/stock/traceability" class="btn secondary" style="font-size:13px;padding:8px 14px">🌳 Árbol Trazabilidad</a>';
+    $body .= '    <a href="/stock/traceability" class="btn secondary" style="font-size:13px;padding:8px 14px">Trazabilidad</a>';
     $body .= '  </div>';
     $body .= '</div>';
 
@@ -2742,26 +2925,46 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '            <label style="display:block;font-size:11.5px;font-weight:700;color:#475569;margin-bottom:3px">Descripción de Material</label>';
     $body .= '            <input type="text" name="sku_desc_manual" id="inp_sku_desc_manual" placeholder="Ej: TELA TNT BLANCO 80GR..." style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px">';
     $body .= '          </div>';
-    $body .= '          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+    $body .= '          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">';
     $body .= '            <div>';
     $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#475569;margin-bottom:3px">Ancho (mm / cm)</label>';
-    $body .= '              <input type="number" step="any" name="width_mm" id="inp_width_manual" placeholder="Ej: 1080" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px">';
+    $body .= '              <input type="number" step="any" name="width_mm" id="inp_width_manual" placeholder="Ej: 1080" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px" oninput="calcManualRollDims(\'width\')">';
     $body .= '            </div>';
     $body .= '            <div>';
     $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#475569;margin-bottom:3px">Metros (m)</label>';
-    $body .= '              <input type="number" step="any" name="meters" id="inp_meters_manual" placeholder="Ej: 1400" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px">';
+    $body .= '              <input type="number" step="any" name="meters" id="inp_meters_manual" placeholder="Ej: 1400" style="width:100%;padding:7px 10px;border:1px solid #cbd5e1;border-radius:5px;font-size:13px" oninput="calcManualRollDims(\'meters\')">';
+    $body .= '            </div>';
+    $body .= '            <div>';
+    $body .= '              <label style="display:block;font-size:11.5px;font-weight:700;color:#0f766e;margin-bottom:3px">Peso (Kg) *</label>';
+    $body .= '              <input type="number" step="0.01" min="0.1" name="manual_weight_kg" id="inp_weight_manual" placeholder="Ej: 85.0" style="width:100%;padding:7px 10px;border:1.5px solid #0f766e;border-radius:5px;font-size:13px;font-weight:700" oninput="calcManualRollDims(\'weight\')">';
     $body .= '            </div>';
     $body .= '          </div>';
     $body .= '        </div>';
-
-    // Ficha resumen de la bobina seleccionada
-    $body .= '        <div id="card_selected_roll_preview" style="background:#f1f5f9;border:1px dashed #cbd5e1;border-radius:8px;padding:12px;margin-top:10px">';
+    $body .= '';
+    $body .= '        <!-- Ficha resumen de la bobina seleccionada y Peso a Despachar -->';
+    $body .= '        <div id="card_selected_roll_preview" style="background:#f8fafc;border:1.5px solid #cbd5e1;border-radius:10px;padding:14px;margin-top:12px">';
     $body .= '          <div style="font-size:11.5px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:6px">Ficha de Bobina a Traspasar</div>';
     $body .= '          <div id="preview_roll_code" style="font-size:15px;font-weight:800;color:#0f172a;font-family:monospace">Sin bobina seleccionada</div>';
     $body .= '          <div id="preview_roll_desc" style="font-size:12.5px;color:#475569;margin-top:2px">Seleccione una bobina del stock o pistolee su etiqueta.</div>';
     $body .= '          <div style="display:flex;gap:14px;margin-top:8px;font-size:12px;color:#334155">';
-    $body .= '            <div><strong>Peso:</strong> <span id="preview_roll_kg">-</span> kg</div>';
     $body .= '            <div><strong>Bodega Origen:</strong> <span id="preview_roll_wh">-</span></div>';
+    $body .= '            <div><strong>Peso Registrado:</strong> <span id="preview_roll_kg">-</span> kg</div>';
+    $body .= '          </div>';
+    $body .= '';
+    $body .= '          <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #cbd5e1">';
+    $body .= '            <label style="display:block;font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px">';
+    $body .= '              ⚖️ Peso Real de Balanza a Traspasar (Kg) <span style="color:#ef4444">*</span>';
+    $body .= '            </label>';
+    $body .= '            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+    $body .= '              <input type="number" step="0.01" min="0.1" name="weight_kg" id="inp_weight_kg" placeholder="0.00" style="width:140px;padding:8px 12px;border:1.5px solid #0284c7;border-radius:6px;font-size:16px;font-weight:800;color:#0f172a;background:#fff" required>';
+    $body .= '              <span style="font-size:13px;font-weight:700;color:#475569">Kg</span>';
+    $body .= '              <button type="button" class="btn secondary" id="btn_scale_transfer" onclick="captureTransferScaleWeight()" style="padding:7px 12px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px">';
+    $body .= '                <span>⚖️ Balanza en Vivo</span>';
+    $body .= '              </button>';
+    $body .= '            </div>';
+    $body .= '            <div id="transfer_scale_msg" style="font-size:11.5px;color:#64748b;margin-top:4px">';
+    $body .= '              Verifique o ajuste el peso pesado en balanza antes de despachar a la planta.';
+    $body .= '            </div>';
     $body .= '          </div>';
     $body .= '        </div>';
     $body .= '      </div>';
@@ -3081,6 +3284,64 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         document.getElementById("preview_roll_desc").textContent = desc;
         document.getElementById("preview_roll_kg").textContent = kg;
         document.getElementById("preview_roll_wh").textContent = wh;
+      }
+
+      async function captureTransferScaleWeight() {
+        var btn = document.getElementById("btn_scale_transfer");
+        var inp = document.getElementById("inp_weight_kg");
+        var msg = document.getElementById("transfer_scale_msg");
+        if (!inp || !btn) return;
+        var old = btn.innerHTML;
+        btn.innerHTML = "<span>⏳ Leyendo...</span>";
+        btn.disabled = true;
+        try {
+          var res = await fetch("/api/scale/weight", { cache: "no-store" });
+          var data = await res.json();
+          if (data && data.ok && data.weight_kg !== undefined) {
+            var w = parseFloat(data.weight_kg);
+            inp.value = w.toFixed(2);
+            document.getElementById("preview_roll_kg").textContent = w.toFixed(2);
+            if (msg) {
+              msg.innerHTML = \'<span style="color:#16a34a;font-weight:bold">✅ Peso capturado de balanza: \' + w.toFixed(2) + \' Kg</span>\';
+            }
+          } else {
+            alert("No se pudo leer la balanza: " + (data.error || "Sin señal"));
+          }
+        } catch(e) {
+          alert("Error de comunicación con balanza: " + e.message);
+        } finally {
+          btn.innerHTML = old;
+          btn.disabled = false;
+        }
+      }
+
+      function calcManualRollDims(changed) {
+        var wInp = document.getElementById("inp_width_manual");
+        var mInp = document.getElementById("inp_meters_manual");
+        var kgInp = document.getElementById("inp_weight_manual");
+        var mainKgInp = document.getElementById("inp_weight_kg");
+        if (!wInp || !mInp || !kgInp || !mainKgInp) return;
+        var widthVal = parseFloat(wInp.value || "0");
+        var metersVal = parseFloat(mInp.value || "0");
+        var kgVal = parseFloat(kgInp.value || "0");
+        var widthM = widthVal > 100 ? (widthVal / 1000) : (widthVal / 100);
+        var gsm = 80;
+
+        if (changed === "weight" && kgVal > 0) {
+          mainKgInp.value = kgVal.toFixed(2);
+          document.getElementById("preview_roll_kg").textContent = kgVal.toFixed(2);
+          if (widthM > 0 && metersVal <= 0) {
+            var calcMts = Math.round((kgVal * 1000) / (widthM * gsm));
+            mInp.value = calcMts;
+          }
+        } else if (changed === "meters" && metersVal > 0) {
+          if (widthM > 0 && kgVal <= 0) {
+            var calcKg = (metersVal * widthM * gsm) / 1000;
+            kgInp.value = calcKg.toFixed(2);
+            mainKgInp.value = calcKg.toFixed(2);
+            document.getElementById("preview_roll_kg").textContent = calcKg.toFixed(2);
+          }
+        }
       }
 
       function lookupScannedRoll() {

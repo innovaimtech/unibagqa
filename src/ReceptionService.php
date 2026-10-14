@@ -4418,8 +4418,11 @@ SQL;
             return 'IA' . sprintf('%08d', time() % 100000000);
         }
         $companyId = $companyId > 0 ? $companyId : 20010;
+        $ownsTransaction = !$erpPdo->inTransaction();
         try {
-            $erpPdo->beginTransaction();
+            if ($ownsTransaction) {
+                $erpPdo->beginTransaction();
+            }
             $stmt = $erpPdo->prepare(
                 'SELECT company_numformat_stockchange, company_numcounter_stockchange
                  FROM company_data
@@ -4443,10 +4446,12 @@ SQL;
                 ':id' => $companyId,
             ]);
 
-            $erpPdo->commit();
+            if ($ownsTransaction) {
+                $erpPdo->commit();
+            }
             return $prefix . sprintf('%08d', $nextCounter);
         } catch (Throwable) {
-            if ($erpPdo->inTransaction()) {
+            if ($ownsTransaction && $erpPdo->inTransaction()) {
                 $erpPdo->rollBack();
             }
             return 'IA' . sprintf('%08d', time() % 100000000);
@@ -5376,6 +5381,59 @@ SQL;
         $stmt = $this->pdo->prepare('SELECT id, code, name FROM chemicals WHERE is_active = 1 ORDER BY code ASC');
         $stmt->execute();
         return $stmt->fetchAll();
+    }
+
+    /**
+     * Retorna artículos existentes en una bodega ERP para ser solicitados como tintas/insumos.
+     *
+     * @return array<int, array{item_id:int, code:string, name:string, unit_name:string, available_qty:float, request_label:string}>
+     */
+    public function listWarehouseItemsByWarehouseCode(int $warehouseCode, bool $onlyWithStock = true): array
+    {
+        $warehouseCode = max(0, $warehouseCode);
+        if ($warehouseCode <= 0) {
+            return [];
+        }
+
+        $this->syncWarehousesFromErp();
+
+        $stmt = $this->pdo->prepare(
+            'SELECT id, code, name, erp_storehouse_id
+             FROM warehouses
+             WHERE code = :code
+             LIMIT 1'
+        );
+        $stmt->execute([':code' => $warehouseCode]);
+        $warehouse = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        $erpStorehouseId = (int)($warehouse['erp_storehouse_id'] ?? 0);
+        if ($erpStorehouseId <= 0) {
+            $erpStorehouseId = $warehouseCode;
+        }
+
+        $items = $this->getErpStockByStorehouse($erpStorehouseId, null, $onlyWithStock);
+        $results = [];
+        foreach ($items as $item) {
+            $code = trim((string)($item['item_number_prod'] ?? ''));
+            $name = trim((string)($item['item_title'] ?? ''));
+            $unitName = trim((string)($item['unit_name'] ?? 'UNID'));
+            $availableQty = (float)($item['available_qty'] ?? 0);
+
+            if ($code === '' && $name === '') {
+                continue;
+            }
+
+            $results[] = [
+                'item_id' => (int)($item['item_id'] ?? 0),
+                'code' => $code,
+                'name' => $name,
+                'unit_name' => $unitName,
+                'available_qty' => $availableQty,
+                'request_label' => trim(($code !== '' ? $code . ' - ' : '') . $name),
+            ];
+        }
+
+        return $results;
     }
 
     public function listAniloxCatalog(): array
@@ -10113,14 +10171,14 @@ SQL;
                 LEFT JOIN item t11 ON t10.item_id = t11.id
                 LEFT JOIN customer t12 ON t9.req_cust_id = t12.id
                 INNER JOIN (
-                    SELECT evt_prod_worker_otid, 
-                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') OR evt_status > 0 THEN evt_amount ELSE 0 END) AS produced_units,
+                    SELECT evt_prod_worker_otid,
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') THEN evt_amount ELSE 0 END) AS produced_units,
                            SUM(evt_amount_metros_lineales) AS produced_meters,
                            SUM(prod_bobina_kg) AS produced_kg
                     FROM prod_worker_ot_events
                     GROUP BY evt_prod_worker_otid
                     HAVING (
-                        SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') OR evt_status > 0 THEN evt_amount ELSE 0 END) > 0
+                        SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') THEN evt_amount ELSE 0 END) > 0
                         OR SUM(evt_amount_metros_lineales) > 0
                         OR SUM(prod_bobina_kg) > 0
                     )
@@ -11037,6 +11095,104 @@ SQL;
                 $this->erpPdo->rollBack();
             }
             return ['ok' => false, 'error' => 'Error al actualizar producción: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Elimina un registro de producción (prod_worker_ot) y sus eventos, mermas y controles asociados.
+     * Operación transaccional con auditoría, permitida a usuarios autorizados (Héctor y Javier).
+     *
+     * @param int $otId ID del registro en prod_worker_ot
+     * @param string|null $userName Nombre del usuario para registro de auditoría
+     * @return array{ok: bool, message?: string, error?: string}
+     */
+    public function deleteProductionRecord(int $otId, ?string $userName = null): array
+    {
+        if ($otId <= 0) {
+            return ['ok' => false, 'error' => 'Identificador de registro no válido.'];
+        }
+
+        try {
+            // 1. Obtener registro base de prod_worker_ot para validar existencia y obtener info de contexto
+            $stmtBase = $this->erpPdo->prepare("
+                SELECT t1.id, t1.wok_ag_id, t1.wok_init_id, t1.wok_status,
+                       t2.ag_equipo_id, t2.ag_prdid,
+                       h.prd_number, e.equipo_name,
+                       CONCAT(w.wrk_firstname, ' ', w.wrk_lastname) AS worker_name
+                FROM prod_worker_ot t1
+                LEFT JOIN prod_agenda t2 ON t1.wok_ag_id = t2.id
+                LEFT JOIN prod_header h ON t2.ag_prdid = h.id
+                LEFT JOIN prod_worker_init wi ON t1.wok_init_id = wi.id
+                LEFT JOIN workers w ON wi.win_wrkid = w.id
+                LEFT JOIN equipo e ON t2.ag_equipo_id = e.id
+                WHERE t1.id = :ot_id
+            ");
+            $stmtBase->execute([':ot_id' => $otId]);
+            $baseRec = $stmtBase->fetch(PDO::FETCH_ASSOC);
+            if (!$baseRec) {
+                return ['ok' => false, 'error' => 'No se encontró el registro de producción especificado o ya fue eliminado.'];
+            }
+
+            $prdNumber = trim((string)($baseRec['prd_number'] ?? ''));
+            $editor = trim((string)($userName ?? 'Usuario'));
+
+            // 2. Transacción ACID
+            if (!$this->erpPdo->inTransaction()) {
+                $this->erpPdo->beginTransaction();
+            }
+
+            // 2.1 Obtener todos los IDs de eventos asociados a esta OT
+            $stEvts = $this->erpPdo->prepare("SELECT id FROM prod_worker_ot_events WHERE evt_prod_worker_otid = :ot_id");
+            $stEvts->execute([':ot_id' => $otId]);
+            $evtIds = $stEvts->fetchAll(PDO::FETCH_COLUMN) ?: [];
+
+            // 2.2 Eliminar mermas/defectos de esos eventos
+            if (!empty($evtIds)) {
+                $placeholders = implode(',', array_fill(0, count($evtIds), '?'));
+                $stDelDef = $this->erpPdo->prepare("DELETE FROM prod_worker_ot_defectunits WHERE evt_refid IN ($placeholders)");
+                $stDelDef->execute($evtIds);
+            }
+
+            // 2.3 Eliminar controles de calidad (autocontrol) asociados a esta OT
+            if ($this->erpTableExists('prod_worker_ot_autocontrol')) {
+                $stDelAc = $this->erpPdo->prepare("DELETE FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id");
+                $stDelAc->execute([':ot_id' => $otId]);
+            }
+
+            // 2.4 Eliminar embalajes si existieran
+            if ($this->erpTableExists('prod_worker_embalajes')) {
+                $stDelEmb = $this->erpPdo->prepare("DELETE FROM prod_worker_embalajes WHERE evt_prod_worker_otid = :ot_id");
+                $stDelEmb->execute([':ot_id' => $otId]);
+            }
+
+            // 2.5 Eliminar registros de clasificación de subproductos si existieran
+            if ($this->erpTableExists('orders_classify_subproducts_inputweights')) {
+                $stDelClas = $this->erpPdo->prepare("DELETE FROM orders_classify_subproducts_inputweights WHERE prod_worker_ot_id = :ot_id");
+                $stDelClas->execute([':ot_id' => $otId]);
+            }
+
+            // 2.6 Eliminar eventos de producción
+            $stDelEvt = $this->erpPdo->prepare("DELETE FROM prod_worker_ot_events WHERE evt_prod_worker_otid = :ot_id");
+            $stDelEvt->execute([':ot_id' => $otId]);
+
+            // 2.7 Eliminar el registro maestro de la OT
+            $stDelOt = $this->erpPdo->prepare("DELETE FROM prod_worker_ot WHERE id = :ot_id");
+            $stDelOt->execute([':ot_id' => $otId]);
+
+            $this->erpPdo->commit();
+
+            // Log de auditoría
+            error_log(sprintf('[PROD_DELETE] OT %d (N° %s) eliminada exitosamente por %s', $otId, $prdNumber, $editor));
+
+            return [
+                'ok' => true,
+                'message' => sprintf('Registro de producción de la OT %s (ID %d) eliminado exitosamente.', $prdNumber !== '' ? $prdNumber : '#' . $otId, $otId),
+            ];
+        } catch (Throwable $e) {
+            if ($this->erpPdo->inTransaction()) {
+                $this->erpPdo->rollBack();
+            }
+            return ['ok' => false, 'error' => 'Error al eliminar el registro de producción: ' . $e->getMessage()];
         }
     }
 
@@ -15950,6 +16106,8 @@ SQL;
             ]);
         } catch (Throwable) {}
 
+        $this->syncErpInventoryForRollTransfer($rollId, $fromWarehouseId, $toWarehouseId, 'PRODUCTION_TRANSFER');
+
         // 7. Sincronizar en ERP (unibag_unibag)
         if ($this->erpPdo !== null) {
             try {
@@ -16664,7 +16822,7 @@ SQL;
 
         $this->pdo->beginTransaction();
         try {
-            $this->syncErpInventoryForReceivedRoll($rollId, -1.0);
+            $this->syncErpInventoryForReceivedRoll($rollId, -1.0, 'RECEPTION_DELETE');
             $this->deleteRollWarehouseTraceabilityEntry($rollId, $rollCode);
 
             $stmtMov = $this->pdo->prepare("DELETE FROM movements WHERE entity_type = 'ROLL' AND entity_id = :id");
@@ -16709,7 +16867,7 @@ SQL;
         $result = $this->rollReceptionService->createRoll($input);
         if (($result['ok'] ?? false) === true && (int)($result['id'] ?? 0) > 0) {
             $this->syncRollWarehouseTraceabilityEntry((int)$result['id']);
-            $this->syncErpInventoryForReceivedRoll((int)$result['id'], 1.0);
+            $this->syncErpInventoryForReceivedRoll((int)$result['id'], 1.0, 'RECEPTION');
         }
         return $result;
     }
@@ -21758,7 +21916,7 @@ SQL;
                 LEFT JOIN customer t12 ON t9.req_cust_id = t12.id
                 LEFT JOIN (
                     SELECT evt_prod_worker_otid,
-                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') OR evt_status > 0 THEN evt_amount ELSE 0 END) AS produced_units,
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') THEN evt_amount ELSE 0 END) AS produced_units,
                            SUM(COALESCE(evt_amount_metros_lineales, 0)) AS produced_meters
                     FROM prod_worker_ot_events
                     GROUP BY evt_prod_worker_otid
@@ -22855,16 +23013,17 @@ SQL;
         ]);
     }
 
-    private function syncErpInventoryForReceivedRoll(int $rollId, float $direction): void
+    private function syncErpInventoryForReceivedRoll(int $rollId, float $direction, string $movementContext = 'RECEPTION'): void
     {
         if ($rollId <= 0 || $direction == 0.0 || $this->erpPdo === null) {
             return;
         }
 
         $stmt = $this->pdo->prepare(
-            'SELECT r.id, r.received_qty, r.warehouse_id, s.code AS sku_code
+            'SELECT r.id, r.roll_code, r.received_qty, r.warehouse_id, s.code AS sku_code, w.code AS warehouse_code
              FROM rolls r
              INNER JOIN skus s ON s.id = r.sku_id
+             INNER JOIN warehouses w ON w.id = r.warehouse_id
              WHERE r.id = :id
              LIMIT 1'
         );
@@ -22887,28 +23046,66 @@ SQL;
             return;
         }
 
-        $this->adjustErpInventoryRow(
-            (int)$erpItem['id'],
-            (int)$erpStorehouse['shop_id'],
-            (int)$erpStorehouse['id'],
-            $receivedQty * $direction
-        );
+        $movementLabel = strtoupper(trim($movementContext));
+        $annotationBase = $direction > 0
+            ? sprintf(
+                'TRZ RECEPCION %s BOBINA %s SKU %s BOD %s',
+                $movementLabel,
+                trim((string)($roll['roll_code'] ?? ('#' . $rollId))),
+                $skuCode,
+                (string)($roll['warehouse_code'] ?? $warehouseId)
+            )
+            : sprintf(
+                'TRZ REVERSO %s BOBINA %s SKU %s BOD %s',
+                $movementLabel,
+                trim((string)($roll['roll_code'] ?? ('#' . $rollId))),
+                $skuCode,
+                (string)($roll['warehouse_code'] ?? $warehouseId)
+            );
+
+        $wasBooked = $this->recordErpInventoryMovementAcrossTargets($annotationBase, [[
+            'erp_item_id' => (int)$erpItem['id'],
+            'shop_id' => (int)$erpStorehouse['shop_id'],
+            'erp_storehouse_id' => (int)$erpStorehouse['id'],
+            'qty' => $receivedQty * $direction,
+        ]]);
+
+        if ($wasBooked) {
+            return;
+        }
+
+        foreach ($this->getErpSyncTargets() as $targetPdo) {
+            $this->adjustErpInventoryRow(
+                (int)$erpItem['id'],
+                (int)$erpStorehouse['shop_id'],
+                (int)$erpStorehouse['id'],
+                $receivedQty * $direction,
+                $targetPdo
+            );
+        }
     }
 
-    private function syncErpInventoryForRollTransfer(int $rollId, int $fromWarehouseId, int $toWarehouseId): void
+    private function syncErpInventoryForRollTransfer(int $rollId, int $fromWarehouseId, int $toWarehouseId, string $movementContext = 'TRANSFER'): void
     {
         if ($rollId <= 0 || $fromWarehouseId <= 0 || $toWarehouseId <= 0 || $fromWarehouseId === $toWarehouseId || $this->erpPdo === null) {
             return;
         }
 
         $stmt = $this->pdo->prepare(
-            'SELECT r.received_qty, s.code AS sku_code
+            'SELECT r.roll_code, r.received_qty, s.code AS sku_code,
+                    wf.code AS from_warehouse_code, wt.code AS to_warehouse_code
              FROM rolls r
              INNER JOIN skus s ON s.id = r.sku_id
+             INNER JOIN warehouses wf ON wf.id = :from_wh
+             INNER JOIN warehouses wt ON wt.id = :to_wh
              WHERE r.id = :id
              LIMIT 1'
         );
-        $stmt->execute([':id' => $rollId]);
+        $stmt->execute([
+            ':id' => $rollId,
+            ':from_wh' => $fromWarehouseId,
+            ':to_wh' => $toWarehouseId,
+        ]);
         $roll = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$roll) {
             return;
@@ -22931,8 +23128,327 @@ SQL;
         }
 
         $itemId = (int)$erpItem['id'];
-        $this->adjustErpInventoryRow($itemId, (int)$fromStorehouse['shop_id'], (int)$fromStorehouse['id'], -1.0 * $receivedQty);
-        $this->adjustErpInventoryRow($itemId, (int)$toStorehouse['shop_id'], (int)$toStorehouse['id'], $receivedQty);
+        $annotationBase = sprintf(
+            'TRZ %s BOBINA %s SKU %s %s->%s',
+            strtoupper(trim($movementContext)),
+            trim((string)($roll['roll_code'] ?? ('#' . $rollId))),
+            $skuCode,
+            (string)($roll['from_warehouse_code'] ?? $fromWarehouseId),
+            (string)($roll['to_warehouse_code'] ?? $toWarehouseId)
+        );
+
+        $wasBooked = $this->recordErpInventoryMovementAcrossTargets($annotationBase, [
+            [
+                'erp_item_id' => $itemId,
+                'shop_id' => (int)$fromStorehouse['shop_id'],
+                'erp_storehouse_id' => (int)$fromStorehouse['id'],
+                'qty' => -1.0 * $receivedQty,
+            ],
+            [
+                'erp_item_id' => $itemId,
+                'shop_id' => (int)$toStorehouse['shop_id'],
+                'erp_storehouse_id' => (int)$toStorehouse['id'],
+                'qty' => $receivedQty,
+            ],
+        ]);
+        if ($wasBooked) {
+            return;
+        }
+
+        foreach ($this->getErpSyncTargets() as $targetPdo) {
+            $this->adjustErpInventoryRow($itemId, (int)$fromStorehouse['shop_id'], (int)$fromStorehouse['id'], -1.0 * $receivedQty, $targetPdo);
+            $this->adjustErpInventoryRow($itemId, (int)$toStorehouse['shop_id'], (int)$toStorehouse['id'], $receivedQty, $targetPdo);
+        }
+    }
+
+    /**
+     * @param array<int, array<string, int|float>> $entries
+     */
+    private function recordErpInventoryMovementAcrossTargets(string $annotationBase, array $entries, int $issueId = 17, int $userId = 1): bool
+    {
+        $annotationBase = trim($annotationBase);
+        if ($annotationBase === '' || $entries === []) {
+            return false;
+        }
+
+        $targets = $this->getErpSyncTargets();
+        if ($targets === []) {
+            return false;
+        }
+
+        $bookedAny = false;
+        $bookedAll = true;
+        foreach ($targets as $targetPdo) {
+            $targetBooked = false;
+            try {
+                if ($this->recordErpInventoryMovementToPdo($targetPdo, $annotationBase, $entries, $issueId, $userId)) {
+                    $bookedAny = true;
+                    $targetBooked = true;
+                }
+            } catch (Throwable) {
+            }
+            if (!$targetBooked) {
+                $bookedAll = false;
+            }
+        }
+
+        return $bookedAny && $bookedAll;
+    }
+
+    /**
+     * @param array<int, array<string, int|float>> $entries
+     */
+    private function recordErpInventoryMovementToPdo(PDO $erpPdo, string $annotationBase, array $entries, int $issueId, int $userId): bool
+    {
+        $buckets = [];
+        foreach ($entries as $entry) {
+            $itemId = (int)($entry['erp_item_id'] ?? 0);
+            $shopId = (int)($entry['shop_id'] ?? 0);
+            $storehouseId = (int)($entry['erp_storehouse_id'] ?? 0);
+            $qty = (float)($entry['qty'] ?? 0);
+            if ($itemId <= 0 || $shopId <= 0 || $storehouseId <= 0 || abs($qty) < 0.0001) {
+                continue;
+            }
+
+            $negative = $qty < 0 ? 1 : 0;
+            $bucketKey = $negative . ':' . $shopId;
+            if (!isset($buckets[$bucketKey])) {
+                $buckets[$bucketKey] = [
+                    'negative' => $negative,
+                    'shop_id' => $shopId,
+                    'entries' => [],
+                ];
+            }
+
+            $buckets[$bucketKey]['entries'][] = [
+                'erp_item_id' => $itemId,
+                'shop_id' => $shopId,
+                'erp_storehouse_id' => $storehouseId,
+                'qty' => abs($qty),
+            ];
+        }
+
+        if ($buckets === []) {
+            return false;
+        }
+
+        $bookedAny = false;
+        $now = time();
+        foreach ($buckets as $bucket) {
+            $negative = (int)$bucket['negative'];
+            $shopId = (int)$bucket['shop_id'];
+            $tranType = $negative > 0 ? 'stockchangedown' : 'stockchangeup';
+            $annotation = $annotationBase . ($negative > 0 ? ' [SALIDA]' : ' [ENTRADA]');
+            $companyId = $this->resolveErpCompanyId($erpPdo);
+
+            try {
+                $erpPdo->beginTransaction();
+
+                $existingId = $this->findErpStockChangeIdByAnnotation($erpPdo, $annotation, $negative);
+                if ($existingId > 0 && $this->stockChangeHasTranData($erpPdo, $existingId, $tranType)) {
+                    $erpPdo->commit();
+                    $bookedAny = true;
+                    continue;
+                }
+
+                if ($existingId > 0) {
+                    $erpPdo->prepare(
+                        'UPDATE stockchanges
+                         SET stk_issueid = :issueid,
+                             stk_companyid = :company_id,
+                             stk_shopid = :shop_id,
+                             stk_bookdate = :bookdate,
+                             stk_negative = :negative,
+                             stk_status = 2,
+                             stk_upddat = :upddat,
+                             stk_updusr = :updusr
+                         WHERE id = :id'
+                    )->execute([
+                        ':issueid' => $issueId,
+                        ':company_id' => $companyId,
+                        ':shop_id' => $shopId,
+                        ':bookdate' => $now,
+                        ':negative' => $negative,
+                        ':upddat' => $now,
+                        ':updusr' => $userId > 0 ? $userId : 1,
+                        ':id' => $existingId,
+                    ]);
+                    $erpPdo->prepare('DELETE FROM stockchanges_items WHERE stk_id = :stk_id')
+                        ->execute([':stk_id' => $existingId]);
+                    $erpPdo->prepare('DELETE FROM tran_data WHERE tran_id = :tran_id AND tran_type = :tran_type')
+                        ->execute([
+                            ':tran_id' => $existingId,
+                            ':tran_type' => $tranType,
+                        ]);
+                    $stockChangeId = $existingId;
+                    $stockChangeNumber = $this->getErpStockChangeNumberById($erpPdo, $stockChangeId);
+                } else {
+                    $stockChangeNumber = $this->generateNextErpStockChangeNumber($companyId, $erpPdo);
+                    $erpPdo->prepare(
+                        'INSERT INTO stockchanges
+                         (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate,
+                          stk_negative, stk_status, stk_crtdat, stk_crtusr, stk_isventainterna, stk_fixedsthid)
+                         VALUES
+                         (:stk_num, :annotation, :issueid, :company_id, :shop_id, :bookdate,
+                          :negative, 2, :crtdat, :crtusr, 0, 0)'
+                    )->execute([
+                        ':stk_num' => $stockChangeNumber,
+                        ':annotation' => $annotation,
+                        ':issueid' => $issueId,
+                        ':company_id' => $companyId,
+                        ':shop_id' => $shopId,
+                        ':bookdate' => $now,
+                        ':negative' => $negative,
+                        ':crtdat' => $now,
+                        ':crtusr' => $userId > 0 ? $userId : 1,
+                    ]);
+                    $stockChangeId = (int)$erpPdo->lastInsertId();
+                }
+
+                $insertItem = $erpPdo->prepare(
+                    'INSERT INTO stockchanges_items
+                     (stk_id, item_id, item_pos, item_amount, item_type, item_st_id)
+                     VALUES
+                     (:stk_id, :item_id, :item_pos, :item_amount, "item", :item_st_id)'
+                );
+                $insertTran = $erpPdo->prepare(
+                    'INSERT INTO tran_data
+                     (tran_id, tran_pos, tran_type, tran_number, tran_currstock, tran_amount, tran_company_id, tran_shop_id, tran_st_id, tran_supplier_id,
+                      tran_cust_id, tran_issueid, item_id, item_parent_id, item_type, item_costprice_brutto, item_costprice_taxes_perc, item_costprice_netto,
+                      item_costprice_taxes, item_costprice_avg_netto, item_sellprice_brutto, item_sellprice_taxes_perc, item_sellprice_netto, item_sellprice_taxes,
+                      item_charges_id, item_charges_used_id, tran_day, tran_month, tran_year, tran_crtusr, tran_crtdat, tran_order_id)
+                     VALUES
+                     (:tran_id, :tran_pos, :tran_type, :tran_number, :tran_currstock, :tran_amount, :tran_company_id, :tran_shop_id, :tran_st_id, 0,
+                      0, :tran_issueid, :item_id, 0, "item", 0, 0, 0,
+                      0, 0, 0, 0, 0, 0,
+                      0, 0, :tran_day, :tran_month, :tran_year, :tran_crtusr, :tran_crtdat, 0)'
+                );
+
+                $currentStockByKey = [];
+                foreach ($bucket['entries'] as $position => $entry) {
+                    $itemId = (int)$entry['erp_item_id'];
+                    $storehouseId = (int)$entry['erp_storehouse_id'];
+                    $qty = (float)$entry['qty'];
+                    $stockKey = $itemId . ':' . $storehouseId;
+                    $currentStock = $currentStockByKey[$stockKey] ?? $this->getCurrentErpInventoryQty($itemId, $storehouseId, $erpPdo);
+
+                    $insertItem->execute([
+                        ':stk_id' => $stockChangeId,
+                        ':item_id' => $itemId,
+                        ':item_pos' => $position,
+                        ':item_amount' => number_format($qty, 10, '.', ''),
+                        ':item_st_id' => $storehouseId,
+                    ]);
+
+                    $insertTran->execute([
+                        ':tran_id' => $stockChangeId,
+                        ':tran_pos' => $position,
+                        ':tran_type' => $tranType,
+                        ':tran_number' => $stockChangeNumber,
+                        ':tran_currstock' => number_format($currentStock, 10, '.', ''),
+                        ':tran_amount' => number_format($qty, 10, '.', ''),
+                        ':tran_company_id' => $companyId,
+                        ':tran_shop_id' => $shopId,
+                        ':tran_st_id' => $storehouseId,
+                        ':tran_issueid' => $issueId,
+                        ':item_id' => $itemId,
+                        ':tran_day' => (int)date('d', $now),
+                        ':tran_month' => (int)date('m', $now),
+                        ':tran_year' => (int)date('Y', $now),
+                        ':tran_crtusr' => $userId > 0 ? $userId : 1,
+                        ':tran_crtdat' => $now,
+                    ]);
+
+                    $delta = $negative > 0 ? -1.0 * $qty : $qty;
+                    $this->adjustErpInventoryRow($itemId, $shopId, $storehouseId, $delta, $erpPdo, true);
+                    $currentStockByKey[$stockKey] = $currentStock + $delta;
+                }
+
+                $erpPdo->commit();
+                $bookedAny = true;
+            } catch (Throwable) {
+                if ($erpPdo->inTransaction()) {
+                    $erpPdo->rollBack();
+                }
+            }
+        }
+
+        return $bookedAny;
+    }
+
+    private function findErpStockChangeIdByAnnotation(PDO $erpPdo, string $annotation, int $negative): int
+    {
+        $stmt = $erpPdo->prepare(
+            'SELECT id
+             FROM stockchanges
+             WHERE stk_annotation = :annotation
+               AND stk_negative = :negative
+             ORDER BY id DESC
+             LIMIT 1'
+        );
+        $stmt->execute([
+            ':annotation' => $annotation,
+            ':negative' => $negative,
+        ]);
+
+        return (int)($stmt->fetchColumn() ?: 0);
+    }
+
+    private function stockChangeHasTranData(PDO $erpPdo, int $stockChangeId, string $tranType): bool
+    {
+        if ($stockChangeId <= 0) {
+            return false;
+        }
+
+        $stmt = $erpPdo->prepare(
+            'SELECT COUNT(*)
+             FROM tran_data
+             WHERE tran_id = :tran_id
+               AND tran_type = :tran_type'
+        );
+        $stmt->execute([
+            ':tran_id' => $stockChangeId,
+            ':tran_type' => $tranType,
+        ]);
+
+        return (int)($stmt->fetchColumn() ?: 0) > 0;
+    }
+
+    private function getErpStockChangeNumberById(PDO $erpPdo, int $stockChangeId): string
+    {
+        if ($stockChangeId <= 0) {
+            return '';
+        }
+
+        $stmt = $erpPdo->prepare(
+            'SELECT stk_num
+             FROM stockchanges
+             WHERE id = :id
+             LIMIT 1'
+        );
+        $stmt->execute([':id' => $stockChangeId]);
+
+        return trim((string)($stmt->fetchColumn() ?: ''));
+    }
+
+    private function resolveErpCompanyId(PDO $erpPdo): int
+    {
+        try {
+            $preferred = $erpPdo->query('SELECT id FROM company_data WHERE id = 20010 LIMIT 1');
+            $preferredId = $preferred ? (int)($preferred->fetchColumn() ?: 0) : 0;
+            if ($preferredId > 0) {
+                return $preferredId;
+            }
+
+            $fallback = $erpPdo->query('SELECT id FROM company_data ORDER BY id ASC LIMIT 1');
+            $fallbackId = $fallback ? (int)($fallback->fetchColumn() ?: 0) : 0;
+            if ($fallbackId > 0) {
+                return $fallbackId;
+            }
+        } catch (Throwable) {
+        }
+
+        return 20010;
     }
 
     private function getErpStorehouseForLocalWarehouse(int $localWarehouseId): ?array
@@ -22966,13 +23482,14 @@ SQL;
         ];
     }
 
-    private function getCurrentErpInventoryQty(int $erpItemId, int $erpStorehouseId): float
+    private function getCurrentErpInventoryQty(int $erpItemId, int $erpStorehouseId, ?PDO $erpPdo = null): float
     {
-        if ($erpItemId <= 0 || $erpStorehouseId <= 0 || $this->erpPdo === null) {
+        $erpPdo ??= $this->erpPdo;
+        if ($erpItemId <= 0 || $erpStorehouseId <= 0 || $erpPdo === null) {
             return 0.0;
         }
 
-        $stmt = $this->erpPdo->prepare(
+        $stmt = $erpPdo->prepare(
             'SELECT COALESCE(SUM(iss_inventory), 0)
              FROM item_shops_storehouses
              WHERE item_id = :item_id
@@ -22986,17 +23503,19 @@ SQL;
         return (float)($stmt->fetchColumn() ?: 0);
     }
 
-    private function adjustErpInventoryRow(int $erpItemId, int $shopId, int $erpStorehouseId, float $deltaQty): void
+    private function adjustErpInventoryRow(int $erpItemId, int $shopId, int $erpStorehouseId, float $deltaQty, ?PDO $erpPdo = null, bool $allowNegative = false): void
     {
-        if ($erpItemId <= 0 || $shopId <= 0 || $erpStorehouseId <= 0 || abs($deltaQty) < 0.0001 || $this->erpPdo === null) {
+        $erpPdo ??= $this->erpPdo;
+        if ($erpItemId <= 0 || $shopId <= 0 || $erpStorehouseId <= 0 || abs($deltaQty) < 0.0001 || $erpPdo === null) {
             return;
         }
 
-        $update = $this->erpPdo->prepare(
-            'UPDATE item_shops_storehouses
-             SET iss_inventory = GREATEST(0, iss_inventory + :delta)
+        $inventoryExpr = $allowNegative ? 'iss_inventory + :delta' : 'GREATEST(0, iss_inventory + :delta)';
+        $update = $erpPdo->prepare(
+            "UPDATE item_shops_storehouses
+             SET iss_inventory = {$inventoryExpr}
              WHERE item_id = :item_id
-               AND st_id = :st_id'
+               AND st_id = :st_id"
         );
         $update->execute([
             ':delta' => $deltaQty,
@@ -23004,11 +23523,11 @@ SQL;
             ':st_id' => $erpStorehouseId,
         ]);
 
-        if ($update->rowCount() > 0 || $deltaQty < 0) {
+        if ($update->rowCount() > 0 || ($deltaQty < 0 && !$allowNegative)) {
             return;
         }
 
-        $insert = $this->erpPdo->prepare(
+        $insert = $erpPdo->prepare(
             'INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_inventory)
              VALUES (:item_id, :shop_id, :st_id, :iss_inventory)'
         );

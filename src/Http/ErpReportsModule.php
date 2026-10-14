@@ -4167,6 +4167,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
             $body .= '<td style="font-size:11.5px">' . h($fabDesc) . ($manillaColor !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">Manilla: ' . h($manillaColor) . '</span>' : '') . ($colorsFront !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">Colores: ' . h($colorsFront) . '</span>' : '') . '</td>';
             $body .= '<td style="font-size:11.5px">👤 ' . h($operator) . ($supervisor !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">Sup: ' . h($supervisor) . '</span>' : '') . ($helper !== '' ? '<br><span class="erp-prod-muted" style="font-size:10.5px">Ayd: ' . h($helper) . '</span>' : '') . '</td>';
             $body .= '<td class="text-center" style="font-size:11px">' . h($startDt) . '<br>' . h($endDt) . '</td>';
+            $body .= '<td class="text-center" style="font-weight:700;color:#334155">' . h($duration) . '</td>';
             $totOrder = (float)($row['total_order_units'] ?? 0);
             $priorProd = (float)($row['prior_produced_units'] ?? 0);
             $planSub = '';
@@ -4216,9 +4217,9 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
             ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
  
             if ($canEdit) {
-                $body .= '<td class="text-center"><button type="button" class="btn-edit-prod-trigger" data-prod="' . h((string)$prodRecordJson) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#00A9A6;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)">✏️ Modificar</button></td>';
+                $body .= '<td class="text-center" style="white-space:nowrap"><div style="display:inline-flex;align-items:center;gap:6px"><button type="button" class="btn-edit-prod-trigger" data-prod="' . h((string)$prodRecordJson) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#00A9A6;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)">✏️ Modificar</button><button type="button" class="btn-delete-prod-trigger" data-otid="' . (int)($row['ot_id'] ?? 0) . '" data-otnum="' . h($otNum) . '" data-machine="' . h($machineName) . '" data-worker="' . h($operator) . '" data-date="' . h($startDt) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#ef4444;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)" title="Eliminar registro de producción duplicado">🗑️ Borrar</button></div></td>';
             } else {
-                $body .= '<td class="text-center"><span class="erp-prod-muted" style="font-size:11.5px;color:#94a3b8" title="Modificaciones permitidas únicamente para HECTOR y JAVIER">🔒 Bloqueado</span></td>';
+                $body .= '<td class="text-center"><span class="erp-prod-muted" style="font-size:11.5px;color:#94a3b8" title="Modificaciones y eliminaciones permitidas únicamente para HECTOR y JAVIER">🔒 Bloqueado</span></td>';
             }
             $body .= '</tr>';
         }
@@ -4410,7 +4411,54 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
         </div>
     </div>
 
-    <!-- Script del Modal de Modificación de Producción -->
+    <!-- Modal para Eliminar Registro de Producción Duplicado -->
+    <div id="modal-prod-delete" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center;padding:16px;">
+        <div class="modal-prod-dialog" style="background:#fff;width:min(520px, 98%);display:flex;flex-direction:column;border-radius:16px;box-shadow:0 25px 50px -12px rgba(0,0,0,0.3);border:1px solid #fee2e2;overflow:hidden;">
+            <div style="background:#b91c1c;color:#fff;padding:16px 20px;display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;align-items:center;gap:10px;">
+                    <span style="font-size:20px">🗑️</span>
+                    <div>
+                        <div style="font-size:16px;font-weight:800;color:#fff">Eliminar Registro de Producción</div>
+                        <div style="font-size:11.5px;color:#fecaca">Autorizado únicamente para Héctor y Javier</div>
+                    </div>
+                </div>
+                <button type="button" id="btn-close-delete-modal-x" style="background:transparent;border:none;color:#fff;font-size:22px;cursor:pointer;line-height:1">×</button>
+            </div>
+            
+            <form id="form-delete-prod" method="post" action="/reports/machine-production/delete">
+                <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
+                <input type="hidden" name="ot_id" id="delete_ot_id" value="">
+                <input type="hidden" name="redirect_url" value="' . h($_SERVER['REQUEST_URI'] ?? '/reports/machine-production') . '">
+                
+                <div style="padding:20px 24px;">
+                    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:12px 14px;margin-bottom:16px;">
+                        <p style="margin:0;font-size:13px;line-height:1.5;color:#991b1b;font-weight:600">
+                            ¿Estás seguro de eliminar este registro de producción?
+                        </p>
+                        <p style="margin:6px 0 0;font-size:12px;color:#b91c1c;line-height:1.4">
+                            Esta acción eliminará de forma permanente el turno de la OT, sus eventos y mermas registradas. Úsalo para corregir registros u órdenes duplicadas.
+                        </p>
+                    </div>
+
+                    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px;font-size:13px;display:flex;flex-direction:column;gap:8px;">
+                        <div><strong style="color:#64748b">OT / Número:</strong> <span id="del-info-ot" style="font-weight:700;color:#0f172a">-</span></div>
+                        <div><strong style="color:#64748b">Máquina:</strong> <span id="del-info-machine" style="font-weight:600;color:#0f172a">-</span></div>
+                        <div><strong style="color:#64748b">Operador:</strong> <span id="del-info-worker" style="font-weight:600;color:#0f172a">-</span></div>
+                        <div><strong style="color:#64748b">Fecha / Hora:</strong> <span id="del-info-date" style="font-weight:600;color:#0f172a">-</span></div>
+                    </div>
+
+                    <div id="delete-status-msg" style="display:none;margin-top:14px;font-size:12.5px;font-weight:700;padding:8px 12px;border-radius:6px;text-align:center"></div>
+                </div>
+
+                <div style="background:#f8fafc;padding:12px 20px;border-top:1px solid #e2e8f0;display:flex;justify-content:flex-end;gap:10px;">
+                    <button type="button" id="btn-cancel-delete" style="padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;background:#e2e8f0;color:#334155;border:none;cursor:pointer">Cancelar</button>
+                    <button type="submit" id="btn-confirm-delete" style="padding:8px 18px;border-radius:8px;font-size:13px;font-weight:700;background:#ef4444;color:#fff;border:none;cursor:pointer;box-shadow:0 2px 4px rgba(239,68,68,0.2)">🗑️ Sí, Eliminar Registro</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Script del Modal de Modificación y Eliminación de Producción -->
     <script>
     (function() {
         var modal = document.getElementById("modal-prod-edit");
@@ -4601,6 +4649,117 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
                         statusDiv.textContent = "⚠️ Error de conexión al guardar.";
                     } else {
                         alert("Error de conexión al guardar.");
+                    }
+                });
+            });
+        }
+
+        // Lógica de eliminación de registros duplicados
+        var delModal = document.getElementById("modal-prod-delete");
+        var delForm = document.getElementById("form-delete-prod");
+        var delCloseX = document.getElementById("btn-close-delete-modal-x");
+        var delCancelBtn = document.getElementById("btn-cancel-delete");
+        var delConfirmBtn = document.getElementById("btn-confirm-delete");
+        var delStatusDiv = document.getElementById("delete-status-msg");
+
+        function closeDelModal() {
+            if (delModal) delModal.style.display = "none";
+            if (delStatusDiv) { delStatusDiv.style.display = "none"; delStatusDiv.textContent = ""; }
+            if (delConfirmBtn) { delConfirmBtn.disabled = false; delConfirmBtn.innerHTML = "🗑️ Sí, Eliminar Registro"; }
+        }
+
+        if (delCloseX) delCloseX.addEventListener("click", closeDelModal);
+        if (delCancelBtn) delCancelBtn.addEventListener("click", closeDelModal);
+        if (delModal) {
+            delModal.addEventListener("click", function(e) {
+                if (e.target === delModal) closeDelModal();
+            });
+        }
+        document.addEventListener("keydown", function(e) {
+            if (e.key === "Escape" && delModal && delModal.style.display !== "none") closeDelModal();
+        });
+
+        document.querySelectorAll(".btn-delete-prod-trigger").forEach(function(btn) {
+            btn.addEventListener("click", function() {
+                var otId = btn.getAttribute("data-otid") || "";
+                var otNum = btn.getAttribute("data-otnum") || "-";
+                var machine = btn.getAttribute("data-machine") || "-";
+                var worker = btn.getAttribute("data-worker") || "-";
+                var dateStr = btn.getAttribute("data-date") || "-";
+
+                document.getElementById("delete_ot_id").value = otId;
+                document.getElementById("del-info-ot").textContent = "OT " + otNum + " (ID: #" + otId + ")";
+                document.getElementById("del-info-machine").textContent = machine;
+                document.getElementById("del-info-worker").textContent = worker;
+                document.getElementById("del-info-date").textContent = dateStr;
+
+                if (delModal) delModal.style.display = "flex";
+            });
+        });
+
+        if (delForm) {
+            delForm.addEventListener("submit", function(e) {
+                e.preventDefault();
+                if (delConfirmBtn) {
+                    delConfirmBtn.disabled = true;
+                    delConfirmBtn.innerHTML = "⏳ Eliminando...";
+                }
+                if (delStatusDiv) {
+                    delStatusDiv.style.display = "none";
+                    delStatusDiv.textContent = "";
+                }
+
+                var formData = new FormData(delForm);
+                fetch("/reports/machine-production/delete", {
+                    method: "POST",
+                    headers: {
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Accept": "application/json"
+                    },
+                    body: formData
+                })
+                .then(function(res) {
+                    return res.json().then(function(json) { return { ok: res.ok, data: json }; });
+                })
+                .then(function(result) {
+                    if (result.ok && result.data && result.data.ok) {
+                        if (delStatusDiv) {
+                            delStatusDiv.style.display = "block";
+                            delStatusDiv.style.background = "#dcfce7";
+                            delStatusDiv.style.color = "#15803d";
+                            delStatusDiv.textContent = "✅ " + (result.data.message || "Registro eliminado con éxito. Actualizando...");
+                        }
+                        setTimeout(function() {
+                            window.location.reload();
+                        }, 500);
+                    } else {
+                        if (delConfirmBtn) {
+                            delConfirmBtn.disabled = false;
+                            delConfirmBtn.innerHTML = "🗑️ Sí, Eliminar Registro";
+                        }
+                        var err = (result.data && result.data.error) ? result.data.error : "Error al eliminar registro.";
+                        if (delStatusDiv) {
+                            delStatusDiv.style.display = "block";
+                            delStatusDiv.style.background = "#fee2e2";
+                            delStatusDiv.style.color = "#b91c1c";
+                            delStatusDiv.textContent = "⚠️ " + err;
+                        } else {
+                            alert(err);
+                        }
+                    }
+                })
+                .catch(function(err) {
+                    if (delConfirmBtn) {
+                        delConfirmBtn.disabled = false;
+                        delConfirmBtn.innerHTML = "🗑️ Sí, Eliminar Registro";
+                    }
+                    if (delStatusDiv) {
+                        delStatusDiv.style.display = "block";
+                        delStatusDiv.style.background = "#fee2e2";
+                        delStatusDiv.style.color = "#b91c1c";
+                        delStatusDiv.textContent = "⚠️ Error de conexión al eliminar.";
+                    } else {
+                        alert("Error de conexión al eliminar.");
                     }
                 });
             });
@@ -8702,6 +8861,65 @@ function handleErpReportRoutes(string $path, string $method, ReceptionService $s
         return true;
     }
 
+    // Eliminación de registro de producción (OT duplicada o registro erróneo)
+    if ($path === '/reports/machine-production/delete' && $method === 'POST') {
+        if (!userCanAccessArea('ERP', sessionAreaPermissions())) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'error' => 'No tiene permisos suficientes para eliminar producción.']);
+            return true;
+        }
+
+        if (!unibagCanUserPerformModifications()) {
+            http_response_code(403);
+            $errPermMsg = 'Acceso denegado: únicamente los usuarios autorizados (HECTOR y JAVIER) pueden eliminar registros de producción.';
+            $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+                   || (isset($_SERVER['HTTP_ACCEPT']) && str_contains($_SERVER['HTTP_ACCEPT'], 'application/json'));
+            if ($isAjax) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(['ok' => false, 'error' => $errPermMsg]);
+                return true;
+            }
+            $redirectUrl = trim((string)($_POST['redirect_url'] ?? '/reports/machine-production'));
+            if ($redirectUrl === '' || !str_starts_with($redirectUrl, '/reports/machine-production')) {
+                $redirectUrl = '/reports/machine-production';
+            }
+            $sep = str_contains($redirectUrl, '?') ? '&' : '?';
+            redirectResponse($redirectUrl . $sep . 'error=' . rawurlencode($errPermMsg));
+            return true;
+        }
+
+        requireCsrf();
+
+        $otId = isset($_POST['ot_id']) ? (int)$_POST['ot_id'] : 0;
+        $userName = trim((string)($_SESSION['user_name'] ?? $_SESSION['auth_username'] ?? $_SESSION['user_firstname'] ?? 'Usuario'));
+        $result = $service->deleteProductionRecord($otId, $userName);
+
+        $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+               || (isset($_SERVER['HTTP_ACCEPT']) && str_contains($_SERVER['HTTP_ACCEPT'], 'application/json'));
+
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            if ($result['ok'] !== true) {
+                http_response_code(422);
+            }
+            echo json_encode($result, JSON_UNESCAPED_UNICODE);
+            return true;
+        }
+
+        $redirectUrl = trim((string)($_POST['redirect_url'] ?? '/reports/machine-production'));
+        if ($redirectUrl === '' || !str_starts_with($redirectUrl, '/reports/machine-production')) {
+            $redirectUrl = '/reports/machine-production';
+        }
+        $sep = str_contains($redirectUrl, '?') ? '&' : '?';
+        if ($result['ok'] === true) {
+            redirectResponse($redirectUrl . $sep . 'msg=' . rawurlencode((string)($result['message'] ?? 'Registro eliminado con éxito.')));
+        } else {
+            redirectResponse($redirectUrl . $sep . 'error=' . rawurlencode((string)($result['error'] ?? 'Error al eliminar.')));
+        }
+        return true;
+    }
+
     // Eventos de Máquina (Unificado: Detención, Colación, Cambio Configuración)
     if ($path === '/reports/machine-events' && $method === 'GET') {
         unibagRenderMachineEventsReportPage($service);
@@ -9642,4 +9860,3 @@ function unibagOutputDispatchesReportExcel(ReceptionService $service): void
     SimpleXlsx::streamHtml($filename, $html, 'Despachos');
     exit;
 }
-

@@ -469,7 +469,10 @@ final class ProductionService
      */
     public function listScheduledOrdersForMachine(int $equipoId, int $plantaId, ?string $dateFilter = null): array
     {
-        $wherePlanta = $plantaId > 0 ? " AND t0.ag_plantaid = :planta_id" : "";
+        // En agenda legacy existen planificaciones válidas con ag_plantaid = 0 o NULL.
+        // Si filtramos solo por la planta exacta, la OT no aparece en la consola nueva aunque
+        // ya esté correctamente asignada a la máquina en el ERP antiguo.
+        $wherePlanta = $plantaId > 0 ? " AND (t0.ag_plantaid = :planta_id OR t0.ag_plantaid IS NULL OR t0.ag_plantaid = 0)" : "";
         $whereDate = "";
         $params = [':equipo_id' => $equipoId];
         if ($plantaId > 0) {
@@ -521,7 +524,7 @@ final class ProductionService
                                teq.equipo_name, teqt.type_ant_title, teq.equipo_type_id, teq.equipo_prod_isprinter_flexo, teq.equipo_prod_isprinter_seri,
                                (SELECT COALESCE(SUM(t_ev.evt_amount), 0) FROM prod_worker_ot t_ot INNER JOIN prod_worker_ot_events t_ev ON t_ev.evt_prod_worker_otid = t_ot.id WHERE t_ot.wok_ag_id = t0.id AND t_ev.evt_type = 'prod' AND t_ev.evt_status > 0) AS total_produced
                 FROM prod_agenda t0
-                INNER JOIN prod_header t3x ON t0.ag_prdid = t3x.id AND t3x.prd_status >= 2
+                LEFT OUTER JOIN prod_header t3x ON t0.ag_prdid = t3x.id
                 INNER JOIN orders t1 ON t0.ag_reqid = t1.id
                 LEFT OUTER JOIN company_data t2 ON t1.req_company_id = t2.id
                 LEFT OUTER JOIN company_shops t3 ON t1.req_shop_id = t3.id
@@ -557,6 +560,288 @@ final class ProductionService
         } catch (Throwable) {
             return [];
         }
+    }
+
+    /**
+     * Lista las órdenes de trabajo activas en ERP que NO han entrado en la planificación de la máquina indicada
+     * (sin agenda asignada a este equipo o sin agenda general), permitiendo al operario o supervisor incorporarlas.
+     *
+     * @param int $equipoId ID de máquina
+     * @param int $plantaId ID de planta
+     * @param string|null $search Término de búsqueda opcional (OT, CC, cliente, producto)
+     * @param int $limit Límite de resultados
+     * @return array<int, array<string, mixed>>
+     */
+    public function listUnscheduledOrdersForMachine(int $equipoId, int $plantaId, ?string $search = null, int $limit = 60): array
+    {
+        if ($equipoId <= 0) {
+            return [];
+        }
+
+        try {
+            $stmtEq = $this->erpPdo->prepare("SELECT id, equipo_name, equipo_type_id, equipo_prod_isprinter_flexo, equipo_prod_isprinter_seri FROM equipo WHERE id = :id LIMIT 1");
+            $stmtEq->execute([':id' => $equipoId]);
+            $eq = $stmtEq->fetch(PDO::FETCH_ASSOC);
+            if (!$eq) {
+                return [];
+            }
+
+            $eqTypeId = (int)($eq['equipo_type_id'] ?? 0);
+            $isFlexo = ($eqTypeId === 7 || (int)($eq['equipo_prod_isprinter_flexo'] ?? 0) === 1);
+            $isSeri = ($eqTypeId === 11 || (int)($eq['equipo_prod_isprinter_seri'] ?? 0) === 1);
+            $isRebo = ($eqTypeId === 12);
+
+            $whereType = "";
+            if ($isFlexo) {
+                $whereType = " AND (t1x.fab_printtype LIKE '%FLEX%' OR t1x.fab_printtype = 'FLX')";
+            } elseif ($isSeri) {
+                $whereType = " AND (t1x.fab_printtype LIKE '%SERI%' OR t1x.fab_printtype = 'SER')";
+            } elseif ($isRebo) {
+                $whereType = " AND (t1.req_rebo_type IS NOT NULL OR t1.req_rebo_cc_genrefid > 0 OR t1.req_operador_tela_width > 0)";
+            }
+
+            $whereSearch = "";
+            $params = [':equipo_id' => $equipoId];
+            if ($search !== null && trim($search) !== '') {
+                $cleanSearch = '%' . trim($search) . '%';
+                $whereSearch = " AND (t3x.prd_number LIKE :s1 OR t1.req_number LIKE :s2 OR t4.cust_name LIKE :s3 OR t2x.item_title LIKE :s4 OR t1x.fab_design_name LIKE :s5)";
+                $params[':s1'] = $cleanSearch;
+                $params[':s2'] = $cleanSearch;
+                $params[':s3'] = $cleanSearch;
+                $params[':s4'] = $cleanSearch;
+                $params[':s5'] = $cleanSearch;
+            }
+
+            $sql = "SELECT DISTINCT t3x.id AS prdid, t3x.prd_number,
+                                   t1.id AS req_id, t1.req_number, t1.req_production_initdate, t1.req_status,
+                                   t1.req_operador_tela_width, t1.req_rebo_type, t1.req_rebo_cc_genrefid,
+                                   t1.req_infoaddprd_cliche_ubicacion, t1.req_infoaddprd_cliche_codigo,
+                                   t1.req_operador_mermaperc, t1.req_operador_bastidoramt, t1.req_solic_devprints_poltype,
+                                   t2.company_short, t3.shop_name, t4.cust_name,
+                                   t2x.item_number_prod, t2x.item_title, t2x.item_prodcalc_fuelle_act, t1x.item_amount,
+                                   t1x.fab_printtype, t1x.fab_type, t1x.fab_med_width, t1x.fab_med_height,
+                                   t1x.fab_med_fuelle, t1x.fab_design_imagehash, t1x.fab_design_name, t1x.item_img_hash,
+                                   t1x.fab_print_colordesc_1, t1x.fab_print_colordesc_2, t1x.fab_print_colordesc_3,
+                                   t1x.fab_print_colordesc_4, t1x.fab_print_colordesc_5, t1x.fab_print_colordesc_6,
+                                   (SELECT COUNT(*) FROM prod_agenda pa_all WHERE pa_all.ag_prdid = t3x.id AND pa_all.ag_status = 1) AS total_agendas_activas
+                    FROM prod_header t3x
+                    INNER JOIN orders t1 ON t3x.prd_reqid = t1.id
+                    LEFT OUTER JOIN company_data t2 ON t1.req_company_id = t2.id
+                    LEFT OUTER JOIN company_shops t3 ON t1.req_shop_id = t3.id
+                    LEFT OUTER JOIN customer t4 ON t1.req_cust_id = t4.id
+                    INNER JOIN orders_items t1x ON t1.id = t1x.req_id
+                    LEFT OUTER JOIN item t2x ON t1x.item_id = t2x.id
+                    WHERE t3x.prd_status >= 2
+                      AND t1.req_status > 1
+                      {$whereType}
+                      {$whereSearch}
+                      AND NOT EXISTS (
+                        SELECT 1 FROM prod_agenda pa
+                        WHERE pa.ag_prdid = t3x.id
+                          AND pa.ag_equipo_id = :equipo_id
+                          AND pa.ag_status = 1
+                      )
+                    ORDER BY t1.req_production_initdate DESC, t3x.id DESC
+                    LIMIT {$limit}";
+
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute($params);
+            $orders = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            foreach ($orders as &$ord) {
+                $ord['ag_id'] = 0;
+                $ord['ag_amount'] = (float)($ord['item_amount'] ?? 0);
+                $ord['ag_date'] = '-';
+                $ord['ag_active'] = 0;
+                $ord['equipo_name'] = (string)($eq['equipo_name'] ?? '');
+                $ord['equipo_type_id'] = $eqTypeId;
+                $ord['equipo_prod_isprinter_flexo'] = (int)($eq['equipo_prod_isprinter_flexo'] ?? 0);
+                $ord['equipo_prod_isprinter_seri'] = (int)($eq['equipo_prod_isprinter_seri'] ?? 0);
+                $ord['is_unscheduled'] = true;
+
+                $isReboItem = ((int)($ord['req_rebo_cc_genrefid'] ?? 0) > 0)
+                    || ($eqTypeId === 12)
+                    || stripos((string)($eq['equipo_name'] ?? ''), 'REBO') !== false;
+                if ($isReboItem) {
+                    $ord['rebo_distribucion'] = $this->getReboDistributionText((int)$ord['req_id'], (float)($ord['req_operador_tela_width'] ?? 0));
+                }
+            }
+            unset($ord);
+
+            $this->attachFlexoMetrics($orders, $equipoId);
+            $this->attachSeriMetrics($orders);
+
+            return $orders;
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Incorpora a la planificación e inicia formalmente una Orden de Trabajo que no estaba agendada en la máquina.
+     * Crea el registro correspondiente en `prod_agenda` y arranca `prod_worker_ot`.
+     *
+     * @param int $prdId ID de prod_header
+     * @param int $initId ID de sesión de máquina (prod_worker_init)
+     * @param int $equipoId ID de máquina
+     * @param int $plantaId ID de planta
+    /**
+     * Asegura o crea el registro en prod_agenda para una OT no planificada en una máquina.
+     * Retorna el id de prod_agenda (ag_id) o 0 en caso de error.
+     */
+    public function ensureAgendaForUnscheduledOrder(int $prdId, int $equipoId, int $plantaId, ?float $amount = null): int
+    {
+        if ($prdId <= 0 || $equipoId <= 0) {
+            return 0;
+        }
+
+        try {
+            // Verificar si ya existe un registro de agenda activo para esta máquina y OT
+            $stmtCheckAg = $this->erpPdo->prepare(
+                "SELECT id FROM prod_agenda
+                 WHERE ag_prdid = :prdid AND ag_equipo_id = :equipoid AND ag_status = 1
+                 ORDER BY id DESC LIMIT 1"
+            );
+            $stmtCheckAg->execute([':prdid' => $prdId, ':equipoid' => $equipoId]);
+            $existingAg = $stmtCheckAg->fetch(PDO::FETCH_ASSOC);
+            if ($existingAg && (int)$existingAg['id'] > 0) {
+                return (int)$existingAg['id'];
+            }
+
+            $stmtPrd = $this->erpPdo->prepare(
+                "SELECT t3x.id AS prdid, t3x.prd_reqid, t1x.item_amount, t1.id AS req_id, teq.equipo_type_id
+                 FROM prod_header t3x
+                 INNER JOIN orders t1 ON t3x.prd_reqid = t1.id
+                 LEFT JOIN orders_items t1x ON t1.id = t1x.req_id
+                 LEFT JOIN equipo teq ON teq.id = :equipo_id
+                 WHERE t3x.id = :prd_id
+                 LIMIT 1"
+            );
+            $stmtPrd->execute([':prd_id' => $prdId, ':equipo_id' => $equipoId]);
+            $prd = $stmtPrd->fetch(PDO::FETCH_ASSOC);
+            if (!$prd) {
+                return 0;
+            }
+
+            $reqId = (int)$prd['req_id'];
+            $equipoTypeId = (int)($prd['equipo_type_id'] ?? 0);
+            $itemAmount = $amount !== null && $amount > 0 ? $amount : (float)($prd['item_amount'] ?? 1000);
+            $now = time();
+            $today = date('d.m.Y');
+
+            $stmtInsAg = $this->erpPdo->prepare(
+                "INSERT INTO prod_agenda
+                    (ag_date, ag_date_stamp, ag_equipo_id, ag_equipotype_id, ag_amount, ag_prdid, ag_reqid, ag_plantaid, ag_crtdat, ag_crtusr, ag_status, ag_active, ag_order)
+                 VALUES
+                    (:ag_date, :ag_date_stamp, :ag_equipo_id, :ag_equipotype_id, :ag_amount, :ag_prdid, :ag_reqid, :ag_plantaid, :ag_crtdat, 0, 1, 1, 99)"
+            );
+            $stmtInsAg->execute([
+                ':ag_date' => $today,
+                ':ag_date_stamp' => $now,
+                ':ag_equipo_id' => $equipoId,
+                ':ag_equipotype_id' => $equipoTypeId,
+                ':ag_amount' => $itemAmount,
+                ':ag_prdid' => $prdId,
+                ':ag_reqid' => $reqId,
+                ':ag_plantaid' => $plantaId > 0 ? $plantaId : 1,
+                ':ag_crtdat' => $now,
+            ]);
+
+            return (int)$this->erpPdo->lastInsertId();
+        } catch (Throwable) {
+            return 0;
+        }
+    }
+
+    /**
+     * Incorpora una orden fuera de planificación a la agenda de la máquina y abre la sesión del operario.
+     * 
+     * @param int $prdId ID de prod_header
+     * @param int $initId ID de prod_worker_init
+     * @param int $equipoId ID de la máquina
+     * @param int $plantaId ID de la planta
+     * @param float|null $amount Cantidad a planificar (por defecto toma el saldo de la orden)
+     * @return array{ok: bool, ag_id?: int, worker_ot_id?: int, error?: string}
+     */
+    public function startUnscheduledWorkOrder(int $prdId, int $initId, int $equipoId, int $plantaId, ?float $amount = null): array
+    {
+        if ($prdId <= 0 || $initId <= 0 || $equipoId <= 0) {
+            return ['ok' => false, 'error' => 'Parámetros inválidos para iniciar orden fuera de planificación.'];
+        }
+
+        try {
+            $agId = $this->ensureAgendaForUnscheduledOrder($prdId, $equipoId, $plantaId, $amount);
+            if ($agId <= 0) {
+                return ['ok' => false, 'error' => 'No se pudo generar o encontrar el registro de agenda para la orden.'];
+            }
+
+            $startRes = $this->startWorkerOt($agId, $initId);
+            if (!$startRes['ok']) {
+                return $startRes;
+            }
+
+            return [
+                'ok' => true,
+                'ag_id' => $agId,
+                'worker_ot_id' => (int)($startRes['worker_ot_id'] ?? 0),
+            ];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al incorporar e iniciar orden: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Genera y descarga un archivo Excel con la lista de productos que no entraron en la planificación.
+     */
+    public function outputUnscheduledOrdersExcel(array $orders, string $machineName = ''): void
+    {
+        $safeMachine = preg_replace('/[^a-zA-Z0-9_\-]/', '_', $machineName) ?: 'Maquina';
+        $filename = 'productos_sin_planificacion_' . strtolower($safeMachine) . '_' . date('Ymd_His') . '.xls';
+
+        $html = '<table border="1">';
+        $html .= '<thead><tr style="background:#0F766E;color:#FFFFFF;font-weight:bold">';
+        $html .= '<th>N° O.T.</th>';
+        $html .= '<th>N° C.C.</th>';
+        $html .= '<th>Cliente</th>';
+        $html .= '<th>Producto / Título</th>';
+        $html .= '<th>Material</th>';
+        $html .= '<th>Tipo Impresión</th>';
+        $html .= '<th>Medidas (cm)</th>';
+        $html .= '<th>Fuelle (cm)</th>';
+        $html .= '<th>Cantidad Solicitada</th>';
+        $html .= '<th>Fecha Requerida ERP</th>';
+        $html .= '<th>Ubicación Cliché</th>';
+        $html .= '<th>Código Cliché</th>';
+        $html .= '</tr></thead><tbody>';
+
+        foreach ($orders as $ord) {
+            $w = (int)($ord['fab_med_width'] ?? 0);
+            $h = (int)($ord['fab_med_height'] ?? 0);
+            $fuelle = (int)($ord['fab_med_fuelle'] ?? 0);
+            $medidas = $w > 0 ? "{$w}x{$h}" : '-';
+            $initDate = (int)($ord['req_production_initdate'] ?? 0);
+            $dateStr = $initDate > 0 ? date('d.m.Y', $initDate) : '-';
+
+            $html .= '<tr>';
+            $html .= '<td>' . htmlspecialchars((string)($ord['prd_number'] ?? '')) . '</td>';
+            $html .= '<td>' . htmlspecialchars((string)($ord['req_number'] ?? '')) . '</td>';
+            $html .= '<td>' . htmlspecialchars((string)($ord['cust_name'] ?? '')) . '</td>';
+            $html .= '<td>' . htmlspecialchars((string)($ord['item_title'] ?? $ord['fab_design_name'] ?? '')) . '</td>';
+            $html .= '<td>' . htmlspecialchars((string)($ord['fab_type'] ?? 'TNT')) . '</td>';
+            $html .= '<td>' . htmlspecialchars((string)($ord['fab_printtype'] ?? '-')) . '</td>';
+            $html .= '<td>' . htmlspecialchars($medidas) . '</td>';
+            $html .= '<td>' . ($fuelle > 0 ? (int)$fuelle : '0') . '</td>';
+            $html .= '<td>' . (float)($ord['item_amount'] ?? 0) . '</td>';
+            $html .= '<td>' . htmlspecialchars($dateStr) . '</td>';
+            $html .= '<td>' . htmlspecialchars((string)($ord['req_infoaddprd_cliche_ubicacion'] ?? '-')) . '</td>';
+            $html .= '<td>' . htmlspecialchars((string)($ord['req_infoaddprd_cliche_codigo'] ?? '-')) . '</td>';
+            $html .= '</tr>';
+        }
+        $html .= '</tbody></table>';
+
+        require_once __DIR__ . '/SimpleXlsx.php';
+        SimpleXlsx::streamHtml($filename, $html, 'Sin Planificacion');
+        exit;
     }
 
     /**
@@ -717,8 +1002,8 @@ final class ProductionService
             $mermaPerc = (float)($ord['req_operador_mermaperc'] ?? 0);
             $meraUnits = round($agAmount / 100 * $mermaPerc);
             $realUnit = $agAmount + $meraUnits;
-            $bastidorAmt = max(1, (int)($ord['req_operador_bastidoramt'] ?? 1));
-            $ord['seri_contador'] = $bastidorAmt > 0 ? round($realUnit / $bastidorAmt) : (int)$realUnit;
+            $devPrints = max(1, (int)($ord['req_solic_devprints_cc'] ?? 1));
+            $ord['seri_contador'] = $devPrints > 0 ? round($realUnit / $devPrints) : (int)$realUnit;
         }
         unset($ord);
     }
@@ -736,15 +1021,17 @@ final class ProductionService
             return ['ok' => false, 'error' => 'Agenda e inicio de máquina son requeridos.'];
         }
 
-        // Verificar si ya existe una OT abierta para este init
+        // Verificar si ya existe una OT abierta o recién creada para este init (evita duplicación por doble clic)
+        $recentTs = time() - 10;
         $stmtCheck = $this->erpPdo->prepare(
             "SELECT id FROM prod_worker_ot
-             WHERE wok_ag_id = :ag_id AND wok_init_id = :init_id AND wok_status = 1
-             LIMIT 1"
+             WHERE wok_ag_id = :ag_id AND wok_init_id = :init_id AND (wok_status = 1 OR wok_crtdat >= :recent_ts)
+             ORDER BY id DESC LIMIT 1"
         );
         $stmtCheck->execute([
             ':ag_id' => $agId,
             ':init_id' => $initId,
+            ':recent_ts' => $recentTs,
         ]);
         $existing = $stmtCheck->fetch();
         if (is_array($existing) && (int)$existing['id'] > 0) {
@@ -799,7 +1086,7 @@ final class ProductionService
                        t1.req_prod_adjfile_0, t1.req_prod_adjfile_1, t1.req_prod_adjfile_2, t1.req_prod_adjfile_3, t1.req_prod_adjfile_4,
                        t1.req_prod_adjcomments_0, t1.req_prod_adjcomments_1, t1.req_prod_adjcomments_2, t1.req_prod_adjcomments_3, t1.req_prod_adjcomments_4,
                        t1x.fab_design_imagehash, t1.req_company_id, t1.req_shop_id, t1x.fab_mat_fabric_color, t1x.fab_mat_manilla_color,
-                       t1.req_solic_devprints_cc, t1x.fab_design_name, t1x.fab_mat_gramms,
+                       t1.req_solic_devprints_cc, t1x.fab_design_name, t1x.fab_mat_gramms, t1x.item_compdesc,
                        t1.req_operador_bastidoramt, t1.req_operador_mermaperc, t1.req_operador_tela_width,
                        t1.req_solic_devprints_poltype, t1x.fab_manilla_length, t1.req_rebo_type,
                        t1.req_rebo_state, t1.req_rebo_rolloscc, t2x.item_prodcalc_fuelle_act, t1.req_rebo_cortescc,
@@ -848,7 +1135,19 @@ final class ProductionService
             $stmt = $this->erpPdo->prepare($sql);
             $stmt->execute([':ag_id' => $agId]);
             $row = $stmt->fetch();
-            return is_array($row) ? $row : null;
+            if (is_array($row)) {
+                $grams = (float)($row['fab_mat_gramms'] ?? 0);
+                if ($grams <= 0) {
+                    $text = (string)($row['item_compdesc'] ?? '') . ' ' . (string)($row['item_title'] ?? '');
+                    if (preg_match('/(?:tela|gramaje|peso)?\s*(\d{2,3})\s*(?:grs?|g|gsm)\b/i', $text, $m)) {
+                        $grams = (float)$m[1];
+                    }
+                }
+                $row['ot_grams'] = $grams;
+                $row['ot_grams_str'] = $grams > 0 ? ((int)$grams . ' gr') : '-';
+                return $row;
+            }
+            return null;
         } catch (Throwable) {
             return null;
         }
@@ -1071,8 +1370,8 @@ final class ProductionService
             if ($frontCol || $backCol) $amtColorsSeri++;
         }
 
-        $bastidorAmt = max(1, (int)($agendaData['req_operador_bastidoramt'] ?? 1));
-        $pasadasPrint = $bastidorAmt > 0 ? round($agAmount / $bastidorAmt) : 0;
+        $devPrints = max(1, (int)($agendaData['req_solic_devprints_cc'] ?? 1));
+        $pasadasPrint = $devPrints > 0 ? round($agAmount / $devPrints) : 0;
 
         // Insumos confección (manillas, bobinas)
         $largoManillas = (int)($agendaData['fab_manilla_length'] ?? 0);
@@ -1247,6 +1546,9 @@ final class ProductionService
                 }
             }
         }
+
+        $mermatypes = $this->getMermaTypes();
+        $repairtypes = $this->getRepairTypes();
 
         return [
             'agenda' => $agendaData,
@@ -1461,6 +1763,39 @@ final class ProductionService
         $now = time();
         $eventId = 0;
 
+        // Si no viene refId y se trata de un inicio de tiraje (amount = 0), comprobar si ya existe un evento 'prod' abierto
+        if ($refId === null || $refId <= 0) {
+            if ($amount <= 0.0) {
+                $stmtActiveProd = $this->erpPdo->prepare("
+                    SELECT id FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :ot_id 
+                      AND evt_type = 'prod'
+                      AND evt_status = 1
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stmtActiveProd->execute([':ot_id' => $workerOtId]);
+                $activeProdId = (int)$stmtActiveProd->fetchColumn();
+                if ($activeProdId > 0) {
+                    $refId = $activeProdId;
+                }
+            }
+        }
+        // Automatización de Bobinas Impresas: Si no vinieron kilos o metros, autocompletar con la suma de bobinas impresas producidas
+        if ($workerOtId > 0 && ($bobinaKg <= 0.0 || $metrosLineales <= 0)) {
+            $prSummary = $this->getPrintedRollsSummary($workerOtId);
+            if (!empty($prSummary['rolls_count']) && $prSummary['rolls_count'] > 0) {
+                if ($bobinaKg <= 0.0) {
+                    $bobinaKg = (float)$prSummary['total_weight_kg'];
+                }
+                if ($metrosLineales <= 0) {
+                    $metrosLineales = (int)round($prSummary['total_meters']);
+                }
+                if ($amount <= 0.0 && ($metroType === 'metros_lineales' || empty($metroType))) {
+                    $amount = (float)$metrosLineales;
+                }
+            }
+        }
+
         if ($refId !== null && $refId > 0) {
             $eventId = $refId;
             $endDat = $isEnd ? $now : null;
@@ -1471,7 +1806,7 @@ final class ProductionService
                         overrideembalaje_act = :overr,
                         evt_amount_pulpo_frente = :frente,
                         evt_amount_pulpo_dorso = :dorso"
-                    . ($isEnd ? ", evt_enddat = :enddat" : "")
+                    . ($isEnd ? ", evt_enddat = :enddat, evt_status = 2" : "")
                     . " WHERE id = :id";
             $params = [
                 ':amt' => $amount,
@@ -1492,12 +1827,14 @@ final class ProductionService
             $stmt = $this->erpPdo->prepare($sql);
             $stmt->execute($params);
         } else {
+            $status = $isEnd ? 2 : 1;
+            $endDat = $isEnd ? $now : 0;
             $sql = "INSERT INTO prod_worker_ot_events
-                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments,
+                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments,
                      prod_bobina_kg, evt_amount_metros_maquina, evt_amount_metros_lineales, evt_metrotype, evt_amount2,
                      overrideembalaje_act, evt_amount_pulpo_frente, evt_amount_pulpo_dorso)
                     VALUES
-                    (:ot_id, :amt, :crtdat, 1, 'prod', :comments,
+                    (:ot_id, :amt, :crtdat, :enddat, :status, 'prod', :comments,
                      :kg, :mmaq, :mlin, :mtype, :amt2, :overr, :frente, :dorso)";
 
             $stmt = $this->erpPdo->prepare($sql);
@@ -1505,6 +1842,8 @@ final class ProductionService
                 ':ot_id' => $workerOtId,
                 ':amt' => $amount,
                 ':crtdat' => $now,
+                ':enddat' => $endDat,
+                ':status' => $status,
                 ':comments' => $comments,
                 ':kg' => $bobinaKg,
                 ':mmaq' => $metrosMaquina,
@@ -1518,8 +1857,66 @@ final class ProductionService
             $eventId = (int)$this->erpPdo->lastInsertId();
         }
 
+        // Consolidación de mermas de desmontaje de bobinas:
+        // Si el evento final no trae alguna merma de desmontaje previamente registrada, cargarla automáticamente
+        if ($workerOtId > 0) {
+            $dismount = $this->getRollDismountMermas($workerOtId);
+            foreach ($dismount as $dtid => $dinfo) {
+                if (empty($mermas[$dtid]) || ((float)($mermas[$dtid]['amount'] ?? 0) <= 0 && (float)($mermas[$dtid]['kgs'] ?? 0) <= 0 && (int)($mermas[$dtid]['mts'] ?? 0) <= 0)) {
+                    $mermas[$dtid] = [
+                        'amount' => (float)($dinfo['amount'] ?? 0),
+                        'kgs' => (float)($dinfo['kgs'] ?? 0),
+                        'mts' => (int)($dinfo['mts'] ?? 0),
+                        'comments' => (string)($dinfo['comments'] ?? ''),
+                    ];
+                }
+            }
+        }
+
         if ($eventId > 0 && (!empty($mermas) || !empty($repairs))) {
             $this->saveEventDefectUnits($eventId, $mermas, $repairs);
+        }
+
+        // Desactivar registros intermedios de 'merma' de desmontaje para no duplicar en reportes
+        if ($workerOtId > 0 && $eventId > 0) {
+            try {
+                $stCleanDefects = $this->erpPdo->prepare("
+                    UPDATE prod_worker_ot_defectunits d
+                    INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                    SET d.evt_status = 0
+                    WHERE e.evt_prod_worker_otid = :ot_id
+                      AND e.evt_type = 'merma'
+                      AND e.id != :cur_eid
+                ");
+                $stCleanDefects->execute([':ot_id' => $workerOtId, ':cur_eid' => $eventId]);
+
+                $stCleanEvents = $this->erpPdo->prepare("
+                    UPDATE prod_worker_ot_events
+                    SET evt_status = 2, evt_enddat = :now
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_type = 'merma'
+                      AND id != :cur_eid
+                ");
+            } catch (Throwable) {}
+        }
+
+        // Consolidar y cerrar eventos intermedios de bobina semielaborada para no duplicar kilos ni metros en reportes
+        if ($workerOtId > 0 && $eventId > 0) {
+            $prSummary = $this->getPrintedRollsSummary($workerOtId);
+            if (!empty($prSummary['rolls_count']) && $prSummary['rolls_count'] > 0) {
+                try {
+                    $this->erpPdo->prepare("
+                        UPDATE prod_worker_ot_events
+                        SET evt_status = 2,
+                            evt_enddat = COALESCE(evt_enddat, :now),
+                            prod_bobina_kg = 0,
+                            evt_amount = 0
+                        WHERE evt_prod_worker_otid = :ot_id
+                          AND evt_comments LIKE '%Bobina Semielaborada%'
+                          AND id != :cur_eid
+                    ")->execute([':now' => $now, ':ot_id' => $workerOtId, ':cur_eid' => $eventId]);
+                } catch (Throwable) {}
+            }
         }
 
         try {
@@ -2080,19 +2477,20 @@ final class ProductionService
                     FROM rolls r
                     INNER JOIN skus s ON r.sku_id = s.id
                     LEFT JOIN warehouses w ON r.warehouse_id = w.id
-                    WHERE r.current_work_order_id = :ot_id
+                    WHERE (r.current_work_order_id = :ot_id OR (r.source_work_order_id = :ot_id2 AND r.status = 'CONSUMED'))
                     ORDER BY r.id ASC
                 ");
-                $stmtRolls->execute([':ot_id' => $workerOtId]);
+                $stmtRolls->execute([':ot_id' => $workerOtId, ':ot_id2' => $workerOtId]);
                 $assignedRolls = $stmtRolls->fetchAll(PDO::FETCH_ASSOC) ?: [];
                 foreach ($assignedRolls as &$ar) {
                     $assignedKg += (float)($ar['weight_kg'] ?? 0);
                     $ar['roll_number'] = $ar['roll_code'];
                     $ar['current_weight_kg'] = $ar['weight_kg'];
+                    $ar['entry_weight_kg'] = (float)($ar['weight_kg'] ?? 0);
 
                     $arId = (int)$ar['id'];
                     $stmtM = $this->trzPdo->prepare("
-                        SELECT type, created_at FROM events
+                        SELECT type, payload, created_at FROM events
                         WHERE type IN ('ROLL_MOUNTED_ON_MACHINE', 'ROLL_UNMOUNTED_FROM_MACHINE')
                           AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
                           AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
@@ -2102,6 +2500,41 @@ final class ProductionService
                     $lastMount = $stmtM->fetch(PDO::FETCH_ASSOC);
                     $ar['is_mounted'] = ($lastMount && $lastMount['type'] === 'ROLL_MOUNTED_ON_MACHINE');
                     $ar['mounted_at'] = $ar['is_mounted'] ? $lastMount['created_at'] : null;
+                    if ($lastMount && !empty($lastMount['payload'])) {
+                        $pData = json_decode((string)$lastMount['payload'], true);
+                        if (!empty($pData['entry_weight_kg'])) {
+                            $ar['entry_weight_kg'] = (float)$pData['entry_weight_kg'];
+                        }
+                    }
+
+                    $stmtOut = $this->trzPdo->prepare("
+                        SELECT type, payload, created_at FROM events
+                        WHERE type IN ('ROLL_OUTPUT_COMPLETED', 'ROLL_CONSUMED')
+                          AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                          AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                        ORDER BY id DESC LIMIT 1
+                    ");
+                    $stmtOut->execute([':rid' => (string)$arId, ':otid' => (string)$workerOtId]);
+                    $lastOut = $stmtOut->fetch(PDO::FETCH_ASSOC);
+                    if ($lastOut && !empty($lastOut['payload'])) {
+                        $outData = json_decode((string)$lastOut['payload'], true);
+                        $ar['output_bobina_kg'] = (float)($outData['output_bobina_kg'] ?? $outData['output_binas_kg'] ?? 0);
+                        $ar['output_binas_kg'] = $ar['output_bobina_kg'];
+                        $ar['output_roll_id'] = (int)($outData['output_roll_id'] ?? 0);
+                        $ar['output_roll_code'] = (string)($outData['output_roll_code'] ?? '');
+                        $ar['output_meters'] = (float)($outData['output_meters'] ?? 0);
+                        $ar['scrap_kg'] = (float)($outData['scrap_kg'] ?? 0);
+                        $ar['leftover_kg'] = (float)($outData['leftover_kg'] ?? 0);
+                        $ar['leftover_roll_code'] = (string)($outData['leftover_roll_code'] ?? '');
+                        $ar['leftover_roll_id'] = (int)($outData['leftover_roll_id'] ?? 0);
+                        if ($ar['leftover_roll_id'] <= 0 && $ar['leftover_roll_code'] !== '') {
+                            $stFindSob = $this->trzPdo->prepare("SELECT id FROM rolls WHERE roll_code = :c LIMIT 1");
+                            $stFindSob->execute([':c' => $ar['leftover_roll_code']]);
+                            $ar['leftover_roll_id'] = (int)$stFindSob->fetchColumn();
+                        }
+                        $ar['mermas_detail'] = (array)($outData['mermas_detail'] ?? []);
+                        $ar['output_at'] = $lastOut['created_at'];
+                    }
                 }
                 unset($ar);
             }
@@ -2287,14 +2720,15 @@ final class ProductionService
 
                         $stmtErp = $this->erpPdo->prepare("
                             INSERT INTO prod_worker_ot_events
-                             (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                             (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                             VALUES
-                             (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)
+                             (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
                         ");
                         $stmtErp->execute([
                             ':ot_id' => $workerOtId,
                             ':amt' => $weightKg,
                             ':crtdat' => $now,
+                            ':enddat' => $now,
                             ':comments' => $erpComment,
                         ]);
 
@@ -2373,14 +2807,15 @@ final class ProductionService
 
                 $stmtErp = $this->erpPdo->prepare(
                     "INSERT INTO prod_worker_ot_events
-                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                      VALUES
-                     (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)"
+                     (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)"
                 );
                 $stmtErp->execute([
                     ':ot_id' => $workerOtId,
                     ':amt' => $weightKg,
                     ':crtdat' => $now,
+                    ':enddat' => $now,
                     ':comments' => $erpComment,
                 ]);
 
@@ -2423,9 +2858,9 @@ final class ProductionService
     }
 
     /**
-     * Registra el montaje físico de una bobina en la máquina (desbobinador).
+     * Registra el montaje físico de una bobina en la máquina (desbobinador) solicitando el peso de ingreso.
      */
-    public function mountRollOnMachine(int $workerOtId, int $rollId, string $operatorName, string $comments = ''): array
+    public function mountRollOnMachine(int $workerOtId, int $rollId, string $operatorName, float $entryWeightKg = 0.0, string $comments = ''): array
     {
         if ($workerOtId <= 0 || $rollId <= 0) {
             return ['ok' => false, 'error' => 'Parámetros inválidos para montar bobina.'];
@@ -2440,6 +2875,17 @@ final class ProductionService
             $stmt->execute([':id' => $rollId]);
             $roll = $stmt->fetch(PDO::FETCH_ASSOC);
             $rollCode = $roll['roll_code'] ?? "ID #{$rollId}";
+            $currentKg = (float)($roll['weight_kg'] ?? 0);
+            $actualEntryKg = $entryWeightKg > 0 ? $entryWeightKg : $currentKg;
+
+            // Actualizar peso de la bobina en TRZ al peso de ingreso medido
+            if ($entryWeightKg > 0) {
+                $this->trzPdo->prepare("UPDATE rolls SET weight_kg = :w, status = 'IN_PROCESS' WHERE id = :id")
+                    ->execute([':w' => $entryWeightKg, ':id' => $rollId]);
+            } else {
+                $this->trzPdo->prepare("UPDATE rolls SET status = 'IN_PROCESS' WHERE id = :id")
+                    ->execute([':id' => $rollId]);
+            }
 
             $stmtEvent = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
             $stmtEvent->execute([
@@ -2448,27 +2894,339 @@ final class ProductionService
                     'roll_id' => $rollId,
                     'roll_code' => $rollCode,
                     'worker_ot_id' => $workerOtId,
+                    'entry_weight_kg' => $actualEntryKg,
                     'operator' => $operatorName,
                     'comments' => $comments,
                     'timestamp' => $now,
                 ], JSON_UNESCAPED_UNICODE),
             ]);
 
+            $comm = "Montaje de Bobina {$rollCode} en máquina (Peso ingreso: {$actualEntryKg} kg) por {$operatorName}";
+            if ($comments !== '') {
+                $comm .= " [{$comments}]";
+            }
             $stmtErp = $this->erpPdo->prepare(
                 "INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                  VALUES
-                 (:ot_id, 0, :crtdat, 1, 'materiales', :comments)"
+                 (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)"
             );
             $stmtErp->execute([
                 ':ot_id' => $workerOtId,
                 ':crtdat' => $now,
-                ':comments' => "Montaje de Bobina {$rollCode} en máquina por {$operatorName}",
+                ':enddat' => $now,
+                ':comments' => $comm,
             ]);
 
-            return ['ok' => true, 'roll_code' => $rollCode];
+            return ['ok' => true, 'roll_code' => $rollCode, 'entry_weight_kg' => $actualEntryKg];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al montar bobina: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Registra la salida de una bobina montada en máquina:
+     * - Peso de salida en binas / bobinas producidas ($outputBinasKg)
+     * - Mermas de salida generadas por la bobina ($scrapKg)
+     * - Sobrante en la bobina ($leftoverKg): si es > 0, genera un nuevo código de bobina
+     *   y la registra en Bodega 3000 con trazabilidad vinculada a la bobina madre.
+     * - Cierra la bobina original como CONSUMED y registra los eventos en TRZ y ERP.
+     */
+    public function recordRollOutputAndLeftover(
+        int $workerOtId,
+        int $rollId,
+        float $outputBobinaKg,
+        float $scrapKg,
+        float $leftoverKg,
+        string $comments = '',
+        string $operatorName = '',
+        array $mermasDetail = [],
+        bool $createOutputRoll = false,
+        string $outputSkuCode = '',
+        float $outputMeters = 0.0
+    ): array {
+        if ($rollId <= 0 || $workerOtId <= 0) {
+            return ['ok' => false, 'error' => 'Parámetros inválidos para registrar salida de bobina.'];
+        }
+        if ($this->trzPdo === null) {
+            return ['ok' => false, 'error' => 'Base de datos de trazabilidad no disponible.'];
+        }
+        if ($createOutputRoll && $outputBobinaKg <= 0) {
+            return ['ok' => false, 'error' => 'Debes registrar el peso de la nueva bobina saliente para generar su etiqueta.'];
+        }
+
+        // Si se informaron mermas por tipo pero scrapKg vino en 0, calcular total
+        if ($scrapKg <= 0 && !empty($mermasDetail)) {
+            $sumKgs = 0.0;
+            foreach ($mermasDetail as $md) {
+                $sumKgs += (float)($md['kgs'] ?? 0);
+            }
+            if ($sumKgs > 0) {
+                $scrapKg = round($sumKgs, 2);
+            }
+        }
+
+        try {
+            $now = time();
+            $stmt = $this->trzPdo->prepare("
+                SELECT r.*, s.code AS sku_code, s.description AS sku_desc
+                FROM rolls r
+                LEFT JOIN skus s ON r.sku_id = s.id
+                WHERE r.id = :id LIMIT 1
+            ");
+            $stmt->execute([':id' => $rollId]);
+            $roll = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$roll) {
+                return ['ok' => false, 'error' => 'Bobina no encontrada en trazabilidad.'];
+            }
+
+            $rollCode = (string)$roll['roll_code'];
+            $skuId = (int)($roll['sku_id'] ?? 0);
+            $skuCode = trim((string)($roll['sku_code'] ?? 'TEL'));
+            $entryWeight = (float)($roll['weight_kg'] ?? 0);
+
+            // Buscar peso de ingreso en el último evento de montaje si existe
+            $stM = $this->trzPdo->prepare("
+                SELECT payload FROM events
+                WHERE type = 'ROLL_MOUNTED_ON_MACHINE'
+                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                ORDER BY id DESC LIMIT 1
+            ");
+            $stM->execute([':rid' => (string)$rollId, ':otid' => (string)$workerOtId]);
+            $evMount = $stM->fetch(PDO::FETCH_ASSOC);
+            if ($evMount && !empty($evMount['payload'])) {
+                $pData = json_decode((string)$evMount['payload'], true);
+                if (!empty($pData['entry_weight_kg'])) {
+                    $entryWeight = (float)$pData['entry_weight_kg'];
+                }
+            }
+
+            $leftoverRollCode = '';
+            $newRollId = 0;
+            $outputRollId = 0;
+            $outputRollCode = '';
+            $outputMeters = max(0.0, $outputMeters);
+
+            if ($createOutputRoll && $outputBobinaKg > 0) {
+                $resolvedOutputSku = trim($outputSkuCode) !== '' ? trim($outputSkuCode) : $skuCode;
+                $outputRes = $this->createOutputRollFromWorkOrder(
+                    $workerOtId,
+                    $rollId,
+                    $resolvedOutputSku,
+                    $outputBobinaKg,
+                    $outputMeters,
+                    500,
+                    $operatorName
+                );
+                if (($outputRes['ok'] ?? false) !== true) {
+                    return ['ok' => false, 'error' => (string)($outputRes['error'] ?? 'No se pudo generar la bobina saliente.')];
+                }
+                $outputRollId = (int)($outputRes['child_roll_id'] ?? 0);
+                $outputRollCode = (string)($outputRes['child_roll_code'] ?? '');
+            }
+
+            // 1. SI HAY SOBRANTE EN LA BOBINA -> GENERAR NUEVO CÓDIGO CON TRAZABILIDAD
+            if ($leftoverKg > 0) {
+                $dateSuffix = date('ymd');
+                $randSuffix = strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
+                if (str_starts_with(strtoupper($skuCode), 'TEL')) {
+                    $leftoverRollCode = "{$skuCode}-SOB-{$dateSuffix}-{$randSuffix}";
+                } elseif (str_starts_with(strtoupper($rollCode), 'BOB-')) {
+                    $leftoverRollCode = "{$rollCode}-SOB-{$randSuffix}";
+                } else {
+                    $leftoverRollCode = "BOB-{$skuCode}-SOB-{$dateSuffix}-{$randSuffix}";
+                }
+
+                // Resolver Bodega 3000
+                $stWh = $this->trzPdo->query("SELECT id FROM warehouses WHERE code IN (3000, 16) OR name LIKE '%3000%' ORDER BY id ASC LIMIT 1");
+                $whId = (int)($stWh ? $stWh->fetchColumn() : 0);
+                if ($whId <= 0) {
+                    $whId = (int)($roll['warehouse_id'] ?? 1);
+                }
+
+                // Insertar nueva bobina sobrante en TRZ disponible en Bodega 3000
+                $insSob = $this->trzPdo->prepare("
+                    INSERT INTO rolls
+                        (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode,
+                         status, current_work_order_id, parent_roll_id, source_work_order_id,
+                         process_stage, width_mm, microns, color, meters, created_at)
+                    VALUES
+                        (:code, :sku_id, :wh_id, :weight_kg, 1, 'SOBRANTE',
+                         'RECEIVED', NULL, :parent_id, :src_ot,
+                         'PRODUCTION', :width, :microns, :color, :meters, NOW())
+                ");
+                $insSob->execute([
+                    ':code' => $leftoverRollCode,
+                    ':sku_id' => $skuId,
+                    ':wh_id' => $whId,
+                    ':weight_kg' => $leftoverKg,
+                    ':parent_id' => $rollId,
+                    ':src_ot' => $workerOtId,
+                    ':width' => (int)($roll['width_mm'] ?? 0),
+                    ':microns' => (int)($roll['microns'] ?? 80),
+                    ':color' => (string)($roll['color'] ?? ''),
+                    ':meters' => round($leftoverKg / max(0.01, ($entryWeight > 0 ? ($entryWeight / max(1, (float)$roll['meters'])) : 0.08)), 1),
+                ]);
+                $newRollId = (int)$this->trzPdo->lastInsertId();
+
+                // Registrar evento de sobrante en TRZ
+                $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
+                    ':type' => 'ROLL_LEFTOVER_CREATED',
+                    ':payload' => json_encode([
+                        'parent_roll_id' => $rollId,
+                        'parent_roll_code' => $rollCode,
+                        'new_roll_id' => $newRollId,
+                        'new_roll_code' => $leftoverRollCode,
+                        'leftover_kg' => $leftoverKg,
+                        'warehouse' => 'Bodega 3000',
+                        'worker_ot_id' => $workerOtId,
+                        'operator' => $operatorName,
+                        'timestamp' => $now,
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+            }
+
+            // 2. CERRAR BOBINA MADRE EN TRZ (CONSUMIDA EN LA OT, PERO VINCULADA EN SOURCE PARA HISTORIAL)
+            $this->trzPdo->prepare("
+                UPDATE rolls
+                SET status = 'CONSUMED',
+                    source_work_order_id = :src_ot,
+                    current_work_order_id = NULL
+                WHERE id = :id
+            ")->execute([':id' => $rollId, ':src_ot' => $workerOtId]);
+
+            // Kilos consumidos reales de tela = ingreso - sobrante
+            $netConsumedKg = max(0.0, round($entryWeight - $leftoverKg, 2));
+
+            // Registrar evento de salida de bobina en TRZ
+            $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
+                ':type' => 'ROLL_OUTPUT_COMPLETED',
+                ':payload' => json_encode([
+                    'roll_id' => $rollId,
+                    'roll_code' => $rollCode,
+                    'entry_weight_kg' => $entryWeight,
+                    'output_bobina_kg' => $outputBobinaKg,
+                    'output_binas_kg' => $outputBobinaKg,
+                    'output_roll_id' => $outputRollId,
+                    'output_roll_code' => $outputRollCode,
+                    'output_meters' => $outputMeters,
+                    'scrap_kg' => $scrapKg,
+                    'leftover_kg' => $leftoverKg,
+                    'leftover_roll_id' => $newRollId,
+                    'leftover_roll_code' => $leftoverRollCode,
+                    'mermas_detail' => $mermasDetail,
+                    'net_consumed_kg' => $netConsumedKg,
+                    'worker_ot_id' => $workerOtId,
+                    'operator' => $operatorName,
+                    'comments' => $comments,
+                    'timestamp' => $now,
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            // 3. REGISTRAR EVENTOS EN ERP (prod_worker_ot_events)
+            $descMat = "Salida Bobina {$rollCode}: Ingreso {$entryWeight} kg -> Bobina: {$outputBobinaKg} kg, Mermas: {$scrapKg} kg";
+            if ($leftoverKg > 0) {
+                $descMat .= ", Sobrante: {$leftoverKg} kg (Código: {$leftoverRollCode})";
+            } else {
+                $descMat .= " (Consumida completa)";
+            }
+            if ($comments !== '') {
+                $descMat .= " [{$comments}]";
+            }
+
+            $stmtErpMat = $this->erpPdo->prepare("
+                INSERT INTO prod_worker_ot_events
+                (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                VALUES
+                (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+            ");
+            $stmtErpMat->execute([
+                ':ot_id' => $workerOtId,
+                ':amt' => $netConsumedKg,
+                ':crtdat' => $now,
+                ':enddat' => $now,
+                ':comments' => $descMat,
+            ]);
+
+            // Si se informaron mermas de salida, registrarlas en el evento de merma de la OT
+            $mermaEvtId = 0;
+            if ($scrapKg > 0) {
+                $stmtErpMerma = $this->erpPdo->prepare("
+                    INSERT INTO prod_worker_ot_events
+                    (evt_prod_worker_otid, evt_amount, evt_amount2, evt_type, evt_comments, evt_crtdat, evt_enddat, evt_status)
+                    VALUES
+                    (:ot_id, :amt, 0, 'merma', :comments, :crtdat, :enddat, 2)
+                ");
+                $stmtErpMerma->execute([
+                    ':ot_id' => $workerOtId,
+                    ':amt' => $scrapKg,
+                    ':comments' => "Merma salida bobina {$rollCode}: {$scrapKg} kg" . ($comments !== '' ? " [{$comments}]" : ""),
+                    ':crtdat' => $now,
+                    ':enddat' => $now,
+                ]);
+                $mermaEvtId = (int)$this->erpPdo->lastInsertId();
+
+                // Registrar desglose en prod_worker_ot_defectunits si se proporcionó
+                if ($mermaEvtId > 0) {
+                    $hasBreakdown = false;
+                    if (!empty($mermasDetail)) {
+                        foreach ($mermasDetail as $mtId => $mInfo) {
+                            $mKgs = (float)($mInfo['kgs'] ?? 0);
+                            $mComm = trim((string)($mInfo['comments'] ?? ''));
+                            if ($mKgs > 0 || $mComm !== '') {
+                                $hasBreakdown = true;
+                                $stmtDefect = $this->erpPdo->prepare("
+                                    INSERT INTO prod_worker_ot_defectunits
+                                    (evt_amount, evt_crtdat, evt_status, evt_type, evt_comments, evt_merma_typeid, evt_refid, evt_kgstounits, evt_mtstounits)
+                                    VALUES
+                                    (0, :crtdat, 1, 'merma', :comm, :type_id, :ref_id, :kgs, 0)
+                                ");
+                                $stmtDefect->execute([
+                                    ':crtdat' => $now,
+                                    ':comm' => $mComm,
+                                    ':type_id' => (int)$mtId,
+                                    ':ref_id' => $mermaEvtId,
+                                    ':kgs' => $mKgs,
+                                ]);
+                            }
+                        }
+                    }
+                    if (!$hasBreakdown && $scrapKg > 0) {
+                        $stmtDefect = $this->erpPdo->prepare("
+                            INSERT INTO prod_worker_ot_defectunits
+                            (evt_amount, evt_crtdat, evt_status, evt_type, evt_comments, evt_merma_typeid, evt_refid, evt_kgstounits, evt_mtstounits)
+                            VALUES
+                            (0, :crtdat, 1, 'merma', :comm, 6, :ref_id, :kgs, 0)
+                        ");
+                        $stmtDefect->execute([
+                            ':crtdat' => $now,
+                            ':comm' => "Merma salida bobina {$rollCode}",
+                            ':ref_id' => $mermaEvtId,
+                            ':kgs' => $scrapKg,
+                        ]);
+                    }
+                }
+            }
+
+            return [
+                'ok' => true,
+                'roll_code' => $rollCode,
+                'leftover_roll_id' => $newRollId,
+                'leftover_roll_code' => $leftoverRollCode,
+                'leftover_kg' => $leftoverKg,
+                'output_roll_id' => $outputRollId,
+                'output_roll_code' => $outputRollCode,
+                'output_meters' => $outputMeters,
+                'output_bobina_kg' => $outputBobinaKg,
+                'output_binas_kg' => $outputBobinaKg,
+                'scrap_kg' => $scrapKg,
+                'mermas_detail' => $mermasDetail,
+                'net_consumed_kg' => $netConsumedKg,
+                'message' => "Salida de bobina {$rollCode} registrada exitosamente." . ($leftoverRollCode !== '' ? " Se generó sobrante {$leftoverRollCode} ({$leftoverKg} kg) con trazabilidad en Bodega 3000." : "")
+            ];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al registrar salida de bobina: ' . $e->getMessage()];
         }
     }
 
@@ -2482,17 +3240,85 @@ final class ProductionService
         }
         try {
             $now = time();
+            $stmtRoll = $this->trzPdo->prepare("
+                SELECT roll_code, weight_kg, current_work_order_id
+                FROM rolls
+                WHERE id = :id
+                LIMIT 1
+            ");
+            $stmtRoll->execute([':id' => $rollId]);
+            $roll = $stmtRoll->fetch(PDO::FETCH_ASSOC);
+            if (!$roll) {
+                return ['ok' => false, 'error' => 'Bobina no encontrada.'];
+            }
+
+            $rollCode = trim((string)($roll['roll_code'] ?? ''));
+            $rollWeightKg = (float)($roll['weight_kg'] ?? 0);
+            $currentWorkOrderId = (int)($roll['current_work_order_id'] ?? 0);
+            if ($currentWorkOrderId > 0 && $currentWorkOrderId !== $workerOtId) {
+                return ['ok' => false, 'error' => 'La bobina pertenece a otra OT activa.'];
+            }
+
             $stmtEvent = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
             $stmtEvent->execute([
                 ':type' => 'ROLL_UNMOUNTED_FROM_MACHINE',
                 ':payload' => json_encode([
                     'roll_id' => $rollId,
+                    'roll_code' => $rollCode,
+                    'weight_kg' => $rollWeightKg,
                     'worker_ot_id' => $workerOtId,
                     'operator' => $operatorName,
                     'timestamp' => $now,
                 ], JSON_UNESCAPED_UNICODE),
             ]);
-            return ['ok' => true];
+
+            if ($this->erpPdo !== null) {
+                $entryWeightKg = $rollWeightKg;
+                $stmtMount = $this->trzPdo->prepare("
+                    SELECT payload
+                    FROM events
+                    WHERE type = 'ROLL_MOUNTED_ON_MACHINE'
+                      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                    ORDER BY id DESC
+                    LIMIT 1
+                ");
+                $stmtMount->execute([
+                    ':rid' => (string)$rollId,
+                    ':otid' => (string)$workerOtId,
+                ]);
+                $mountEvent = $stmtMount->fetch(PDO::FETCH_ASSOC);
+                if ($mountEvent && !empty($mountEvent['payload'])) {
+                    $mountPayload = json_decode((string)$mountEvent['payload'], true);
+                    if (!empty($mountPayload['entry_weight_kg'])) {
+                        $entryWeightKg = (float)$mountPayload['entry_weight_kg'];
+                    }
+                }
+
+                $evtComment = 'Desmontaje temporal de Bobina '
+                    . ($rollCode !== '' ? $rollCode : ('#' . $rollId))
+                    . ' desde máquina';
+                if ($entryWeightKg > 0) {
+                    $evtComment .= ' (Peso ingreso: ' . number_format($entryWeightKg, 2, '.', '') . ' kg)';
+                }
+                if (trim($operatorName) !== '') {
+                    $evtComment .= ' por ' . trim($operatorName);
+                }
+
+                $stmtErp = $this->erpPdo->prepare("
+                    INSERT INTO prod_worker_ot_events
+                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                    VALUES
+                    (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
+                ");
+                $stmtErp->execute([
+                    ':ot_id' => $workerOtId,
+                    ':crtdat' => $now,
+                    ':enddat' => $now,
+                    ':comments' => $evtComment,
+                ]);
+            }
+            return ['ok' => true, 'roll_code' => $rollCode];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al desmontar bobina: ' . $e->getMessage()];
         }
@@ -2595,14 +3421,15 @@ final class ProductionService
             }
             $stmtErp = $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events
-                (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                 VALUES
-                (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)
+                (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
             ");
             $stmtErp->execute([
                 ':ot_id' => $workerOtId,
                 ':amt' => $consumedKg,
                 ':crtdat' => $now,
+                ':enddat' => $now,
                 ':comments' => $desc,
             ]);
 
@@ -2656,6 +3483,29 @@ final class ProductionService
                 $warehouseId = (int)$foundWh['id'];
             }
 
+            // Obtener especificaciones de la bobina madre si existen
+            $parentWidth = null;
+            $parentMicrons = null;
+            $parentColor = null;
+            if ($parentRollId !== null && $parentRollId > 0) {
+                $stParent = $this->trzPdo->prepare("SELECT width_mm, microns, color FROM rolls WHERE id = :id LIMIT 1");
+                $stParent->execute([':id' => $parentRollId]);
+                $pRow = $stParent->fetch(PDO::FETCH_ASSOC);
+                if ($pRow) {
+                    $parentWidth = $pRow['width_mm'] ?? null;
+                    $parentMicrons = $pRow['microns'] ?? null;
+                    $parentColor = $pRow['color'] ?? null;
+                }
+            }
+
+            // Calcular metros aproximados por peso si no vinieron informados
+            if ($meters <= 0 && $weightKg > 0) {
+                $wCm = ($parentWidth !== null && (float)$parentWidth > 0) ? ((float)$parentWidth / 10.0) : 80.0;
+                $g = ($parentMicrons !== null && (float)$parentMicrons > 0) ? (float)$parentMicrons : 80.0;
+                $meters = round(($weightKg * 100000.0) / ($wCm * $g));
+                if ($meters <= 0) $meters = 1.0;
+            }
+
             // Generar código único de bobina hija
             $stmtMax = $this->trzPdo->query("SELECT MAX(id) FROM rolls");
             $nextNum = ((int)$stmtMax->fetchColumn()) + 1;
@@ -2665,9 +3515,9 @@ final class ProductionService
             $now = time();
             $insRoll = $this->trzPdo->prepare(
                 "INSERT INTO rolls
-                 (roll_code, sku_id, warehouse_id, weight_kg, received_qty, meters, status, parent_roll_id, source_work_order_id, process_stage)
+                 (roll_code, sku_id, warehouse_id, weight_kg, received_qty, meters, status, parent_roll_id, source_work_order_id, process_stage, width_mm, microns, color, created_at)
                  VALUES
-                 (:code, :sku, :wh, :weight, 1.000, :meters, 'RECEIVED', :parent, :wo_id, 'PRINTED')"
+                 (:code, :sku, :wh, :weight, 1.000, :meters, 'RECEIVED', :parent, :wo_id, 'PRINTED', :w_mm, :mic, :col, NOW())"
             );
             $insRoll->execute([
                 ':code' => $childRollCode,
@@ -2677,6 +3527,9 @@ final class ProductionService
                 ':meters' => $meters > 0 ? $meters : null,
                 ':parent' => $parentRollId > 0 ? $parentRollId : null,
                 ':wo_id' => $workerOtId,
+                ':w_mm' => $parentWidth,
+                ':mic' => $parentMicrons,
+                ':col' => $parentColor,
             ]);
 
             $childId = (int)$this->trzPdo->lastInsertId();
@@ -2700,14 +3553,17 @@ final class ProductionService
             // Evento en ERP remoto
             $stmtErp = $this->erpPdo->prepare(
                 "INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_amount_metros_lineales, evt_metrotype, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                  VALUES
-                 (:ot_id, :amt, :crtdat, 1, 'prod', :comments)"
+                 (:ot_id, :amt, :kg, :mlin, 'metros_lineales', :crtdat, :enddat, 2, 'prod', :comments)"
             );
             $stmtErp->execute([
                 ':ot_id' => $workerOtId,
-                ':amt' => $weightKg,
+                ':amt' => $meters > 0 ? $meters : $weightKg,
+                ':kg' => $weightKg,
+                ':mlin' => $meters,
                 ':crtdat' => $now,
+                ':enddat' => $now,
                 ':comments' => "Bobina Semielaborada {$childRollCode} ({$weightKg} kg, {$meters} m)",
             ]);
 
@@ -3021,7 +3877,34 @@ final class ProductionService
             if ($woId > 0) {
                 $stmtOt = $this->erpPdo->prepare(
                     "SELECT t1.*, t4.prd_number, t5.req_number, t7.equipo_name, t8.type_ant_title,
-                            t9.wrk_firstname, t9.wrk_lastname
+                            t9.wrk_firstname, t9.wrk_lastname, t3.ag_amount AS planned_qty,
+                            (SELECT COALESCE(SUM(e.evt_amount), 0)
+                               FROM prod_worker_ot_events e
+                              WHERE e.evt_prod_worker_otid = t1.id
+                                AND e.evt_type = 'prod'
+                                AND e.evt_status > 0) AS total_produced_qty,
+                            (SELECT COALESCE(SUM(e.prod_bobina_kg), 0)
+                               FROM prod_worker_ot_events e
+                              WHERE e.evt_prod_worker_otid = t1.id
+                                AND e.evt_type = 'prod'
+                                AND e.evt_status > 0) AS total_output_kg,
+                            (SELECT COALESCE(SUM(e.evt_amount_metros_lineales), 0)
+                               FROM prod_worker_ot_events e
+                              WHERE e.evt_prod_worker_otid = t1.id
+                                AND e.evt_type = 'prod'
+                                AND e.evt_status > 0) AS total_output_meters,
+                            (SELECT COALESCE(SUM(d.evt_amount), 0)
+                               FROM prod_worker_ot_defectunits d
+                               INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                              WHERE e.evt_prod_worker_otid = t1.id
+                                AND d.evt_type = 'merma'
+                                AND d.evt_status > 0) AS total_merma_units,
+                            (SELECT COALESCE(SUM(d.evt_kgstounits), 0)
+                               FROM prod_worker_ot_defectunits d
+                               INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                              WHERE e.evt_prod_worker_otid = t1.id
+                                AND d.evt_type = 'merma'
+                                AND d.evt_status > 0) AS total_merma_kg
                      FROM prod_worker_ot t1
                      INNER JOIN prod_worker_init t2 ON t1.wok_init_id = t2.id
                      LEFT OUTER JOIN equipo t7 ON t2.win_equipoid = t7.id
@@ -3159,7 +4042,34 @@ final class ProductionService
             if ($woId > 0) {
                 $stmtOt = $this->erpPdo->prepare("
                     SELECT t1.*, t4.prd_number, t5.req_number, t7.equipo_name, t8.type_ant_title,
-                           t9.wrk_firstname, t9.wrk_lastname
+                           t9.wrk_firstname, t9.wrk_lastname, t3.ag_amount AS planned_qty,
+                           (SELECT COALESCE(SUM(e.evt_amount), 0)
+                              FROM prod_worker_ot_events e
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND e.evt_type = 'prod'
+                               AND e.evt_status > 0) AS total_produced_qty,
+                           (SELECT COALESCE(SUM(e.prod_bobina_kg), 0)
+                              FROM prod_worker_ot_events e
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND e.evt_type = 'prod'
+                               AND e.evt_status > 0) AS total_output_kg,
+                           (SELECT COALESCE(SUM(e.evt_amount_metros_lineales), 0)
+                              FROM prod_worker_ot_events e
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND e.evt_type = 'prod'
+                               AND e.evt_status > 0) AS total_output_meters,
+                           (SELECT COALESCE(SUM(d.evt_amount), 0)
+                              FROM prod_worker_ot_defectunits d
+                              INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND d.evt_type = 'merma'
+                               AND d.evt_status > 0) AS total_merma_units,
+                           (SELECT COALESCE(SUM(d.evt_kgstounits), 0)
+                              FROM prod_worker_ot_defectunits d
+                              INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND d.evt_type = 'merma'
+                               AND d.evt_status > 0) AS total_merma_kg
                     FROM prod_worker_ot t1
                     INNER JOIN prod_worker_init t2 ON t1.wok_init_id = t2.id
                     LEFT OUTER JOIN equipo t7 ON t2.win_equipoid = t7.id
@@ -3240,7 +4150,34 @@ final class ProductionService
             if ($woId > 0) {
                 $stmtOt = $this->erpPdo->prepare("
                     SELECT t1.*, t4.prd_number, t5.req_number, t7.equipo_name, t8.type_ant_title,
-                           t9.wrk_firstname, t9.wrk_lastname
+                           t9.wrk_firstname, t9.wrk_lastname, t3.ag_amount AS planned_qty,
+                           (SELECT COALESCE(SUM(e.evt_amount), 0)
+                              FROM prod_worker_ot_events e
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND e.evt_type = 'prod'
+                               AND e.evt_status > 0) AS total_produced_qty,
+                           (SELECT COALESCE(SUM(e.prod_bobina_kg), 0)
+                              FROM prod_worker_ot_events e
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND e.evt_type = 'prod'
+                               AND e.evt_status > 0) AS total_output_kg,
+                           (SELECT COALESCE(SUM(e.evt_amount_metros_lineales), 0)
+                              FROM prod_worker_ot_events e
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND e.evt_type = 'prod'
+                               AND e.evt_status > 0) AS total_output_meters,
+                           (SELECT COALESCE(SUM(d.evt_amount), 0)
+                              FROM prod_worker_ot_defectunits d
+                              INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND d.evt_type = 'merma'
+                               AND d.evt_status > 0) AS total_merma_units,
+                           (SELECT COALESCE(SUM(d.evt_kgstounits), 0)
+                              FROM prod_worker_ot_defectunits d
+                              INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                             WHERE e.evt_prod_worker_otid = t1.id
+                               AND d.evt_type = 'merma'
+                               AND d.evt_status > 0) AS total_merma_kg
                     FROM prod_worker_ot t1
                     INNER JOIN prod_worker_init t2 ON t1.wok_init_id = t2.id
                     LEFT OUTER JOIN equipo t7 ON t2.win_equipoid = t7.id
@@ -4120,6 +5057,105 @@ final class ProductionService
         $stmt->execute([':enddat' => $now, ':id' => $workerOtId]);
 
         try {
+            // Consolidar mermas de desmontaje en el evento de producción si aún no se vincularon
+            $stmtLastProd = $this->erpPdo->prepare("
+                SELECT id FROM prod_worker_ot_events
+                WHERE evt_prod_worker_otid = :ot_id AND evt_type = 'prod'
+                ORDER BY id DESC LIMIT 1
+            ");
+            $stmtLastProd->execute([':ot_id' => $workerOtId]);
+            $lastProdId = (int)$stmtLastProd->fetchColumn();
+            if ($lastProdId > 0) {
+                $stmtCheckDef = $this->erpPdo->prepare("
+                    SELECT COUNT(*) FROM prod_worker_ot_defectunits WHERE evt_refid = :eid AND evt_status > 0
+                ");
+                $stmtCheckDef->execute([':eid' => $lastProdId]);
+                $defCount = (int)$stmtCheckDef->fetchColumn();
+                if ($defCount === 0) {
+                    $dismount = $this->getRollDismountMermas($workerOtId);
+                    $mermasToSave = [];
+                    foreach ($dismount as $tid => $dinfo) {
+                        $mermasToSave[$tid] = [
+                            'amount' => $dinfo['amount'] ?? 0,
+                            'kgs' => $dinfo['kgs'] ?? 0,
+                            'mts' => $dinfo['mts'] ?? 0,
+                            'comments' => $dinfo['comments'] ?? '',
+                        ];
+                    }
+                    if (!empty($mermasToSave)) {
+                        $this->saveEventDefectUnits($lastProdId, $mermasToSave, []);
+                        $this->erpPdo->prepare("
+                            UPDATE prod_worker_ot_defectunits d
+                            INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                            SET d.evt_status = 0
+                            WHERE e.evt_prod_worker_otid = :ot_id AND e.evt_type = 'merma' AND e.id != :cur_eid
+                        ")->execute([':ot_id' => $workerOtId, ':cur_eid' => $lastProdId]);
+                    }
+                }
+
+                // Consolidar automáticamente peso y metros de las bobinas impresas si el evento tiene 0
+                $prSummary = $this->getPrintedRollsSummary($workerOtId);
+                if (!empty($prSummary['rolls_count']) && $prSummary['rolls_count'] > 0) {
+                    $this->erpPdo->prepare("
+                        UPDATE prod_worker_ot_events
+                        SET prod_bobina_kg = CASE WHEN prod_bobina_kg <= 0 THEN :pkg ELSE prod_bobina_kg END,
+                            evt_amount_metros_lineales = CASE WHEN evt_amount_metros_lineales <= 0 THEN :pmlin ELSE evt_amount_metros_lineales END,
+                            evt_amount = CASE WHEN evt_amount <= 0 THEN :pamt ELSE evt_amount END
+                        WHERE id = :eid
+                    ")->execute([
+                        ':pkg' => $prSummary['total_weight_kg'],
+                        ':pmlin' => $prSummary['total_meters'],
+                        ':pamt' => $prSummary['total_meters'],
+                        ':eid' => $lastProdId,
+                    ]);
+
+                    $this->erpPdo->prepare("
+                        UPDATE prod_worker_ot_events
+                        SET evt_status = 2,
+                            evt_enddat = COALESCE(evt_enddat, :now),
+                            prod_bobina_kg = 0,
+                            evt_amount = 0
+                        WHERE evt_prod_worker_otid = :ot_id
+                          AND evt_comments LIKE '%Bobina Semielaborada%'
+                          AND id != :cur_eid
+                    ")->execute([':now' => $now, ':ot_id' => $workerOtId, ':cur_eid' => $lastProdId]);
+                }
+            } else {
+                // Si no existía evento previo de producción pero se emitieron bobinas impresas, crear evento final consolidado
+                $prSummary = $this->getPrintedRollsSummary($workerOtId);
+                if (!empty($prSummary['rolls_count']) && $prSummary['rolls_count'] > 0) {
+                    $insEvt = $this->erpPdo->prepare("
+                        INSERT INTO prod_worker_ot_events
+                        (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_amount_metros_lineales, evt_metrotype, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                        VALUES
+                        (:ot_id, :amt, :kg, :mlin, 'metros_lineales', :crtdat, :enddat, 2, 'prod', :comments)
+                    ");
+                    $insEvt->execute([
+                        ':ot_id' => $workerOtId,
+                        ':amt' => $prSummary['total_meters'],
+                        ':kg' => $prSummary['total_weight_kg'],
+                        ':mlin' => $prSummary['total_meters'],
+                        ':crtdat' => $now,
+                        ':enddat' => $now,
+                        ':comments' => "Producción final consolidada ({$prSummary['rolls_count']} bobinas impresas)",
+                    ]);
+                    $lastProdId = (int)$this->erpPdo->lastInsertId();
+
+                    $this->erpPdo->prepare("
+                        UPDATE prod_worker_ot_events
+                        SET evt_status = 2,
+                            evt_enddat = COALESCE(evt_enddat, :now),
+                            prod_bobina_kg = 0,
+                            evt_amount = 0
+                        WHERE evt_prod_worker_otid = :ot_id
+                          AND evt_comments LIKE '%Bobina Semielaborada%'
+                          AND id != :cur_eid
+                    ")->execute([':now' => $now, ':ot_id' => $workerOtId, ':cur_eid' => $lastProdId]);
+                }
+            }
+        } catch (Throwable) {}
+
+        try {
             $stmtCloseEvt = $this->erpPdo->prepare(
                 "UPDATE prod_worker_ot_events
                  SET evt_status = 2, evt_enddat = :enddat
@@ -4688,6 +5724,24 @@ final class ProductionService
             );
             $stmtCheck->execute([':ref_id' => $eventId, ':type_id' => (int)$typeId]);
             $existingId = (int)$stmtCheck->fetchColumn();
+
+            // Si es merma tipo 9 (Setup / Alistamiento), verificar si ya existe para cualquier evento de esta misma OT
+            if ($existingId <= 0 && (int)$typeId === 9) {
+                $stmtCheckAlis = $this->erpPdo->prepare(
+                    "SELECT d.id FROM prod_worker_ot_defectunits d
+                     INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                     WHERE e.evt_prod_worker_otid = (SELECT evt_prod_worker_otid FROM prod_worker_ot_events WHERE id = :ref_id LIMIT 1)
+                       AND d.evt_type = 'merma' AND d.evt_merma_typeid = 9 AND d.evt_status > 0
+                     ORDER BY d.id DESC LIMIT 1"
+                );
+                $stmtCheckAlis->execute([':ref_id' => $eventId]);
+                $existingAlisId = (int)$stmtCheckAlis->fetchColumn();
+                if ($existingAlisId > 0) {
+                    $existingId = $existingAlisId;
+                    $this->erpPdo->prepare("UPDATE prod_worker_ot_defectunits SET evt_refid = :eid WHERE id = :id")
+                        ->execute([':eid' => $eventId, ':id' => $existingId]);
+                }
+            }
 
             if ($amt > 0 || $kgs > 0 || $mts > 0 || $comm !== '') {
                 if ($existingId > 0) {
@@ -5538,7 +6592,7 @@ final class ProductionService
      *   y genera el alta de los nuevos subproductos cortados (entrada stk_negative=0).
      * - Si es Solo Rebobinado: NO CONSUME la bobina madre (la bobina mantiene su stock intacto).
      */
-    public function executeReboFinalize(int $agId, array $postData, int $userId, int $companyId, int $workerOtId = 0): array
+    public function executeReboFinalize(int $agId, array $postData, int $userId, int $companyId, int $workerOtId = 0, string $operatorName = ''): array
     {
         $selItemId = (int)($postData['selitemid1'] ?? 0);
         if ($selItemId <= 0 || $agId <= 0) {
@@ -5721,6 +6775,8 @@ final class ProductionService
                     $destUseKg = (float)str_replace(',', '.', (string)($postData["stockplustotalkg_{$idx}"] ?? 0));
                     $reboAmt = max(1, (int)($postData["reboamt_{$idx}"] ?? 1));
                     $destLargo = (float)($postData["stockpluslargo_{$idx}"] ?? 0);
+                    $destinoLabel = trim((string)($postData["rebo_destino_{$idx}"] ?? ''));
+                    $destType = $this->isReboHandleDestination($destinoLabel, $destDims, $agenda) ? 'handle' : 'bag';
 
                     if ($destDims <= 0 || $destUseKg <= 0) {
                         continue;
@@ -5754,6 +6810,8 @@ final class ProductionService
                         'item_reboprod_unitkg' => round($destUseKg / $reboAmt, 2),
                         'dest_dims' => $destDims,
                         'dest_largo' => $destLargo,
+                        'destino_label' => $destinoLabel,
+                        'dest_type' => $destType,
                     ];
                 }
             }
@@ -5868,6 +6926,9 @@ final class ProductionService
             $rollIdPost = (int)($postData['scanned_roll_id'] ?? $postData['roll_id'] ?? 0);
             $rollCodePost = trim((string)($postData['scanned_roll_code'] ?? $postData['roll_code'] ?? ($itemSel['item_number_prod'] ?? '')));
             $createdChildRolls = [];
+            $createdBagRolls = [];
+            $createdHandleRolls = [];
+            $createdHandlePallet = null;
             if ($this->trzPdo !== null) {
                 try {
                     if ($rollIdPost <= 0 && $rollCodePost !== '') {
@@ -5897,8 +6958,10 @@ final class ProductionService
                         $widthMm = (int)round(($pRow['dest_dims'] ?? 0) * 10);
                         $meters = (float)($pRow['dest_largo'] ?? 0);
                         $destItemId = (int)($pRow['dest_itemid'] ?? 0);
+                        $destType = (string)($pRow['dest_type'] ?? 'bag');
+                        $destinoLabel = trim((string)($pRow['destino_label'] ?? ''));
 
-                        $skuCode = 'CUT-' . $destItemId;
+                        $skuCode = ($destType === 'handle' ? 'CUT-HANDLE-' : 'CUT-') . $destItemId;
                         $skuId = 1;
                         try {
                             $stmtSku = $this->trzPdo->prepare("SELECT id FROM skus WHERE code = :c LIMIT 1");
@@ -5908,7 +6971,12 @@ final class ProductionService
                                 $skuId = (int)$foundSku;
                             } else {
                                 $stmtInsSku = $this->trzPdo->prepare("INSERT INTO skus (code, description, is_active) VALUES (:c, :d, 1)");
-                                $stmtInsSku->execute([':c' => $skuCode, ':d' => "Bobina Cortada {$pRow['dest_dims']}cm"]);
+                                $stmtInsSku->execute([
+                                    ':c' => $skuCode,
+                                    ':d' => $destType === 'handle'
+                                        ? ("Manilla Cortada {$pRow['dest_dims']}cm")
+                                        : ("Bobina Cortada {$pRow['dest_dims']}cm"),
+                                ]);
                                 $skuId = (int)$this->trzPdo->lastInsertId();
                             }
                         } catch (Throwable) {}
@@ -5917,7 +6985,9 @@ final class ProductionService
                             try {
                                 $stmtMax = $this->trzPdo->query("SELECT MAX(id) FROM rolls");
                                 $nextNum = ((int)$stmtMax->fetchColumn()) + 1;
-                                $childRollCode = sprintf('ROLL-CUT-%05d', $nextNum);
+                                $childRollCode = $destType === 'handle'
+                                    ? sprintf('ROLL-HDL-%05d', $nextNum)
+                                    : sprintf('ROLL-CUT-%05d', $nextNum);
 
                                 $insRoll = $this->trzPdo->prepare("
                                     INSERT INTO rolls
@@ -5958,15 +7028,115 @@ final class ProductionService
                                     'weight_kg' => $unitKg,
                                     'width_mm' => $widthMm,
                                     'meters' => $meters,
+                                    'dest_type' => $destType,
+                                    'destino_label' => $destinoLabel,
                                 ];
+                                if ($destType === 'handle') {
+                                    $createdHandleRolls[] = [
+                                        'id' => $childRollId,
+                                        'roll_code' => $childRollCode,
+                                        'weight_kg' => $unitKg,
+                                        'width_mm' => $widthMm,
+                                        'meters' => $meters,
+                                        'destino_label' => $destinoLabel,
+                                    ];
+                                } else {
+                                    $createdBagRolls[] = [
+                                        'id' => $childRollId,
+                                        'roll_code' => $childRollCode,
+                                        'weight_kg' => $unitKg,
+                                        'width_mm' => $widthMm,
+                                        'meters' => $meters,
+                                        'destino_label' => $destinoLabel,
+                                    ];
+                                }
                             } catch (Throwable) {}
                         }
+                    }
+
+                    if (!empty($createdHandleRolls)) {
+                        $stmtMaxPal = $this->trzPdo->query("SELECT MAX(id) FROM pallets");
+                        $nextPalNum = ((int)$stmtMaxPal->fetchColumn()) + 1;
+                        $palletCode = sprintf('PAL-%06d', $nextPalNum);
+                        $handleCount = count($createdHandleRolls);
+                        $finalSku = 'MANILLAS';
+                        if (!empty($createdHandleRolls[0]['width_mm'])) {
+                            $finalSku .= ' ' . number_format(((float)$createdHandleRolls[0]['width_mm']) / 10, 1, ',', '.') . 'cm';
+                        }
+                        $insPal = $this->trzPdo->prepare("
+                            INSERT INTO pallets
+                            (pallet_code, work_order_id, source_roll_id, final_sku, destination_mode, customer_order_ref, warehouse_id, box_count, operator_name, status)
+                            VALUES
+                            (:code, :wo_id, :roll_id, :sku, :dest, :cust_ref, 1, :box_count, :op, 'OPEN')
+                        ");
+                        $insPal->execute([
+                            ':code' => $palletCode,
+                            ':wo_id' => $workerOtId > 0 ? $workerOtId : null,
+                            ':roll_id' => $rollIdPost > 0 ? $rollIdPost : null,
+                            ':sku' => $finalSku,
+                            ':dest' => 'REBO_HANDLE_PALLET',
+                            ':cust_ref' => $orderNum !== '' ? $orderNum : null,
+                            ':box_count' => $handleCount,
+                            ':op' => trim($operatorName) !== '' ? trim($operatorName) : ('Usuario ' . $userId),
+                        ]);
+                        $palletId = (int)$this->trzPdo->lastInsertId();
+
+                        $stmtEvt = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
+                        $stmtEvt->execute([
+                            ':type' => 'REBO_HANDLE_PALLET_CREATED',
+                            ':payload' => json_encode([
+                                'pallet_id' => $palletId,
+                                'pallet_code' => $palletCode,
+                                'source_roll_id' => $rollIdPost,
+                                'handle_roll_ids' => array_column($createdHandleRolls, 'id'),
+                                'handle_roll_codes' => array_column($createdHandleRolls, 'roll_code'),
+                                'handle_roll_count' => $handleCount,
+                                'source_work_order_id' => $workerOtId,
+                                'operator_id' => $userId,
+                                'operator_name' => trim($operatorName) !== '' ? trim($operatorName) : null,
+                                'timestamp' => $now,
+                            ], JSON_UNESCAPED_UNICODE),
+                        ]);
+
+                        $createdHandlePallet = [
+                            'id' => $palletId,
+                            'code' => $palletCode,
+                            'handle_count' => $handleCount,
+                        ];
                     }
                 } catch (Throwable) {}
             }
         }
 
-        return ['ok' => true, 'rebo_type' => 'Corte', 'consumed' => true, 'created_rolls' => $createdChildRolls];
+        return [
+            'ok' => true,
+            'rebo_type' => 'Corte',
+            'consumed' => true,
+            'created_rolls' => $createdChildRolls,
+            'created_bag_rolls' => $createdBagRolls,
+            'created_handle_rolls' => $createdHandleRolls,
+            'handle_pallet' => $createdHandlePallet,
+        ];
+    }
+
+    private function isReboHandleDestination(string $destinoLabel, float $destDims, array $agenda): bool
+    {
+        $dest = mb_strtolower(trim($destinoLabel));
+        if ($dest !== '') {
+            if (str_contains($dest, 'manilla')) {
+                return true;
+            }
+            if (str_contains($dest, 'bolsa')) {
+                return false;
+            }
+        }
+
+        $anchoManillas = (float)($agenda['req_infoaddprd_ancho_manillas'] ?? 0);
+        if ($anchoManillas > 0 && $destDims > 0 && $destDims <= ($anchoManillas + 1.0)) {
+            return true;
+        }
+
+        return $destDims > 0 && $destDims <= 15.0;
     }
 
     /**
@@ -6138,13 +7308,25 @@ final class ProductionService
         if ($amount <= 0 && $kgs <= 0 && $mts <= 0) return true; // Nada que guardar
 
         try {
-            // Buscar el evento de apertura (o el evento activo más reciente)
+            // Buscar si ya existe CUALQUIER registro de merma tipo 9 para esta OT (independiente del evento)
+            $stmtExisting = $this->erpPdo->prepare("
+                SELECT d.id, d.evt_refid
+                FROM prod_worker_ot_defectunits d
+                INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                WHERE e.evt_prod_worker_otid = :ot_id
+                  AND d.evt_merma_typeid = 9
+                  AND d.evt_status > 0
+                ORDER BY d.id DESC LIMIT 1
+            ");
+            $stmtExisting->execute([':ot_id' => $workerOtId]);
+            $existingRow = $stmtExisting->fetch(PDO::FETCH_ASSOC);
+
+            // Buscar evento de apertura o el evento activo más reciente de la OT
             $stmtEvt = $this->erpPdo->prepare("
                 SELECT id FROM prod_worker_ot_events
                 WHERE evt_prod_worker_otid = :ot_id
                   AND evt_type = 'apertura'
-                  AND evt_status > 0
-                ORDER BY evt_crtdat DESC LIMIT 1
+                ORDER BY evt_status DESC, evt_crtdat DESC LIMIT 1
             ");
             $stmtEvt->execute([':ot_id' => $workerOtId]);
             $refId = (int)$stmtEvt->fetchColumn();
@@ -6160,28 +7342,17 @@ final class ProductionService
                 $refId = (int)$stmtEvt2->fetchColumn();
             }
 
-            // Verificar si ya existe una merma tipo 9 para esta OT / ref
-            $existingId = 0;
-            if ($refId > 0) {
-                $chk = $this->erpPdo->prepare("
-                    SELECT id FROM prod_worker_ot_defectunits
-                    WHERE evt_refid = :ref_id AND evt_merma_typeid = 9 AND evt_status > 0
-                    LIMIT 1
-                ");
-                $chk->execute([':ref_id' => $refId]);
-                $existingId = (int)$chk->fetchColumn();
-            }
-
             $comm = trim($comments) ?: 'Merma de Alistamiento / Ajuste (Setup)';
             $now = time();
 
-            if ($existingId > 0) {
+            if ($existingRow && (int)$existingRow['id'] > 0) {
+                $targetRefId = $refId > 0 ? $refId : (int)$existingRow['evt_refid'];
                 $upd = $this->erpPdo->prepare("
                     UPDATE prod_worker_ot_defectunits
-                    SET evt_amount = :amt, evt_kgstounits = :kgs, evt_mtstounits = :mts, evt_comments = :comm
+                    SET evt_amount = :amt, evt_kgstounits = :kgs, evt_mtstounits = :mts, evt_comments = :comm, evt_refid = :ref_id
                     WHERE id = :id
                 ");
-                return $upd->execute([':amt' => $amount, ':kgs' => $kgs, ':mts' => $mts, ':comm' => $comm, ':id' => $existingId]);
+                return $upd->execute([':amt' => $amount, ':kgs' => $kgs, ':mts' => $mts, ':comm' => $comm, ':ref_id' => $targetRefId, ':id' => (int)$existingRow['id']]);
             } else {
                 $ins = $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_defectunits
@@ -6223,10 +7394,16 @@ final class ProductionService
             $r = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($r) {
                 return [
+                    'id' => (int)$r['id'],
+                    'evt_refid' => (int)$r['evt_refid'],
                     'amount' => (float)$r['evt_amount'],
                     'kgs' => (float)$r['evt_kgstounits'],
                     'mts' => (int)$r['evt_mtstounits'],
                     'comments' => (string)$r['evt_comments'],
+                    'evt_amount' => (float)$r['evt_amount'],
+                    'evt_kgstounits' => (float)$r['evt_kgstounits'],
+                    'evt_mtstounits' => (int)$r['evt_mtstounits'],
+                    'evt_comments' => (string)$r['evt_comments'],
                 ];
             }
             return null;
@@ -6236,10 +7413,265 @@ final class ProductionService
     }
 
     /**
+     * Retorna las mermas registradas durante el desmontaje de bobinas para la OT,
+     * agrupadas por tipo de merma (prod_mermatypes.id => ['kgs' => ..., 'amount' => ..., 'mts' => ..., 'comments' => ...]).
+     */
+    public function getRollDismountMermas(int $workerOtId): array
+    {
+        if ($workerOtId <= 0) {
+            return [];
+        }
+        $result = [];
+        try {
+            $stmt = $this->erpPdo->prepare("
+                SELECT d.evt_merma_typeid, 
+                       SUM(d.evt_kgstounits) AS total_kgs, 
+                       SUM(d.evt_amount) AS total_amount,
+                       SUM(d.evt_mtstounits) AS total_mts,
+                       GROUP_CONCAT(NULLIF(d.evt_comments, '') SEPARATOR '; ') AS comments,
+                       COUNT(*) AS rolls_count
+                FROM prod_worker_ot_defectunits d
+                INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                WHERE e.evt_prod_worker_otid = :ot_id
+                  AND e.evt_type = 'merma'
+                  AND d.evt_status > 0
+                GROUP BY d.evt_merma_typeid
+            ");
+            $stmt->execute([':ot_id' => $workerOtId]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($rows as $r) {
+                $typeId = (int)$r['evt_merma_typeid'];
+                $result[$typeId] = [
+                    'type_id' => $typeId,
+                    'kgs' => (float)$r['total_kgs'],
+                    'amount' => (float)$r['total_amount'],
+                    'mts' => (int)$r['total_mts'],
+                    'comments' => (string)($r['comments'] ?? ''),
+                    'rolls_count' => (int)($r['rolls_count'] ?? 0),
+                ];
+            }
+        } catch (Throwable) {}
+
+        // Fallback: si por alguna razón no hay registros en ERP pero sí en TRZ events
+        if (empty($result) && $this->trzPdo !== null) {
+            try {
+                $stmtTrz = $this->trzPdo->prepare("
+                    SELECT payload FROM events 
+                    WHERE type = 'ROLL_OUTPUT_COMPLETED' 
+                    ORDER BY id ASC
+                ");
+                $stmtTrz->execute();
+                while ($tr = $stmtTrz->fetch(PDO::FETCH_ASSOC)) {
+                    $p = json_decode((string)($tr['payload'] ?? ''), true);
+                    if (is_array($p) && (int)($p['worker_ot_id'] ?? 0) === $workerOtId && !empty($p['mermas_detail']) && is_array($p['mermas_detail'])) {
+                        foreach ($p['mermas_detail'] as $mtId => $mInfo) {
+                            $tId = (int)$mtId;
+                            $k = (float)($mInfo['kgs'] ?? 0);
+                            $c = trim((string)($mInfo['comments'] ?? ''));
+                            if ($k > 0 || $c !== '') {
+                                if (!isset($result[$tId])) {
+                                    $result[$tId] = [
+                                        'type_id' => $tId,
+                                        'kgs' => $k,
+                                        'amount' => 0.0,
+                                        'mts' => 0,
+                                        'comments' => $c,
+                                        'rolls_count' => 1,
+                                    ];
+                                } else {
+                                    $result[$tId]['kgs'] += $k;
+                                    $result[$tId]['rolls_count'] += 1;
+                                    if ($c !== '') {
+                                        $result[$tId]['comments'] .= ($result[$tId]['comments'] !== '' ? '; ' : '') . $c;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable) {}
+        }
+
+        return $result;
+    }
+
+    /**
+     * Retorna el resumen consolidado de las bobinas impresas semielaboradas generadas en la OT.
+     * Incluye la suma total de peso (kg), la suma de metros lineales, el conteo de bobinas y el detalle.
+     */
+    public function getPrintedRollsSummary(int $workerOtId): array
+    {
+        if ($workerOtId <= 0) {
+            return [
+                'total_weight_kg' => 0.0,
+                'total_meters' => 0.0,
+                'rolls_count' => 0,
+                'rolls_list' => [],
+            ];
+        }
+
+        $rollsList = [];
+        $totalWeight = 0.0;
+        $totalMeters = 0.0;
+
+        // 1. Consultar en TRZ (tabla rolls)
+        if ($this->trzPdo !== null) {
+            try {
+                $stmt = $this->trzPdo->prepare("
+                    SELECT id, roll_code, weight_kg, meters, parent_roll_id, created_at
+                    FROM rolls
+                    WHERE source_work_order_id = :ot_id
+                      AND (process_stage = 'PRINTED' OR roll_code LIKE 'ROLL-SE-%')
+                    ORDER BY id ASC
+                ");
+                $stmt->execute([':ot_id' => $workerOtId]);
+                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($rows as $r) {
+                    $w = (float)($r['weight_kg'] ?? 0);
+                    $m = (float)($r['meters'] ?? 0);
+                    $totalWeight += $w;
+                    $totalMeters += $m;
+                    $rollsList[] = [
+                        'id' => (int)$r['id'],
+                        'roll_code' => (string)$r['roll_code'],
+                        'weight_kg' => $w,
+                        'meters' => $m,
+                        'parent_roll_id' => $r['parent_roll_id'] !== null ? (int)$r['parent_roll_id'] : null,
+                        'created_at' => (string)($r['created_at'] ?? ''),
+                    ];
+                }
+            } catch (Throwable) {}
+        }
+
+        // 2. Si no hubo resultados en rolls, verificar en events (CHILD_ROLL_CREATED) de TRZ
+        if (empty($rollsList) && $this->trzPdo !== null) {
+            try {
+                $stmtEvt = $this->trzPdo->prepare("
+                    SELECT id, payload, created_at
+                    FROM events
+                    WHERE type = 'CHILD_ROLL_CREATED'
+                    ORDER BY id ASC
+                ");
+                $stmtEvt->execute();
+                while ($erow = $stmtEvt->fetch(PDO::FETCH_ASSOC)) {
+                    $p = json_decode((string)($erow['payload'] ?? ''), true);
+                    if (is_array($p) && (int)($p['worker_ot_id'] ?? 0) === $workerOtId) {
+                        $w = (float)($p['weight_kg'] ?? 0);
+                        $m = (float)($p['meters'] ?? 0);
+                        $code = (string)($p['child_roll_code'] ?? ('ROLL-' . ($p['child_roll_id'] ?? $erow['id'])));
+                        $totalWeight += $w;
+                        $totalMeters += $m;
+                        $rollsList[] = [
+                            'id' => (int)($p['child_roll_id'] ?? $erow['id']),
+                            'roll_code' => $code,
+                            'weight_kg' => $w,
+                            'meters' => $m,
+                            'parent_roll_id' => !empty($p['parent_roll_id']) ? (int)$p['parent_roll_id'] : null,
+                            'created_at' => (string)($erow['created_at'] ?? ''),
+                        ];
+                    }
+                }
+            } catch (Throwable) {}
+        }
+
+        // 3. Fallback en ERP: eventos que registran 'Bobina Semielaborada'
+        if (empty($rollsList) && $this->erpPdo !== null) {
+            try {
+                $stmtErp = $this->erpPdo->prepare("
+                    SELECT id, evt_amount, prod_bobina_kg, evt_amount_metros_lineales, evt_comments, evt_crtdat
+                    FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_comments LIKE '%Bobina Semielaborada%'
+                      AND evt_status > 0
+                    ORDER BY id ASC
+                ");
+                $stmtErp->execute([':ot_id' => $workerOtId]);
+                while ($erow = $stmtErp->fetch(PDO::FETCH_ASSOC)) {
+                    $w = (float)($erow['prod_bobina_kg'] > 0 ? $erow['prod_bobina_kg'] : $erow['evt_amount']);
+                    $m = (float)($erow['evt_amount_metros_lineales'] ?? 0);
+                    if ($w > 0) {
+                        $totalWeight += $w;
+                        $totalMeters += $m;
+                        $rollsList[] = [
+                            'id' => (int)$erow['id'],
+                            'roll_code' => 'BOB-SE-' . $erow['id'],
+                            'weight_kg' => $w,
+                            'meters' => $m,
+                            'parent_roll_id' => null,
+                            'created_at' => date('Y-m-d H:i:s', (int)$erow['evt_crtdat']),
+                        ];
+                    }
+                }
+            } catch (Throwable) {}
+        }
+
+        return [
+            'total_weight_kg' => round($totalWeight, 3),
+            'total_meters' => round($totalMeters, 2),
+            'rolls_count' => count($rollsList),
+            'rolls_list' => $rollsList,
+        ];
+    }
+
+    /**
+     * Determina si una máquina o agenda corresponde a Flexografía, Serigrafía o Pulpo Serigráfico.
+     */
+    public function isFlexoSeriPulpoMachine(?int $equipoId = null, ?array $agenda = null): bool
+    {
+        if ($agenda !== null) {
+            $isFlexo = (int)($agenda['equipo_prod_isprinter_flexo'] ?? 0) === 1
+                || (int)($agenda['equipo_type_id'] ?? 0) === 7
+                || stripos((string)($agenda['type_ant_title'] ?? ''), 'flexo') !== false
+                || stripos((string)($agenda['equipo_name'] ?? ''), 'flexo') !== false;
+            $isSeri = (int)($agenda['equipo_prod_isprinter_seri'] ?? 0) === 1
+                || in_array((int)($agenda['equipo_type_id'] ?? 0), [11, 22], true)
+                || stripos((string)($agenda['type_ant_title'] ?? ''), 'seri') !== false
+                || stripos((string)($agenda['equipo_name'] ?? ''), 'seri') !== false
+                || stripos((string)($agenda['equipo_name'] ?? ''), 'pulpo') !== false;
+            if ($isFlexo || $isSeri) {
+                return true;
+            }
+        }
+
+        if ($equipoId !== null && $equipoId > 0) {
+            try {
+                $stmt = $this->erpPdo->prepare("
+                    SELECT e.id, e.equipo_name, e.equipo_type_id,
+                           e.equipo_prod_isprinter_flexo, e.equipo_prod_isprinter_seri,
+                           t.type_ant_title
+                    FROM equipo e
+                    LEFT JOIN equipo_type t ON e.equipo_type_id = t.id
+                    WHERE e.id = :id
+                    LIMIT 1
+                ");
+                $stmt->execute([':id' => $equipoId]);
+                $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                if ($row) {
+                    if ((int)$row['equipo_prod_isprinter_flexo'] === 1
+                        || (int)$row['equipo_prod_isprinter_seri'] === 1
+                        || in_array((int)$row['equipo_type_id'], [7, 11, 22], true)
+                        || stripos((string)$row['equipo_name'], 'flexo') !== false
+                        || stripos((string)$row['equipo_name'], 'seri') !== false
+                        || stripos((string)$row['equipo_name'], 'pulpo') !== false
+                        || stripos((string)($row['type_ant_title'] ?? ''), 'flexo') !== false
+                        || stripos((string)($row['type_ant_title'] ?? ''), 'seri') !== false
+                    ) {
+                        return true;
+                    }
+                }
+            } catch (Throwable) {}
+        }
+
+        return false;
+    }
+
+    /**
      * Lista todas las bobinas disponibles actualmente en Bodega 3000 (Insumos/MP en producción).
      * Incluye análisis de compatibilidad opcional con una OT si se pasa $agId.
+     * Si la máquina corresponde a Flexografía, Serigrafía o Pulpo Serigráfico,
+     * SOLO se incluyen códigos iniciados en TEL (telas vírgenes), excluyendo bolsas y bobinas ya impresas/procesadas.
      */
-    public function listAvailableRollsInBodega3000(?int $agId = null, int $limit = 100): array
+    public function listAvailableRollsInBodega3000(?int $agId = null, int $limit = 100, ?bool $unprintedOnly = null, ?int $equipoId = null, bool $compatibleOnly = false): array
     {
         $rolls = [];
 
@@ -6247,17 +7679,45 @@ final class ProductionService
         $targetMat = '';
         $targetColor = '';
         $targetWidth = 0.0;
+        $targetWidthMm = 0;
+        $targetGrams = 0.0;
+        $agenda = null;
         if ($agId !== null && $agId > 0) {
             $agenda = $this->getWorkOrderAgendaDetails($agId);
             if ($agenda !== null) {
                 $targetMat = mb_strtoupper(trim((string)($agenda['fab_type'] ?? '')));
                 $targetColor = mb_strtolower(trim((string)($agenda['fabric_color'] ?? $agenda['ag_color_tela'] ?? '')));
                 $targetWidth = (float)($agenda['req_operador_tela_width'] ?? $agenda['fab_med_width'] ?? 0);
+                $targetGrams = (float)($agenda['ot_grams'] ?? 0);
+                $targetWidthMm = (int)round($targetWidth > 0 && $targetWidth < 100 ? $targetWidth * 10 : $targetWidth);
+                if ($equipoId === null && !empty($agenda['ag_equipo_id'])) {
+                    $equipoId = (int)$agenda['ag_equipo_id'];
+                }
             }
         }
 
+        $isFlexoSeriPulpo = $this->isFlexoSeriPulpoMachine($equipoId, $agenda);
+        $isPrinter = $isFlexoSeriPulpo;
+        if ($unprintedOnly === null) {
+            $unprintedOnly = $isFlexoSeriPulpo;
+        }
+        $telOnly = $isFlexoSeriPulpo;
+
         // 1. Bobinas en ERP unibag_unibag en Bodega 3000 (st_id IN (16, 27) o LIKE '3000%') con stock positivo
         try {
+            $whereErp = $telOnly
+                ? "AND (i.item_number_prod LIKE 'TEL%' OR i.item_number_prod LIKE 'tel%')"
+                : "AND (
+                      i.item_number_prod LIKE 'TEL%'
+                      OR i.item_number_prod LIKE 'BTE%'
+                      OR i.item_number_prod LIKE 'BOB%'
+                      OR i.item_title LIKE 'PLA/%'
+                      OR i.item_title LIKE 'PP/%'
+                      OR i.item_title LIKE 'TNT/%'
+                      OR i.item_title LIKE '%BOBINA%'
+                      OR i.item_title LIKE '%TELA%'
+                  )";
+
             $sqlErp = "
                 SELECT iss.iss_inventory, iss.st_id, css.st_name as warehouse_name,
                        i.id as item_id, i.item_number_prod as sku_code, i.item_title as sku_desc,
@@ -6267,16 +7727,7 @@ final class ProductionService
                 JOIN company_shops_storehouses css ON css.id = iss.st_id
                 WHERE (iss.st_id IN (16, 27) OR css.st_name LIKE '%3000%')
                   AND iss.iss_inventory > 0
-                  AND (
-                      i.item_number_prod LIKE 'TEL%'
-                      OR i.item_number_prod LIKE 'BTE%'
-                      OR i.item_number_prod LIKE 'BOB%'
-                      OR i.item_title LIKE 'PLA/%'
-                      OR i.item_title LIKE 'PP/%'
-                      OR i.item_title LIKE 'TNT/%'
-                      OR i.item_title LIKE '%BOBINA%'
-                      OR i.item_title LIKE '%TELA%'
-                  )
+                  {$whereErp}
                 ORDER BY iss.iss_inventory DESC
                 LIMIT :lim
             ";
@@ -6288,6 +7739,17 @@ final class ProductionService
             foreach ($erpRows as $row) {
                 $desc = (string)$row['sku_desc'];
                 $sku = (string)$row['sku_code'];
+
+                // Si es Flexo, Seri o Pulpo: REGLA ESTRICTA -> Solo códigos iniciados en TEL
+                if ($telOnly && !str_starts_with(strtoupper($sku), 'TEL')) {
+                    continue;
+                }
+
+                // Detección de bobina impresa
+                $isPrinted = (stripos($desc, 'IMPRES') !== false || stripos($sku, 'IMP') !== false);
+                if ($unprintedOnly && $isPrinted) {
+                    continue; // Para Flexo y Seri se excluyen bobinas ya impresas
+                }
 
                 // Parser de materialidad (PLA / PP / TNT)
                 $rMat = 'PP';
@@ -6327,6 +7789,8 @@ final class ProductionService
                 $isComp = false;
                 $matMatch = true;
                 $colMatch = true;
+                $gramMatch = true;
+                $widthMatch = true;
                 if ($targetMat !== '') {
                     $normTarget = str_contains($targetMat, 'PLA') ? 'PLA' : 'PP';
                     $matMatch = ($rMat === $normTarget);
@@ -6334,7 +7798,14 @@ final class ProductionService
                 if ($targetColor !== '') {
                     $colMatch = str_contains(mb_strtolower($color), $targetColor) || str_contains($targetColor, mb_strtolower($color));
                 }
-                $isComp = ($matMatch && $colMatch);
+                if ($targetGrams > 0 && $gramms > 0) {
+                    $gramMatch = (abs($gramms - $targetGrams) <= 5);
+                }
+                if ($targetWidthMm > 0) {
+                    $rollWidthMm = (int)round($widthCm * 10);
+                    $widthMatch = ($rollWidthMm > 0 && abs($rollWidthMm - $targetWidthMm) <= 80) || ($rollWidthMm >= $targetWidthMm);
+                }
+                $isComp = ($matMatch && $colMatch && $gramMatch && $widthMatch && (!$isPrinter || !$isPrinted));
 
                 $rolls[] = [
                     'id' => "BOD3000_{$row['st_id']}_{$row['item_id']}",
@@ -6352,9 +7823,12 @@ final class ProductionService
                     'weight_kg' => $weightKg,
                     'stock_qty' => (float)$row['iss_inventory'],
                     'warehouse_name' => (string)$row['warehouse_name'],
+                    'is_printed' => $isPrinted,
                     'is_compatible' => $isComp,
                     'is_material_match' => $matMatch,
                     'is_color_match' => $colMatch,
+                    'is_gram_match' => $gramMatch,
+                    'is_width_match' => $widthMatch,
                 ];
             }
         } catch (Throwable) {}
@@ -6362,6 +7836,10 @@ final class ProductionService
         // 2. Bobinas registradas en TRZ en Bodega 3000 o en proceso activo de producción
         if ($this->trzPdo !== null) {
             try {
+                $whereTrzTel = $telOnly
+                    ? "AND (s.code LIKE 'TEL%' OR s.code LIKE 'tel%' OR r.roll_code LIKE 'TEL%' OR r.roll_code LIKE 'tel%')"
+                    : "";
+
                 $sqlTrz = "
                     SELECT r.*, s.code as sku_code, s.description as sku_desc, w.name as warehouse_name
                     FROM rolls r
@@ -6369,6 +7847,7 @@ final class ProductionService
                     LEFT JOIN warehouses w ON r.warehouse_id = w.id
                     WHERE (w.code IN (3000, 16, 27) OR w.name LIKE '%3000%' OR r.process_stage = 'PRODUCTION')
                       AND r.status != 'CONSUMED'
+                      {$whereTrzTel}
                     ORDER BY r.id DESC
                     LIMIT :lim
                 ";
@@ -6378,38 +7857,82 @@ final class ProductionService
                 $trzRows = $stmtTrz->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
                 foreach ($trzRows as $row) {
+                    $rCode = (string)$row['roll_code'];
+                    $rDesc = (string)($row['sku_desc'] ?? '');
+                    $skuCode = (string)($row['sku_code'] ?? '');
+
+                    // Si es Flexo, Seri o Pulpo: REGLA ESTRICTA -> Solo códigos iniciados en TEL
+                    if ($telOnly) {
+                        $codeUpper = strtoupper($skuCode);
+                        $rollUpper = strtoupper($rCode);
+                        if (!str_starts_with($codeUpper, 'TEL') && !str_starts_with($rollUpper, 'TEL')) {
+                            continue;
+                        }
+                    }
+
+                    // Detección de bobina impresa en TRZ (RP-, ROLL-SE-, process_stage=PRINTED, o con source_work_order_id)
+                    $isPrinted = ($row['process_stage'] === 'PRINTED'
+                        || str_starts_with($rCode, 'RP-')
+                        || str_starts_with($rCode, 'ROLL-SE-')
+                        || !empty($row['source_work_order_id'])
+                        || stripos($rDesc, 'IMPRES') !== false);
+
+                    if ($unprintedOnly && $isPrinted) {
+                        continue; // Para Flexo y Seri se excluyen bobinas ya impresas
+                    }
+
                     $color = (string)($row['color'] ?? '-');
                     $rMat = 'PP';
-                    if (stripos((string)$row['sku_code'], 'PLA') !== false || stripos((string)$row['sku_desc'], 'PLA') !== false) {
+                    if (stripos((string)$row['sku_code'], 'PLA') !== false || stripos($rDesc, 'PLA') !== false) {
                         $rMat = 'PLA';
                     }
 
-                    $matMatch = ($targetMat === '' || ($strContains = str_contains($targetMat, 'PLA') ? ($rMat === 'PLA') : ($rMat === 'PP')));
+                    $matMatch = ($targetMat === '' || (str_contains($targetMat, 'PLA') ? ($rMat === 'PLA') : ($rMat === 'PP')));
                     $colMatch = ($targetColor === '' || str_contains(mb_strtolower($color), $targetColor) || str_contains($targetColor, mb_strtolower($color)));
-                    $isComp = ($matMatch && $colMatch);
+                    $gramms = (float)($row['microns'] ?? 80);
+                    $gramMatch = true;
+                    $widthMatch = true;
+                    if ($targetGrams > 0 && $gramms > 0) {
+                        $gramMatch = (abs($gramms - $targetGrams) <= 5);
+                    }
+                    if ($targetWidthMm > 0) {
+                        $rWidthMm = (int)($row['width_mm'] ?? 0);
+                        $widthMatch = ($rWidthMm > 0 && abs($rWidthMm - $targetWidthMm) <= 80) || ($rWidthMm >= $targetWidthMm);
+                    }
+                    $isComp = ($matMatch && $colMatch && $gramMatch && $widthMatch && (!$isPrinter || !$isPrinted));
 
                     $rolls[] = [
                         'id' => (int)$row['id'],
                         'source' => 'TRZ',
                         'erp_item_id' => 0,
                         'st_id' => 16,
-                        'roll_code' => (string)$row['roll_code'],
+                        'roll_code' => $rCode,
                         'sku_code' => (string)($row['sku_code'] ?? 'S/C'),
-                        'sku_desc' => (string)($row['sku_desc'] ?? ''),
+                        'sku_desc' => $rDesc,
                         'material' => $rMat,
                         'color' => $color,
                         'width_cm' => round(((float)($row['width_mm'] ?? 0)) / 10, 1),
-                        'grammage' => (float)($row['microns'] ?? 80),
+                        'grammage' => $gramms,
                         'meters' => (float)($row['meters'] ?? 0),
                         'weight_kg' => (float)($row['weight_kg'] ?? 0),
                         'stock_qty' => (float)($row['received_qty'] ?? 1),
                         'warehouse_name' => (string)($row['warehouse_name'] ?? 'Bodega 3000'),
+                        'is_printed' => $isPrinted,
                         'is_compatible' => $isComp,
                         'is_material_match' => $matMatch,
                         'is_color_match' => $colMatch,
+                        'is_gram_match' => $gramMatch,
+                        'is_width_match' => $widthMatch,
                     ];
                 }
             } catch (Throwable) {}
+        }
+
+        if ($compatibleOnly && $agId !== null && $agId > 0) {
+            $rolls = array_values(array_filter(
+                $rolls,
+                static fn(array $roll): bool => !empty($roll['is_compatible'])
+            ));
         }
 
         return $rolls;
@@ -6448,14 +7971,15 @@ final class ProductionService
             try {
                 $stmtErp = $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
-                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                     VALUES
-                     (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)
+                     (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
                 ");
                 $stmtErp->execute([
                     ':ot_id' => $workerOtId,
                     ':amt' => $wKg,
                     ':crtdat' => $now,
+                    ':enddat' => $now,
                     ':comments' => $evtComment,
                 ]);
             } catch (Throwable $e) {
@@ -6486,6 +8010,9 @@ final class ProductionService
         }
 
         // 2. MODO: CON TRAZABILIDAD (Seleccionada desde Bodega 3000 o código QR)
+        $agDetails = ($agId !== null && $agId > 0) ? $this->getWorkOrderAgendaDetails($agId) : null;
+        $isFlexoSeriPulpo = $this->isFlexoSeriPulpoMachine($machineId, $agDetails);
+
         // Caso A: Selección desde ERP_stId_itemId o BOD3000_stId_itemId
         if (preg_match('/^(?:BOD3000|ERP)_(\d+)_(\d+)$/', $rollIdentifier, $m)) {
             $stId = (int)$m[1];
@@ -6506,6 +8033,12 @@ final class ProductionService
             }
 
             $sku = (string)$item['item_number_prod'];
+            if ($isFlexoSeriPulpo && !str_starts_with(strtoupper($sku), 'TEL')) {
+                return [
+                    'ok' => false,
+                    'error' => "En Flexografía, Serigrafía y Pulpo Serigráfico solo se pueden solicitar materiales de Bodega 3000 con códigos de tela (iniciados en TEL). El material {$sku} corresponde a bolsa o bobina ya hecha/procesada."
+                ];
+            }
             $desc = (string)$item['item_title'];
             $wKg = $weightKg > 0 ? $weightKg : (float)($item['item_reg_kg'] ?: 85.0);
             $rollCode = "BOB-{$sku}-" . date('ymd') . "-" . strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
@@ -6581,13 +8114,14 @@ final class ProductionService
 
             $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                 VALUES
-                 (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)
+                 (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
             ")->execute([
                 ':ot_id' => $workerOtId,
                 ':amt' => $wKg,
                 ':crtdat' => $now,
+                ':enddat' => $now,
                 ':comments' => $evtComment,
             ]);
 
@@ -6601,6 +8135,26 @@ final class ProductionService
             $stR->execute([':id' => $trzRollId]);
             $roll = $stR->fetch(PDO::FETCH_ASSOC);
             if ($roll) {
+                $sku = (string)($roll['sku_code'] ?? 'S/C');
+                $rCode = (string)$roll['roll_code'];
+                if ($isFlexoSeriPulpo && !str_starts_with(strtoupper($sku), 'TEL') && !str_starts_with(strtoupper($rCode), 'TEL')) {
+                    return [
+                        'ok' => false,
+                        'error' => "En Flexografía, Serigrafía y Pulpo Serigráfico solo se pueden solicitar materiales de Bodega 3000 con códigos de tela (iniciados en TEL). La bobina {$rCode} ({$sku}) corresponde a bolsa o bobina ya procesada."
+                    ];
+                }
+
+                $isPrinted = ($roll['process_stage'] === 'PRINTED'
+                    || str_starts_with((string)$roll['roll_code'], 'RP-')
+                    || str_starts_with((string)$roll['roll_code'], 'ROLL-SE-')
+                    || !empty($roll['source_work_order_id']));
+                if ($isPrinted && $isFlexoSeriPulpo) {
+                    return [
+                        'ok' => false,
+                        'error' => "La bobina {$roll['roll_code']} ya fue impresa previamente. Las máquinas de Flexografía y Serigrafía requieren bobinas vírgenes sin uso de impresión."
+                    ];
+                }
+
                 $wKg = (float)$roll['weight_kg'];
                 $rCode = (string)$roll['roll_code'];
                 $sku = (string)($roll['sku_code'] ?? 'S/C');
@@ -6636,13 +8190,14 @@ final class ProductionService
 
                 $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
-                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                     VALUES
-                     (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)
+                     (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
                 ")->execute([
                     ':ot_id' => $workerOtId,
                     ':amt' => $wKg,
                     ':crtdat' => $now,
+                    ':enddat' => $now,
                     ':comments' => $evtComment,
                 ]);
 

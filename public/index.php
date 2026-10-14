@@ -89,6 +89,161 @@ session_set_cookie_params([
 session_start();
 csrfToken();
 
+/**
+ * Inyecta un selector de fechas unificado en español para todos los HTML
+ * que aún usen <input type="date"> nativo, preservando el valor Y-m-d
+ * enviado al backend pero mostrando dd/mm/yyyy al usuario.
+ */
+function unibagDatePickerAssetsHtml(): string
+{
+    return <<<'HTML'
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+<style id="unibag-date-picker-style">
+.flatpickr-calendar { font-family: Arial, "Helvetica Neue", Helvetica, sans-serif; }
+.flatpickr-months .flatpickr-month,
+.flatpickr-current-month .flatpickr-monthDropdown-months,
+.flatpickr-weekdays,
+.flatpickr-weekday,
+.flatpickr-day { text-transform: none; }
+.flatpickr-input,
+input[data-unibag-datepicker-visible="1"] {
+    letter-spacing: 0.2px;
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr/dist/l10n/es.js"></script>
+<script id="unibag-date-picker-script">
+(function () {
+    function bindDateInputs(root) {
+        if (!window.flatpickr) {
+            return;
+        }
+        var scope = root && root.querySelectorAll ? root : document;
+        var inputs = scope.querySelectorAll('input[type="date"]:not([data-unibag-datepicker-bound])');
+        inputs.forEach(function (input) {
+            input.setAttribute('lang', 'es');
+            input.dataset.unibagDatepickerBound = '1';
+
+            var picker = flatpickr(input, {
+                locale: (window.flatpickr && window.flatpickr.l10ns && window.flatpickr.l10ns.es) ? window.flatpickr.l10ns.es : 'es',
+                dateFormat: 'Y-m-d',
+                altInput: true,
+                altFormat: 'd/m/Y',
+                allowInput: true,
+                disableMobile: true,
+                monthSelectorType: 'static',
+                onReady: function (_selectedDates, _dateStr, instance) {
+                    if (!instance.altInput) return;
+                    instance.altInput.setAttribute('placeholder', 'dd/mm/aaaa');
+                    instance.altInput.setAttribute('autocomplete', 'off');
+                    instance.altInput.dataset.unibagDatepickerVisible = '1';
+                    instance.altInput.lang = 'es';
+                    if (input.disabled) instance.altInput.disabled = true;
+                    if (input.readOnly) instance.altInput.readOnly = true;
+                },
+                onChange: function () {
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                },
+                onValueUpdate: function () {
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            });
+
+            if (picker && picker.altInput && input.className) {
+                picker.altInput.className += ' ' + input.className;
+            }
+        });
+    }
+
+    function initDateInputs() {
+        if (!window.flatpickr) {
+            window.setTimeout(initDateInputs, 120);
+            return;
+        }
+        bindDateInputs(document);
+        if (!window.__unibagDatePickerObserver) {
+            window.__unibagDatePickerObserver = new MutationObserver(function (mutations) {
+                mutations.forEach(function (mutation) {
+                    mutation.addedNodes.forEach(function (node) {
+                        if (!node || node.nodeType !== 1) return;
+                        if (node.matches && node.matches('input[type="date"]')) {
+                            bindDateInputs(node.parentNode || document);
+                        } else if (node.querySelectorAll) {
+                            bindDateInputs(node);
+                        }
+                    });
+                });
+            });
+            window.__unibagDatePickerObserver.observe(document.documentElement || document.body, {
+                childList: true,
+                subtree: true
+            });
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initDateInputs);
+    } else {
+        initDateInputs();
+    }
+})();
+</script>
+HTML;
+}
+
+function unibagInjectDatePickerAssets(string $html): string
+{
+    if ($html === '') {
+        return $html;
+    }
+
+    if (!str_contains($html, '<html') || !str_contains($html, '<body')) {
+        return $html;
+    }
+
+    if (
+        !str_contains($html, 'type="date"')
+        && !str_contains($html, "type='date'")
+    ) {
+        return $html;
+    }
+
+    if (str_contains($html, 'unibag-date-picker-script')) {
+        return $html;
+    }
+
+    $headers = array_map('strtolower', headers_list());
+    foreach ($headers as $header) {
+        if (str_starts_with($header, 'content-type:')) {
+            if (
+                !str_contains($header, 'text/html')
+                && !str_contains($header, 'application/xhtml+xml')
+            ) {
+                return $html;
+            }
+            if (
+                str_contains($header, 'application/vnd.ms-excel')
+                || str_contains($header, 'application/vnd.openxmlformats-officedocument')
+                || str_contains($header, 'application/octet-stream')
+            ) {
+                return $html;
+            }
+        }
+    }
+
+    $assets = unibagDatePickerAssetsHtml();
+    if (stripos($html, '</head>') !== false) {
+        $html = preg_replace('/<\/head>/i', $assets . PHP_EOL . '</head>', $html, 1) ?? $html;
+    } elseif (stripos($html, '<body') !== false) {
+        $html = preg_replace('/<body\b([^>]*)>/i', $assets . PHP_EOL . '<body$1>', $html, 1) ?? $html;
+    }
+
+    return $html;
+}
+
+ob_start('unibagInjectDatePickerAssets');
+
 $trzPdo = null;
 $erpPdo = null;
 $service = null;
@@ -607,6 +762,11 @@ function renderReceptionNavTabs(string $activeTab): string
             'label' => 'Importación Finalizadas',
             'icon' => '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>',
             'url' => '/import-containers?status=complete',
+        ],
+        'reception_audit' => [
+            'label' => 'Auditoría por Contenedor',
+            'icon' => '<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>',
+            'url' => '/reports/reception-audit',
         ],
     ];
 
@@ -3170,7 +3330,7 @@ function render(string $title, string $body): void
         echo '<a class="subitem' . ($currentPath === '/reports/machine-events' ? ' active' : '') . '" href="/reports/machine-events"><span>Eventos de Máquina</span></a>';
         echo '<a class="subitem' . ($isLunch ? ' active' : '') . '" href="/reports/colaciones"><span>Control Colaciones</span></a>';
         echo '<a class="subitem' . ($currentPath === '/reports/nivel-servicio' ? ' active' : '') . '" href="/reports/nivel-servicio"><span>Nivel de Servicio</span></a>';
-        echo '<a class="subitem' . ($currentPath === '/reports/reception-audit' ? ' active' : '') . '" href="/reports/reception-audit"><span>Auditoría Recepción</span></a>';
+        echo '<a class="subitem' . (str_starts_with($currentPath, '/reports/reception-audit') ? ' active' : '') . '" href="/reports/reception-audit"><span>Auditoría Recepción</span></a>';
         echo '<a class="subitem' . (str_starts_with($currentPath, '/reports/monthly-presentation') ? ' active' : '') . '" href="/reports/monthly-presentation"><span>Informe Mensual PPT</span></a>';
     } elseif ($activeModule === 'bonificaciones') {
         $bonusView = (string)($_GET['view'] ?? 'bonoflexo');
@@ -13968,1004 +14128,14 @@ if ($path === '/import-containers/export-excel' && $method === 'GET') {
 }
 
 if ($path === '/reports/reception-audit' && $method === 'GET') {
-    $statusFilter = isset($_GET['status']) ? trim((string)$_GET['status']) : 'all';
-    if (!in_array($statusFilter, ['all', 'active', 'complete'], true)) {
-        $statusFilter = 'all';
-    }
-    $dateFrom = isset($_GET['date_from']) ? trim((string)$_GET['date_from']) : '';
-    $dateTo = isset($_GET['date_to']) ? trim((string)$_GET['date_to']) : '';
-    $poCode = isset($_GET['po_code']) ? trim((string)$_GET['po_code']) : '';
-    $containerCode = isset($_GET['container_code']) ? trim((string)$_GET['container_code']) : '';
-    $supplierQuery = isset($_GET['supplier']) ? trim((string)$_GET['supplier']) : '';
-    $criticalOnly = isset($_GET['critical_only']) && $_GET['critical_only'] === '1';
-    $isExport = isset($_GET['export']) && $_GET['export'] === 'excel';
-
-    $containers = [];
-    if ($statusFilter === 'active') {
-        $containers = $service->listImportContainers(
-            null, null, 'active', 500,
-            $dateFrom !== '' ? $dateFrom : null,
-            $dateTo !== '' ? $dateTo : null,
-            $poCode !== '' ? $poCode : null,
-            null,
-            $containerCode !== '' ? $containerCode : null,
-            null, 0
-        );
-    } elseif ($statusFilter === 'complete') {
-        $containers = $service->listImportContainers(
-            null, null, 'complete', 500,
-            $dateFrom !== '' ? $dateFrom : null,
-            $dateTo !== '' ? $dateTo : null,
-            $poCode !== '' ? $poCode : null,
-            null,
-            $containerCode !== '' ? $containerCode : null,
-            null, 0
-        );
-    } else {
-        $act = $service->listImportContainers(
-            null, null, 'active', 500,
-            $dateFrom !== '' ? $dateFrom : null,
-            $dateTo !== '' ? $dateTo : null,
-            $poCode !== '' ? $poCode : null,
-            null,
-            $containerCode !== '' ? $containerCode : null,
-            null, 0
-        );
-        $cmp = $service->listImportContainers(
-            null, null, 'complete', 500,
-            $dateFrom !== '' ? $dateFrom : null,
-            $dateTo !== '' ? $dateTo : null,
-            $poCode !== '' ? $poCode : null,
-            null,
-            $containerCode !== '' ? $containerCode : null,
-            null, 0
-        );
-        $byId = [];
-        foreach (array_merge($act, $cmp) as $c) {
-            $byId[(int)$c['id']] = $c;
-        }
-        $containers = array_values($byId);
-    }
-
-    usort($containers, static fn(array $a, array $b): int => ((int)($b['id'] ?? 0)) <=> ((int)($a['id'] ?? 0)));
-
-    $cIds = array_column($containers, 'id');
-    $suppData = [];
-    $scaleData = [];
-    if ($cIds !== []) {
-        $cIn = implode(',', array_map('intval', $cIds));
-        try {
-            $suppStmt = Db::erpPdo()->query("
-                SELECT sci.sord_id AS container_id,
-                       GROUP_CONCAT(DISTINCT s.supp_company SEPARATOR ' / ') AS supplier_names,
-                       GROUP_CONCAT(DISTINCT c.country_name SEPARATOR ' / ') AS country_names
-                FROM supplier_contenedor_items sci
-                JOIN supplier_order_items soi ON soi.id = sci.sord_pos_id
-                JOIN supplier_order so ON so.id = soi.sord_id
-                JOIN supplier s ON s.id = so.sord_supplier_id
-                LEFT JOIN country c ON c.id = s.supp_countryid
-                WHERE sci.sord_id IN ($cIn)
-                GROUP BY sci.sord_id
-            ");
-            if ($suppStmt) {
-                foreach ($suppStmt->fetchAll(PDO::FETCH_ASSOC) as $sRow) {
-                    $suppData[(int)$sRow['container_id']] = $sRow;
-                }
-            }
-        } catch (\Throwable) {}
-
-        try {
-            $scaleStmt = Db::pdo()->query("
-                SELECT import_container_id,
-                       COUNT(*) AS rolls_weighed,
-                       COALESCE(SUM(weight_kg), 0) AS scale_weight_kg,
-                       MIN(created_at) AS first_weigh,
-                       MAX(created_at) AS last_weigh
-                FROM rolls
-                WHERE import_container_id IN ($cIn)
-                GROUP BY import_container_id
-            ");
-            if ($scaleStmt) {
-                foreach ($scaleStmt->fetchAll(PDO::FETCH_ASSOC) as $scRow) {
-                    $scaleData[(int)$scRow['import_container_id']] = $scRow;
-                }
-            }
-        } catch (\Throwable) {}
-    }
-
-    $containerRows = [];
-    $summary = [
-        'total_containers' => 0,
-        'active_containers' => 0,
-        'complete_containers' => 0,
-        'ordered_weight_kg' => 0.0,
-        'received_weight_kg' => 0.0,
-        'ordered_rolls' => 0.0,
-        'received_rolls' => 0.0,
-        'scale_rolls_weighed' => 0,
-        'scale_weight_kg' => 0.0,
-        'critical_containers' => 0,
-        'warning_containers' => 0,
-        'conforming_containers' => 0,
-        'erp_closed' => 0,
-        'erp_pending' => 0,
-    ];
-
-    foreach ($containers as $c) {
-        $cId = (int)$c['id'];
-        $suppInfo = $suppData[$cId] ?? ['supplier_names' => '-', 'country_names' => '-'];
-        $scaleInfo = $scaleData[$cId] ?? ['rolls_weighed' => 0, 'scale_weight_kg' => 0.0, 'first_weigh' => null, 'last_weigh' => null];
-
-        $suppNames = trim((string)($suppInfo['supplier_names'] ?? '-'));
-        $countryNames = trim((string)($suppInfo['country_names'] ?? '-'));
-        if ($supplierQuery !== '' && stripos($suppNames, $supplierQuery) === false && stripos($countryNames, $supplierQuery) === false) {
-            continue;
-        }
-
-        $ordRolls = round((float)($c['ordered_rolls'] ?? 0), 3);
-        $recRolls = round((float)($c['received_rolls'] ?? 0), 3);
-        $ordWeight = round((float)($c['ordered_weight_kg'] ?? 0), 3);
-        $recWeight = round((float)($c['received_weight_kg'] ?? 0), 3);
-        $qtyDiff = round($recRolls - $ordRolls, 3);
-        $weightDiff = round($recWeight - $ordWeight, 3);
-        $weightDiffPct = $ordWeight > 0.0001 ? round(($weightDiff / $ordWeight) * 100, 2) : 0.0;
-        $erpComplete = (bool)($c['erp_is_complete'] ?? false);
-
-        $absWeightDiffPct = abs($weightDiffPct);
-        $absQtyDiff = abs($qtyDiff);
-
-        $isCritical = ($absQtyDiff >= 1.0 || $absWeightDiffPct >= 3.0 || !$erpComplete);
-        $isWarning = (!$isCritical && $absWeightDiffPct >= 1.5);
-        $isConforming = (!$isCritical && !$isWarning);
-
-        if ($criticalOnly && !$isCritical) {
-            continue;
-        }
-
-        $c['supplier_names'] = $suppNames;
-        $c['country_names'] = $countryNames;
-        $c['scale_rolls_weighed'] = (int)($scaleInfo['rolls_weighed'] ?? 0);
-        $c['scale_weight_kg'] = round((float)($scaleInfo['scale_weight_kg'] ?? 0), 3);
-        $c['first_weigh'] = $scaleInfo['first_weigh'] ?? null;
-        $c['last_weigh'] = $scaleInfo['last_weigh'] ?? null;
-        $c['qty_diff'] = $qtyDiff;
-        $c['weight_diff'] = $weightDiff;
-        $c['weight_diff_pct'] = $weightDiffPct;
-        $c['is_critical'] = $isCritical;
-        $c['is_warning'] = $isWarning;
-        $c['is_conforming'] = $isConforming;
-
-        $containerRows[] = $c;
-
-        $summary['total_containers']++;
-        if ((string)($c['status'] ?? '') === 'COMPLETE') {
-            $summary['complete_containers']++;
-        } else {
-            $summary['active_containers']++;
-        }
-        $summary['ordered_weight_kg'] += $ordWeight;
-        $summary['received_weight_kg'] += $recWeight;
-        $summary['ordered_rolls'] += $ordRolls;
-        $summary['received_rolls'] += $recRolls;
-        $summary['scale_rolls_weighed'] += $c['scale_rolls_weighed'];
-        $summary['scale_weight_kg'] += $c['scale_weight_kg'];
-
-        if ($isCritical) {
-            $summary['critical_containers']++;
-        } elseif ($isWarning) {
-            $summary['warning_containers']++;
-        } else {
-            $summary['conforming_containers']++;
-        }
-
-        if ($erpComplete) {
-            $summary['erp_closed']++;
-        } else {
-            $summary['erp_pending']++;
-        }
-    }
-
-    $netWeightDiff = round($summary['received_weight_kg'] - $summary['ordered_weight_kg'], 3);
-    $netWeightDiffPct = $summary['ordered_weight_kg'] > 0.0001
-        ? round(($netWeightDiff / $summary['ordered_weight_kg']) * 100, 2)
-        : 0.0;
-    $netQtyDiff = round($summary['received_rolls'] - $summary['ordered_rolls'], 3);
-    $erpClosePct = $summary['total_containers'] > 0
-        ? round(($summary['erp_closed'] / $summary['total_containers']) * 100, 1)
-        : 0.0;
-
-    if ($isExport) {
-        $filename = 'auditoria_recepcion_contenedores_' . date('Ymd_His') . '.xlsx';
-        $exportHtml = '<!doctype html><html><head><meta charset="utf-8"></head><body>';
-        $exportHtml .= '<h2>INFORME DE AUDITORÍA DE RECEPCIÓN POR CONTENEDOR - UNIBAG SPA</h2>';
-        $exportHtml .= '<p><strong>Fecha Emisión:</strong> ' . date('d/m/Y H:i') . ' | <strong>Total Contenedores:</strong> ' . count($containerRows) . '</p>';
-        $exportHtml .= '<table border="1"><thead><tr style="background:#0f172a;color:#ffffff;font-weight:bold;text-align:center">';
-        $exportHtml .= '<th>ID</th><th>Contenedor</th><th>Bill of Lading</th><th>Buque</th><th>OCs</th><th>Proveedor</th><th>País</th><th>Estado Operativo</th>';
-        $exportHtml .= '<th>Rollos Facturados</th><th>Rollos Físicos</th><th>Dif Rollos</th>';
-        $exportHtml .= '<th>Kilos Facturados (kg)</th><th>Kilos Balanza (kg)</th><th>Dif Kilos (kg)</th><th>Desviación (%)</th>';
-        $exportHtml .= '<th>Dictamen Auditoría</th><th>Cierre ERP</th><th>ETA Planta</th><th>Fecha Registro</th>';
-        $exportHtml .= '</tr></thead><tbody>';
-
-        foreach ($containerRows as $row) {
-            $dictLabel = $row['is_critical'] ? 'DESVIACIÓN CRÍTICA' : ($row['is_warning'] ? 'EN TOLERANCIA' : 'CONFORME');
-            $erpLabel = (bool)($row['erp_is_complete'] ?? false) ? 'CERRADO ERP' : 'PENDIENTE ERP';
-            $exportHtml .= '<tr>';
-            $exportHtml .= '<td>' . (int)$row['id'] . '</td>';
-            $exportHtml .= '<td>' . h((string)($row['container_code'] ?: ('#' . $row['id']))) . '</td>';
-            $exportHtml .= '<td>' . h((string)($row['bill_of_lading'] ?: '-')) . '</td>';
-            $exportHtml .= '<td>' . h((string)($row['vessel_name'] ?: '-')) . '</td>';
-            $exportHtml .= '<td>' . h((string)($row['po_codes'] ?: '-')) . '</td>';
-            $exportHtml .= '<td>' . h((string)$row['supplier_names']) . '</td>';
-            $exportHtml .= '<td>' . h((string)$row['country_names']) . '</td>';
-            $exportHtml .= '<td>' . h((string)$row['status']) . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($row['ordered_rolls'] ?? 0), 0, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($row['received_rolls'] ?? 0), 0, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($row['qty_diff'] ?? 0), 0, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($row['ordered_weight_kg'] ?? 0), 2, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($row['received_weight_kg'] ?? 0), 2, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($row['weight_diff'] ?? 0), 2, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($row['weight_diff_pct'] ?? 0), 2, ',', '.') . '%</td>';
-            $exportHtml .= '<td style="text-align:center">' . $dictLabel . '</td>';
-            $exportHtml .= '<td style="text-align:center">' . $erpLabel . '</td>';
-            $exportHtml .= '<td>' . h((string)($row['eta_plant'] ?: '-')) . '</td>';
-            $exportHtml .= '<td>' . h((string)($row['created_at'] ?: '-')) . '</td>';
-            $exportHtml .= '</tr>';
-        }
-        $exportHtml .= '</tbody></table></body></html>';
-
-        SimpleXlsx::streamHtml($filename, $exportHtml, 'Auditoria_Contenedores');
-        exit;
-    }
-
-    $exportQuery = $_GET;
-    $exportQuery['export'] = 'excel';
-    $excelUrl = '/reports/reception-audit?' . http_build_query($exportQuery);
-    $clearUrl = '/reports/reception-audit';
-
-    $body = '<div style="display:flex;flex-direction:column;gap:20px">';
-    $body .= renderReceptionNavTabs('reports');
-
-    $body .= '<style>
-      .rec-audit-kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
-      .rec-audit-kpi-card { background:#ffffff; border:1px solid #e2e8f0; border-radius:14px; padding:18px 20px; box-shadow:0 4px 16px rgba(15,23,42,.04); position:relative; overflow:hidden; }
-      .rec-audit-kpi-card::before { content:""; position:absolute; top:0; left:0; right:0; height:4px; }
-      .rec-audit-kpi-card.blue::before { background:#2563eb; }
-      .rec-audit-kpi-card.teal::before { background:#0f766e; }
-      .rec-audit-kpi-card.amber::before { background:#d97706; }
-      .rec-audit-kpi-card.red::before { background:#dc2626; }
-      .rec-audit-kpi-card.emerald::before { background:#059669; }
-      .rec-audit-kpi-title { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:#64748b; font-weight:800; display:flex; justify-content:space-between; align-items:center; }
-      .rec-audit-kpi-val { font-size:24px; font-weight:800; color:#0f172a; margin-top:8px; line-height:1.2; }
-      .rec-audit-kpi-sub { font-size:12px; color:#64748b; margin-top:6px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-      .rec-badge-verdict { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.04em; padding:3px 9px; border-radius:999px; }
-      .rec-verdict-ok { background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; }
-      .rec-verdict-warn { background:#fffbeb; color:#92400e; border:1px solid #fde68a; }
-      .rec-verdict-crit { background:#fef2f2; color:#991b1b; border:1px solid #fecaca; }
-      .rec-code-pill { font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size:12px; font-weight:800; color:#0f172a; background:#f1f5f9; padding:3px 8px; border-radius:6px; border:1px solid #e2e8f0; display:inline-block; }
-      .rec-supp-box { max-width:240px; }
-      .rec-supp-title { font-weight:700; color:#0f172a; font-size:13px; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .rec-supp-country { font-size:11px; color:#64748b; font-weight:600; display:inline-flex; align-items:center; gap:4px; margin-top:2px; }
-    </style>';
-
-    // Header ejecutivo
-    $body .= '<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:22px 24px;box-shadow:0 6px 20px rgba(15,23,42,.04)">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
-        <div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <span style="background:#0f172a;color:#ffffff;font-size:11px;font-weight:800;padding:3px 8px;border-radius:6px;letter-spacing:.06em">AUDITORÍA</span>
-            <span style="font-size:13px;color:#64748b;font-weight:600">Control de Tolerancia por Contenedor</span>
-          </div>
-          <h1 style="margin:6px 0 4px 0;font-size:24px;font-weight:800;color:#0f172a">Informe de Auditoría de Recepción (Contenedores)</h1>
-          <div style="font-size:13px;color:#64748b;max-width:850px;line-height:1.5">
-            Auditoría física de pesajes en balanza vs. factura comercial estructurada estrictamente por contenedor individual, descartando distorsiones de recepciones históricas no trazables.
-          </div>
-        </div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <a href="' . h($excelUrl) . '" class="btn" style="background:#059669;color:#ffffff;border:none;display:inline-flex;align-items:center;gap:8px;font-weight:700;padding:9px 16px;border-radius:10px">
-            <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-            Exportar a Excel
-          </a>
-        </div>
-      </div>';
-
-    // Formulario de Filtros
-    $body .= '<form method="get" action="/reports/reception-audit" style="margin-top:20px;padding-top:18px;border-top:1px solid #f1f5f9">
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:flex-end">
-          <div class="rec-field">
-            <label style="font-size:11px;font-weight:800;text-transform:uppercase;color:#475569">Estado Cargamento</label>
-            <select name="status" style="width:100%;height:38px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px;font-size:13px">
-              <option value="all"' . ($statusFilter === 'all' ? ' selected' : '') . '>Todos los estados</option>
-              <option value="active"' . ($statusFilter === 'active' ? ' selected' : '') . '>Solo activos / en proceso</option>
-              <option value="complete"' . ($statusFilter === 'complete' ? ' selected' : '') . '>Solo finalizados</option>
-            </select>
-          </div>
-          <div class="rec-field">
-            <label style="font-size:11px;font-weight:800;text-transform:uppercase;color:#475569">Fecha Desde</label>
-            <input type="date" name="date_from" value="' . h($dateFrom) . '" style="width:100%;height:38px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px;font-size:13px">
-          </div>
-          <div class="rec-field">
-            <label style="font-size:11px;font-weight:800;text-transform:uppercase;color:#475569">Fecha Hasta</label>
-            <input type="date" name="date_to" value="' . h($dateTo) . '" style="width:100%;height:38px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px;font-size:13px">
-          </div>
-          <div class="rec-field">
-            <label style="font-size:11px;font-weight:800;text-transform:uppercase;color:#475569">Contenedor / BL</label>
-            <input type="text" name="container_code" value="' . h($containerCode) . '" placeholder="Ej. FFAU7684870" style="width:100%;height:38px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px;font-size:13px">
-          </div>
-          <div class="rec-field">
-            <label style="font-size:11px;font-weight:800;text-transform:uppercase;color:#475569">Orden de Compra</label>
-            <input type="text" name="po_code" value="' . h($poCode) . '" placeholder="Ej. OC0003963" style="width:100%;height:38px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px;font-size:13px">
-          </div>
-          <div class="rec-field">
-            <label style="font-size:11px;font-weight:800;text-transform:uppercase;color:#475569">Proveedor / País</label>
-            <input type="text" name="supplier" value="' . h($supplierQuery) . '" placeholder="Buscar proveedor..." style="width:100%;height:38px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px;font-size:13px">
-          </div>
-          <div class="rec-field" style="display:flex;align-items:center;height:38px">
-            <label style="display:flex;align-items:center;gap:7px;font-size:12px;font-weight:700;color:#991b1b;cursor:pointer">
-              <input type="checkbox" name="critical_only" value="1"' . ($criticalOnly ? ' checked' : '') . ' style="accent-color:#dc2626;width:16px;height:16px">
-              Solo Desviación Crítica
-            </label>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;height:38px">
-            <button class="btn" type="submit" style="background:#0f172a;color:#ffffff;height:38px;padding:0 16px;border-radius:8px;font-weight:700">Filtrar</button>
-            <a href="' . h($clearUrl) . '" class="btn secondary" style="height:38px;line-height:36px;padding:0 12px;border-radius:8px;font-size:13px">Limpiar</a>
-          </div>
-        </div>
-      </form>
-    </div>';
-
-    // KPI Cards ejecutivos
-    $diffColorNet = $netWeightDiff >= 0 ? '#065f46' : '#991b1b';
-    $body .= '<div class="rec-audit-kpi-grid">
-      <div class="rec-audit-kpi-card blue">
-        <div class="rec-audit-kpi-title">
-          <span>Contenedores Auditados</span>
-          <span style="font-size:16px">🚢</span>
-        </div>
-        <div class="rec-audit-kpi-val">' . number_format($summary['total_containers'], 0, ',', '.') . '</div>
-        <div class="rec-audit-kpi-sub">
-          <span style="font-weight:700;color:#0f172a">' . $summary['active_containers'] . '</span> en proceso &bull; 
-          <span style="font-weight:700;color:#0f172a">' . $summary['complete_containers'] . '</span> finalizados
-        </div>
-      </div>
-
-      <div class="rec-audit-kpi-card teal">
-        <div class="rec-audit-kpi-title">
-          <span>Balance de Kilos (Balanza vs Doc)</span>
-          <span style="font-size:16px">⚖️</span>
-        </div>
-        <div class="rec-audit-kpi-val" style="color:' . $diffColorNet . '">' . ($netWeightDiff >= 0 ? '+' : '') . number_format($netWeightDiff, 1, ',', '.') . ' <span style="font-size:15px;color:#64748b">kg</span></div>
-        <div class="rec-audit-kpi-sub">
-          Desviación global: <strong style="color:' . $diffColorNet . '">' . ($netWeightDiff >= 0 ? '+' : '') . number_format($netWeightDiffPct, 2, ',', '.') . '%</strong>
-          <span style="color:#94a3b8">(' . number_format($summary['received_weight_kg'], 0, ',', '.') . ' / ' . number_format($summary['ordered_weight_kg'], 0, ',', '.') . ' kg)</span>
-        </div>
-      </div>
-
-      <div class="rec-audit-kpi-card amber">
-        <div class="rec-audit-kpi-title">
-          <span>Bultos / Bobinas Físicas</span>
-          <span style="font-size:16px">📦</span>
-        </div>
-        <div class="rec-audit-kpi-val">' . number_format($summary['received_rolls'], 0, ',', '.') . ' <span style="font-size:15px;color:#64748b">de ' . number_format($summary['ordered_rolls'], 0, ',', '.') . '</span></div>
-        <div class="rec-audit-kpi-sub">
-          Diferencia neta: <strong>' . ($netQtyDiff >= 0 ? '+' : '') . number_format($netQtyDiff, 0, ',', '.') . ' unid.</strong> &bull; Pesajes balanza TRZ: <strong>' . number_format($summary['scale_rolls_weighed'], 0, ',', '.') . '</strong>
-        </div>
-      </div>
-
-      <div class="rec-audit-kpi-card ' . ($summary['critical_containers'] > 0 ? 'red' : 'emerald') . '">
-        <div class="rec-audit-kpi-title">
-          <span>Dictamen de Tolerancia</span>
-          <span style="font-size:16px">' . ($summary['critical_containers'] > 0 ? '⚠️' : '✅') . '</span>
-        </div>
-        <div class="rec-audit-kpi-val" style="color:' . ($summary['critical_containers'] > 0 ? '#dc2626' : '#059669') . '">
-          ' . $summary['critical_containers'] . ' <span style="font-size:15px;font-weight:700;color:#64748b">críticos</span>
-        </div>
-        <div class="rec-audit-kpi-sub">
-          <span style="color:#059669;font-weight:700">' . $summary['conforming_containers'] . ' conformes</span> &bull; 
-          <span style="color:#d97706;font-weight:700">' . $summary['warning_containers'] . ' tolerancia</span>
-        </div>
-      </div>
-
-      <div class="rec-audit-kpi-card emerald">
-        <div class="rec-audit-kpi-title">
-          <span>Cierre Contable ERP</span>
-          <span style="font-size:16px">📋</span>
-        </div>
-        <div class="rec-audit-kpi-val">' . number_format($erpClosePct, 1, ',', '.') . '%</div>
-        <div class="rec-audit-kpi-sub">
-          <span style="color:#059669;font-weight:700">' . $summary['erp_closed'] . '</span> cerrados en ERP &bull; 
-          <span style="color:#dc2626;font-weight:700">' . $summary['erp_pending'] . '</span> pendientes
-        </div>
-      </div>
-    </div>';
-
-    // Tabla de Contenedores de Auditoría
-    $body .= '<div class="rec-table-card" style="box-shadow:0 8px 24px rgba(15,23,42,.05);border-radius:16px;border:1px solid #e2e8f0;overflow:hidden">
-      <div style="padding:16px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
-        <div>
-          <div style="font-weight:800;color:#0f172a;font-size:15px">Matriz de Auditoría por Contenedor</div>
-          <div style="font-size:12px;color:#64748b;margin-top:2px">Mostrando ' . count($containerRows) . ' contenedores individualizados con evaluación de tolerancia y balanza</div>
-        </div>
-        <div style="font-size:12px;color:#64748b">
-          Tolerancia comercial: <strong style="color:#065f46">&plusmn;1.5% Conforme</strong> &bull; <strong style="color:#b45309">1.5% a 3.0% En Tolerancia</strong> &bull; <strong style="color:#b91c1c">&gt; 3.0% Crítico</strong>
-        </div>
-      </div>
-      <div class="rec-table-wrap">
-        <table class="rec-table" style="width:100%;border-collapse:collapse">
-          <thead>
-            <tr style="background:#0f172a;color:#ffffff;font-size:11px;text-transform:uppercase;letter-spacing:.05em">
-              <th style="padding:12px 14px">Contenedor / BL</th>
-              <th style="padding:12px 14px">Proveedor & Origen</th>
-              <th style="padding:12px 14px">Fechas</th>
-              <th style="padding:12px 14px;text-align:right">Bobinas / Bultos</th>
-              <th style="padding:12px 14px;text-align:right">Kilos Balanza vs Doc</th>
-              <th style="padding:12px 14px;text-align:right">Desviación Peso</th>
-              <th style="padding:12px 14px;text-align:center">Dictamen Auditoría</th>
-              <th style="padding:12px 14px;text-align:center">Cierre ERP</th>
-              <th style="padding:12px 14px;text-align:right">Acciones</th>
-            </tr>
-          </thead>
-          <tbody>';
-
-    foreach ($containerRows as $c) {
-        $containerId = (int)$c['id'];
-        $reportUrl = '/reports/reception-audit/container/' . $containerId;
-        $opUrl = '/import-containers/' . $containerId;
-        $cCode = trim((string)($c['container_code'] ?: ('Cargamento #' . $containerId)));
-        $bl = trim((string)($c['bill_of_lading'] ?: '-'));
-        $vessel = trim((string)($c['vessel_name'] ?: '-'));
-        $poCodes = trim((string)($c['po_codes'] ?: '-'));
-
-        $ordRolls = (float)($c['ordered_rolls'] ?? 0);
-        $recRolls = (float)($c['received_rolls'] ?? 0);
-        $qtyDiff = (float)($c['qty_diff'] ?? 0);
-
-        $ordKg = (float)($c['ordered_weight_kg'] ?? 0);
-        $recKg = (float)($c['received_weight_kg'] ?? 0);
-        $weightDiff = (float)($c['weight_diff'] ?? 0);
-        $weightDiffPct = (float)($c['weight_diff_pct'] ?? 0);
-
-        $isCritical = (bool)($c['is_critical'] ?? false);
-        $isWarning = (bool)($c['is_warning'] ?? false);
-
-        $rowBg = $isCritical ? '#fef2f2' : ($isWarning ? '#fffbeb' : '#ffffff');
-        $diffTextColor = $isCritical ? '#b91c1c' : ($isWarning ? '#b45309' : '#047857');
-
-        $body .= '<tr style="background:' . $rowBg . ';border-bottom:1px solid #f1f5f9;transition:background .15s ease">';
-        
-        // 1. Contenedor / BL
-        $body .= '<td style="padding:12px 14px;vertical-align:middle">
-          <a href="' . h($reportUrl) . '" class="rec-code-pill" style="text-decoration:none;color:#0f172a;border-color:#cbd5e1" title="Ver informe de auditoría">' . h($cCode) . '</a>
-          <div style="font-size:11px;color:#475569;margin-top:4px">
-            <strong>BL:</strong> ' . h($bl) . ($vessel !== '-' ? ' &bull; <em>' . h($vessel) . '</em>' : '') . '
-          </div>
-          <div style="font-size:11px;color:#64748b;margin-top:2px">
-            <strong>OCs:</strong> ' . h($poCodes) . '
-          </div>
-        </td>';
-
-        // 2. Proveedor & País
-        $body .= '<td style="padding:12px 14px;vertical-align:middle">
-          <div class="rec-supp-box">
-            <div class="rec-supp-title" title="' . h((string)$c['supplier_names']) . '">' . h((string)$c['supplier_names']) . '</div>
-            <div class="rec-supp-country">
-              <svg style="width:12px;height:12px;color:#64748b" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-              ' . h((string)$c['country_names']) . '
-            </div>
-          </div>
-        </td>';
-
-        // 3. Fechas
-        $etaDate = trim((string)($c['eta_plant'] ?: ($c['eta_port'] ?: '')));
-        $regDate = substr(trim((string)($c['created_at'] ?? '')), 0, 10);
-        $body .= '<td style="padding:12px 14px;vertical-align:middle;font-size:12px;color:#475569">
-          <div><span style="color:#94a3b8;font-size:11px">ETA:</span> <strong>' . h($etaDate ?: '-') . '</strong></div>
-          <div style="margin-top:2px;font-size:11px;color:#64748b"><span style="color:#94a3b8">Reg:</span> ' . h($regDate ?: '-') . '</div>
-        </td>';
-
-        // 4. Bobinas / Bultos
-        $body .= '<td style="padding:12px 14px;vertical-align:middle;text-align:right">
-          <div style="font-size:13px;font-weight:800;color:#0f172a">' . number_format($recRolls, 0, ',', '.') . ' <span style="font-size:11px;font-weight:600;color:#64748b">/ ' . number_format($ordRolls, 0, ',', '.') . '</span></div>
-          <div style="font-size:11px;margin-top:3px;font-weight:700;color:' . (abs($qtyDiff) >= 1.0 ? '#b91c1c' : '#065f46') . '">
-            ' . ($qtyDiff >= 0 ? '+' : '') . number_format($qtyDiff, 0, ',', '.') . ' unid.
-          </div>
-        </td>';
-
-        // 5. Kilos Balanza vs Doc
-        $body .= '<td style="padding:12px 14px;vertical-align:middle;text-align:right">
-          <div style="font-size:13px;font-weight:800;color:#0f172a">' . number_format($recKg, 1, ',', '.') . ' <span style="font-size:11px;color:#64748b">kg</span></div>
-          <div style="font-size:11px;color:#64748b;margin-top:2px">Doc: ' . number_format($ordKg, 1, ',', '.') . ' kg</div>
-        </td>';
-
-        // 6. Desviación Peso
-        $body .= '<td style="padding:12px 14px;vertical-align:middle;text-align:right">
-          <div style="font-size:13px;font-weight:800;color:' . $diffTextColor . '">' . ($weightDiff >= 0 ? '+' : '') . number_format($weightDiff, 1, ',', '.') . ' kg</div>
-          <div style="font-size:11px;font-weight:700;color:' . $diffTextColor . ';margin-top:2px">' . ($weightDiff >= 0 ? '+' : '') . number_format($weightDiffPct, 2, ',', '.') . '%</div>
-        </td>';
-
-        // 7. Dictamen Auditoría
-        $body .= '<td style="padding:12px 14px;vertical-align:middle;text-align:center">';
-        if ($isCritical) {
-            $body .= '<span class="rec-badge-verdict rec-verdict-crit" title="Desviación > 3% o diferencia de unidades">⚠️ CRÍTICO</span>';
-        } elseif ($isWarning) {
-            $body .= '<span class="rec-badge-verdict rec-verdict-warn" title="Desviación entre 1.5% y 3.0%">TOLERANCIA</span>';
-        } else {
-            $body .= '<span class="rec-badge-verdict rec-verdict-ok" title="En tolerancia normal <= 1.5%">CONFORME</span>';
-        }
-        $body .= '</td>';
-
-        // 8. Cierre ERP
-        $body .= '<td style="padding:12px 14px;vertical-align:middle;text-align:center">';
-        if ((bool)($c['erp_is_complete'] ?? false)) {
-            $body .= '<span style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px;display:inline-block">Cerrado ERP</span>';
-        } else {
-            $body .= '<span style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px;display:inline-block">Pendiente</span>';
-        }
-        $body .= '</td>';
-
-        // 9. Acciones
-        $body .= '<td style="padding:12px 14px;vertical-align:middle;text-align:right;white-space:nowrap">
-          <div style="display:inline-flex;gap:6px;align-items:center">
-            <a href="' . h($reportUrl) . '" class="btn" style="background:#0f172a;color:#ffffff;padding:6px 11px;font-size:12px;border-radius:8px;font-weight:700;display:inline-flex;align-items:center;gap:4px">
-              Auditoría
-              <svg style="width:13px;height:13px" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-            </a>
-            <a href="' . h($opUrl) . '" class="btn secondary" style="padding:6px 9px;font-size:12px;border-radius:8px" title="Ver recepción operativa">📦</a>
-          </div>
-        </td>';
-
-        $body .= '</tr>';
-    }
-
-    if ($containerRows === []) {
-        $body .= '<tr><td colspan="9" style="padding:48px 20px;text-align:center;color:#64748b">
-          <div style="font-size:32px;margin-bottom:8px">🔍</div>
-          <div style="font-size:16px;font-weight:800;color:#0f172a">No se encontraron contenedores para los filtros aplicados</div>
-          <div style="font-size:13px;margin-top:4px">Prueba ajustando el rango de fechas, seleccionando "Todos los estados" o limpiando el filtro.</div>
-          <div style="margin-top:14px"><a href="' . h($clearUrl) . '" class="btn secondary" style="padding:6px 14px;font-size:13px">Restablecer filtros</a></div>
-        </td></tr>';
-    }
-
-    $body .= '</tbody></table></div></div>';
-    $body .= '</div>';
-
-    render('Auditoría de Recepción · Contenedores', $body);
+    require_once __DIR__ . '/../src/Http/ReceptionAuditModule.php';
+    handleReceptionAuditList($service);
     exit;
 }
 
 if (preg_match('#^/reports/reception-audit/container/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
-    $containerId = (int)$m[1];
-    $container = $service->getImportContainer($containerId);
-    if ($container === null) {
-        http_response_code(404);
-        render('No encontrado', '<div class="card">No existe el contenedor solicitado.</div>');
-        exit;
-    }
-
-    $isExport = isset($_GET['export']) && $_GET['export'] === 'excel';
-    $lines = $service->listImportContainerLines($containerId);
-
-    // Obtener bobinas pesadas en balanza TRZ
-    $rolls = [];
-    try {
-        $rStmt = Db::pdo()->prepare("
-            SELECT r.id, r.roll_code, r.weight_kg, r.received_qty, r.width_mm, r.microns, r.meters, r.status, r.created_at, r.purchase_order_line_id
-            FROM rolls r
-            WHERE r.import_container_id = :cid
-            ORDER BY r.id ASC
-        ");
-        $rStmt->execute([':cid' => $containerId]);
-        $rolls = $rStmt->fetchAll(PDO::FETCH_ASSOC);
-    } catch (\Throwable) {}
-
-    // Proveedores y país
-    $suppNames = '-';
-    $countryNames = '-';
-    try {
-        $spStmt = Db::erpPdo()->prepare("
-            SELECT GROUP_CONCAT(DISTINCT s.supp_company SEPARATOR ' / ') AS supplier_names,
-                   GROUP_CONCAT(DISTINCT c.country_name SEPARATOR ' / ') AS country_names
-            FROM supplier_contenedor_items sci
-            JOIN supplier_order_items soi ON soi.id = sci.sord_pos_id
-            JOIN supplier_order so ON so.id = soi.sord_id
-            JOIN supplier s ON s.id = so.sord_supplier_id
-            LEFT JOIN country c ON c.id = s.supp_countryid
-            WHERE sci.sord_id = :cid
-        ");
-        $spStmt->execute([':cid' => $containerId]);
-        $spRow = $spStmt->fetch(PDO::FETCH_ASSOC);
-        if ($spRow) {
-            $suppNames = trim((string)($spRow['supplier_names'] ?: '-'));
-            $countryNames = trim((string)($spRow['country_names'] ?: '-'));
-        }
-    } catch (\Throwable) {}
-
-    $ordRolls = round((float)($container['ordered_rolls'] ?? 0), 3);
-    $recRolls = round((float)($container['received_rolls'] ?? 0), 3);
-    $ordWeight = round((float)($container['ordered_weight_kg'] ?? 0), 3);
-    $recWeight = round((float)($container['received_weight_kg'] ?? 0), 3);
-
-    $qtyDiff = round($recRolls - $ordRolls, 3);
-    $weightDiff = round($recWeight - $ordWeight, 3);
-    $weightDiffPct = $ordWeight > 0.0001 ? round(($weightDiff / $ordWeight) * 100, 2) : 0.0;
-    $erpComplete = (bool)($container['erp_is_complete'] ?? false);
-
-    $criticalLines = 0;
-    $warningLines = 0;
-    $conformingLines = 0;
-
-    foreach ($lines as &$line) {
-        $lineSummary = receptionLineSummary($line);
-        $lineOrdWeight = round((float)($lineSummary['ordered_weight_kg'] ?? 0), 3);
-        $lineRecWeight = round((float)($lineSummary['received_weight_kg'] ?? 0), 3);
-        $lineQtyDiff = round((float)($lineSummary['received_rolls'] ?? 0) - (float)($lineSummary['ordered_rolls'] ?? 0), 3);
-        $lineWeightDiff = round($lineRecWeight - $lineOrdWeight, 3);
-        $lineWeightDiffPct = $lineOrdWeight > 0.0001 ? round(($lineWeightDiff / $lineOrdWeight) * 100, 2) : 0.0;
-        
-        $line['qty_diff'] = $lineQtyDiff;
-        $line['weight_diff'] = $lineWeightDiff;
-        $line['weight_diff_pct'] = $lineWeightDiffPct;
-        $line['is_complete'] = (bool)($lineSummary['is_complete'] ?? false);
-        $line['summary'] = $lineSummary;
-
-        if (abs($lineQtyDiff) >= 1.0 || abs($lineWeightDiffPct) >= 3.0 || !$line['is_complete']) {
-            $criticalLines++;
-        } elseif (abs($lineWeightDiffPct) >= 1.5) {
-            $warningLines++;
-        } else {
-            $conformingLines++;
-        }
-    }
-    unset($line);
-
-    $absWeightDiffPct = abs($weightDiffPct);
-    $absQtyDiff = abs($qtyDiff);
-    $isCritical = ($absQtyDiff >= 1.0 || $absWeightDiffPct >= 3.0 || !$erpComplete);
-    $isWarning = (!$isCritical && $absWeightDiffPct >= 1.5);
-    $isConforming = (!$isCritical && !$isWarning);
-
-    $containerCode = trim((string)($container['container_code'] ?: ('#' . $containerId)));
-    $bl = trim((string)($container['bill_of_lading'] ?: '-'));
-    $vessel = trim((string)($container['vessel_name'] ?: '-'));
-    $forwarder = trim((string)($container['forwarder_name'] ?: '-'));
-    $poCodes = trim((string)($container['po_codes'] ?: '-'));
-
-    // Exportación Excel individual del contenedor
-    if ($isExport) {
-        $filename = 'auditoria_contenedor_' . preg_replace('/[^A-Za-z0-9_-]/', '_', $containerCode) . '_' . date('Ymd_His') . '.xlsx';
-        $exportHtml = '<!doctype html><html><head><meta charset="utf-8"></head><body>';
-        $exportHtml .= '<h2>INFORME OFICIAL DE AUDITORÍA DE RECEPCIÓN - CONTENEDOR ' . h($containerCode) . '</h2>';
-        $exportHtml .= '<p><strong>Bill of Lading:</strong> ' . h($bl) . ' | <strong>Buque:</strong> ' . h($vessel) . ' | <strong>Proveedor:</strong> ' . h($suppNames) . ' (' . h($countryNames) . ') | <strong>OCs:</strong> ' . h($poCodes) . '</p>';
-        $exportHtml .= '<p><strong>Balance Kilos:</strong> Balanza ' . number_format($recWeight, 2, ',', '.') . ' kg vs Doc ' . number_format($ordWeight, 2, ',', '.') . ' kg (Dif: ' . ($weightDiff >= 0 ? '+' : '') . number_format($weightDiff, 2, ',', '.') . ' kg / ' . number_format($weightDiffPct, 2, ',', '.') . '%)</p>';
-        
-        $exportHtml .= '<h3>1. DESGLOSE POR PRODUCTO / SKU</h3>';
-        $exportHtml .= '<table border="1"><thead><tr style="background:#0f172a;color:#ffffff;font-weight:bold">';
-        $exportHtml .= '<th>OC</th><th>SKU</th><th>Descripción</th><th>Modo</th><th>Especificación</th><th>Bultos Doc</th><th>Bultos Físicos</th><th>Dif Bultos</th><th>Kilos Doc (kg)</th><th>Kilos Balanza (kg)</th><th>Dif Kilos (kg)</th><th>Desviación (%)</th><th>Estado</th>';
-        $exportHtml .= '</tr></thead><tbody>';
-        foreach ($lines as $ln) {
-            $sm = $ln['summary'];
-            $exportHtml .= '<tr>';
-            $exportHtml .= '<td>' . h((string)($ln['po_code'] ?? '-')) . '</td>';
-            $exportHtml .= '<td>' . h((string)($ln['sku_code'] ?? '-')) . '</td>';
-            $exportHtml .= '<td>' . h((string)($ln['sku_description'] ?? '-')) . '</td>';
-            $exportHtml .= '<td>' . h(receptionModeLabel((string)($ln['reception_mode'] ?? 'WEIGHT'))) . '</td>';
-            $exportHtml .= '<td>' . buildReceptionSpec($ln) . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($sm['ordered_rolls'] ?? 0), 0, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($sm['received_rolls'] ?? 0), 0, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($ln['qty_diff'] ?? 0), 0, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($sm['ordered_weight_kg'] ?? 0), 2, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($sm['received_weight_kg'] ?? 0), 2, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($ln['weight_diff'] ?? 0), 2, ',', '.') . '</td>';
-            $exportHtml .= '<td style="text-align:right">' . number_format((float)($ln['weight_diff_pct'] ?? 0), 2, ',', '.') . '%</td>';
-            $exportHtml .= '<td>' . ((bool)($ln['is_complete'] ?? false) ? 'Completa' : 'Pendiente') . '</td>';
-            $exportHtml .= '</tr>';
-        }
-        $exportHtml .= '</tbody></table>';
-
-        if ($rolls !== []) {
-            $exportHtml .= '<h3>2. REGISTRO DE BOBINAS FÍSICAS PESADAS EN BALANZA (' . count($rolls) . ' BOBINAS)</h3>';
-            $exportHtml .= '<table border="1"><thead><tr style="background:#1e3a8a;color:#ffffff;font-weight:bold">';
-            $exportHtml .= '<th>N°</th><th>Código Bobina</th><th>Peso Balanza (kg)</th><th>Ancho (mm)</th><th>Micras/Gramos</th><th>Metros</th><th>Fecha/Hora Pesaje</th><th>Estado</th>';
-            $exportHtml .= '</tr></thead><tbody>';
-            $idx = 1;
-            foreach ($rolls as $r) {
-                $exportHtml .= '<tr>';
-                $exportHtml .= '<td>' . $idx++ . '</td>';
-                $exportHtml .= '<td>' . h((string)$r['roll_code']) . '</td>';
-                $exportHtml .= '<td style="text-align:right">' . number_format((float)$r['weight_kg'], 2, ',', '.') . '</td>';
-                $exportHtml .= '<td style="text-align:right">' . (int)($r['width_mm'] ?? 0) . '</td>';
-                $exportHtml .= '<td style="text-align:right">' . (int)($r['microns'] ?? 0) . '</td>';
-                $exportHtml .= '<td style="text-align:right">' . number_format((float)($r['meters'] ?? 0), 2, ',', '.') . '</td>';
-                $exportHtml .= '<td>' . h((string)$r['created_at']) . '</td>';
-                $exportHtml .= '<td>' . h((string)$r['status']) . '</td>';
-                $exportHtml .= '</tr>';
-            }
-            $exportHtml .= '</tbody></table>';
-        }
-
-        $exportHtml .= '</body></html>';
-        SimpleXlsx::streamHtml($filename, $exportHtml, 'Detalle_Contenedor');
-        exit;
-    }
-
-    $scaleRollsCount = count($rolls);
-    $scaleTotalKg = array_sum(array_column($rolls, 'weight_kg'));
-    $scaleAvgKg = $scaleRollsCount > 0 ? round($scaleTotalKg / $scaleRollsCount, 2) : 0.0;
-
-    $diffColor = $isCritical ? '#b91c1c' : ($isWarning ? '#b45309' : '#047857');
-    $verdictClass = $isCritical ? 'crit' : ($isWarning ? 'warn' : 'ok');
-    $verdictTitle = $isCritical ? 'RECEPCIÓN CON DESVIACIÓN CRÍTICA' : ($isWarning ? 'RECEPCIÓN EN TOLERANCIA OBSERVADA' : 'RECEPCIÓN CONFORME EN TOLERANCIA');
-    
-    $verdictExplain = '';
-    if ($isCritical) {
-        $verdictExplain = 'Se han detectado desviaciones fuera de norma comercial: ';
-        $reasons = [];
-        if ($absWeightDiffPct >= 3.0) $reasons[] = 'desviación de peso en balanza de ' . number_format($weightDiffPct, 2, ',', '.') . '% (límite comercial 3.0%)';
-        if ($absQtyDiff >= 1.0) $reasons[] = 'diferencia física de bultos/bobinas (' . ($qtyDiff >= 0 ? '+' : '') . number_format($qtyDiff, 0, ',', '.') . ' unid.)';
-        if (!$erpComplete) $reasons[] = 'cierre contable administrativo pendiente en ERP';
-        $verdictExplain .= implode(', ', $reasons) . '. Se recomienda formalizar reclamo con proveedor/embarcador.';
-    } elseif ($isWarning) {
-        $verdictExplain = 'El cargamento presenta una variación de peso en balanza de ' . number_format($weightDiffPct, 2, ',', '.') . '%, lo cual se encuentra dentro del rango de tolerancia comercial ampliado (1.5% a 3.0%). La cantidad de bultos coincide.';
-    } else {
-        $verdictExplain = 'El cargamento cumple a cabalidad los estándares de calidad y control de peso. Desviación neta de ' . number_format($weightDiffPct, 2, ',', '.') . '% dentro de la tolerancia estricta (≤ 1.5%) y bultos conformes.';
-    }
-
-    $exportQuery = $_GET;
-    $exportQuery['export'] = 'excel';
-    $excelUrl = '/reports/reception-audit/container/' . $containerId . '?' . http_build_query($exportQuery);
-
-    $body = '<div style="display:flex;flex-direction:column;gap:20px">';
-    $body .= renderReceptionNavTabs('reports');
-
-    $body .= '<style>
-      @media print {
-        body { background:#ffffff !important; font-size:10pt !important; color:#000000 !important; }
-        .app-sidebar, .app-header, .rec-nav-tabs, .btn, .no-print { display:none !important; }
-        .rec-audit-card, .rec-table-card { box-shadow:none !important; border:1px solid #94a3b8 !important; }
-        .print-only { display:block !important; }
-      }
-      .print-only { display:none; }
-      .rec-container-kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
-      .rec-verdict-banner { border-radius:14px; padding:20px 24px; display:flex; align-items:flex-start; gap:16px; box-shadow:0 6px 20px rgba(15,23,42,.04); }
-      .rec-verdict-banner.ok { background:#ecfdf5; border:1px solid #a7f3d0; }
-      .rec-verdict-banner.warn { background:#fffbeb; border:1px solid #fde68a; }
-      .rec-verdict-banner.crit { background:#fef2f2; border:1px solid #fecaca; }
-    </style>';
-
-    // Membrete para impresión
-    $body .= '<div class="print-only" style="padding-bottom:14px;border-bottom:2px solid #0f172a;margin-bottom:16px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <h2 style="margin:0;font-size:20px;font-weight:900;color:#0f172a">UNIBAG SPA &bull; CONTROL DE CALIDAD Y RECEPCIONES</h2>
-          <div style="font-size:12px;color:#475569">Dictamen Oficial de Auditoría de Recepción por Contenedor</div>
-        </div>
-        <div style="text-align:right;font-size:11px;color:#475569">
-          <div>Fecha Impresión: ' . date('d/m/Y H:i') . '</div>
-          <div>Auditoría Contenedor ID #' . $containerId . '</div>
-        </div>
-      </div>
-    </div>';
-
-    // Cabecera interactiva
-    $body .= '<div class="rec-audit-card" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:16px;padding:22px 24px;box-shadow:0 6px 20px rgba(15,23,42,.04)">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap">
-        <div>
-          <div style="display:flex;align-items:center;gap:8px">
-            <a href="/reports/reception-audit" style="color:#64748b;text-decoration:none;font-size:12px;font-weight:700;display:inline-flex;align-items:center;gap:4px">
-              &larr; Volver a Auditoría
-            </a>
-            <span style="color:#cbd5e1">&bull;</span>
-            <span style="font-family:monospace;font-size:12px;font-weight:800;background:#f1f5f9;color:#0f172a;padding:2px 8px;border-radius:6px">ID #' . $containerId . '</span>
-            <span style="font-size:12px;color:#64748b">Estado: ' . renderReceptionStatusBadge((string)$container['status']) . '</span>
-          </div>
-          <h1 style="margin:8px 0 4px 0;font-size:28px;font-weight:900;color:#0f172a">Contenedor ' . h($containerCode) . '</h1>
-          <div style="font-size:14px;color:#475569;font-weight:600">
-            ' . h($suppNames) . ' &bull; <em>' . h($countryNames) . '</em>
-          </div>
-        </div>
-        <div class="no-print" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <a href="' . h($excelUrl) . '" class="btn" style="background:#059669;color:#ffffff;border:none;display:inline-flex;align-items:center;gap:6px;font-weight:700;padding:8px 14px;border-radius:9px;font-size:13px">
-            <svg style="width:15px;height:15px" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-            Excel
-          </a>
-          <button onclick="window.print()" class="btn" style="background:#0f172a;color:#ffffff;display:inline-flex;align-items:center;gap:6px;font-weight:700;padding:8px 14px;border-radius:9px;font-size:13px">
-            <svg style="width:15px;height:15px" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
-            Imprimir Dictamen
-          </button>
-          <a href="/import-containers/' . $containerId . '" class="btn secondary" style="padding:8px 14px;border-radius:9px;font-size:13px;font-weight:700">
-            Abrir Operativa 📦
-          </a>
-        </div>
-      </div>
-    </div>';
-
-    // Banner de Dictamen Ejecutivo
-    $body .= '<div class="rec-verdict-banner ' . $verdictClass . '">
-      <div style="font-size:28px;line-height:1">' . ($isCritical ? '⚠️' : ($isWarning ? '📋' : '✅')) . '</div>
-      <div style="flex:1">
-        <div style="font-size:16px;font-weight:900;color:' . $diffColor . '">' . $verdictTitle . '</div>
-        <div style="font-size:13px;color:#334155;margin-top:4px;line-height:1.5">' . h($verdictExplain) . '</div>
-      </div>
-      <div style="text-align:right">
-        <span style="font-size:12px;font-weight:800;color:' . ($erpComplete ? '#065f46' : '#c2410c') . ';background:#ffffff;padding:5px 12px;border-radius:8px;border:1px solid rgba(0,0,0,.08);display:inline-block">
-          ' . ($erpComplete ? '✓ Cierre Contable Completo' : '⏳ Cierre ERP Pendiente') . '
-        </span>
-      </div>
-    </div>';
-
-    // Ficha de Datos Generales
-    $body .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 18px">
-        <div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Bill of Lading (BL)</div>
-        <div style="font-size:16px;font-weight:800;color:#0f172a;margin-top:4px">' . h($bl) . '</div>
-      </div>
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 18px">
-        <div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Buque & Embarcador</div>
-        <div style="font-size:16px;font-weight:800;color:#0f172a;margin-top:4px">' . h($vessel) . '</div>
-        <div style="font-size:11px;color:#64748b;margin-top:2px">' . h($forwarder) . '</div>
-      </div>
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 18px">
-        <div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Órdenes de Compra (OCs)</div>
-        <div style="font-size:16px;font-weight:800;color:#0f172a;margin-top:4px">' . h($poCodes) . '</div>
-      </div>
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:14px 18px">
-        <div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">ETA / Arribo Planta</div>
-        <div style="font-size:16px;font-weight:800;color:#0f172a;margin-top:4px">' . h((string)($container['eta_plant'] ?: ($container['eta_port'] ?: '-'))) . '</div>
-        <div style="font-size:11px;color:#64748b;margin-top:2px">Reg: ' . h(substr((string)($container['created_at'] ?? ''), 0, 10)) . '</div>
-      </div>
-    </div>';
-
-    // 4 KPI Cards de Balance de Balanza
-    $body .= '<div class="rec-container-kpi-grid">
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px">
-        <div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Kilos Facturados (Doc)</div>
-        <div style="font-size:26px;font-weight:900;color:#0f172a;margin-top:6px">' . number_format($ordWeight, 1, ',', '.') . ' <span style="font-size:14px;color:#64748b">kg</span></div>
-        <div style="font-size:12px;color:#64748b;margin-top:4px">Bultos esperados: <strong>' . number_format($ordRolls, 0, ',', '.') . ' unid.</strong></div>
-      </div>
-
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px">
-        <div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Kilos Balanza (Físico)</div>
-        <div style="font-size:26px;font-weight:900;color:#0f766e;margin-top:6px">' . number_format($recWeight, 1, ',', '.') . ' <span style="font-size:14px;color:#64748b">kg</span></div>
-        <div style="font-size:12px;color:#64748b;margin-top:4px">Bultos recibidos: <strong>' . number_format($recRolls, 0, ',', '.') . ' unid.</strong></div>
-      </div>
-
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px">
-        <div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Desviación Neta Balanza</div>
-        <div style="font-size:26px;font-weight:900;color:' . $diffColor . ';margin-top:6px">' . ($weightDiff >= 0 ? '+' : '') . number_format($weightDiff, 1, ',', '.') . ' <span style="font-size:14px;color:#64748b">kg</span></div>
-        <div style="font-size:12px;color:' . $diffColor . ';margin-top:4px;font-weight:700">Variación: ' . ($weightDiff >= 0 ? '+' : '') . number_format($weightDiffPct, 2, ',', '.') . '%</div>
-      </div>
-
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;padding:16px 20px">
-        <div style="font-size:11px;text-transform:uppercase;color:#64748b;font-weight:800">Bobinas en Báscula TRZ</div>
-        <div style="font-size:26px;font-weight:900;color:#0f172a;margin-top:6px">' . number_format($scaleRollsCount, 0, ',', '.') . ' <span style="font-size:14px;color:#64748b">bobinas</span></div>
-        <div style="font-size:12px;color:#64748b;margin-top:4px">Promedio: <strong>' . number_format($scaleAvgKg, 1, ',', '.') . ' kg/bobina</strong></div>
-      </div>
-    </div>';
-
-    // Tabla de Cruce por Ítem / SKU
-    $body .= '<div class="rec-table-card" style="box-shadow:0 6px 20px rgba(15,23,42,.04);border-radius:16px;border:1px solid #e2e8f0;overflow:hidden">
-      <div style="padding:16px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap">
-        <div>
-          <div style="font-size:16px;font-weight:900;color:#0f172a">Detalle por Ítem / SKU de la Orden</div>
-          <div style="font-size:12px;color:#64748b;margin-top:2px">Cruce exacto de cantidades documentadas vs pesajes registrados por línea de cargamento</div>
-        </div>
-        <div style="font-size:12px;color:#64748b">' . count($lines) . ' líneas registradas</div>
-      </div>
-      <div class="rec-table-wrap">
-        <table class="rec-table" style="width:100%;border-collapse:collapse">
-          <thead>
-            <tr style="background:#0f172a;color:#ffffff;font-size:11px;text-transform:uppercase">
-              <th style="padding:12px 14px">OC</th>
-              <th style="padding:12px 14px">SKU & Descripción</th>
-              <th style="padding:12px 14px">Modo</th>
-              <th style="padding:12px 14px">Especificación</th>
-              <th style="padding:12px 14px;text-align:right">Bobinas (Doc / Físico)</th>
-              <th style="padding:12px 14px;text-align:right">Kilos Balanza vs Doc</th>
-              <th style="padding:12px 14px;text-align:right">Desviación Línea</th>
-              <th style="padding:12px 14px;text-align:center">Estado Línea</th>
-            </tr>
-          </thead>
-          <tbody>';
-
-    foreach ($lines as $line) {
-        $sm = $line['summary'];
-        $lQtyDiff = (float)($line['qty_diff'] ?? 0);
-        $lWDiff = (float)($line['weight_diff'] ?? 0);
-        $lWPct = (float)($line['weight_diff_pct'] ?? 0);
-        $isLineComplete = (bool)($line['is_complete'] ?? false);
-        $lineColor = (abs($lQtyDiff) >= 1.0 || abs($lWPct) >= 3.0 || !$isLineComplete) ? '#b91c1c' : '#047857';
-
-        $body .= '<tr style="border-bottom:1px solid #f1f5f9">';
-        $body .= '<td style="padding:12px 14px;font-weight:700;color:#0f172a">' . h((string)($line['po_code'] ?? '-')) . '</td>';
-        $body .= '<td style="padding:12px 14px">
-          <div style="font-weight:800;color:#0f172a">' . h((string)($line['sku_code'] ?? '-')) . '</div>
-          <div style="font-size:12px;color:#64748b;margin-top:2px">' . h((string)($line['sku_description'] ?? '-')) . '</div>
-        </td>';
-        $body .= '<td style="padding:12px 14px;font-size:12px;color:#475569">' . h(receptionModeLabel((string)($line['reception_mode'] ?? 'WEIGHT'))) . '</td>';
-        $body .= '<td style="padding:12px 14px;font-size:12px;color:#475569">' . buildReceptionSpec($line) . '</td>';
-        $body .= '<td style="padding:12px 14px;text-align:right">
-          <div style="font-weight:800;color:#0f172a">' . number_format((float)($sm['received_rolls'] ?? 0), 0, ',', '.') . ' <span style="font-size:11px;color:#64748b">/ ' . number_format((float)($sm['ordered_rolls'] ?? 0), 0, ',', '.') . '</span></div>
-          <div style="font-size:11px;font-weight:700;color:' . (abs($lQtyDiff) >= 1.0 ? '#b91c1c' : '#065f46') . ';margin-top:2px">
-            ' . ($lQtyDiff >= 0 ? '+' : '') . number_format($lQtyDiff, 0, ',', '.') . ' unid.
-          </div>
-        </td>';
-        $body .= '<td style="padding:12px 14px;text-align:right">
-          <div style="font-weight:800;color:#0f172a">' . number_format((float)($sm['received_weight_kg'] ?? 0), 1, ',', '.') . ' <span style="font-size:11px;color:#64748b">kg</span></div>
-          <div style="font-size:11px;color:#64748b;margin-top:2px">Doc: ' . number_format((float)($sm['ordered_weight_kg'] ?? 0), 1, ',', '.') . ' kg</div>
-        </td>';
-        $body .= '<td style="padding:12px 14px;text-align:right">
-          <div style="font-weight:800;color:' . $lineColor . '">' . ($lWDiff >= 0 ? '+' : '') . number_format($lWDiff, 1, ',', '.') . ' kg</div>
-          <div style="font-size:11px;font-weight:700;color:' . $lineColor . ';margin-top:2px">' . ($lWDiff >= 0 ? '+' : '') . number_format($lWPct, 2, ',', '.') . '%</div>
-        </td>';
-        $body .= '<td style="padding:12px 14px;text-align:center">';
-        if ($isLineComplete) {
-            $body .= '<span style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px;display:inline-block">Completa</span>';
-        } else {
-            $body .= '<span style="background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px;display:inline-block">Pendiente</span>';
-        }
-        $body .= '</td>';
-        $body .= '</tr>';
-    }
-
-    if ($lines === []) {
-        $body .= '<tr><td colspan="8" style="padding:24px;text-align:center;color:#64748b">Sin líneas asignadas para este contenedor.</td></tr>';
-    }
-    $body .= '</tbody></table></div></div>';
-
-    // Sección de Bobinas Físicas Pesadas en Báscula
-    if ($rolls !== []) {
-        $body .= '<div class="rec-table-card" style="box-shadow:0 6px 20px rgba(15,23,42,.04);border-radius:16px;border:1px solid #e2e8f0;overflow:hidden">
-          <div style="padding:16px 20px;background:#0f172a;color:#ffffff;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
-            <div>
-              <div style="font-size:16px;font-weight:900">Registro Trazable de Bobinas en Báscula (' . count($rolls) . ' bobinas)</div>
-              <div style="font-size:12px;color:#94a3b8;margin-top:2px">Detalle unitario de cada pesaje físico capturado por balanza electrónica para este contenedor</div>
-            </div>
-            <div style="font-size:13px;font-weight:700;color:#38bdf8">
-              Peso acumulado balanza: ' . number_format($scaleTotalKg, 1, ',', '.') . ' kg
-            </div>
-          </div>
-          <div class="rec-table-wrap" style="max-height:420px;overflow-y:auto">
-            <table class="rec-table" style="width:100%;border-collapse:collapse">
-              <thead>
-                <tr style="background:#1e293b;color:#ffffff;font-size:11px;text-transform:uppercase;position:sticky;top:0;z-index:2">
-                  <th style="padding:10px 14px">#</th>
-                  <th style="padding:10px 14px">Código de Bobina</th>
-                  <th style="padding:10px 14px;text-align:right">Peso Báscula (kg)</th>
-                  <th style="padding:10px 14px;text-align:right">Ancho (mm)</th>
-                  <th style="padding:10px 14px;text-align:right">Micras/Gramos</th>
-                  <th style="padding:10px 14px;text-align:right">Metros</th>
-                  <th style="padding:10px 14px">Fecha / Hora Pesaje</th>
-                  <th style="padding:10px 14px;text-align:center">Estado Trazable</th>
-                </tr>
-              </thead>
-              <tbody>';
-
-        $rIdx = 1;
-        foreach ($rolls as $r) {
-            $body .= '<tr style="border-bottom:1px solid #f1f5f9;font-size:12px">';
-            $body .= '<td style="padding:9px 14px;color:#64748b">' . $rIdx++ . '</td>';
-            $body .= '<td style="padding:9px 14px"><span class="rec-code-pill">' . h((string)$r['roll_code']) . '</span></td>';
-            $body .= '<td style="padding:9px 14px;text-align:right;font-weight:800;color:#0f172a">' . number_format((float)$r['weight_kg'], 2, ',', '.') . ' kg</td>';
-            $body .= '<td style="padding:9px 14px;text-align:right;color:#475569">' . (int)($r['width_mm'] ?? 0) . '</td>';
-            $body .= '<td style="padding:9px 14px;text-align:right;color:#475569">' . (int)($r['microns'] ?? 0) . '</td>';
-            $body .= '<td style="padding:9px 14px;text-align:right;color:#475569">' . number_format((float)($r['meters'] ?? 0), 0, ',', '.') . ' m</td>';
-            $body .= '<td style="padding:9px 14px;color:#64748b">' . h((string)$r['created_at']) . '</td>';
-            $body .= '<td style="padding:9px 14px;text-align:center"><span style="background:#f1f5f9;color:#334155;font-size:10px;font-weight:800;padding:2px 7px;border-radius:4px">' . h((string)$r['status']) . '</span></td>';
-            $body .= '</tr>';
-        }
-
-        $body .= '</tbody></table></div></div>';
-    } else {
-        $body .= '<div style="background:#f8fafc;border:1px dashed #cbd5e1;border-radius:14px;padding:22px;text-align:center;color:#64748b">
-          <div style="font-size:24px;margin-bottom:6px">⚖️</div>
-          <div style="font-weight:700;color:#0f172a;font-size:14px">Sin registros individuales de báscula electrónica para este cargamento</div>
-          <div style="font-size:12px;max-width:580px;margin:4px auto 0 auto">
-            Este contenedor fue procesado de forma consolidada en el ERP. La trazabilidad unitaria por bobina está activa para todas las recepciones pesadas con la balanza integrada.
-          </div>
-        </div>';
-    }
-
-    $body .= '</div>';
-    render('Dictamen de Auditoría · ' . $containerCode, $body);
+    require_once __DIR__ . '/../src/Http/ReceptionAuditModule.php';
+    handleReceptionAuditContainerDetail($service, (int)$m[1]);
     exit;
 }
 

@@ -218,12 +218,27 @@ function handleProductionRoutes(
             $dateFilter = null;
         }
 
-        $scheduledOrders = $prodService->listScheduledOrdersForMachine($equipoId, $plantaId, $dateFilter);
-        $activeOt = $prodService->getOpenWorkerOt($workerId, $plantaId);
+        $activeTab = 'scheduled';
+        $searchQuery = trim((string)($_GET['search'] ?? $_GET['q'] ?? ''));
 
+        $scheduledOrders = $prodService->listScheduledOrdersForMachine($equipoId, $plantaId, $dateFilter);
+        $unscheduledOrders = [];
+
+        $activeOt = $prodService->getOpenWorkerOt($workerId, $plantaId);
         $activeStandby = $prodService->getActiveMachineStandby($equipoId, (int)$activeInit['id']);
 
-        renderProductionNewWorkOrderScreen($activeInit, $scheduledOrders, $activeOt, $currentOperatorName, $plantaName, $activeStandby, $dateFilter);
+        renderProductionNewWorkOrderScreen(
+            $activeInit,
+            $scheduledOrders,
+            $activeOt,
+            $currentOperatorName,
+            $plantaName,
+            $activeStandby,
+            $dateFilter,
+            $unscheduledOrders,
+            $activeTab,
+            $searchQuery
+        );
         return true;
     }
 
@@ -243,6 +258,12 @@ function handleProductionRoutes(
         } else {
             redirectResponse('/production/work-orders/new?error=' . rawurlencode((string)($res['error'] ?? 'Error al iniciar OT.')));
         }
+        return true;
+    }
+
+    if ($path === '/production/work-orders/init-unscheduled' && $method === 'POST') {
+        requireCsrf();
+        redirectResponse('/production/work-orders/new?error=' . rawurlencode('Productos fuera de planificación deshabilitados para evitar sobrecarga del sistema.'));
         return true;
     }
 
@@ -383,7 +404,6 @@ function handleProductionRoutes(
             return true;
         }
 
-        // Caso 2: Finalización de Tiraje o Actualización de Avance
         $amount = (float)str_replace(',', '.', (string)($_REQUEST['prod_amount'] ?? 0));
         $amount2 = (float)str_replace(',', '.', (string)($_REQUEST['prod_amount2'] ?? 0));
         $bobinaKg = (float)str_replace(',', '.', (string)($_REQUEST['prod_bobina_kg'] ?? 0));
@@ -391,6 +411,16 @@ function handleProductionRoutes(
         $mlin = (int)($_REQUEST['evt_amount_metros_lineales'] ?? 0);
         $mtype = trim((string)($_REQUEST['evt_metrotype'] ?? ''));
         $isEnd = ($submode === 'end' || $actionType === 'end');
+
+        // Automatización: Si no vinieron kilos o metros, autocompletar con la suma de bobinas impresas emitidas
+        if ($workerOtId > 0 && ($bobinaKg <= 0 || $mlin <= 0)) {
+            $prSummary = $prodService->getPrintedRollsSummary($workerOtId);
+            if (!empty($prSummary['rolls_count']) && $prSummary['rolls_count'] > 0) {
+                if ($bobinaKg <= 0) $bobinaKg = (float)$prSummary['total_weight_kg'];
+                if ($mlin <= 0) $mlin = (int)round($prSummary['total_meters']);
+                if ($amount <= 0 && $mtype === 'metros_lineales') $amount = (float)$mlin;
+            }
+        }
 
         // Procesar mermas y reparaciones por tipo
         $mermas = [];
@@ -416,6 +446,81 @@ function handleProductionRoutes(
 
         $amountFrente = (float)str_replace(',', '.', (string)($_REQUEST['amount_pulpo_frente'] ?? $_REQUEST['idx_pulpo_seri_pasadas_inp_frente'] ?? 0));
         $amountDorso = (float)str_replace(',', '.', (string)($_REQUEST['amount_pulpo_dorso'] ?? $_REQUEST['idx_pulpo_seri_pasadas_inp_dorso'] ?? 0));
+        $seriCounterValues = [];
+        foreach ($_REQUEST as $reqKey => $reqVal) {
+            if (!str_starts_with((string)$reqKey, 'seri_counter_color_')) {
+                continue;
+            }
+            $colorIdx = (int)substr((string)$reqKey, strlen('seri_counter_color_'));
+            if ($colorIdx <= 0) {
+                continue;
+            }
+            $seriCounterValues[$colorIdx] = (float)str_replace(',', '.', (string)$reqVal);
+        }
+        if (!empty($seriCounterValues)) {
+            $seriDevPrints = max(1, (int)($_REQUEST['seri_bastidor_multiplier'] ?? $_REQUEST['seri_devprints_multiplier'] ?? ($agenda['req_operador_bastidoramt'] ?? 1)));
+            $seriColorIndexes = array_keys($seriCounterValues);
+            sort($seriColorIndexes);
+            $seriPrevCounters = array_fill_keys($seriColorIndexes, 0.0);
+            if ($workerOtId > 0) {
+                $seriPrevEvents = $prodService->getWorkOrderEvents($workerOtId);
+                foreach ($seriPrevEvents as $seriPrevEvent) {
+                    if (!in_array((string)($seriPrevEvent['evt_type'] ?? ''), ['prod', 'prodsericolor'], true)) {
+                        continue;
+                    }
+                    if ((int)($seriPrevEvent['id'] ?? 0) === $refId) {
+                        continue;
+                    }
+                    $seriPrevComments = (string)($seriPrevEvent['evt_comments'] ?? '');
+                    if (!preg_match('/\[SERI_COUNTERS:\s*(.*?)\]/', $seriPrevComments, $seriPrevMetaMatch)) {
+                        continue;
+                    }
+                    $seriPrevMeta = trim((string)($seriPrevMetaMatch[1] ?? ''));
+                    $seriPrevMeta = trim((string)preg_replace('/\s+\|\s+(?:img\/bast|imp\/des)=.*$/', '', $seriPrevMeta));
+                    if ($seriPrevMeta === '') {
+                        continue;
+                    }
+                    foreach (preg_split('/\s*,\s*/', $seriPrevMeta) as $seriPrevToken) {
+                        if (!preg_match('/^C(\d+):.*?=(\d+(?:\.\d+)?)$/', trim((string)$seriPrevToken), $seriPrevCounterMatch)) {
+                            continue;
+                        }
+                        $seriPrevIdx = (int)$seriPrevCounterMatch[1];
+                        if (!array_key_exists($seriPrevIdx, $seriPrevCounters)) {
+                            continue;
+                        }
+                        $seriPrevCounters[$seriPrevIdx] += (float)$seriPrevCounterMatch[2];
+                    }
+                }
+            }
+
+            $seriPrevFinishedBase = !empty($seriPrevCounters) ? (float)min($seriPrevCounters) : 0.0;
+            $seriNewTotals = [];
+            foreach ($seriColorIndexes as $seriColorIdx) {
+                $seriNewTotals[$seriColorIdx] = (float)($seriPrevCounters[$seriColorIdx] ?? 0) + (float)($seriCounterValues[$seriColorIdx] ?? 0);
+            }
+            $seriNewFinishedBase = !empty($seriNewTotals) ? (float)min($seriNewTotals) : 0.0;
+            $seriFinishedDeltaBase = max(0.0, $seriNewFinishedBase - $seriPrevFinishedBase);
+
+            $amount2 = $seriFinishedDeltaBase;
+            if ($amount <= 0) {
+                $amount = $seriFinishedDeltaBase * $seriDevPrints;
+            }
+
+            $commentsBase = preg_replace('/\s*\[SERI_COUNTERS:[^\]]*\]\s*$/', '', $comments);
+            $comments = is_string($commentsBase) ? trim($commentsBase) : $comments;
+            $seriCounterParts = [];
+            foreach ($seriCounterValues as $colorIdx => $counterVal) {
+                if ($counterVal <= 0) {
+                    continue;
+                }
+                $colorLabel = trim((string)($_REQUEST['seri_counter_label_' . $colorIdx] ?? ('Color ' . $colorIdx)));
+                $seriCounterParts[] = 'C' . $colorIdx . ':' . $colorLabel . '=' . (int)round($counterVal);
+            }
+            if (!empty($seriCounterParts)) {
+                $seriMeta = '[SERI_COUNTERS: ' . implode(', ', $seriCounterParts) . ' | img/bast=' . $seriDevPrints . ' | base=' . (int)round($seriFinishedDeltaBase) . ']';
+                $comments = $comments !== '' ? ($comments . ' ' . $seriMeta) : $seriMeta;
+            }
+        }
 
         // Lógica de cálculo acumulativo de bolsas terminadas en Pulpo Serigráfico:
         // Considera las pasadas previas de frente y dorso guardadas en la OT para acumular bolsas terminadas.
@@ -672,15 +777,6 @@ function handleProductionRoutes(
             $selectedPoints = array_map('intval', $_POST['autocontrol_points']);
         }
 
-        // Guardar Merma de Alistamiento si fue ingresada en el formulario
-        $mermaAmt = (float)str_replace(',', '.', (string)($_REQUEST['merma_alis_amount'] ?? 0));
-        $mermaKgs = (float)str_replace(',', '.', (string)($_REQUEST['merma_alis_kgs'] ?? 0));
-        $mermaMts = (float)str_replace(',', '.', (string)($_REQUEST['merma_alis_mts'] ?? 0));
-        $mermaComm = trim((string)($_REQUEST['merma_alis_comments'] ?? ''));
-        if ($mermaAmt > 0 || $mermaKgs > 0 || $mermaMts > 0 || $mermaComm !== '') {
-            $prodService->saveAlistamientoMerma($workerOtId, $mermaAmt, $mermaKgs, $mermaMts, $mermaComm);
-        }
-
         // Asegurar cierre de evento de alistamiento
         $prodService->closeOpenAperturaEvent($workerOtId);
 
@@ -766,6 +862,27 @@ function handleProductionRoutes(
         $meters = (float)str_replace(',', '.', (string)($_POST['meters'] ?? 0));
         $autoPrint = !empty($_POST['auto_print']);
 
+        // Calcular metros lineales automáticamente a partir del peso de la bobina saliente
+        if ($meters <= 0 && $weightKg > 0) {
+            $ctxAgenda = $prodService->getWorkOrderAgendaDetails($agId);
+            $wCm = (float)($ctxAgenda['req_operador_tela_width'] ?? ($ctxAgenda['fab_med_width'] ?? 0));
+            $g = (float)($ctxAgenda['fab_mat_gramms'] ?? 0);
+            if ($parentRollId !== null && $parentRollId > 0 && Db::trzPdo() !== null) {
+                $stParent = Db::trzPdo()->prepare("SELECT width_mm, microns FROM rolls WHERE id = :id LIMIT 1");
+                $stParent->execute([':id' => $parentRollId]);
+                $pRow = $stParent->fetch(PDO::FETCH_ASSOC);
+                if (!empty($pRow['width_mm']) && (float)$pRow['width_mm'] > 0) {
+                    $wCm = (float)$pRow['width_mm'] / 10.0;
+                }
+                if (!empty($pRow['microns']) && (float)$pRow['microns'] > 0) {
+                    $g = (float)$pRow['microns'];
+                }
+            }
+            if ($wCm <= 0) $wCm = 80.0;
+            if ($g <= 0) $g = 80.0;
+            $meters = round(($weightKg * 100000.0) / ($wCm * $g));
+        }
+
         $res = $prodService->createOutputRollFromWorkOrder(
             $workerOtId,
             $parentRollId,
@@ -781,10 +898,10 @@ function handleProductionRoutes(
             if ($autoPrint) {
                 redirectResponse('/rolls/' . $childId . '/label?server_print=1');
             } else {
-                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=semielaborado&roll_created=' . $childId . '&roll_code=' . urlencode($res['child_roll_code']));
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&roll_created=' . $childId . '&roll_code=' . urlencode($res['child_roll_code']));
             }
         } else {
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=semielaborado&error=' . rawurlencode((string)($res['error'] ?? 'Error al crear bobina semielaborada.')));
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&error=' . rawurlencode((string)($res['error'] ?? 'Error al crear bobina semielaborada.')));
         }
         return true;
     }
@@ -875,14 +992,15 @@ function handleProductionRoutes(
             $erpPdo = Db::erpPdo();
             $stmtErp = $erpPdo->prepare(
                 "INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                  VALUES
-                 (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)"
+                 (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)"
             );
             $stmtErp->execute([
                 ':ot_id' => $workerOtId,
                 ':amt' => $matQty,
                 ':crtdat' => $now,
+                ':enddat' => $now,
                 ':comments' => $desc,
             ]);
             $res = ['ok' => true];
@@ -906,8 +1024,9 @@ function handleProductionRoutes(
         $comments = trim((string)($_REQUEST['comments'] ?? ''));
 
         if ($actionType === 'mount') {
-            $res = $prodService->mountRollOnMachine($workerOtId, $rollId, $currentOperatorName, $comments);
-            $param = $res['ok'] ? '&mounted=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al montar bobina'));
+            $entryWeightKg = (float)str_replace(',', '.', (string)($_REQUEST['entry_weight_kg'] ?? 0));
+            $res = $prodService->mountRollOnMachine($workerOtId, $rollId, $currentOperatorName, $entryWeightKg, $comments);
+            $param = $res['ok'] ? ('&mounted=1&m_kg=' . ($res['entry_weight_kg'] ?? $entryWeightKg)) : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al montar bobina'));
         } elseif ($actionType === 'unmount') {
             $res = $prodService->unmountRollFromMachine($workerOtId, $rollId, $currentOperatorName);
             $param = $res['ok'] ? '&unmounted=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al desmontar bobina'));
@@ -922,29 +1041,78 @@ function handleProductionRoutes(
         return true;
     }
 
-    // Registro de Consumo Real y Retazo de Bobina (Trazabilidad)
+    // Registro de Desmontaje y Salida de Bobina (Peso Bobina, mermas por tipo, sobrante trazable)
     if ($path === '/production/work-orders/materials/consume' && $method === 'POST') {
         requireCsrf();
         $agId = (int)($_REQUEST['agid'] ?? 0);
         $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
         $rollId = (int)($_REQUEST['roll_id'] ?? 0);
-        $consumedWeight = (float)str_replace(',', '.', (string)($_REQUEST['consumed_weight'] ?? 0));
-        $scrapWeight = (float)str_replace(',', '.', (string)($_REQUEST['scrap_weight'] ?? 0));
+        $outputBobinaKg = (float)str_replace(',', '.', (string)($_REQUEST['output_bobina_kg'] ?? $_REQUEST['output_binas_kg'] ?? 0));
+        $scrapKg = (float)str_replace(',', '.', (string)($_REQUEST['scrap_weight'] ?? $_REQUEST['scrap_kg'] ?? 0));
+        $leftoverKg = (float)str_replace(',', '.', (string)($_REQUEST['leftover_weight'] ?? $_REQUEST['leftover_kg'] ?? 0));
         $comments = trim((string)($_REQUEST['comments'] ?? ''));
+        $createOutputRoll = !empty($_REQUEST['create_output_roll']);
+        $consumeAgenda = $agId > 0 ? $prodService->getWorkOrderAgendaDetails($agId) : null;
+        $outputSkuCode = trim((string)($consumeAgenda['item_title'] ?? $consumeAgenda['fab_type'] ?? ''));
+        if ($outputSkuCode === '') {
+            $outputSkuCode = trim((string)($_REQUEST['output_sku_code'] ?? ''));
+        }
+        $outputMeters = (float)str_replace(',', '.', (string)($_REQUEST['output_meters'] ?? 0));
+        $autoPrintOutput = !empty($_REQUEST['auto_print_output']);
 
-        $res = $prodService->recordRollConsumptionAndScrap(
+        // Desglose de mermas por tipo si vienen en el formulario
+        $mermasDetail = [];
+        $totalScrapDetail = 0.0;
+        if (!empty($_POST['merma_kgs']) && is_array($_POST['merma_kgs'])) {
+            foreach ($_POST['merma_kgs'] as $mtId => $val) {
+                $kgs = (float)str_replace(',', '.', (string)$val);
+                $comm = trim((string)($_POST['merma_comm'][$mtId] ?? ''));
+                if ($kgs > 0 || $comm !== '') {
+                    $mermasDetail[(int)$mtId] = [
+                        'kgs' => $kgs,
+                        'comments' => $comm,
+                    ];
+                    $totalScrapDetail += $kgs;
+                }
+            }
+        }
+        if ($totalScrapDetail > 0) {
+            $scrapKg = $totalScrapDetail;
+        }
+
+        $res = $prodService->recordRollOutputAndLeftover(
             $workerOtId,
             $rollId,
-            $consumedWeight,
-            $scrapWeight,
+            $outputBobinaKg,
+            $scrapKg,
+            $leftoverKg,
             $comments,
-            $currentOperatorName
+            $currentOperatorName,
+            $mermasDetail,
+            $createOutputRoll,
+            $outputSkuCode,
+            $outputMeters
         );
 
         if ($res['ok']) {
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&saved_consumption=1');
+            $param = '&saved_output=1';
+            if (!empty($res['output_roll_code'])) {
+                $param .= '&output_id=' . (int)($res['output_roll_id'] ?? 0)
+                    . '&output_code=' . rawurlencode((string)$res['output_roll_code'])
+                    . '&output_kg=' . rawurlencode((string)($res['output_bobina_kg'] ?? 0));
+                if (!empty($res['output_meters'])) {
+                    $param .= '&output_meters=' . rawurlencode((string)$res['output_meters']);
+                }
+                if ($autoPrintOutput) {
+                    $param .= '&output_autoprint=1';
+                }
+            }
+            if (!empty($res['leftover_roll_code'])) {
+                $param .= '&leftover_id=' . (int)($res['leftover_roll_id'] ?? 0) . '&leftover_code=' . rawurlencode((string)$res['leftover_roll_code']) . '&leftover_kg=' . $res['leftover_kg'];
+            }
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales' . $param);
         } else {
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar consumo y retazo.')));
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar salida de bobina.')));
         }
         return true;
     }
@@ -1005,9 +1173,14 @@ function handleProductionRoutes(
             if (!empty($_POST['rebofinalize'])) {
                 $openOt = $prodService->getOpenWorkerOt($workerId, $plantaId);
                 $workerOtId = $openOt !== null ? (int)$openOt['id'] : 0;
-                $resRebo = $prodService->executeReboFinalize($agId, $_POST, (int)($_SESSION['user_id'] ?? 4075), (int)($_SESSION['company_id'] ?? 20010), $workerOtId);
+                $resRebo = $prodService->executeReboFinalize($agId, $_POST, (int)($_SESSION['user_id'] ?? 4075), (int)($_SESSION['company_id'] ?? 20010), $workerOtId, $currentOperatorName);
                 $cutCount = !empty($resRebo['created_rolls']) ? count($resRebo['created_rolls']) : 0;
-                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod&rebo_done=1&cuts=' . $cutCount);
+                $firstBagRollId = !empty($resRebo['created_bag_rolls'][0]['id'])
+                    ? (int)$resRebo['created_bag_rolls'][0]['id']
+                    : (!empty($resRebo['created_rolls'][0]['id']) ? (int)$resRebo['created_rolls'][0]['id'] : 0);
+                $palletId = !empty($resRebo['handle_pallet']['id']) ? (int)$resRebo['handle_pallet']['id'] : 0;
+                $handleCount = !empty($resRebo['created_handle_rolls']) ? count($resRebo['created_handle_rolls']) : 0;
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod&rebo_done=1&cuts=' . $cutCount . '&first_cut=' . $firstBagRollId . '&pallet_id=' . $palletId . '&handle_rolls=' . $handleCount);
                 return true;
             }
         }
@@ -1060,6 +1233,12 @@ function handleProductionRoutes(
         ];
 
         $mode = trim((string)($_GET['mode'] ?? $_POST['mode'] ?? ''));
+        if ($mode === 'prod') {
+            $mode = 'production';
+        }
+        if ($mode === 'semielaborado') {
+            $mode = 'materiales';
+        }
         if ($mode === 'materiales' || $mode === 'cargar') {
             $availableRolls = $prodService->listAvailableRollsForProduction(
                 null,
@@ -1197,9 +1376,14 @@ function handleProductionRoutes(
 
         $equipoId = (int)$activeInit['win_equipoid'];
         $activeOrders = $prodService->listActiveOrdersInCourse($plantaId, $equipoId);
-        $scheduledOrders = $prodService->listScheduledOrdersForMachine($equipoId, $plantaId);
+        $scheduledOrders = $prodService->listScheduledOrdersForMachine($equipoId, $plantaId, date('Y-m-d'));
+        $unscheduledOrders = [];
 
         $selectedAgId = isset($_GET['agid']) ? (int)$_GET['agid'] : (int)($_GET['ag_id'] ?? 0);
+        $prdId = (int)($_GET['prd_id'] ?? 0);
+        if ($selectedAgId <= 0 && $prdId > 0 && $equipoId > 0) {
+            $selectedAgId = $prodService->ensureAgendaForUnscheduledOrder($prdId, $equipoId, $plantaId);
+        }
         if ($selectedAgId <= 0 && !empty($activeOrders)) {
             $selectedAgId = (int)$activeOrders[0]['ag_id'];
         } elseif ($selectedAgId <= 0 && !empty($scheduledOrders)) {
@@ -1210,10 +1394,10 @@ function handleProductionRoutes(
         $workerOt = ($selectedAgId > 0) ? $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $selectedAgId) : null;
         $workerOtId = $workerOt !== null ? (int)$workerOt['id'] : 0;
 
-        $bodega3000Rolls = $prodService->listAvailableRollsInBodega3000($selectedAgId);
+        $bodega3000Rolls = $prodService->listAvailableRollsInBodega3000($selectedAgId, 60, null, $equipoId, true);
         $centralRolls = ($selectedAgenda !== null) ? $prodService->listAvailableRollsForProduction(
             null,
-            100,
+            60,
             (string)($selectedAgenda['fabric_color'] ?? ''),
             (float)($selectedAgenda['req_operador_tela_width'] ?? 0),
             (string)($selectedAgenda['fab_type'] ?? ''),
@@ -1221,6 +1405,8 @@ function handleProductionRoutes(
         ) : [];
 
         $assignedRolls = ($workerOtId > 0) ? ($prodService->getWorkOrderMaterialQuota($selectedAgId, $workerOtId)['assigned_rolls'] ?? []) : [];
+        $inkWarehouse = productionResolveInkWarehouseForAgenda($activeInit, $selectedAgenda);
+        $chemicals = $receptionService->listWarehouseItemsByWarehouseCode((int)($inkWarehouse['code'] ?? 0), true);
 
         renderProductionMaterialsRequestScreen(
             $activeInit,
@@ -1232,8 +1418,11 @@ function handleProductionRoutes(
             $bodega3000Rolls,
             $centralRolls,
             $assignedRolls,
+            $chemicals,
+            $inkWarehouse,
             $currentOperatorName,
-            $plantaName
+            $plantaName,
+            $unscheduledOrders
         );
         return true;
     }
@@ -1320,6 +1509,56 @@ function handleProductionRoutes(
                 redirectResponse('/production/materials/request?agid=' . $agId . '&error=' . rawurlencode((string)($res['error'] ?? 'Error al solicitar bobinas.')));
             }
             return true;
+        } elseif ($actionMode === 'chemical_request') {
+            $agenda = $agId > 0 ? $prodService->getWorkOrderAgendaDetails($agId) : null;
+            $workOrderId = (int)($agenda['req_id'] ?? $agenda['ag_reqid'] ?? 0);
+            $chemicalId = (int)($_POST['chemical_id'] ?? 0);
+            $requestedItemText = trim((string)($_POST['requested_item_text'] ?? ''));
+            $requestedQty = (float)str_replace(',', '.', (string)($_POST['material_qty'] ?? 0));
+            $requestedUnit = trim((string)($_POST['material_unit'] ?? 'Kg'));
+            $comments = trim((string)($_POST['comments'] ?? ''));
+            $warehouseCode = (int)($_POST['warehouse_code'] ?? 0);
+            $warehouseName = trim((string)($_POST['warehouse_name'] ?? ''));
+            if ($warehouseCode > 0) {
+                $warehouseMsg = 'Bodega sugerida: ' . $warehouseCode . ($warehouseName !== '' ? ' (' . $warehouseName . ')' : '');
+                $comments = $comments !== '' ? ($warehouseMsg . ' · ' . $comments) : $warehouseMsg;
+            }
+
+            if ($chemicalId > 0) {
+                $res = $receptionService->createMaterialRequest(
+                    $workOrderId,
+                    'CHEMICAL',
+                    '',
+                    $chemicalId,
+                    '',
+                    $requestedQty,
+                    0.0,
+                    $requestedUnit,
+                    $comments,
+                    $currentOperatorName
+                );
+            } else {
+                $res = $receptionService->createMaterialRequest(
+                    $workOrderId,
+                    'OTHER',
+                    '',
+                    null,
+                    $requestedItemText,
+                    $requestedQty,
+                    0.0,
+                    $requestedUnit,
+                    $comments,
+                    $currentOperatorName
+                );
+            }
+
+            if (($res['ok'] ?? false) === true) {
+                redirectResponse('/production/materials/request?agid=' . $agId . '&saved_request=1&request_type=chemical&material_kind=inks');
+            }
+
+            $firstError = isset($res['errors']) && is_array($res['errors']) ? (string)reset($res['errors']) : '';
+            redirectResponse('/production/materials/request?agid=' . $agId . '&error=' . rawurlencode($firstError !== '' ? $firstError : 'Error al solicitar tinta.') . '&request_type=chemical&material_kind=inks');
+            return true;
         } elseif ($actionMode === 'insumos_directos') {
             $matType = trim((string)($_POST['material_type'] ?? 'Insumo Directo'));
             $matQty = (float)str_replace(',', '.', (string)($_POST['material_qty'] ?? 0));
@@ -1328,15 +1567,17 @@ function handleProductionRoutes(
             $desc = "Solicitud Insumo: {$matType} - Cant: {$matQty} {$matUnit}";
             if ($comments !== '') $desc .= " ({$comments})";
 
+            $now = time();
             Db::erpPdo()->prepare("
                 INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                 VALUES
-                 (:ot_id, :amt, :crtdat, 1, 'materiales', :comments)
+                 (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
             ")->execute([
                 ':ot_id' => $workerOtId,
                 ':amt' => $matQty,
-                ':crtdat' => time(),
+                ':crtdat' => $now,
+                ':enddat' => $now,
                 ':comments' => $desc,
             ]);
             redirectResponse('/production/materials/request?agid=' . $agId . '&saved_material=1');
@@ -1703,10 +1944,14 @@ function renderProductionOperatorConsole(
             return;
         }
         if (!empty($_POST['rebofinalize'])) {
-            $resRebo = $prodService->executeReboFinalize($agId, $_POST, (int)($_SESSION['user_id'] ?? 4075), (int)($_SESSION['company_id'] ?? 20010), $workerOtId);
+            $resRebo = $prodService->executeReboFinalize($agId, $_POST, (int)($_SESSION['user_id'] ?? 4075), (int)($_SESSION['company_id'] ?? 20010), $workerOtId, $currentOperatorName);
             $cutCount = !empty($resRebo['created_rolls']) ? count($resRebo['created_rolls']) : 0;
-            $firstCutId = !empty($resRebo['created_rolls'][0]['id']) ? (int)$resRebo['created_rolls'][0]['id'] : 0;
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod&rebo_done=1&cuts=' . $cutCount . '&first_cut=' . $firstCutId);
+            $firstCutId = !empty($resRebo['created_bag_rolls'][0]['id'])
+                ? (int)$resRebo['created_bag_rolls'][0]['id']
+                : (!empty($resRebo['created_rolls'][0]['id']) ? (int)$resRebo['created_rolls'][0]['id'] : 0);
+            $palletId = !empty($resRebo['handle_pallet']['id']) ? (int)$resRebo['handle_pallet']['id'] : 0;
+            $handleCount = !empty($resRebo['created_handle_rolls']) ? count($resRebo['created_handle_rolls']) : 0;
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod&rebo_done=1&cuts=' . $cutCount . '&first_cut=' . $firstCutId . '&pallet_id=' . $palletId . '&handle_rolls=' . $handleCount);
             return;
         }
 
@@ -1786,6 +2031,7 @@ function renderProductionOperatorConsole(
     if ($mode === 'production' && $refId <= 0 && $openProdId > 0) {
         $refId = $openProdId;
     }
+    $printedRollsSummary = ($workerOtId > 0 && $isFlexo) ? $prodService->getPrintedRollsSummary($workerOtId) : [];
 
     // Helper format (reproduce printPrice de Unibag eliminando ceros innecesarios a la derecha)
     $fmt = function($val, $dec = 0, $blankIfNull = false) {
@@ -1965,6 +2211,13 @@ function renderProductionOperatorConsole(
         </div>
     <?php endif; ?>
 
+    <?php if (!empty($_GET['error'])): ?>
+        <div style="background:#FDECEC;border:1.5px solid #EF4444;color:#991B1B;padding:14px 18px;border-radius:6px;margin-bottom:18px;font-size:14px">
+            <i class="fa fa-fw fa-exclamation-triangle" style="font-size:18px;color:#DC2626"></i>
+            <b>Error:</b> <?=htmlspecialchars((string)$_GET['error'])?>
+        </div>
+    <?php endif; ?>
+
     <?php if ($isExclusiveAutocontrol): ?>
         <!-- ============================================================== -->
         <!-- PANTALLA EXCLUSIVA DE AUTOCONTROL (autocontrol.form.php)       -->
@@ -2075,234 +2328,528 @@ function renderProductionOperatorConsole(
         $acFuelle = (int)($agenda['fab_med_fuelle'] ?? 0);
         $acMedidasStr = $acW > 0 ? ("{$acW} x {$acH}" . ($acFuelle > 0 ? " + {$acFuelle}" : "") . " cm") : '-';
         $acTelaWidth = (float)($agenda['req_operador_tela_width'] ?? 0);
+        $acSeriMermaPerc = (float)($agenda['req_operador_mermaperc'] ?? 0);
+        $acSeriDevPrints = max(1, (int)($agenda['req_solic_devprints_cc'] ?? 1));
+        $acSeriMlinProg = round((float)$agenda['ag_amount'] * (float)$corte_m2);
+        $acSeriMlinAddi = round($acSeriMlinProg / 100 * $acSeriMermaPerc);
+        $acSeriMlinPrint = round($acSeriMlinProg + $acSeriMlinAddi);
+        $acSeriMermaUnits = round((float)$agenda['ag_amount'] / 100 * $acSeriMermaPerc);
+        $acSeriRealUnits = (float)$agenda['ag_amount'] + $acSeriMermaUnits;
+        $acSeriPasadasPrint = (int)round($acSeriRealUnits / $acSeriDevPrints);
+        $acSeriKgsProcess = round(
+            $acSeriMlinPrint
+            * (float)($agenda['req_operador_tela_width'] ?? 0)
+            / 100
+            * (float)($agenda['fab_mat_gramms'] ?? 0)
+            / 1000
+        );
         ?>
 
-        <!-- Tarjeta 1: Información Cliente y Diseño para Autocontrol -->
-        <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
-            <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_cliente', 'icon_autoctrl_info_cliente')">
-                <span><i class="fa fa-fw fa-user"></i> 1. Información Cliente y Diseño</span>
-                <span class="unibag-collapse-btn">
-                    <span id="lbl_autoctrl_info_cliente">Minimizar</span>
-                    <i id="icon_autoctrl_info_cliente" class="fa fa-chevron-up"></i>
-                </span>
-            </div>
-            <div id="sec_autoctrl_info_cliente" style="padding:15px">
-                <table border="0" width="100%" cellpadding="6" cellspacing="0">
-                <colgroup>
-                    <col width="180">
-                    <col width="32%">
-                    <col width="160">
-                    <col>
-                </colgroup>
-                <tr>
-                    <td class="tdleft">N° OT</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['prd_number'])?></b></td>
-                    <td class="tdleft">Color N° 1</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Cliente</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['cust_name'])?></b></td>
-                    <td class="tdleft">Color N° 2</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">N° CC</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['req_number'])?></b></td>
-                    <td class="tdleft">Color N° 3</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Diseño</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_design_name'] !== '' ? $agenda['fab_design_name'] : $agenda['item_title']))?></td>
-                    <td class="tdleft">Color N° 4</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Producto</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)$agenda['item_number_prod'])?> | <?=htmlspecialchars((string)$agenda['item_title'])?></td>
-                    <td class="tdleft">Color N° 5</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_5'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Materialidad</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)$agenda['fab_type'])?></td>
-                    <td class="tdleft">Color N° 6</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_6'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Medidas (Ancho x Alto)</td>
-                    <td class="tdnrm"><b><?=(int)$agenda['fab_med_width']?> x <?=(int)$agenda['fab_med_height']?> cm</b></td>
-                    <td class="tdleft">Colores Resumen</td>
-                    <td class="tdnrm"><?=htmlspecialchars($printcolors ?: '-')?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Fuelle</td>
-                    <td class="tdnrm"><?=(int)$agenda['fab_med_fuelle']?> cm</td>
-                    <td class="tdleft">Fecha de Entrega</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_despacho_desc'] !== '' ? $agenda['req_despacho_desc'] : $agenda['ag_date']))?></b></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Cantidad de Bolsas</td>
-                    <td class="tdnrm"><b><?=$fmt($agenda['ag_amount'])?></b></td>
-                    <td class="tdleft">Fecha solicitud cliché</td>
-                    <td class="tdnrm"><?=(int)($agenda['req_cliche_peli_solic_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_solic_dat']) : '-'?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Color Tela</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></td>
-                    <td class="tdleft">Fecha recepción cliché</td>
-                    <td class="tdnrm"><?=(int)($agenda['req_cliche_peli_recep_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_recep_dat']) : '-'?></td>
-                </tr>
-                <tr>
-                    <td colspan="4" style="background:#EDF0F6;padding:4px"></td>
-                </tr>
-                <tr>
-                    <td class="tdleft" valign="middle">Imagen Diseño</td>
-                    <td class="tdnrm" colspan="3" valign="middle">
-                        <?php if ($acHasImg): ?>
-                            <div style="display:inline-flex;align-items:center;gap:14px;flex-wrap:wrap">
-                                <div style="cursor:pointer;display:inline-flex;align-items:center;gap:12px;background:#F8FAFC;border:2px solid #0284C7;padding:8px 14px;border-radius:6px;box-shadow:0 2px 6px rgba(2,132,199,0.15)"
-                                     onclick="openDesignModal('<?=htmlspecialchars($acImgUrl)?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>')"
-                                     title="Clic para ver foto del diseño en ventana flotante">
-                                    <img src="<?=htmlspecialchars($acImgUrl)?>" alt="Foto Diseño" style="height:70px;max-width:120px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff">
-                                    <div>
-                                        <div style="font-size:13px;font-weight:700;color:#0284C7"><i class="fa fa-search-plus"></i> Abrir en Ventana Flotante</div>
-                                        <div style="font-size:11px;color:#64748B;margin-top:2px">Clic aquí para ampliar y revisar diseño</div>
-                                    </div>
-                                </div>
-                                <a href="<?=$acImgUrl?>" target="_blank" class="btngrey" style="padding:6px 12px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px">
-                                    <i class="fa fa-fw fa-external-link-alt" style="color:white;"></i> Pestaña nueva
+        <?php if ($isSeriPlana): ?>
+            <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
+                <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_cliente', 'icon_autoctrl_info_cliente')">
+                    <span><i class="fa fa-fw fa-user"></i> Información Cliente</span>
+                    <span class="unibag-collapse-btn">
+                        <span id="lbl_autoctrl_info_cliente">Minimizar</span>
+                        <i id="icon_autoctrl_info_cliente" class="fa fa-chevron-up"></i>
+                    </span>
+                </div>
+                <div id="sec_autoctrl_info_cliente">
+                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                    <colgroup>
+                        <col width="200">
+                        <col width="40%">
+                        <col width="185">
+                        <col>
+                    </colgroup>
+                    <tr>
+                        <td class="tdleft">N° OT</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)$agenda['prd_number'])?></td>
+                        <td class="tdleft">Cant. Colores</td>
+                        <td class="tdnrm"><b><?=$fmt($amtColorsSeri)?></b></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Cliente</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)$agenda['cust_name'])?></td>
+                        <td class="tdleft">Color N° 1</td>
+                        <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_1'] ?? 0) || (int)($agenda['fab_print_colors_back_1'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '')) : ''?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">N° CC</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)$agenda['req_number'])?></td>
+                        <td class="tdleft">Color N° 2</td>
+                        <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_2'] ?? 0) || (int)($agenda['fab_print_colors_back_2'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '')) : ''?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Producto</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)$agenda['item_number_prod'])?> | <?=htmlspecialchars((string)$agenda['item_title'])?></td>
+                        <td class="tdleft">Color N° 3</td>
+                        <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_3'] ?? 0) || (int)($agenda['fab_print_colors_back_3'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '')) : ''?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Materialidad</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)$agenda['fab_type'])?></td>
+                        <td class="tdleft">Color N° 4</td>
+                        <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_4'] ?? 0) || (int)($agenda['fab_print_colors_back_4'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '')) : ''?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Ancho</td>
+                        <td class="tdnrm"><?=(int)$agenda['fab_med_width']?></td>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm">&nbsp;</td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Alto</td>
+                        <td class="tdnrm"><?=(int)$agenda['fab_med_height']?></td>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm">&nbsp;</td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Fuelle</td>
+                        <td class="tdnrm"><?=(int)$agenda['fab_med_fuelle']?></td>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm">&nbsp;</td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Cantidad de Bolsas</td>
+                        <td class="tdnrm"><b><?=$fmt($agenda['ag_amount'])?></b></td>
+                        <td class="tdleft">Fecha de Entrega</td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_despacho_desc'] !== '' ? $agenda['req_despacho_desc'] : $agenda['ag_date']))?></b></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft" colspan="2">Fecha solicitud película</td>
+                        <td class="tdnrm" colspan="2"><?=(int)($agenda['req_cliche_peli_solic_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_solic_dat']) : '<b class="msg_save_err">N/A</b>'?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft" colspan="2">Fecha recepción película</td>
+                        <td class="tdnrm" colspan="2"><?=(int)($agenda['req_cliche_peli_recep_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_recep_dat']) : '<b class="msg_save_err">N/A</b>'?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft" colspan="2">Imagen diseño</td>
+                        <td class="tdnrm" colspan="2">
+                            <?php if ($acHasImg): ?>
+                                <a href="<?=$acImgUrl?>" target="_blank" onclick="openDesignModal('<?=$acImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
                                 </a>
-                            </div>
-                        <?php else: ?>
-                            <span style="color:#999;font-style:italic">Sin imagen de diseño cargada</span>
-                        <?php endif; ?>
-                    </td>
-                </tr>
-                <?php for ($x = 0; $x < 5; $x++): ?>
-                    <?php if (!empty($agenda["req_prod_adjfile_{$x}"])): 
-                        $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
-                        $isImg = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $adjFile);
-                        $adjUrl = "/docs/prod/" . rawurlencode($adjFile);
-                    ?>
+                            <?php else: ?>
+                                <span style="color:#999">Sin imagen cargada</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php for ($x = 0; $x < 5; $x++): ?>
+                        <?php if (!empty($agenda["req_prod_adjfile_{$x}"])):
+                            $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+                            $adjIsImage = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $adjFile);
+                            $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
+                        ?>
                         <tr>
-                            <td class="tdleft">Imagen Adjunta #<?=($x + 1)?></td>
-                            <td class="tdnrm" colspan="3">
-                                <div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
-                                    <?php if ($isImg): ?>
-                                        <img src="<?=$adjUrl?>" alt="Adjunto #<?=($x + 1)?>" style="height:48px;max-width:80px;object-fit:contain;border:1px solid #cbd5e1;border-radius:4px;background:#fff;cursor:pointer"
-                                             onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>')"
-                                             title="Clic para ampliar en ventana flotante">
-                                    <?php endif; ?>
-                                    <button type="button" class="btngrey" style="padding:4px 10px;font-size:12px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px"
-                                            onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>')">
-                                        <i class="fa fa-fw fa-<?= $isImg ? 'image' : 'file' ?>" style="color:white;"></i> <?= $isImg ? 'Ver Imagen #' . ($x + 1) : 'Descargar Adjunto #' . ($x + 1) ?>
-                                    </button>
-                                    <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
-                                        <span style="margin-left:6px;color:#475569;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
-                                    <?php endif; ?>
-                                </div>
+                            <td class="tdleft" colspan="2">Imagen x #<?=($x + 1)?></td>
+                            <td class="tdnrm" colspan="2">
+                                <?php if ($adjIsImage): ?>
+                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                    </a>
+                                <?php else: ?>
+                                    <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                        <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
+                                    </a>
+                                <?php endif; ?>
+                                <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
+                                    <span style="margin-left:8px;color:#64748B;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
+                                <?php endif; ?>
                             </td>
                         </tr>
-                    <?php endif; ?>
-                <?php endfor; ?>
-                </table>
+                        <?php endif; ?>
+                    <?php endfor; ?>
+                    </table>
+                </div>
             </div>
-        </div>
 
-        <!-- Tarjeta 2: Información de Fabricación para Autocontrol -->
-        <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
-            <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_fab', 'icon_autoctrl_info_fab')">
-                <span><i class="fa fa-fw fa-cogs"></i> 2. Información de Fabricación</span>
-                <span class="unibag-collapse-btn">
-                    <span id="lbl_autoctrl_info_fab">Minimizar</span>
-                    <i id="icon_autoctrl_info_fab" class="fa fa-chevron-up"></i>
-                </span>
+            <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
+                <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_fab', 'icon_autoctrl_info_fab')">
+                    <span><i class="fa fa-fw fa-info-circle"></i> Información de Fabricación</span>
+                    <span class="unibag-collapse-btn">
+                        <span id="lbl_autoctrl_info_fab">Minimizar</span>
+                        <i id="icon_autoctrl_info_fab" class="fa fa-chevron-up"></i>
+                    </span>
+                </div>
+                <div id="sec_autoctrl_info_fab">
+                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                    <colgroup>
+                        <col width="200">
+                        <col width="40%">
+                        <col width="185">
+                        <col>
+                    </colgroup>
+                    <tr>
+                        <td class="tdleft">Desarrollo</td>
+                        <td class="tdnrm"><b><?=$fmt($corte_m2, 4)?> mtrs</b></td>
+                        <td class="tdleft">Color N° 1</td>
+                        <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_1'] ?? 0) || (int)($agenda['fab_print_colors_back_1'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '')) : ''?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Pie de Imprenta</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['req_pie_imprenta'] ?? '-'))?></td>
+                        <td class="tdleft">Color N° 2</td>
+                        <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_2'] ?? 0) || (int)($agenda['fab_print_colors_back_2'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '')) : ''?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">N° Código de Barra</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['item_sellprice_barcodenumber'] ?? '-'))?></td>
+                        <td class="tdleft">Color N° 3</td>
+                        <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_3'] ?? 0) || (int)($agenda['fab_print_colors_back_3'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '')) : ''?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Impresiones en cilindro</td>
+                        <td class="tdnrm">&nbsp;</td>
+                        <td class="tdleft">Color N° 4</td>
+                        <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_4'] ?? 0) || (int)($agenda['fab_print_colors_back_4'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '')) : ''?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Impresiones por desarrollo</td>
+                        <td class="tdnrm"><?=(int)($agenda['req_solic_devprints_cc'] ?? 0)?> impresiones</td>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm">&nbsp;</td>
+                    </tr>
+                    <tr>
+                        <td colspan="4"><div style="height:10px"></div></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Materialidad</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_type'] ?? '-'))?></td>
+                        <td class="tdleft">Metros a imprimir</td>
+                        <td class="tdnrm"><?=$fmt($acSeriMlinPrint)?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Color Tela</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></td>
+                        <td class="tdleft">Contador impresora</td>
+                        <td class="tdnrm"><?=$fmt($acSeriPasadasPrint)?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Ancho Tela</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['req_operador_tela_width'] ?? '-'))?></td>
+                        <td class="tdleft">Kg a imprimir</td>
+                        <td class="tdnrm"><?=$fmt($acSeriKgsProcess)?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Gramaje</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_mat_gramms'] ?? '-'))?> gr</td>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm">&nbsp;</td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft" colspan="2">Cantidad de imágenes impresas en bastidor</td>
+                        <td class="tdnrm" colspan="2">
+                            <form method="get" action="/production/work-orders/operate" style="margin:0;display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                <input type="hidden" name="agid" value="<?=$agId?>">
+                                <input type="hidden" name="mode" value="setspecparams">
+                                <input type="hidden" name="req_id" value="<?=(int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0)?>">
+                                <select class="inptxt" name="bastidoramt" style="width:120px">
+                                    <option value="">Seleccione</option>
+                                    <?php for ($zzz = 1; $zzz <= 5; $zzz++): ?>
+                                        <option value="<?=$zzz?>" <?=((int)($agenda['req_operador_bastidoramt'] ?? 1) === $zzz) ? 'selected' : ''?>><?=$zzz?></option>
+                                    <?php endfor; ?>
+                                </select>
+                                <input type="submit" class="btngreen" value="Guardar" style="padding:5px 12px;border:none">
+                            </form>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft" colspan="2">Imagen diseño</td>
+                        <td class="tdnrm" colspan="2">
+                            <?php if ($acHasImg): ?>
+                                <a href="<?=$acImgUrl?>" target="_blank" onclick="openDesignModal('<?=$acImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                </a>
+                            <?php else: ?>
+                                <span style="color:#999">Sin imagen cargada</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php for ($x = 0; $x < 5; $x++): ?>
+                        <?php if (!empty($agenda["req_prod_adjfile_{$x}"])):
+                            $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+                            $adjIsImage = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $adjFile);
+                            $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
+                        ?>
+                        <tr>
+                            <td class="tdleft" colspan="2">Imagen x #<?=($x + 1)?></td>
+                            <td class="tdnrm" colspan="2">
+                                <?php if ($adjIsImage): ?>
+                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                    </a>
+                                <?php else: ?>
+                                    <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                        <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
+                                    </a>
+                                <?php endif; ?>
+                                <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
+                                    <span style="margin-left:8px;color:#64748B;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php endif; ?>
+                    <?php endfor; ?>
+                    </table>
+                </div>
             </div>
-            <div id="sec_autoctrl_info_fab" style="padding:15px">
-                <table border="0" width="100%" cellpadding="6" cellspacing="0">
-                <colgroup>
-                    <col width="180">
-                    <col width="32%">
-                    <col width="160">
-                    <col>
-                </colgroup>
-                <tr>
-                    <td class="tdleft">Rodillo a utilizar</td>
-                    <td class="tdnrm"><b style="color:#0284C7;font-size:14px">Z = <?=$fmt($corte_z, 0)?></b></td>
-                    <td class="tdleft">Unidad N° 1</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Corte de bolsa</td>
-                    <td class="tdnrm"><?=$fmt($corte_m2, 4)?> mtrs</td>
-                    <td class="tdleft">Unidad N° 2</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Ubicación Clisé</td>
-                    <td class="tdnrm"><b style="color:#0F766E"><?=htmlspecialchars((string)($agenda['req_infoaddprd_cliche_ubicacion'] ?? '-'))?></b></td>
-                    <td class="tdleft">Unidad N° 3</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Código Cliché</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_infoaddprd_cliche_codigo'] ?? '-'))?></b></td>
-                    <td class="tdleft">Unidad N° 4</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Pie de Imprenta / Máquina</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_pie_imprenta'] ?? '-'))?></b></td>
-                    <td class="tdleft">Unidad N° 5</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_5'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">N° Código de Barra</td>
-                    <td class="tdnrm"><b style="font-family:monospace;font-size:13px"><?=htmlspecialchars((string)($agenda['item_sellprice_barcodenumber'] ?? '-'))?></b></td>
-                    <td class="tdleft">Unidad N° 6</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_6'] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Ancho Bobina / Tela</td>
-                    <td class="tdnrm"><b><?= $acTelaWidth > 0 ? $acTelaWidth . ' cm' : '-' ?></b></td>
-                    <td class="tdleft">Anilox N° 1</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[1] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Impresiones por desarrollo</td>
-                    <td class="tdnrm"><?=(int)($agenda['req_solic_devprints_cc'] ?? 0)?> impresiones</td>
-                    <td class="tdleft">Anilox N° 2</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[2] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">% de merma</td>
-                    <td class="tdnrm"><?=$fmt($agenda['req_operador_mermaperc'], 2)?> %</td>
-                    <td class="tdleft">Anilox N° 3</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[3] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Metros a imprimir</td>
-                    <td class="tdnrm"><b><?=$fmt($metrosAImprimir, 2)?> mtrs</b></td>
-                    <td class="tdleft">Anilox N° 4</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[4] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Color Tela</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></b></td>
-                    <td class="tdleft">Anilox N° 5</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[5] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Tipo de Tela</td>
-                    <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['fab_type'] ?? '-'))?></b></td>
-                    <td class="tdleft">Anilox N° 6</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[6] ?? '-'))?></td>
-                </tr>
-                </table>
+        <?php else: ?>
+            <!-- Tarjeta 1: Información Cliente y Diseño para Autocontrol -->
+            <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
+                <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_cliente', 'icon_autoctrl_info_cliente')">
+                    <span><i class="fa fa-fw fa-user"></i> 1. Información Cliente y Diseño</span>
+                    <span class="unibag-collapse-btn">
+                        <span id="lbl_autoctrl_info_cliente">Minimizar</span>
+                        <i id="icon_autoctrl_info_cliente" class="fa fa-chevron-up"></i>
+                    </span>
+                </div>
+                <div id="sec_autoctrl_info_cliente" style="padding:15px">
+                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                    <colgroup>
+                        <col width="180">
+                        <col width="32%">
+                        <col width="160">
+                        <col>
+                    </colgroup>
+                    <tr>
+                        <td class="tdleft">N° OT</td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['prd_number'])?></b></td>
+                        <td class="tdleft">Color N° 1</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Cliente</td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['cust_name'])?></b></td>
+                        <td class="tdleft">Color N° 2</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">N° CC</td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$agenda['req_number'])?></b></td>
+                        <td class="tdleft">Color N° 3</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Diseño</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_design_name'] !== '' ? $agenda['fab_design_name'] : $agenda['item_title']))?></td>
+                        <td class="tdleft">Color N° 4</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Producto</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)$agenda['item_number_prod'])?> | <?=htmlspecialchars((string)$agenda['item_title'])?></td>
+                        <td class="tdleft">Color N° 5</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_5'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Materialidad</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)$agenda['fab_type'])?></td>
+                        <td class="tdleft">Color N° 6</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_6'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Medidas (Ancho x Alto)</td>
+                        <td class="tdnrm"><b><?=(int)$agenda['fab_med_width']?> x <?=(int)$agenda['fab_med_height']?> cm</b></td>
+                        <td class="tdleft">Colores Resumen</td>
+                        <td class="tdnrm"><?=htmlspecialchars($printcolors ?: '-')?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Fuelle</td>
+                        <td class="tdnrm"><?=(int)$agenda['fab_med_fuelle']?> cm</td>
+                        <td class="tdleft">Fecha de Entrega</td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_despacho_desc'] !== '' ? $agenda['req_despacho_desc'] : $agenda['ag_date']))?></b></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Cantidad de Bolsas</td>
+                        <td class="tdnrm"><b><?=$fmt($agenda['ag_amount'])?></b></td>
+                        <td class="tdleft">Fecha solicitud cliché</td>
+                        <td class="tdnrm"><?=(int)($agenda['req_cliche_peli_solic_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_solic_dat']) : '-'?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Color Tela</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></td>
+                        <td class="tdleft">Fecha recepción cliché</td>
+                        <td class="tdnrm"><?=(int)($agenda['req_cliche_peli_recep_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_recep_dat']) : '-'?></td>
+                    </tr>
+                    <tr>
+                        <td colspan="4" style="background:#EDF0F6;padding:4px"></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft" valign="middle">Imagen Diseño</td>
+                        <td class="tdnrm" colspan="3" valign="middle">
+                            <?php if ($acHasImg): ?>
+                                <div style="display:inline-flex;align-items:center;gap:14px;flex-wrap:wrap">
+                                    <div style="cursor:pointer;display:inline-flex;align-items:center;gap:12px;background:#F8FAFC;border:2px solid #0284C7;padding:8px 14px;border-radius:6px;box-shadow:0 2px 6px rgba(2,132,199,0.15)"
+                                         onclick="openDesignModal('<?=htmlspecialchars($acImgUrl)?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>')"
+                                         title="Clic para ver foto del diseño en ventana flotante">
+                                        <img src="<?=htmlspecialchars($acImgUrl)?>" alt="Foto Diseño" style="height:70px;max-width:120px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff">
+                                        <div>
+                                            <div style="font-size:13px;font-weight:700;color:#0284C7"><i class="fa fa-search-plus"></i> Abrir en Ventana Flotante</div>
+                                            <div style="font-size:11px;color:#64748B;margin-top:2px">Clic aquí para ampliar y revisar diseño</div>
+                                        </div>
+                                    </div>
+                                    <a href="<?=$acImgUrl?>" target="_blank" class="btngrey" style="padding:6px 12px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px">
+                                        <i class="fa fa-fw fa-external-link-alt" style="color:white;"></i> Pestaña nueva
+                                    </a>
+                                </div>
+                            <?php else: ?>
+                                <span style="color:#999;font-style:italic">Sin imagen de diseño cargada</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php for ($x = 0; $x < 5; $x++): ?>
+                        <?php if (!empty($agenda["req_prod_adjfile_{$x}"])):
+                            $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+                            $isImg = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $adjFile);
+                            $adjUrl = "/docs/prod/" . rawurlencode($adjFile);
+                        ?>
+                            <tr>
+                                <td class="tdleft">Imagen Adjunta #<?=($x + 1)?></td>
+                                <td class="tdnrm" colspan="3">
+                                    <div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
+                                        <?php if ($isImg): ?>
+                                            <img src="<?=$adjUrl?>" alt="Adjunto #<?=($x + 1)?>" style="height:48px;max-width:80px;object-fit:contain;border:1px solid #cbd5e1;border-radius:4px;background:#fff;cursor:pointer"
+                                                 onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>')"
+                                                 title="Clic para ampliar en ventana flotante">
+                                        <?php endif; ?>
+                                        <button type="button" class="btngrey" style="padding:4px 10px;font-size:12px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:5px"
+                                                onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>')">
+                                            <i class="fa fa-fw fa-<?= $isImg ? 'image' : 'file' ?>" style="color:white;"></i> <?= $isImg ? 'Ver Imagen #' . ($x + 1) : 'Descargar Adjunto #' . ($x + 1) ?>
+                                        </button>
+                                        <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
+                                            <span style="margin-left:6px;color:#475569;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endif; ?>
+                    <?php endfor; ?>
+                    </table>
+                </div>
             </div>
-        </div>
+
+            <!-- Tarjeta 2: Información de Fabricación para Autocontrol -->
+            <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
+                <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_fab', 'icon_autoctrl_info_fab')">
+                    <span><i class="fa fa-fw fa-cogs"></i> 2. Información de Fabricación</span>
+                    <span class="unibag-collapse-btn">
+                        <span id="lbl_autoctrl_info_fab">Minimizar</span>
+                        <i id="icon_autoctrl_info_fab" class="fa fa-chevron-up"></i>
+                    </span>
+                </div>
+                <div id="sec_autoctrl_info_fab" style="padding:15px">
+                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                    <colgroup>
+                        <col width="180">
+                        <col width="32%">
+                        <col width="160">
+                        <col>
+                    </colgroup>
+                    <tr>
+                        <td class="tdleft">Rodillo a utilizar</td>
+                        <td class="tdnrm"><b style="color:#0284C7;font-size:14px">Z = <?=$fmt($corte_z, 0)?></b></td>
+                        <td class="tdleft">Unidad N° 1</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Corte de bolsa</td>
+                        <td class="tdnrm"><?=$fmt($corte_m2, 4)?> mtrs</td>
+                        <td class="tdleft">Unidad N° 2</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Ubicación Clisé</td>
+                        <td class="tdnrm"><b style="color:#0F766E"><?=htmlspecialchars((string)($agenda['req_infoaddprd_cliche_ubicacion'] ?? '-'))?></b></td>
+                        <td class="tdleft">Unidad N° 3</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Código Cliché</td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_infoaddprd_cliche_codigo'] ?? '-'))?></b></td>
+                        <td class="tdleft">Unidad N° 4</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Pie de Imprenta / Máquina</td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_pie_imprenta'] ?? '-'))?></b></td>
+                        <td class="tdleft">Unidad N° 5</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_5'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">N° Código de Barra</td>
+                        <td class="tdnrm"><b style="font-family:monospace;font-size:13px"><?=htmlspecialchars((string)($agenda['item_sellprice_barcodenumber'] ?? '-'))?></b></td>
+                        <td class="tdleft">Unidad N° 6</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_6'] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Ancho Bobina / Tela</td>
+                        <td class="tdnrm"><b><?= $acTelaWidth > 0 ? $acTelaWidth . ' cm' : '-' ?></b></td>
+                        <td class="tdleft">Anilox N° 1</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[1] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Impresiones por desarrollo</td>
+                        <td class="tdnrm"><?=(int)($agenda['req_solic_devprints_cc'] ?? 0)?> impresiones</td>
+                        <td class="tdleft">Anilox N° 2</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[2] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">% de merma</td>
+                        <td class="tdnrm"><?=$fmt($agenda['req_operador_mermaperc'], 2)?> %</td>
+                        <td class="tdleft">Anilox N° 3</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[3] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Metros a imprimir</td>
+                        <td class="tdnrm"><b><?=$fmt($metrosAImprimir, 2)?> mtrs</b></td>
+                        <td class="tdleft">Anilox N° 4</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[4] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Color Tela</td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></b></td>
+                        <td class="tdleft">Anilox N° 5</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[5] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Saldo total</td>
+                        <td class="tdnrm"><b><?=$fmt($stats['saldo_total'] ?? 0)?> unidades</b></td>
+                        <td class="tdleft">Anilox N° 6</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[6] ?? '-'))?></td>
+                    </tr>
+                    <tr>
+                        <td colspan="4" style="background:#EDF0F6;padding:4px"></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Materialidad</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)$agenda['fab_type'])?></td>
+                        <td class="tdleft">Metros a imprimir</td>
+                        <td class="tdnrm"><b><?=$fmt($metrosAImprimir, 2)?> mtrs</b></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Color Tela</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></td>
+                        <td class="tdleft">Contador impresora</td>
+                        <td class="tdnrm"><b><?=$fmt(round($metrosAImprimir / 0.41))?></b></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Ancho Tela</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['req_operador_tela_width'] ?? '-'))?> cm</td>
+                        <td class="tdleft">Kg a imprimir</td>
+                        <td class="tdnrm"><b><?=$fmt($kgAImprimir, 2)?> kgs</b></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Gramaje</td>
+                        <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_mat_gramms'] ?? '70'))?> gr</td>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm">&nbsp;</td>
+                    </tr>
+                    </table>
+                </div>
+            </div>
+        <?php endif; ?>
 
         <!-- Tarjeta 2: AUTOCONTROL o APROBACIÓN DE PARTIDA -->
         <?php if ($showSupervisorApproval): ?>
@@ -2451,42 +2998,6 @@ function renderProductionOperatorConsole(
                 <input type="hidden" name="mode" value="autoctrlsave">
                 <input type="hidden" name="submode" id="autoctrl_submode" value="close">
 
-                <?php
-                $savedAlisMerma = ($workerOtId > 0) ? (new ProductionService(Db::erpPdo(), Db::trzPdo()))->getAlistamientoMerma($workerOtId) : null;
-                $defaultAlisAmt = $savedAlisMerma['amount'] ?? '';
-                $defaultAlisKgs = $savedAlisMerma['kgs'] ?? '';
-                $defaultAlisMts = $savedAlisMerma['mts'] ?? '';
-                $defaultAlisComm = $savedAlisMerma['comments'] ?? '';
-                ?>
-                <div style="background:#FFFBEB;border:1.5px solid #FCD34D;border-radius:6px;padding:16px;margin-bottom:15px">
-                    <div style="font-weight:bold;font-size:14px;color:#92400E;margin-bottom:6px;display:flex;align-items:center;gap:8px">
-                        <i class="fa fa-balance-scale" style="font-size:18px"></i> Registro de Merma de Alistamiento (Setup / Puesta a Punto)
-                    </div>
-                    <div style="font-size:12.5px;color:#B45309;margin-bottom:12px;line-height:1.4">
-                        Indique la merma generada durante el alistamiento y calibración de la máquina. Estos valores se transferirán automáticamente a la merma de la OT al <b>Finalizar Producción</b>, por lo que no tendrá que volver a acordarse ni ingresarla al terminar el turno.
-                    </div>
-                    <table border="0" cellpadding="6" cellspacing="0" style="width:100%">
-                    <tr>
-                        <td width="25%" style="padding:4px">
-                            <label style="display:block;font-size:11.5px;font-weight:bold;color:#78350F;margin-bottom:3px">Bolsas / Unidades:</label>
-                            <input type="number" step="1" name="merma_alis_amount" class="inptxt" style="width:100%;font-weight:bold;background:#fff" placeholder="0" value="<?=$defaultAlisAmt > 0 ? (int)$defaultAlisAmt : ''?>">
-                        </td>
-                        <td width="25%" style="padding:4px">
-                            <label style="display:block;font-size:11.5px;font-weight:bold;color:#78350F;margin-bottom:3px">Kilos (kg):</label>
-                            <input type="number" step="0.1" name="merma_alis_kgs" class="inptxt" style="width:100%;font-weight:bold;background:#fff" placeholder="0.0" value="<?=$defaultAlisKgs > 0 ? $defaultAlisKgs : ''?>">
-                        </td>
-                        <td width="25%" style="padding:4px">
-                            <label style="display:block;font-size:11.5px;font-weight:bold;color:#78350F;margin-bottom:3px">Metros (m):</label>
-                            <input type="number" step="1" name="merma_alis_mts" class="inptxt" style="width:100%;font-weight:bold;background:#fff" placeholder="0" value="<?=$defaultAlisMts > 0 ? (int)$defaultAlisMts : ''?>">
-                        </td>
-                        <td width="25%" style="padding:4px">
-                            <label style="display:block;font-size:11.5px;font-weight:bold;color:#78350F;margin-bottom:3px">Observación / Causa:</label>
-                            <input type="text" name="merma_alis_comments" class="inptxt" style="width:100%;background:#fff" placeholder="Ej: Ajuste de registro, calibración..." value="<?=htmlspecialchars((string)$defaultAlisComm)?>">
-                        </td>
-                    </tr>
-                    </table>
-                </div>
-
                 <table border="0" width="100%" cellpadding="0" cellspacing="0">
                 <tr>
                     <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
@@ -2579,27 +3090,34 @@ function renderProductionOperatorConsole(
                 }
             });
             checkOperatorAutocontrolReady();
+
             </script>
         <?php endif; ?>
 
         <!-- Tarjeta 3: Botones auxiliares de autocontrol.form.php -->
+        <?php
+        $autoHidePauseShortcut = ($isSeri || $isSeriPulpo);
+        $autoMaterialsLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
+        ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">
         <tr>
-            <td width="33%" style="padding-right:3px">
-                <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#293865;padding:10px 0;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales&fromautocontrol=1'">
-                    <i class="fa fa-fw <?= $isRebobinadora ? 'fa-dolly' : 'fa-cubes' ?>"></i> <?= $isRebobinadora ? 'Solicitar bobina' : ($isSeriPulpo ? 'Solicitar / Cargar materiales' : 'Utilizar materiales') ?>
+            <td width="<?=$autoHidePauseShortcut ? '50%' : '33%'?>" style="padding-right:3px">
+                <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#293865;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales&fromautocontrol=1'">
+                    <i class="fa fa-fw <?= $isRebobinadora ? 'fa-dolly' : 'fa-cubes' ?>"></i> <?=$autoMaterialsLabel?>
                 </div>
             </td>
-            <td width="34%" style="padding:0 3px">
-                <div class="btnred" style="width:100%;box-sizing:border-box;background-color:#D64141;padding:10px 0;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion&fromautocontrol=1'">
-                    <i class="fa fa-fw fa-wrench"></i> Registrar mantención
+            <td width="<?=$autoHidePauseShortcut ? '50%' : '34%'?>" style="padding:0 3px">
+                <div class="btnred" style="width:100%;box-sizing:border-box;background-color:#D64141;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion&fromautocontrol=1'">
+                    <i class="fa fa-fw fa-wrench"></i> Mantención
                 </div>
             </td>
-            <td width="33%" style="padding-left:3px">
-                <div class="btngrey" style="width:100%;box-sizing:border-box;background-color:#7F7F7F;padding:10px 0;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&fromautocontrol=1'">
-                    <i class="fa fa-fw fa-coffee"></i> Pausa
-                </div>
-            </td>
+            <?php if (!$autoHidePauseShortcut): ?>
+                <td width="33%" style="padding-left:3px">
+                    <div class="btngrey" style="width:100%;box-sizing:border-box;background-color:#7F7F7F;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&fromautocontrol=1'">
+                        <i class="fa fa-fw fa-coffee"></i> Pausa
+                    </div>
+                </td>
+            <?php endif; ?>
         </tr>
         </table>
         <?php
@@ -2738,9 +3256,32 @@ function renderProductionOperatorConsole(
                 </div>
             </div>
             <div>
-                <a href="/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$openProdEvent['id']?>&submode=end" class="btnorange" style="font-size:13.5px;padding:9px 20px;text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:bold;box-shadow:0 2px 4px rgba(0,0,0,0.2)">
-                    <i class="fa fa-stop"></i> ⏹️ Finalizar Tiraje de Producción
+                <a href="/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$openProdEvent['id']?>&submode=end" class="btnorange" style="font-size:13.5px;padding:9px 20px;text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:bold;box-shadow:0 2px 4px rgba(0,0,0,0.2);border-radius:8px">
+                    <i class="fa fa-stop"></i> Finalizar
                 </a>
+            </div>
+        </div>
+    <?php endif; ?>
+ 
+    <?php if ($isFlexo && !empty($printedRollsSummary['rolls_count']) && $printedRollsSummary['rolls_count'] > 0): ?>
+        <div style="background:#F0FDF4;border:1.5px solid #86EFAC;border-radius:6px;padding:14px 18px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;color:#166534;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+            <div>
+                <div style="font-size:14px;font-weight:bold;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-tag" style="color:#059669;font-size:16px"></i> Bobinas Impresas Producidas en esta OT:
+                    <b style="color:#15803D;font-size:16px"><?=number_format($printedRollsSummary['total_weight_kg'], 2, ',', '.')?> kg</b>
+                    <span style="font-size:13px;color:#047857">(<?=number_format($printedRollsSummary['total_meters'], 0, ',', '.')?> metros &bull; <?=$printedRollsSummary['rolls_count']?> bobina<?=$printedRollsSummary['rolls_count'] > 1 ? 's' : ''?>)</span>
+                </div>
+                <div style="font-size:12px;color:#166534;margin-top:4px">
+                    Rollos emitidos: <b><?=implode(', ', array_map(fn($r) => $r['roll_code'] . ' (' . number_format($r['weight_kg'], 1, ',', '.') . ' kg)', $printedRollsSummary['rolls_list']))?></b>.
+                    Estos valores se sumarán y pasarán automáticamente al cierre de producción.
+                </div>
+            </div>
+            <div style="display:flex;gap:8px">
+                <?php if ($openProdEvent !== null): ?>
+                    <a href="/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$openProdEvent['id']?>&submode=end" class="btngreen" style="font-size:12px;padding:6px 14px;text-decoration:none;border-radius:8px">
+                        <i class="fa fa-flag-checkered"></i> Finalizar
+                    </a>
+                <?php endif; ?>
             </div>
         </div>
     <?php endif; ?>
@@ -3534,16 +4075,16 @@ function renderProductionOperatorConsole(
                     </tr>
                 <?php endif; ?>
                 <tr>
-                    <td class="tdleft">Pasadas totales a imprimir</td>
+                    <td class="tdleft">Contador total estimado</td>
                     <td class="tdnrm" colspan="3">
-                        <b><?=$fmt(round((float)$agenda['ag_amount'] / max(1, (int)($agenda['req_operador_bastidoramt'] ?? 1))))?></b>
+                        <b><?=$fmt(round((float)$agenda['ag_amount'] / max(1, (int)($agenda['req_solic_devprints_cc'] ?? 1))))?></b>
                     </td>
                 </tr>
                 <tr>
                     <td class="tdleft">Imágenes impresas en bastidor</td>
                     <td class="tdnrm" colspan="3">
                         <form method="get" action="/production/work-orders/operate" style="margin:0;display:inline-flex;align-items:center;gap:10px">
-                            <input type="hidden" name="agid" value="<?=$agId?>">
+                            <input type="hidden" name="agid" value="<?=$selectedAgId?>">
                             <input type="hidden" name="mode" value="setspecparams">
                             <input type="hidden" name="req_id" value="<?=(int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0)?>">
                             <select class="inptxt" name="bastidoramt" style="width:120px">
@@ -3642,7 +4183,7 @@ function renderProductionOperatorConsole(
                     </table>
 
                     <!-- Tabla de 10 Unidades de Bastidores y Secadores -->
-                    <div style="font-weight:bold;color:#115452;font-size:13.5px;margin-bottom:8px">
+                    <div id="pulpo-config-10" style="font-weight:bold;color:#115452;font-size:13.5px;margin-bottom:8px">
                         <i class="fa fa-th"></i> Configuración de 10 Unidades de Bastidores / Secadores
                     </div>
                     <table border="0" width="100%" cellpadding="6" cellspacing="0" style="border:1px solid #DDDDDD">
@@ -3736,6 +4277,32 @@ function renderProductionOperatorConsole(
         <!-- ============================================================== -->
         <!-- RAMA C: SERIGRAFÍA PLANA (editxid.php líneas 3409 - 3650)      -->
         <!-- ============================================================== -->
+        <?php
+            $seriImgHash = trim((string)($agenda['fab_design_imagehash'] ?? $agenda['item_img_hash'] ?? ''));
+            $seriHasImg = ($seriImgHash !== '' && $seriImgHash !== 'dummy');
+            $seriImgUrl = $seriHasImg ? ('/production/design-image?folder=order&hash=' . rawurlencode($seriImgHash)) : '';
+            $seriFullDesign = trim((string)($agenda['prd_name'] ?? ($agenda['item_title'] ?? '')));
+            $seriMedidasStr = (int)($agenda['fab_med_width'] ?? 0) . ' x ' . (int)($agenda['fab_med_height'] ?? 0);
+            if ((int)($agenda['fab_med_fuelle'] ?? 0) > 0) {
+                $seriMedidasStr .= ' + ' . (int)$agenda['fab_med_fuelle'];
+            }
+            $seriMedidasStr .= ' cm';
+            $seriMermaPerc = (float)($agenda['req_operador_mermaperc'] ?? 0);
+            $seriDevPrints = max(1, (int)($agenda['req_solic_devprints_cc'] ?? 1));
+            $seriMlinProg = round((float)$agenda['ag_amount'] * (float)$corte_m2);
+            $seriMlinAddi = round($seriMlinProg / 100 * $seriMermaPerc);
+            $seriMlinPrint = round($seriMlinProg + $seriMlinAddi);
+            $seriMermaUnits = round((float)$agenda['ag_amount'] / 100 * $seriMermaPerc);
+            $seriRealUnits = (float)$agenda['ag_amount'] + $seriMermaUnits;
+            $seriPasadasPrint = (int)round($seriRealUnits / $seriDevPrints);
+            $seriKgsProcess = round(
+                $seriMlinPrint
+                * (float)($agenda['req_operador_tela_width'] ?? 0)
+                / 100
+                * (float)($agenda['fab_mat_gramms'] ?? 0)
+                / 1000
+            );
+        ?>
         <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
             <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_info_cliente', 'icon_info_cliente')">
                 <span><i class="fa fa-fw fa-user"></i> Información Cliente</span>
@@ -3762,25 +4329,25 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">Cliente</td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$agenda['cust_name'])?></td>
                     <td class="tdleft">Color N° 1</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? ''))?></td>
+                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_1'] ?? 0) || (int)($agenda['fab_print_colors_back_1'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '')) : ''?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">N° CC</td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$agenda['req_number'])?></td>
                     <td class="tdleft">Color N° 2</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? ''))?></td>
+                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_2'] ?? 0) || (int)($agenda['fab_print_colors_back_2'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '')) : ''?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Producto</td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$agenda['item_number_prod'])?> | <?=htmlspecialchars((string)$agenda['item_title'])?></td>
                     <td class="tdleft">Color N° 3</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? ''))?></td>
+                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_3'] ?? 0) || (int)($agenda['fab_print_colors_back_3'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '')) : ''?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Materialidad</td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$agenda['fab_type'])?></td>
                     <td class="tdleft">Color N° 4</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? ''))?></td>
+                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_4'] ?? 0) || (int)($agenda['fab_print_colors_back_4'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '')) : ''?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Ancho</td>
@@ -3814,6 +4381,43 @@ function renderProductionOperatorConsole(
                     <td class="tdleft" colspan="2">Fecha recepción película</td>
                     <td class="tdnrm" colspan="2"><?=(int)($agenda['req_cliche_peli_recep_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_recep_dat']) : '<b class="msg_save_err">N/A</b>'?></td>
                 </tr>
+                <tr>
+                    <td class="tdleft" colspan="2">Imagen diseño</td>
+                    <td class="tdnrm" colspan="2">
+                        <?php if ($seriHasImg): ?>
+                            <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                            </a>
+                        <?php else: ?>
+                            <span style="color:#999">Sin imagen cargada</span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php for ($x = 0; $x < 5; $x++): ?>
+                    <?php if (!empty($agenda["req_prod_adjfile_{$x}"])):
+                        $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+                        $adjIsImage = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $adjFile);
+                        $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
+                    ?>
+                    <tr>
+                        <td class="tdleft" colspan="2">Imagen x #<?=($x + 1)?></td>
+                        <td class="tdnrm" colspan="2">
+                            <?php if ($adjIsImage): ?>
+                                <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                </a>
+                            <?php else: ?>
+                                <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                    <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
+                                </a>
+                            <?php endif; ?>
+                            <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
+                                <span style="margin-left:8px;color:#64748B;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php endif; ?>
+                <?php endfor; ?>
                 </table>
             </div>
         </div>
@@ -3838,14 +4442,113 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">Desarrollo</td>
                     <td class="tdnrm"><b><?=$fmt($corte_m2, 4)?> mtrs</b></td>
                     <td class="tdleft">Color N° 1</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? ''))?></td>
+                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_1'] ?? 0) || (int)($agenda['fab_print_colors_back_1'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '')) : ''?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Corte de bolsa</td>
-                    <td class="tdnrm"><b><?=$fmt($corte_m2, 4)?> mtrs</b></td>
+                    <td class="tdleft">Pie de Imprenta</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['req_pie_imprenta'] ?? '-'))?></td>
                     <td class="tdleft">Color N° 2</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? ''))?></td>
+                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_2'] ?? 0) || (int)($agenda['fab_print_colors_back_2'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '')) : ''?></td>
                 </tr>
+                <tr>
+                    <td class="tdleft">N° Código de Barra</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['item_sellprice_barcodenumber'] ?? '-'))?></td>
+                    <td class="tdleft">Color N° 3</td>
+                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_3'] ?? 0) || (int)($agenda['fab_print_colors_back_3'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '')) : ''?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Impresiones en cilindro</td>
+                    <td class="tdnrm">&nbsp;</td>
+                    <td class="tdleft">Color N° 4</td>
+                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_4'] ?? 0) || (int)($agenda['fab_print_colors_back_4'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '')) : ''?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Impresiones por desarrollo</td>
+                    <td class="tdnrm"><?=(int)($agenda['req_solic_devprints_cc'] ?? 0)?> impresiones</td>
+                    <td class="tdleft">&nbsp;</td>
+                    <td class="tdnrm">&nbsp;</td>
+                </tr>
+                <tr>
+                    <td colspan="4"><div style="height:10px"></div></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Materialidad</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_type'] ?? '-'))?></td>
+                    <td class="tdleft">Metros a imprimir</td>
+                    <td class="tdnrm"><?=$fmt($seriMlinPrint)?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Color Tela</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></td>
+                    <td class="tdleft">Contador impresora</td>
+                    <td class="tdnrm"><?=$fmt($seriPasadasPrint)?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Ancho Tela</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['req_operador_tela_width'] ?? '-'))?></td>
+                    <td class="tdleft">Kg a imprimir</td>
+                    <td class="tdnrm"><?=$fmt($seriKgsProcess)?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Gramaje</td>
+                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_mat_gramms'] ?? '-'))?> gr</td>
+                    <td class="tdleft">&nbsp;</td>
+                    <td class="tdnrm">&nbsp;</td>
+                </tr>
+                <tr>
+                    <td class="tdleft" colspan="2">Cantidad de imágenes impresas en bastidor</td>
+                    <td class="tdnrm" colspan="2">
+                        <form method="get" action="/production/work-orders/operate" style="margin:0;display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                            <input type="hidden" name="agid" value="<?=$agId?>">
+                            <input type="hidden" name="mode" value="setspecparams">
+                            <input type="hidden" name="req_id" value="<?=(int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0)?>">
+                            <select class="inptxt" name="bastidoramt" style="width:120px">
+                                <option value="">Seleccione</option>
+                                <?php for ($zzz = 1; $zzz <= 5; $zzz++): ?>
+                                    <option value="<?=$zzz?>" <?=((int)($agenda['req_operador_bastidoramt'] ?? 1) === $zzz) ? 'selected' : ''?>><?=$zzz?></option>
+                                <?php endfor; ?>
+                            </select>
+                            <input type="submit" class="btngreen" value="Guardar" style="padding:5px 12px;border:none">
+                        </form>
+                    </td>
+                </tr>
+                <tr>
+                    <td class="tdleft" colspan="2">Imagen diseño</td>
+                    <td class="tdnrm" colspan="2">
+                        <?php if ($seriHasImg): ?>
+                            <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                            </a>
+                        <?php else: ?>
+                            <span style="color:#999">Sin imagen cargada</span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php for ($x = 0; $x < 5; $x++): ?>
+                    <?php if (!empty($agenda["req_prod_adjfile_{$x}"])):
+                        $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+                        $adjIsImage = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $adjFile);
+                        $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
+                    ?>
+                    <tr>
+                        <td class="tdleft" colspan="2">Imagen x #<?=($x + 1)?></td>
+                        <td class="tdnrm" colspan="2">
+                            <?php if ($adjIsImage): ?>
+                                <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                </a>
+                            <?php else: ?>
+                                <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                    <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
+                                </a>
+                            <?php endif; ?>
+                            <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
+                                <span style="margin-left:8px;color:#64748B;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php endif; ?>
+                <?php endfor; ?>
                 </table>
             </div>
         </div>
@@ -4581,7 +5284,7 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">&nbsp;</td>
                     <td class="tdnrm">
                         <button type="submit" class="btngreen" style="font-size:14px;padding:9px 24px">
-                            <i class="fa fa-fw fa-play"></i> Iniciar alistamiento&nbsp;
+                            <i class="fa fa-fw fa-play"></i> Iniciar&nbsp;
                         </button>
                     </td>
                 </tr>
@@ -4602,7 +5305,7 @@ function renderProductionOperatorConsole(
             }
         }
         $isEvtOpen = ($currentRefEvt !== null && (int)($currentRefEvt['evt_enddat'] ?? 0) === 0);
-        $isStarting = ($openProdEvent === null && ($refId <= 0 || ($_GET['action'] ?? '') === 'start'));
+        $isStarting = ($openProdEvent === null && ($refId <= 0 || ($_GET['action'] ?? '') === 'start') && ($_GET['submode'] ?? '') !== 'end');
         $prodServiceInstance = new ProductionService(Db::erpPdo(), Db::trzPdo());
         $defectUnits = ($refId > 0) ? $prodServiceInstance->getEventDefectUnits($refId) : [];
         $mermaMap = [];
@@ -4614,11 +5317,23 @@ function renderProductionOperatorConsole(
                 $repairMap[(int)$du['evt_repair_typeid']] = $du;
             }
         }
-        // Pre-llenar automáticamente la Merma de Alistamiento (Tipo 9: Ajuste / Aprobación) registrada en autocontrol
-        if ($workerOtId > 0 && empty($mermaMap[9])) {
-            $alisMerma = $prodServiceInstance->getAlistamientoMerma($workerOtId);
-            if ($alisMerma !== null && ((float)($alisMerma['evt_amount'] ?? 0) > 0 || (float)($alisMerma['evt_kgstounits'] ?? 0) > 0 || (float)($alisMerma['evt_mtstounits'] ?? 0) > 0 || trim((string)($alisMerma['evt_comments'] ?? '')) !== '')) {
-                $mermaMap[9] = $alisMerma;
+        // Pre-llenar automáticamente las mermas registradas al desmontar bobina(s)
+        $dismountMermas = ($workerOtId > 0) ? $prodServiceInstance->getRollDismountMermas($workerOtId) : [];
+        $totalDismountKgs = 0.0;
+        foreach ($dismountMermas as $dmTypeId => $dmInfo) {
+            $dmKgs = (float)($dmInfo['kgs'] ?? 0);
+            $totalDismountKgs += $dmKgs;
+            if (empty($mermaMap[$dmTypeId]) || (float)($mermaMap[$dmTypeId]['evt_kgstounits'] ?? 0) <= 0) {
+                $mermaMap[$dmTypeId] = [
+                    'evt_amount' => (float)($dmInfo['amount'] ?? 0),
+                    'evt_kgstounits' => $dmKgs,
+                    'evt_mtstounits' => (int)($dmInfo['mts'] ?? 0),
+                    'evt_comments' => (string)($dmInfo['comments'] ?? ''),
+                    'from_dismount' => true,
+                    'dismount_kgs' => $dmKgs,
+                ];
+            } else {
+                $mermaMap[$dmTypeId]['dismount_kgs'] = $dmKgs;
             }
         }
         $valAmount = (float)($currentRefEvt['evt_amount'] ?? 0);
@@ -4628,6 +5343,96 @@ function renderProductionOperatorConsole(
         $valMlin = (int)($currentRefEvt['evt_amount_metros_lineales'] ?? 0);
         $valMtype = (string)($currentRefEvt['evt_metrotype'] ?? ($isFlexo ? 'metros_lineales' : ''));
         $valComments = (string)($currentRefEvt['evt_comments'] ?? '');
+        $seriDevPrintsDefault = max(1, (int)($agenda['req_operador_bastidoramt'] ?? $agenda['req_solic_devprints_cc'] ?? 1));
+        $seriCounterBaseValue = $valAmount2 > 0 ? (int)round($valAmount2) : 0;
+        $seriCounterColors = [];
+        $seriSavedCounters = [];
+        $seriPrevCounters = [];
+        $parseSeriCounterMap = static function (string $commentsText): array {
+            $counterMap = [];
+            if (!preg_match('/\[SERI_COUNTERS:\s*(.*?)\]/', $commentsText, $counterMetaMatch)) {
+                return $counterMap;
+            }
+            $counterMeta = trim((string)($counterMetaMatch[1] ?? ''));
+            $counterMeta = trim((string)preg_replace('/\s+\|\s+(?:img\/bast|imp\/des)=.*$/', '', $counterMeta));
+            if ($counterMeta === '') {
+                return $counterMap;
+            }
+            foreach (preg_split('/\s*,\s*/', $counterMeta) as $counterToken) {
+                if (!preg_match('/^C(\d+):.*?=(\d+(?:\.\d+)?)$/', trim((string)$counterToken), $counterMatch)) {
+                    continue;
+                }
+                $counterIdx = (int)$counterMatch[1];
+                $counterMap[$counterIdx] = (float)$counterMatch[2];
+            }
+            return $counterMap;
+        };
+        foreach ($events as $seriEvent) {
+            if (!in_array((string)($seriEvent['evt_type'] ?? ''), ['prod', 'prodsericolor'], true)) {
+                continue;
+            }
+            if ((int)($seriEvent['id'] ?? 0) === $refId) {
+                continue;
+            }
+            foreach ($parseSeriCounterMap((string)($seriEvent['evt_comments'] ?? '')) as $counterIdx => $counterVal) {
+                $seriPrevCounters[$counterIdx] = (float)($seriPrevCounters[$counterIdx] ?? 0) + (float)$counterVal;
+            }
+        }
+        if (preg_match('/\[SERI_COUNTERS:\s*(.*?)\]/', $valComments, $seriCounterMetaMatch)) {
+            $seriCounterMeta = trim((string)($seriCounterMetaMatch[1] ?? ''));
+            $seriCounterMeta = trim((string)preg_replace('/\s+\|\s+imp\/des=.*$/', '', $seriCounterMeta));
+            if ($seriCounterMeta !== '') {
+                foreach (preg_split('/\s*,\s*/', $seriCounterMeta) as $seriCounterToken) {
+                    if (preg_match('/^C(\d+):.*?=(\d+)$/', trim((string)$seriCounterToken), $seriCounterMatch)) {
+                        $seriSavedCounters[(int)$seriCounterMatch[1]] = (int)$seriCounterMatch[2];
+                    }
+                }
+            }
+        }
+        for ($seriIdx = 1; $seriIdx <= 10; $seriIdx++) {
+            $seriColorDesc = trim((string)($agenda['fab_print_colordesc_' . $seriIdx] ?? ''));
+            $seriHasFront = (int)($agenda['fab_print_colors_front_' . $seriIdx] ?? 0) > 0;
+            $seriHasBack = (int)($agenda['fab_print_colors_back_' . $seriIdx] ?? 0) > 0;
+            if (!$seriHasFront && !$seriHasBack && $seriColorDesc === '') {
+                continue;
+            }
+            $seriFaces = [];
+            if ($seriHasFront) {
+                $seriFaces[] = 'Frente';
+            }
+            if ($seriHasBack) {
+                $seriFaces[] = 'Dorso';
+            }
+            $seriCounterColors[] = [
+                'idx' => $seriIdx,
+                'label' => $seriColorDesc !== '' ? $seriColorDesc : ('Color N° ' . $seriIdx),
+                'faces' => implode(' / ', $seriFaces),
+                'value' => (int)($seriSavedCounters[$seriIdx] ?? 0),
+                'prev_value' => (int)round((float)($seriPrevCounters[$seriIdx] ?? 0)),
+            ];
+        }
+
+        // Consultar resumen de bobinas impresas emitidas en la OT para automatizar suma de peso y metros
+        $printedRollsSummary = ($workerOtId > 0) ? $prodServiceInstance->getPrintedRollsSummary($workerOtId) : [];
+        if (!empty($printedRollsSummary['rolls_count']) && $printedRollsSummary['rolls_count'] > 0) {
+            if ($valBobinaKg <= 0 || $isEvtOpen) {
+                $valBobinaKg = (float)$printedRollsSummary['total_weight_kg'];
+            }
+            if ($valMlin <= 0 || $isEvtOpen) {
+                $valMlin = (int)round($printedRollsSummary['total_meters']);
+            }
+            if ($valAmount <= 0) {
+                $valAmount = (float)$valMlin;
+            }
+        }
+
+        $telaWProd = (float)($agenda['req_operador_tela_width'] ?? 80);
+        $telaGsmProd = (float)($agenda['fab_mat_gramms'] ?? 70);
+        $prodMeterWeightKg = ($telaWProd > 0 && $telaGsmProd > 0) ? round(($telaWProd / 100) * ($telaGsmProd / 1000), 4) : 0.056;
+        $prodUnitWeightKg = 0.035;
+        if ((float)($agenda['ag_amount'] ?? 0) > 0 && ($kgAImprimir ?? 0) > 0) {
+            $prodUnitWeightKg = round(((float)$kgAImprimir) / (float)$agenda['ag_amount'], 4);
+        }
         ?>
         <div style="margin-bottom:15px">
             <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
@@ -4690,15 +5495,7 @@ function renderProductionOperatorConsole(
                         <td class="tdnrm"><b style="color:#059669"><i class="fa fa-clock"></i> <?=date('d.m.Y H:i')?></b></td>
                     </tr>
                     <?php if ($isFlexo): ?>
-                        <tr>
-                            <td class="tdleft">Tipo de Lectura Medición</td>
-                            <td class="tdnrm">
-                                <select name="evt_metrotype" class="inptxt" style="width:250px">
-                                    <option value="metros_lineales">Metros Lineales</option>
-                                    <option value="metros_maquina">Metros Máquina</option>
-                                </select>
-                            </td>
-                        </tr>
+                        <input type="hidden" name="evt_metrotype" value="metros_lineales">
                     <?php endif; ?>
                     <tr>
                         <td class="tdleft">Observaciones de Inicio</td>
@@ -4710,7 +5507,7 @@ function renderProductionOperatorConsole(
                         <td class="tdleft">&nbsp;</td>
                         <td class="tdnrm" style="padding-top:18px">
                             <button type="submit" class="btngreen" style="font-size:15px;padding:12px 30px;box-shadow:0 2px 4px rgba(0,0,0,0.15)">
-                                <i class="fa fa-fw fa-play"></i> ▶️ Comenzar Producción Ahora
+                                <i class="fa fa-fw fa-play"></i> Iniciar
                             </button>
                         </td>
                     </tr>
@@ -4753,22 +5550,46 @@ function renderProductionOperatorConsole(
                         <td class="tdnrm"><b><?=htmlspecialchars((string)($machineInit['equipo_name'] ?? $agenda['equipo_name'] ?? '-'))?></b></td>
                     </tr>
                     <?php if ($isFlexo): ?>
+                        <input type="hidden" name="evt_metrotype" value="metros_lineales">
+                        <input type="hidden" name="evt_amount_metros_maquina" value="<?=$valMmaq?>">
+                        <input type="hidden" name="prod_amount" id="inp_flexo_amount" value="<?=$valAmount > 0 ? (int)$valAmount : 0?>">
+                        <?php if (!empty($printedRollsSummary['rolls_count']) && $printedRollsSummary['rolls_count'] > 0): ?>
+                            <tr>
+                                <td colspan="2" style="padding:0 0 14px 0">
+                                    <div style="background:#F0FDF4;border:1.5px solid #86EFAC;border-radius:6px;padding:12px 16px;color:#166534">
+                                        <div style="font-size:13.5px;font-weight:bold;margin-bottom:5px;display:flex;align-items:center;gap:7px">
+                                            <i class="fa fa-tag" style="color:#059669"></i> Bobinas Impresas Producidas en esta OT: 
+                                            <b style="font-size:15px;color:#15803D"><?=number_format($printedRollsSummary['total_weight_kg'], 2, ',', '.')?> kg</b>
+                                            <span style="font-size:12.5px;color:#047857">(<?=number_format($printedRollsSummary['total_meters'], 0, ',', '.')?> metros &bull; <?=$printedRollsSummary['rolls_count']?> bobina<?=$printedRollsSummary['rolls_count'] > 1 ? 's' : ''?>)</span>
+                                        </div>
+                                        <div style="font-size:12px;color:#166534;line-height:1.4">
+                                            Se han sumado y precargado automáticamente los kilos y metros de las bobinas semielaboradas emitidas:
+                                            <b><?=implode(', ', array_map(fn($r) => $r['roll_code'] . ' (' . number_format($r['weight_kg'], 2, ',', '.') . ' kg, ' . number_format($r['meters'], 0, ',', '.') . ' m)', $printedRollsSummary['rolls_list']))?></b>.
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endif; ?>
                         <tr>
-                            <td class="tdleft">Tipo de Lectura</td>
+                            <td class="tdleft">Metros Lineales Producidos *</td>
                             <td class="tdnrm">
-                                <select name="evt_metrotype" class="inptxt" style="width:250px">
-                                    <option value="metros_lineales" <?=$valMtype === 'metros_lineales' ? 'selected' : ''?>>Metros Lineales</option>
-                                    <option value="metros_maquina" <?=$valMtype === 'metros_maquina' ? 'selected' : ''?>>Metros Máquina</option>
-                                </select>
+                                <input type="number" step="1" min="0" name="evt_amount_metros_lineales" id="inp_flexo_mlin" class="inptxt" style="width:200px;font-size:15px;font-weight:bold;<?=!empty($printedRollsSummary['rolls_count']) ? 'background:#F0FDF4;color:#166534' : ''?>" value="<?=$valMlin > 0 ? $valMlin : ''?>" placeholder="0" required oninput="calcFlexoKgs()"> mtrs
+                                <?php if (!empty($printedRollsSummary['rolls_count'])): ?>
+                                    <span style="font-size:11px;background:#059669;color:#FFFFFF;padding:3px 8px;border-radius:4px;margin-left:6px;font-weight:bold"><i class="fa fa-check-circle"></i> Suma de <?=count($printedRollsSummary['rolls_list'])?> bobinas impresas</span>
+                                <?php endif; ?>
                             </td>
                         </tr>
                         <tr>
-                            <td class="tdleft">Metros Lineales Producidos</td>
-                            <td class="tdnrm"><input type="number" step="1" name="evt_amount_metros_lineales" class="inptxt" style="width:200px" value="<?=$valMlin > 0 ? $valMlin : ''?>" placeholder="0"> mtrs</td>
-                        </tr>
-                        <tr>
-                            <td class="tdleft">Metros Máquina</td>
-                            <td class="tdnrm"><input type="number" step="1" name="evt_amount_metros_maquina" class="inptxt" style="width:200px" value="<?=$valMmaq > 0 ? $valMmaq : ''?>" placeholder="0"> mtrs</td>
+                            <td class="tdleft">Kilos Producidos *</td>
+                            <td class="tdnrm">
+                                <input type="number" step="0.01" min="0" name="prod_bobina_kg" id="inp_flexo_kgs" class="inptxt" style="width:200px;font-size:15px;font-weight:bold;background:#F0FDF4;color:#166534" value="<?=$valBobinaKg > 0 ? number_format($valBobinaKg, 2, '.', '') : ''?>" placeholder="0.00" required> kg
+                                <?php if (!empty($printedRollsSummary['rolls_count'])): ?>
+                                    <span style="font-size:11px;background:#059669;color:#FFFFFF;padding:3px 8px;border-radius:4px;margin-left:6px;font-weight:bold"><i class="fa fa-check-circle"></i> Suma de <?=count($printedRollsSummary['rolls_list'])?> bobinas impresas</span>
+                                    <button type="button" class="btngrey" style="font-size:11px;padding:3px 8px;margin-left:6px;cursor:pointer" onclick="restorePrintedRollsValues()"><i class="fa fa-sync-alt"></i> Restablecer suma (<?=number_format($printedRollsSummary['total_weight_kg'], 2, ',', '.')?> kg)</button>
+                                <?php else: ?>
+                                    <span style="font-size:12px;color:#64748B;margin-left:8px"><i class="fa fa-calculator"></i> Calculado automáticamente según gramaje y ancho de tela (<?=$prodMeterWeightKg?> kg/m). Puede ajustarse manualmente si pesó en balanza.</span>
+                                <?php endif; ?>
+                            </td>
                         </tr>
                     <?php elseif ($isSeriPulpo): ?>
                         <?php if ($amtColorsDorso > 0): ?>
@@ -4841,6 +5662,45 @@ function renderProductionOperatorConsole(
                                 </td>
                             </tr>
                         <?php endif; ?>
+                    <?php elseif ($isSeri): ?>
+                        <input type="hidden" name="prod_amount2" id="idx_seri_counter_base" value="<?=$seriCounterBaseValue > 0 ? $seriCounterBaseValue : ''?>">
+                        <tr>
+                            <td class="tdleft">Contador libre por color *</td>
+                            <td class="tdnrm">
+                                <div style="display:flex;flex-direction:column;gap:10px">
+                                    <?php foreach ($seriCounterColors as $seriColor): ?>
+                                        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px">
+                                            <div style="min-width:220px;font-size:12.5px;font-weight:bold;color:#1E293B">
+                                                <?=htmlspecialchars((string)$seriColor['label'])?>
+                                                <?php if ($seriColor['faces'] !== ''): ?>
+                                                    <div style="font-size:11px;font-weight:normal;color:#64748B"><?=htmlspecialchars((string)$seriColor['faces'])?></div>
+                                                <?php endif; ?>
+                                            </div>
+                                            <input type="hidden" name="seri_counter_label_<?=$seriColor['idx']?>" value="<?=htmlspecialchars((string)$seriColor['label'])?>">
+                                            <input type="number" step="1" min="0" name="seri_counter_color_<?=$seriColor['idx']?>" id="idx_seri_counter_<?=$seriColor['idx']?>" class="inptxt seri-counter-input" style="width:180px;font-size:15px;font-weight:bold" value="<?=$seriColor['value'] > 0 ? $seriColor['value'] : ''?>" placeholder="0" data-prev="<?=$seriColor['prev_value']?>" oninput="calcSeriUnitsFromCounters()">
+                                            <span style="font-size:12px;color:#64748B">contador libre</span>
+                                        </div>
+                                    <?php endforeach; ?>
+                                    <?php if (empty($seriCounterColors)): ?>
+                                        <div style="font-size:12px;color:#64748B;background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:6px;padding:10px 12px">
+                                            No hay colores configurados en la ficha. Puede registrar el contador igualmente en la cantidad final.
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="tdleft">Cantidad de imágenes impresas en bastidor *</td>
+                            <td class="tdnrm">
+                                <input type="number" step="1" min="1" max="10" name="seri_bastidor_multiplier" id="idx_seri_bastidor_multiplier" class="inptxt" style="width:200px;font-size:15px;font-weight:bold" value="<?=$seriDevPrintsDefault?>" oninput="calcSeriUnitsFromCounters()"> imagen<?=($seriDevPrintsDefault !== 1 ? 'es' : '')?>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="tdleft">Total unidades terminadas *</td>
+                            <td class="tdnrm">
+                                <input type="number" step="1" min="0" name="prod_amount" id="idx_seri_amount" class="inptxt" style="width:200px;font-weight:bold;background:#F8FAFC" value="<?=$valAmount > 0 ? (int)$valAmount : ''?>" placeholder="0" required> unidades
+                            </td>
+                        </tr>
                     <?php else: ?>
                         <tr>
                             <td class="tdleft">Contador Principal / Bolsas *</td>
@@ -4856,6 +5716,12 @@ function renderProductionOperatorConsole(
                         <!-- TABLA DE MERMAS (editxid.php líneas 850-915 y form.production.php 990-1010) -->
                         <tr>
                             <td colspan="2" style="padding-top:15px">
+                                <?php if ($totalDismountKgs > 0): ?>
+                                    <div style="background:#F0FDF4;border:1px solid #86EFAC;border-radius:4px;padding:10px 14px;margin-bottom:12px;color:#166534;font-size:12.5px;display:flex;align-items:center;gap:8px">
+                                        <i class="fa fa-dolly" style="font-size:16px;color:#059669"></i>
+                                        <span>Se han precargado automáticamente <b><?=number_format($totalDismountKgs, 2, ',', '.')?> kg</b> de mermas registradas al desmontar bobina(s). Puede revisarlas, complementarlas o ajustarlas antes de finalizar.</span>
+                                    </div>
+                                <?php endif; ?>
                                 <table border="0" width="100%" cellpadding="6" cellspacing="0" style="background:#FAFAFA;border:1px solid #DDDDDD;border-radius:4px">
                                 <colgroup>
                                     <col width="220">
@@ -4883,17 +5749,29 @@ function renderProductionOperatorConsole(
                                     $mKgs = (float)($existM['evt_kgstounits'] ?? 0);
                                     $mMts = (int)($existM['evt_mtstounits'] ?? 0);
                                     $mComm = (string)($existM['evt_comments'] ?? '');
+                                    $fromAlis = !empty($existM['from_alistamiento']);
+                                    $fromDismount = !empty($existM['from_dismount']);
+                                    $dismountKgs = (float)($existM['dismount_kgs'] ?? 0);
                                 ?>
-                                <tr>
-                                    <td class="tdnrm"><b><?=htmlspecialchars((string)$mt['merma_title'])?></b></td>
-                                    <td class="tdnrm" align="center">
-                                        <input type="number" step="1" name="merma_amount_<?=$mtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$mAmt > 0 ? (int)$mAmt : ''?>">
+                                <tr <?=$fromDismount ? 'style="background:#F0FDF4"' : ($fromAlis ? 'style="background:#FEF9C3"' : '')?>>
+                                    <td class="tdnrm">
+                                        <b><?=htmlspecialchars((string)$mt['merma_title'])?></b>
+                                        <?php if ($fromDismount && $dismountKgs > 0): ?>
+                                            <span style="font-size:11px;background:#059669;color:#FFFFFF;padding:2px 7px;border-radius:4px;margin-left:6px;font-weight:bold" title="Cargado automáticamente desde el desmontaje de bobinas">
+                                                <i class="fa fa-dolly"></i> Desmontaje: <?=number_format($dismountKgs, 2, ',', '.')?> kg
+                                            </span>
+                                        <?php elseif ($fromAlis): ?>
+                                            <span style="font-size:11px;background:#CA8A04;color:#FFFFFF;padding:2px 7px;border-radius:4px;margin-left:6px;font-weight:bold"><i class="fa fa-check-circle"></i> Desde Autocontrol</span>
+                                        <?php endif; ?>
                                     </td>
                                     <td class="tdnrm" align="center">
-                                        <input type="number" step="0.1" name="merma_kgs_<?=$mtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$mKgs > 0 ? $mKgs : ''?>">
+                                        <input type="number" step="1" min="0" name="merma_amount_<?=$mtId?>" id="merma_amt_<?=$mtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$mAmt > 0 ? (int)$mAmt : ''?>" oninput="syncMermaRow(<?=$mtId?>, 'amount')">
                                     </td>
                                     <td class="tdnrm" align="center">
-                                        <input type="number" step="1" name="merma_mts_<?=$mtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$mMts > 0 ? $mMts : ''?>">
+                                        <input type="number" step="0.01" min="0" name="merma_kgs_<?=$mtId?>" id="merma_kgs_<?=$mtId?>" class="inptxt" style="width:90px;text-align:center;<?=$fromDismount ? 'background:#DCFCE7;font-weight:bold;color:#166534' : ($fromAlis ? 'background:#FFFBEB;font-weight:bold;color:#92400E' : '')?>" value="<?=$mKgs > 0 ? $mKgs : ''?>" oninput="syncMermaRow(<?=$mtId?>, 'kgs')">
+                                    </td>
+                                    <td class="tdnrm" align="center">
+                                        <input type="number" step="1" min="0" name="merma_mts_<?=$mtId?>" id="merma_mts_<?=$mtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$mMts > 0 ? $mMts : ''?>" oninput="syncMermaRow(<?=$mtId?>, 'mts')">
                                     </td>
                                     <td class="tdnrm">
                                         <input type="text" name="merma_comments_<?=$mtId?>" class="inptxt" style="width:100%" value="<?=htmlspecialchars($mComm)?>" placeholder="Detalle...">
@@ -4956,25 +5834,122 @@ function renderProductionOperatorConsole(
                         <td class="tdleft">&nbsp;</td>
                         <td class="tdnrm" style="padding-top:15px">
                             <?php if ($refId > 0 && $isEvtOpen): ?>
-                                <button type="submit" class="btnorange" style="font-size:14px;padding:10px 24px;font-weight:bold" onclick="document.getElementById('prod_submode').value='end'">
-                                    <i class="fa fa-fw fa-stop"></i> ⏹️ Finalizar y Cerrar Tiraje
+                                <button type="submit" class="btnorange" style="font-size:14px;padding:10px 24px;font-weight:bold;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16)" onclick="document.getElementById('prod_submode').value='end'">
+                                    <i class="fa fa-fw fa-stop"></i> Finalizar
                                 </button>
-                                <button type="submit" class="btngreen" style="font-size:14px;padding:10px 22px;margin-left:10px" onclick="document.getElementById('prod_submode').value='update'">
-                                    <i class="fa fa-fw fa-save"></i> 💾 Guardar Avance sin Cerrar
+                                <button type="submit" class="btngreen" style="font-size:14px;padding:10px 22px;margin-left:10px;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16)" onclick="document.getElementById('prod_submode').value='update'">
+                                    <i class="fa fa-fw fa-save"></i> Guardar
                                 </button>
                             <?php elseif ($refId > 0): ?>
-                                <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;font-weight:bold" onclick="document.getElementById('prod_submode').value='update'">
+                                <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;font-weight:bold;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16)" onclick="document.getElementById('prod_submode').value='update'">
                                     <i class="fa fa-fw fa-save"></i> Guardar Cambios
                                 </button>
                             <?php else: ?>
-                                <button type="submit" class="btnorange" style="font-size:14px;padding:10px 24px;font-weight:bold" onclick="document.getElementById('prod_submode').value='end'">
-                                    <i class="fa fa-fw fa-check"></i> Registrar Producción
+                                <button type="submit" class="btnorange" style="font-size:14px;padding:10px 24px;font-weight:bold;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16)" onclick="document.getElementById('prod_submode').value='end'">
+                                    <i class="fa fa-fw fa-check"></i> Finalizar
                                 </button>
                             <?php endif; ?>
                         </td>
                     </tr>
                     </table>
                 </form>
+
+                <script>
+                var PROD_METER_WEIGHT_KG = <?=(float)$prodMeterWeightKg?>;
+                var PROD_UNIT_WEIGHT_KG = <?=(float)$prodUnitWeightKg?>;
+                var IS_FLEXO = <?=$isFlexo ? 'true' : 'false'?>;
+                var HAS_PRINTED_ROLLS = <?=!empty($printedRollsSummary['rolls_count']) ? 'true' : 'false'?>;
+                var PRINTED_ROLLS_TOTAL_KG = <?=(float)($printedRollsSummary['total_weight_kg'] ?? 0)?>;
+                var PRINTED_ROLLS_TOTAL_METERS = <?=(float)($printedRollsSummary['total_meters'] ?? 0)?>;
+
+                function restorePrintedRollsValues() {
+                    var mlinInp = document.getElementById('inp_flexo_mlin');
+                    var kgsInp = document.getElementById('inp_flexo_kgs');
+                    var amtInp = document.getElementById('inp_flexo_amount');
+                    if (mlinInp) mlinInp.value = Math.round(PRINTED_ROLLS_TOTAL_METERS);
+                    if (kgsInp) kgsInp.value = PRINTED_ROLLS_TOTAL_KG.toFixed(2);
+                    if (amtInp) amtInp.value = Math.round(PRINTED_ROLLS_TOTAL_METERS);
+                }
+
+                function calcFlexoKgs() {
+                    var mlinInp = document.getElementById('inp_flexo_mlin');
+                    var kgsInp = document.getElementById('inp_flexo_kgs');
+                    var amtInp = document.getElementById('inp_flexo_amount');
+                    if (!mlinInp || !kgsInp) return;
+                    var mlin = parseFloat(mlinInp.value) || 0;
+                    if (HAS_PRINTED_ROLLS && Math.abs(mlin - PRINTED_ROLLS_TOTAL_METERS) < 1.0) {
+                        kgsInp.value = PRINTED_ROLLS_TOTAL_KG.toFixed(2);
+                    } else if (mlin > 0 && PROD_METER_WEIGHT_KG > 0) {
+                        var kgs = (mlin * PROD_METER_WEIGHT_KG).toFixed(2);
+                        kgsInp.value = kgs;
+                    }
+                    if (amtInp) {
+                        amtInp.value = Math.round(mlin);
+                    }
+                }
+
+                function calcSeriUnitsFromCounters() {
+                    var factorInp = document.getElementById('idx_seri_bastidor_multiplier');
+                    var amountInp = document.getElementById('idx_seri_amount');
+                    var baseInp = document.getElementById('idx_seri_counter_base');
+                    if (!factorInp || !amountInp || !baseInp) return;
+
+                    var factor = parseInt(String(factorInp.value || '0').replace(',', '.'), 10) || 0;
+                    if (factor <= 0) factor = 1;
+
+                    var counters = [];
+                    var prevCounters = [];
+                    document.querySelectorAll('.seri-counter-input').forEach(function(inp) {
+                        var val = parseInt(String(inp.value || '0').replace(',', '.'), 10) || 0;
+                        var prevVal = parseInt(String(inp.getAttribute('data-prev') || '0').replace(',', '.'), 10) || 0;
+                        prevCounters.push(prevVal);
+                        counters.push(prevVal + val);
+                    });
+
+                    if (counters.length === 0) {
+                        baseInp.value = '';
+                        return;
+                    }
+
+                    var prevBaseCounter = prevCounters.length > 0 ? Math.min.apply(Math, prevCounters) : 0;
+                    var newBaseCounter = Math.min.apply(Math, counters);
+                    var baseCounter = Math.max(0, newBaseCounter - prevBaseCounter);
+                    var totalUnits = baseCounter * factor;
+                    baseInp.value = String(baseCounter);
+                    amountInp.value = String(totalUnits);
+                }
+
+                function syncMermaRow(id, field) {
+                    var amtInp = document.getElementById('merma_amt_' + id);
+                    var kgsInp = document.getElementById('merma_kgs_' + id);
+                    var mtsInp = document.getElementById('merma_mts_' + id);
+                    if (!amtInp || !kgsInp || !mtsInp) return;
+
+                    var amt = parseFloat(amtInp.value) || 0;
+                    var kgs = parseFloat(kgsInp.value) || 0;
+                    var mts = parseFloat(mtsInp.value) || 0;
+
+                    if (field === 'amount' && amt > 0) {
+                        if (PROD_UNIT_WEIGHT_KG > 0 && (!kgs || kgs === 0)) {
+                            kgsInp.value = (amt * PROD_UNIT_WEIGHT_KG).toFixed(2);
+                        }
+                    } else if (field === 'mts' && mts > 0) {
+                        if (PROD_METER_WEIGHT_KG > 0 && (!kgs || kgs === 0)) {
+                            kgsInp.value = (mts * PROD_METER_WEIGHT_KG).toFixed(2);
+                        }
+                    } else if (field === 'kgs' && kgs > 0) {
+                        if (IS_FLEXO && PROD_METER_WEIGHT_KG > 0 && (!mts || mts === 0)) {
+                            mtsInp.value = Math.round(kgs / PROD_METER_WEIGHT_KG);
+                        } else if (!IS_FLEXO && PROD_UNIT_WEIGHT_KG > 0 && (!amt || amt === 0)) {
+                            amtInp.value = Math.round(kgs / PROD_UNIT_WEIGHT_KG);
+                        }
+                    }
+                }
+
+                if (document.getElementById('idx_seri_bastidor_multiplier')) {
+                    calcSeriUnitsFromCounters();
+                }
+                </script>
             </div>
         <?php endif; ?>
 
@@ -5076,11 +6051,11 @@ function renderProductionOperatorConsole(
                         </td>
                         <td width="50%" style="padding-left:5px" align="right">
                             <?php if ($isEvtOpen): ?>
-                                <div class="btnorange" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1';" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 16px;font-weight:bold">
-                                    <i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar alistamiento / Ir a Autocontrol
+                                <div class="btnorange" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1';" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 16px;font-weight:bold;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16)">
+                                    <i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar
                                 </div>
                                 <div class="btngrey" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 14px">
-                                    <i class="fa fa-fw fa-save" style="color:white;"></i> Actualizar datos
+                                    <i class="fa fa-fw fa-save" style="color:white;"></i> Guardar
                                 </div>
                             <?php else: ?>
                                 <div class="btngreen" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').submit();" style="width:40%;cursor:pointer;text-align:center">
@@ -5092,7 +6067,7 @@ function renderProductionOperatorConsole(
                     </table>
                 <?php else: ?>
                     <div class="btngreen" onclick="document.getElementById('ap_submode').value='start';document.getElementById('form_apertura_edit').submit();" style="cursor:pointer;display:inline-block">
-                        <i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar alistamiento&nbsp;
+                        <i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar&nbsp;
                     </div>
                 <?php endif; ?>
                     </td>
@@ -5267,7 +6242,6 @@ function renderProductionOperatorConsole(
         }
         $targetColorClean = mb_strtolower(trim($targetColor));
         $targetColorClean = trim((string)preg_replace('/\(pantone[^\)]*\)/i', '', $targetColorClean));
-
         $compatibleRolls = [];
         $otherRolls = [];
         foreach ($availableRolls as $r) {
@@ -5285,626 +6259,717 @@ function renderProductionOperatorConsole(
         </div>
 
         <?php if ($isSeriPulpo): ?>
-            <!-- SECCIÓN: Insumos Directos de Serigrafía Pulpo (Tintas, Bastidores, Bolsas Base) -->
             <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:18px;margin-bottom:18px">
                 <div style="font-size:16px;font-weight:bold;color:#1E3A8A;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-palette"></i> Carga de Insumos Directos &mdash; Serigrafía Pulpo (OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>)
+                    <i class="fa fa-palette"></i> Insumos - Serigrafía Pulpo (OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>)
                 </div>
                 <div style="font-size:12.5px;color:#64748B;margin-top:4px">
-                    En esta sección puede solicitar y registrar tintas serigráficas, bastidores con malla mesh, bolsas base/sustrato, solventes y aditivos para la OT.
+                    En Pulpo la tinta no se registra en esta pantalla. La solicitud se hace a bodega y la utilización queda configurada en la tabla de <b>10 Unidades de Bastidores / Secadores</b>.
                 </div>
             </div>
 
-            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;margin-bottom:20px">
-                <div style="font-size:16px;font-weight:bold;color:#3F4C9B;margin-bottom:15px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-fw fa-paper-plane"></i> Solicitar / Registrar Insumo para la OT
+            <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-radius:6px;padding:14px 16px;margin-bottom:18px">
+                <div style="font-size:13px;font-weight:bold;color:#1E293B;margin-bottom:6px">
+                    <i class="fa fa-shopping-bag" style="color:#0F766E"></i> Sustrato base de esta OT
                 </div>
-
-                <form method="post" action="/production/work-orders/materials/assign">
-                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                    <input type="hidden" name="agid" value="<?=$agId?>">
-                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-
-                    <table border="0" width="100%" cellpadding="8" cellspacing="0">
-                    <colgroup><col width="220"><col></colgroup>
-                    <tr>
-                        <td class="tdleft">Tipo de Material / Insumo *</td>
-                        <td class="tdnrm">
-                            <select name="material_type" class="inptxt" style="width:320px;font-weight:bold" required>
-                                <option value="Tinta Serigráfica">Tinta Serigráfica</option>
-                                <option value="Bastidor / Malla Mesh">Bastidor / Malla Mesh</option>
-                                <option value="Bolsas Base / Sustrato para Impresión">Bolsas Base / Sustrato para Impresión</option>
-                                <option value="Solvente / Retardador / Limpiador">Solvente / Retardador / Limpiador</option>
-                                <option value="Aditivo / Emulsión">Aditivo / Emulsión</option>
-                                <option value="Otro Insumo de Producción">Otro Insumo de Producción</option>
-                            </select>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="tdleft">Cantidad Solicitada / Utilizada *</td>
-                        <td class="tdnrm">
-                            <input type="number" step="0.01" name="material_qty" class="inptxt" style="width:160px" placeholder="0.00" required>
-                            <select name="material_unit" class="inptxt" style="width:130px;margin-left:8px">
-                                <option value="kg">Kilos (kg)</option>
-                                <option value="litros">Litros (L)</option>
-                                <option value="unidades">Unidades / Bolsas</option>
-                                <option value="bastidores">Bastidores</option>
-                            </select>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="tdleft">Observaciones / Color / Detalles</td>
-                        <td class="tdnrm">
-                            <textarea name="comments" class="inptxt" style="width:100%;height:65px" placeholder="Ej: Tinta Color Blanco Frente, Bastidor 77T, Lote sustrato..."></textarea>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="tdleft">&nbsp;</td>
-                        <td class="tdnrm">
-                            <button type="submit" class="btnblue" style="font-size:14px;padding:9px 24px">
-                                <i class="fa fa-fw fa-paper-plane"></i> Solicitar / Registrar Material en OT
-                            </button>
-                        </td>
-                    </tr>
-                    </table>
-                </form>
+                <div style="font-size:12.5px;color:#334155">
+                    <b><?=htmlspecialchars((string)($agenda['item_number_prod'] ?? ''))?></b>
+                    <?php if (!empty($agenda['item_title'])): ?>
+                        - <?=htmlspecialchars((string)$agenda['item_title'])?>
+                    <?php endif; ?>
+                </div>
+                <div style="font-size:11.5px;color:#64748B;margin-top:4px">
+                    En Pulpo la impresión se realiza directamente sobre estas bolsas/unidades base. Por eso aquí no corresponde montaje de bobinas ni consumo manual de tinta.
+                </div>
             </div>
-        <?php endif; ?>
 
-        <!-- SECCIÓN DE BOBINAS DE MATERIA PRIMA (CONECTADA A BASE DE DATOS REAL unibag_unibag) -->
-        <!-- PANEL DE CONTROL DE CUOTA Y ESPECIFICACIONES -->
+            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;margin-bottom:18px">
+                <div style="font-size:15px;font-weight:bold;color:#3F4C9B;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-fw fa-sitemap"></i> Flujo correcto para Pulpo
+                </div>
+                <div style="font-size:12.5px;color:#475569;line-height:1.6;margin-bottom:14px">
+                    1. <b>Solicitar tintas e insumos a bodega</b> desde el módulo exterior.<br>
+                    2. <b>Configurar bastidores, mesh, secadores y total de tinta</b> en la tabla de 10 unidades dentro de la OT.<br>
+                    3. Continuar el tiraje sin mezclar este proceso con bobinas montadas.
+                </div>
+                <div style="display:flex;gap:10px;flex-wrap:wrap">
+                    <a href="/production/materials/request?agid=<?=$agId?>&material_kind=inks" class="btnblue" style="text-decoration:none;font-size:13px;padding:9px 18px;display:inline-flex;align-items:center;gap:7px">
+                        <i class="fa fa-paper-plane"></i> Solicitar Tintas e Insumos
+                    </a>
+                    <a href="/production/work-orders/operate?agid=<?=$agId?>#pulpo-config-10" class="btngreen" style="text-decoration:none;font-size:13px;padding:9px 18px;display:inline-flex;align-items:center;gap:7px">
+                        <i class="fa fa-th"></i> Ir a Configuración 10 Unidades
+                    </a>
+                    <a href="/production/work-orders/operate?agid=<?=$agId?>" class="btngrey" style="text-decoration:none;font-size:13px;padding:9px 18px;display:inline-flex;align-items:center;gap:7px">
+                        <i class="fa fa-arrow-left"></i> Volver a la OT
+                    </a>
+                </div>
+            </div>
+
             <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:18px;margin-bottom:18px">
-                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;border-bottom:1px solid #EEEEEE;padding-bottom:10px">
-                    <div style="font-size:16px;font-weight:bold;color:#1E3A8A;display:flex;align-items:center;gap:8px">
-                        <i class="fa fa-balance-scale"></i> Control de Cuota de Bobinas &mdash; OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>
-                    </div>
-                    <div style="font-size:13px">
-                        Estado Cupo: 
-                        <?php if ($requiresSupervisor): ?>
-                            <span style="background:#FEE2E2;color:#991B1B;padding:4px 10px;border-radius:4px;font-weight:bold">
-                                <i class="fa fa-lock"></i> Cuota Excedida (Requiere Supervisor)
-                            </span>
-                        <?php else: ?>
-                            <span style="background:#DCFCE7;color:#166534;padding:4px 10px;border-radius:4px;font-weight:bold">
-                                <i class="fa fa-check-circle"></i> En Cupo Permitido (<?=count($assignedRolls)?> / <?=$maxAllowedRolls?> bobinas)
-                            </span>
-                        <?php endif; ?>
-                    </div>
+                <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-check-circle"></i> Qué se hace en cada pantalla
                 </div>
-
-                <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:12px;font-size:12.5px">
-                    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:4px;padding:10px">
-                        <div style="color:#64748B;font-size:11px;text-transform:uppercase;font-weight:bold">Bobinas Asignadas</div>
-                        <div style="font-size:18px;font-weight:bold;color:#0F172A;margin-top:2px"><?=count($assignedRolls)?> <span style="font-size:13px;font-weight:normal;color:#64748B">/ <?=$maxAllowedRolls?> máx</span></div>
-                    </div>
-                    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:4px;padding:10px">
-                        <div style="color:#64748B;font-size:11px;text-transform:uppercase;font-weight:bold">Materialidad Requerida</div>
-                        <div style="font-size:15px;font-weight:bold;color:#0284C7;margin-top:4px">
-                            <?=htmlspecialchars($normTargetMat ?: ($targetMaterial ?: 'Según ficha'))?>
-                            <span style="font-size:11px;font-weight:normal;color:#64748B">
-                                (<?=$normTargetMat === 'PLA' ? 'Bodega 100 MP PLA' : ($normTargetMat === 'PP' ? 'Bodega 200 MP PP' : 'Bodega MP')?>)
-                            </span>
-                        </div>
-                    </div>
-                    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:4px;padding:10px">
-                        <div style="color:#64748B;font-size:11px;text-transform:uppercase;font-weight:bold">Color Requerido</div>
-                        <div style="font-size:15px;font-weight:bold;color:#0F172A;margin-top:4px"><?=htmlspecialchars($targetColor ?: 'Según ficha')?></div>
-                    </div>
-                    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:4px;padding:10px">
-                        <div style="color:#64748B;font-size:11px;text-transform:uppercase;font-weight:bold">Ancho / Gramaje</div>
-                        <div style="font-size:15px;font-weight:bold;color:#0F172A;margin-top:4px"><?=$targetWidth > 0 ? ($targetWidth . ' cm') : '-'?> · <?=$targetGrammage > 0 ? ($targetGrammage . ' gr') : '-'?></div>
-                    </div>
-                    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:4px;padding:10px">
-                        <div style="color:#64748B;font-size:11px;text-transform:uppercase;font-weight:bold">Kilos Planificados</div>
-                        <div style="font-size:18px;font-weight:bold;color:#0F172A;margin-top:2px"><?=$plannedKg > 0 ? number_format($plannedKg, 1, ',', '.') : '-'?> <span style="font-size:13px;font-weight:normal;color:#64748B">kg</span></div>
-                    </div>
-                </div>
-
-                <?php if ($requiresSupervisor): ?>
-                    <div style="margin-top:14px;background:#FFFBEB;border:1.5px solid #FCD34D;border-radius:5px;padding:12px 16px;color:#92400E;display:flex;align-items:center;gap:12px">
-                        <i class="fa fa-exclamation-triangle" style="font-size:22px;color:#D97706"></i>
-                        <div>
-                            <div style="font-weight:bold;font-size:13.5px">Límite de Cupo de Bobinas Alcanzado</div>
-                            <div style="font-size:12.5px;margin-top:2px">
-                                Se ha alcanzado el límite máximo de <b><?=$maxAllowedRolls?> bobinas</b> para esta orden de trabajo. Para solicitar bobinas adicionales, un supervisor debe ingresar su usuario y contraseña para autorizar la excepción.
-                            </div>
-                        </div>
-                    </div>
-                <?php endif; ?>
-            </div>
-
-            <!-- FORMULARIO DE SOLICITUD DE BOBINAS A BODEGA -->
-            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;margin-bottom:20px">
-                <div style="font-size:16px;font-weight:bold;color:#3F4C9B;margin-bottom:12px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-fw fa-dolly"></i> <?= $isRebobinadora ? 'Solicitar Bobina para Rebobinadora' : 'Solicitar Bobinas a Bodega (100 MP PLA / 200 MP PP)' ?>
-                </div>
-
-                <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:12px 16px;margin-bottom:16px">
-                    <div style="font-size:13px;font-weight:bold;color:#1E293B;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                        <i class="fa fa-warehouse" style="color:#0284C7"></i> Bodegas Autorizadas: <b>100 (MP PLA)</b> y <b>200 (MP PP)</b>
-                        <?php if ($normTargetMat !== ''): ?>
-                            &middot; <span style="background:#E0F2FE;color:#0369A1;padding:2px 8px;border-radius:4px;font-size:11.5px">Material OT: <b><?=$normTargetMat?></b></span>
-                        <?php endif; ?>
-                        <?php if ($targetColor !== ''): ?>
-                            &middot; <span style="background:#FEF3C7;color:#92400E;padding:2px 8px;border-radius:4px;font-size:11.5px">Color OT: <b><?=htmlspecialchars($targetColor)?></b></span>
-                        <?php endif; ?>
-                    </div>
-                    <div style="font-size:12px;color:#64748B;margin-top:3px">
-                        <?= $isRebobinadora
-                            ? 'Seleccione la bobina de materia prima correspondiente (filtrada según materialidad PLA/PP y color de la OT) para alimentar la rebobinadora. Puede alternar los filtros superiores si requiere revisar otras bobinas.'
-                            : 'Puede seleccionar <b>una o varias bobinas</b> para solicitarlas a bodega. Al solicitarlas quedarán reservadas para esta OT y disponibles al pie de máquina. Luego, presione <b>"⚙️ Montar en Máquina"</b> en la tabla inferior al momento de colocarlas físicamente en el desbobinador.'
-                        ?>
-                    </div>
-                </div>
-
-                <!-- BARRA DE FILTROS INTELIGENTES PARA BOBINAS -->
-                <div style="background:#F1F5F9;border:1px solid #CBD5E1;border-radius:6px;padding:12px 14px;margin-bottom:12px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px">
-                    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;font-size:12.5px">
-                        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:bold;color:#0F172A;user-select:none">
-                            <input type="checkbox" id="chk_filter_compatible" checked onchange="applyRollFilters()" style="width:17px;height:17px;cursor:pointer">
-                            <span><i class="fa fa-star" style="color:#10B981"></i> Solo bobinas acordes a la OT (Color y Material)</span>
-                        </label>
-
-                        <div style="display:flex;align-items:center;gap:5px">
-                            <span style="color:#475569;font-weight:600">Materialidad:</span>
-                            <select id="sel_filter_material" class="inptxt" style="font-size:12px;padding:4px 8px;width:160px;font-weight:bold" onchange="applyRollFilters()">
-                                <option value="all">Todas (PLA y PP)</option>
-                                <option value="PLA" <?=$normTargetMat === 'PLA' ? 'selected' : ''?>>PLA (Bodega 100)</option>
-                                <option value="PP" <?=$normTargetMat === 'PP' ? 'selected' : ''?>>PP / TNT (Bodega 200)</option>
-                                <option value="OTRO">Otras</option>
-                            </select>
-                        </div>
-
-                        <div style="display:flex;align-items:center;gap:5px">
-                            <span style="color:#475569;font-weight:600">Color:</span>
-                            <select id="sel_filter_color" class="inptxt" style="font-size:12px;padding:4px 8px;width:150px;font-weight:bold" onchange="applyRollFilters()">
-                                <option value="all">Todos los Colores</option>
-                                <?php if ($targetColorClean !== ''): ?>
-                                    <option value="<?=htmlspecialchars($targetColorClean)?>" selected>Acorde OT (<?=htmlspecialchars($targetColor)?>)</option>
-                                <?php endif; ?>
-                                <option value="blanco">Blanco</option>
-                                <option value="negro">Negro</option>
-                                <option value="natural">Natural / Crudo / Beige</option>
-                                <option value="azul">Azul</option>
-                                <option value="rojo">Rojo</option>
-                                <option value="verde">Verde</option>
-                                <option value="amarillo">Amarillo</option>
-                                <option value="naranjo">Naranjo</option>
-                                <option value="gris">Gris</option>
-                                <option value="transparente">Transparente</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div style="display:flex;align-items:center;gap:8px">
-                        <input type="text" id="txt_filter_search" class="inptxt" style="font-size:12px;padding:5px 8px;width:210px" placeholder="🔍 Buscar código, SKU..." oninput="applyRollFilters()">
-                        <span id="rolls_filter_counter" style="font-size:11.5px;color:#64748B;font-weight:bold;white-space:nowrap"></span>
-                    </div>
-                </div>
-
-                <form method="post" action="/production/work-orders/materials/assign" id="form_request_rolls" onsubmit="return validateRollsRequestSubmit()">
-                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                    <input type="hidden" name="agid" value="<?=$agId?>">
-                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                    <?php if ($requiresSupervisor): ?>
-                        <input type="hidden" name="requires_supervisor" value="1">
-                    <?php endif; ?>
-
-                    <div style="border:1px solid #CBD5E1;border-radius:5px;max-height:360px;overflow-y:auto;margin-bottom:14px;background:#fff">
-                        <table border="0" width="100%" cellpadding="6" cellspacing="0" style="font-size:12.5px" id="table_rolls_request">
-                        <thead style="position:sticky;top:0;background:#F1F5F9;z-index:2;border-bottom:1px solid #CBD5E1">
-                            <tr>
-                                <th width="40" align="center" style="padding:8px">Sel.</th>
-                                <th width="65" align="center" style="padding:8px">Cant.</th>
-                                <th align="left" style="padding:8px">SKU / Bobina</th>
-                                <th align="left" style="padding:8px">Descripción Técnica (ERP unibag_unibag)</th>
-                                <th align="center" style="padding:8px">Color</th>
-                                <th align="center" style="padding:8px">Ancho</th>
-                                <th align="right" style="padding:8px">Peso Est.</th>
-                                <th align="center" style="padding:8px">Stock Disp.</th>
-                                <th align="center" style="padding:8px">Bodega ERP</th>
-                                <th align="center" style="padding:8px">Compatibilidad</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                        <?php
-                        $allDisplayRolls = array_merge($compatibleRolls, $otherRolls);
-                        ?>
-                        <?php if (empty($allDisplayRolls)): ?>
-                            <tr><td colspan="10" align="center" style="padding:25px;color:#94A3B8">No hay bobinas disponibles en las bodegas del ERP unibag_unibag en este momento.</td></tr>
-                        <?php else: ?>
-                            <?php foreach ($allDisplayRolls as $r): ?>
-                                <?php
-                                $rMat = (string)($r['roll_material'] ?? 'OTRO');
-                                $isComp = !empty($r['is_compatible']);
-                                $matMatch = !empty($r['is_material_match']);
-                                $colMatch = !empty($r['is_color_match']);
-                                $rowColor = mb_strtolower(trim((string)($r['color'] ?? '')));
-                                $rowSearch = mb_strtolower(($r['roll_code'] ?? '') . ' ' . ($r['sku_code'] ?? '') . ' ' . ($r['sku_desc'] ?? '') . ' ' . ($r['color'] ?? '') . ' ' . ($r['warehouse_name'] ?? '') . ' ' . $rMat);
-                                $stockAvailable = (float)($r['stock_qty'] ?? 0);
-                                $maxSelectable = max(1, (int)floor($stockAvailable));
-                                ?>
-                                <tr class="roll-row-item"
-                                    data-compatible="<?=$isComp ? '1' : '0'?>"
-                                    data-mat="<?=$rMat?>"
-                                    data-mat-match="<?=$matMatch ? '1' : '0'?>"
-                                    data-col-match="<?=$colMatch ? '1' : '0'?>"
-                                    data-color="<?=htmlspecialchars($rowColor)?>"
-                                    data-search="<?=htmlspecialchars($rowSearch)?>"
-                                    style="<?=$isComp ? 'background:#F0FDF4;border-bottom:1px solid #DCFCE7' : 'border-bottom:1px solid #F1F5F9'?>">
-                                    <td align="center">
-                                        <input type="checkbox" name="roll_ids[]" value="<?=$r['id']?>" id="chk_roll_<?=$r['id']?>" class="chk-roll-item" style="width:16px;height:16px;cursor:pointer">
-                                    </td>
-                                    <td align="center">
-                                        <input type="number" name="roll_qty[<?=$r['id']?>]" value="1" min="1" max="<?=$maxSelectable?>" style="width:48px;padding:2px 4px;font-size:11.5px;text-align:center" class="inptxt" title="Cantidad de bobinas a solicitar">
-                                    </td>
-                                    <td>
-                                        <label for="chk_roll_<?=$r['id']?>" style="font-weight:bold;color:<?=$isComp ? '#047857' : '#334155'?>;cursor:pointer">
-                                            <?=htmlspecialchars((string)($r['sku_code'] ?? $r['roll_code'] ?? 'S/C'))?>
-                                        </label>
-                                    </td>
-                                    <td>
-                                        <span style="font-size:12px;font-weight:600;color:#1E293B"><?=htmlspecialchars((string)($r['sku_desc'] ?? ''))?></span>
-                                    </td>
-                                    <td align="center">
-                                        <span style="<?=$colMatch ? 'background:#DCFCE7;color:#166534;font-weight:bold' : 'background:#F1F5F9;color:#475569'?>;padding:2px 6px;border-radius:3px;font-size:11.5px">
-                                            <?=htmlspecialchars((string)($r['color'] ?? '-'))?>
-                                        </span>
-                                    </td>
-                                    <td align="center"><?=(float)($r['width_mm'] ?? 0) > 0 ? (number_format((float)$r['width_mm'] / 10, 1) . ' cm') : '-'?></td>
-                                    <td align="right"><b style="color:#0F172A"><?=number_format((float)($r['weight_kg'] ?? $r['current_weight_kg'] ?? 0), 1, ',', '.')?> kg</b></td>
-                                    <td align="center">
-                                        <b style="color:#0284C7"><?=number_format($stockAvailable, 0, ',', '.')?></b>
-                                        <span style="font-size:10.5px;color:#64748B"> disp.</span>
-                                    </td>
-                                    <td align="center">
-                                        <span style="background:#F1F5F9;color:#334155;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;border:1px solid #E2E8F0">
-                                            <?=htmlspecialchars((string)($r['warehouse_name'] ?? 'Bodega'))?>
-                                        </span>
-                                    </td>
-                                    <td align="center">
-                                        <?php if ($isComp): ?>
-                                            <span style="background:#10B981;color:white;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold"><i class="fa fa-star"></i> Acorde a OT</span>
-                                        <?php elseif (!$matMatch): ?>
-                                            <span style="background:#FEE2E2;color:#991B1B;padding:2px 6px;border-radius:4px;font-size:11px"><i class="fa fa-times"></i> Mat. <?=$rMat?> (OT: <?=$normTargetMat?:'Distinto'?>)</span>
-                                        <?php elseif (!$colMatch): ?>
-                                            <span style="background:#FEF3C7;color:#92400E;padding:2px 6px;border-radius:4px;font-size:11px"><i class="fa fa-exclamation-triangle"></i> Color <?=htmlspecialchars((string)$r['color'])?></span>
-                                        <?php else: ?>
-                                            <span style="color:#94A3B8;font-size:11px">No coincide</span>
-                                        <?php endif; ?>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-                            <tr id="no_rolls_filter_msg" style="display:none">
-                                <td colspan="10" align="center" style="padding:25px;color:#94A3B8">
-                                    <i class="fa fa-filter" style="font-size:24px;margin-bottom:6px;display:block"></i>
-                                    No hay bobinas que coincidan con los filtros seleccionados (Materialidad / Color). Desmarque <i>"Solo bobinas acordes a la OT"</i> o cambie los filtros para ver otras opciones.
-                                </td>
-                            </tr>
-                        <?php endif; ?>
-                        </tbody>
-                        </table>
-                    </div>
-
-                    <?php if ($requiresSupervisor): ?>
-                        <table border="0" width="100%" cellpadding="6" cellspacing="0" style="margin-bottom:12px">
-                        <colgroup><col width="200"><col></colgroup>
-                        <tr>
-                            <td class="tdleft" style="background:#FEF3C7;color:#92400E"><b>Usuario Supervisor *</b></td>
-                            <td class="tdnrm" style="background:#FEF3C7">
-                                <input type="text" name="sup_user" class="inptxt" style="width:220px" required autocomplete="off" placeholder="Login supervisor">
-                                <span style="font-size:12px;color:#92400E;margin-left:8px">Autorización por exceso de cupo</span>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="tdleft" style="background:#FEF3C7;color:#92400E"><b>Contraseña Supervisor *</b></td>
-                            <td class="tdnrm" style="background:#FEF3C7">
-                                <input type="password" name="sup_pass" class="inptxt" style="width:220px" required placeholder="Contraseña">
-                            </td>
-                        </tr>
-                        </table>
-                    <?php endif; ?>
-
-                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
-                    <colgroup><col width="200"><col></colgroup>
-                    <tr>
-                        <td class="tdleft">Observaciones de Solicitud</td>
-                        <td class="tdnrm"><input type="text" name="comments" class="inptxt" style="width:100%" placeholder="Observaciones opcionales para la solicitud de bobinas..."></td>
-                    </tr>
-                    <tr>
-                        <td class="tdleft">&nbsp;</td>
-                        <td class="tdnrm" style="padding-top:10px">
-                            <button type="submit" class="btnblue" style="font-size:14px;padding:9px 24px;cursor:pointer">
-                                <i class="fa fa-fw fa-dolly"></i> <?= $isRebobinadora ? '📥 Solicitar Bobina Seleccionada' : '📥 Solicitar Bobinas Seleccionadas' ?>
-                            </button>
-                        </td>
-                    </tr>
-                    </table>
-                </form>
-
-                <script>
-                function validateRollsRequestSubmit() {
-                    var chks = document.querySelectorAll('.chk-roll-item:checked');
-                    if (chks.length === 0) {
-                        alert('Debe marcar la casilla de al menos una bobina para solicitar.');
-                        return false;
-                    }
-                    return true;
-                }
-
-                function applyRollFilters() {
-                    var chkComp = document.getElementById('chk_filter_compatible');
-                    var onlyComp = chkComp ? chkComp.checked : false;
-                    var selMat = document.getElementById('sel_filter_material');
-                    var matVal = selMat ? selMat.value : 'all';
-                    var selCol = document.getElementById('sel_filter_color');
-                    var colVal = selCol ? selCol.value.toLowerCase().trim() : 'all';
-                    var txtSearch = document.getElementById('txt_filter_search');
-                    var qVal = txtSearch ? txtSearch.value.toLowerCase().trim() : '';
-
-                    var rows = document.querySelectorAll('.roll-row-item');
-                    var visible = 0;
-                    var total = rows.length;
-
-                    rows.forEach(function(row) {
-                        var isComp = row.getAttribute('data-compatible') === '1';
-                        var rMat = row.getAttribute('data-mat') || '';
-                        var colMatch = row.getAttribute('data-col-match') === '1';
-                        var rCol = (row.getAttribute('data-color') || '').toLowerCase();
-                        var searchTxt = (row.getAttribute('data-search') || '').toLowerCase();
-
-                        var show = true;
-
-                        if (onlyComp && !isComp) {
-                            show = false;
-                        }
-
-                        if (show && matVal !== 'all') {
-                            if (matVal === 'PLA' && rMat !== 'PLA') show = false;
-                            else if (matVal === 'PP' && rMat !== 'PP') show = false;
-                            else if (matVal === 'OTRO' && (rMat === 'PLA' || rMat === 'PP')) show = false;
-                        }
-
-                        if (show && colVal !== 'all') {
-                            var targetClean = '<?=htmlspecialchars(addslashes($targetColorClean))?>';
-                            if (colVal === targetClean) {
-                                if (!colMatch) show = false;
-                            } else {
-                                if (colVal === 'natural' || colVal === 'crudo' || colVal === 'beige') {
-                                    if (rCol !== 'natural' && rCol !== 'crudo' && rCol !== 'beige' && !searchTxt.includes('natural') && !searchTxt.includes('crudo') && !searchTxt.includes('beige')) {
-                                        show = false;
-                                    }
-                                } else if (!rCol.includes(colVal) && !searchTxt.includes(colVal)) {
-                                    show = false;
-                                }
-                            }
-                        }
-
-                        if (show && qVal !== '') {
-                            if (!searchTxt.includes(qVal)) {
-                                show = false;
-                            }
-                        }
-
-                        row.style.display = show ? '' : 'none';
-                        if (show) visible++;
-                    });
-
-                    var counter = document.getElementById('rolls_filter_counter');
-                    if (counter) {
-                        counter.textContent = 'Mostrando ' + visible + ' de ' + total + ' bobinas';
-                    }
-
-                    var noRows = document.getElementById('no_rolls_filter_msg');
-                    if (noRows) {
-                        noRows.style.display = (visible === 0) ? '' : 'none';
-                    }
-                }
-
-                if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', applyRollFilters);
-                } else {
-                    applyRollFilters();
-                }
-                </script>
-            </div>
-
-            <!-- ============================================================== -->
-            <!-- TABLA DE TRAZABILIDAD: BOBINAS DE LA OT                        -->
-            <!-- SEPARACIÓN: SOLICITADA / DISPONIBLE vs MONTADA EN MÁQUINA      -->
-            <!-- ============================================================== -->
-            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
-                <div style="font-size:16px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-fw fa-link"></i> Bobinas Asignadas a esta OT &mdash; Trazabilidad, Montaje y Registro de Consumo
-                </div>
-
-                <?php if (empty($assignedRolls)): ?>
-                    <div style="background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:4px;padding:25px;text-align:center;color:#64748B">
-                        <i class="fa fa-boxes" style="font-size:28px;color:#94A3B8;margin-bottom:8px"></i><br>
-                        Actualmente no hay bobinas solicitadas ni montadas en esta orden de trabajo.<br>
-                        Seleccione una o varias bobinas en la tabla superior para solicitarlas a bodega.
-                    </div>
-                <?php else: ?>
-                    <table border="0" width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:4px;overflow:hidden">
+                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
                     <thead>
-                        <tr style="background:#F1F5F9;color:#334155;font-size:12.5px">
-                            <th class="tdheader" align="left">Bobina / Código</th>
-                            <th class="tdheader" align="left">Material / SKU</th>
-                            <th class="tdheader" align="center">Color</th>
-                            <th class="tdheader" align="center">Ancho</th>
-                            <th class="tdheader" align="center">Peso Inicial</th>
-                            <th class="tdheader" align="center" width="220">Estado de Bobina</th>
-                            <th class="tdheader" align="center" width="340">Acción / Montaje / Consumo</th>
+                        <tr style="background:#F8FAFC;color:#334155;font-size:12px;text-transform:uppercase">
+                            <th class="tdheader" align="left">Pantalla</th>
+                            <th class="tdheader" align="left">Función</th>
                         </tr>
                     </thead>
                     <tbody>
-                    <?php foreach ($assignedRolls as $ar): 
-                        $rollState = (string)($ar['status'] ?? 'ASSIGNED');
-                        $isClosed = in_array($rollState, ['CONSUMED', 'RETURNED'], true);
-                        $isMounted = !empty($ar['is_mounted']);
-                    ?>
+                        <tr style="border-bottom:1px solid #E2E8F0">
+                            <td class="tdnrm"><b>Insumos</b></td>
+                            <td class="tdnrm">Solicitar tintas e insumos a bodega para la OT.</td>
+                        </tr>
+                        <tr style="border-bottom:1px solid #E2E8F0">
+                            <td class="tdnrm"><b>Configuración de 10 Unidades</b></td>
+                            <td class="tdnrm">Registrar bastidor, mesh, secador y total de tinta por unidad/color.</td>
+                        </tr>
                         <tr>
-                            <td class="tdnrm">
-                                <b><?=htmlspecialchars((string)($ar['roll_code'] ?? ('#' . $ar['id'])))?></b><br>
-                                <span style="font-size:11px;color:#64748B">ID: #<?=$ar['id']?></span>
-                            </td>
-                            <td class="tdnrm">
-                                <?=htmlspecialchars((string)($ar['sku_code'] ?? 'Sustrato'))?><br>
-                                <span style="font-size:11px;color:#64748B"><?=htmlspecialchars((string)($ar['sku_desc'] ?? ''))?></span>
-                            </td>
-                            <td class="tdnrm" align="center">
-                                <span style="background:#E2E8F0;color:#1E293B;padding:3px 8px;border-radius:3px;font-size:12px;font-weight:bold">
-                                    <?=htmlspecialchars((string)($ar['color'] ?? '-'))?>
-                                </span>
-                            </td>
-                            <td class="tdnrm" align="center">
-                                <?=(float)($ar['width_mm'] ?? 0) > 0 ? (number_format((float)$ar['width_mm'] / 10, 1) . ' cm') : '-'?>
-                            </td>
-                            <td class="tdnrm" align="center">
-                                <b style="color:#0F172A"><?=number_format((float)($ar['weight_kg'] ?? 0), 1, ',', '.')?> kg</b>
-                            </td>
-                            <td class="tdnrm" align="center">
-                                <?php if ($isClosed): ?>
-                                    <span style="background:#DCFCE7;color:#166534;padding:4px 9px;border-radius:4px;font-size:11.5px;font-weight:bold">
-                                        <i class="fa fa-check"></i> CONSUMIDA
-                                    </span>
-                                <?php elseif ($isMounted): ?>
-                                    <span style="background:#DBEAFE;color:#1E40AF;padding:4px 9px;border-radius:4px;font-size:11.5px;font-weight:bold">
-                                        <i class="fa fa-cog fa-spin"></i> MONTADA EN MÁQUINA
-                                    </span>
-                                    <?php if (!empty($ar['mounted_at'])): ?>
-                                        <div style="font-size:10.5px;color:#64748B;margin-top:2px"><?=htmlspecialchars($ar['mounted_at'])?></div>
-                                    <?php endif; ?>
-                                <?php else: ?>
-                                    <span style="background:#FEF3C7;color:#92400E;padding:4px 9px;border-radius:4px;font-size:11.5px;font-weight:bold">
-                                        <i class="fa fa-box"></i> SOLICITADA (NO MONTADA)
-                                    </span>
-                                <?php endif; ?>
-                            </td>
-                            <td class="tdnrm">
-                                <?php if ($isClosed): ?>
-                                    <span style="color:#059669;font-size:12px">
-                                        <i class="fa fa-check-circle"></i> Bobina procesada y trazabilidad registrada.
-                                    </span>
-                                <?php elseif ($isMounted): ?>
-                                    <!-- FORMULARIO DE CONSUMO CUANDO ESTÁ MONTADA -->
-                                    <form method="post" action="/production/work-orders/materials/consume" style="margin:0">
-                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                        <input type="hidden" name="agid" value="<?=$agId?>">
-                                        <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                                        <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
+                            <td class="tdnrm"><b>Producción</b></td>
+                            <td class="tdnrm">Ejecutar el tiraje sobre bolsas base, sin mezclar este flujo con bobinas.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
 
-                                        <table border="0" cellpadding="2" cellspacing="0" width="100%">
-                                        <tr>
-                                            <td style="font-size:11.5px;color:#475569">Kg Consumidos:</td>
-                                            <td>
-                                                <input type="number" step="0.1" name="consumed_weight" class="inptxt" style="width:85px;padding:3px 6px" placeholder="0.0" required> kg
-                                            </td>
-                                        </tr>
-                                        <tr>
-                                            <td style="font-size:11.5px;color:#475569">Kg Retazo:</td>
-                                            <td>
-                                                <input type="number" step="0.1" name="scrap_weight" class="inptxt" style="width:85px;padding:3px 6px" placeholder="0.0"> kg
-                                            </td>
-                                        </tr>
-                                        <tr>
-                                            <td style="font-size:11.5px;color:#475569">Detalle:</td>
-                                            <td>
-                                                <input type="text" name="comments" class="inptxt" style="width:100%;padding:3px 6px" placeholder="Causa retazo / lote...">
-                                            </td>
-                                        </tr>
-                                        <tr>
-                                            <td>&nbsp;</td>
-                                            <td style="padding-top:4px">
-                                                <button type="submit" class="btngreen" style="font-size:12px;padding:4px 12px;cursor:pointer">
-                                                    <i class="fa fa-save"></i> ⚖️ Registrar Consumo y Retazo
-                                                </button>
-                                            </td>
-                                        </tr>
-                                        </table>
-                                    </form>
-                                    <div style="margin-top:6px;text-align:right">
+        <?php if (!$isSeriPulpo): ?>
+        <?php
+        $printerOutputDefaultSku = trim((string)($agenda['item_title'] ?? $agenda['fab_type'] ?? 'BOBINA-IMPRESA'));
+        $printerOutputSuggestedMeters = (float)($metros_a_imprimir ?? ($stats['total_meters'] ?? 0));
+        $printerTelaWidth = (float)($agenda['req_operador_tela_width'] ?? ($agenda['fab_med_width'] ?? 80));
+        if ($printerTelaWidth <= 0) {
+            $printerTelaWidth = 80.0;
+        }
+        $printerTelaGramms = (float)($agenda['fab_mat_gramms'] ?? 80);
+        if ($printerTelaGramms <= 0) {
+            $printerTelaGramms = 80.0;
+        }
+        $printerMetersPerKg = round(100000.0 / ($printerTelaWidth * $printerTelaGramms), 2);
+        ?>
+
+        <!-- NOTIFICACIONES Y ALERTS DE MONTAJE Y SALIDA DE BOBINA -->
+        <?php if (!empty($_GET['saved_output'])): ?>
+            <div style="background:#ECFDF5;border:1.5px solid #10B981;border-radius:6px;padding:16px 20px;margin-bottom:18px;color:#065F46">
+                <div style="font-weight:bold;font-size:15px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-check-circle" style="font-size:22px;color:#059669"></i> ¡Salida y desmontaje de bobina registrados exitosamente!
+                </div>
+                <?php if (!empty($_GET['output_code'])): ?>
+                    <div style="margin-top:12px;background:#FFFFFF;border:1.5px solid #6366F1;padding:14px 18px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+                        <div style="font-size:13px;color:#4338CA;margin-bottom:6px">
+                            <i class="fa fa-tag" style="color:#4F46E5"></i> <b>NUEVA BOBINA SALIENTE GENERADA:</b>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+                            <span style="font-size:17px;font-family:monospace;font-weight:bold;color:#3730A3;background:#EEF2FF;padding:5px 12px;border-radius:4px;border:1px solid #C7D2FE">
+                                <?=htmlspecialchars((string)$_GET['output_code'])?>
+                            </span>
+                            <span style="font-size:14px;font-weight:bold;color:#1F2937">
+                                Peso salida: <b style="color:#4338CA"><?=number_format((float)($_GET['output_kg'] ?? 0), 2, ',', '.')?> kg</b>
+                            </span>
+                            <?php if (!empty($_GET['output_meters'])): ?>
+                                <span style="font-size:13px;color:#4338CA">
+                                    <?=number_format((float)$_GET['output_meters'], 0, ',', '.')?> m aprox.
+                                </span>
+                            <?php endif; ?>
+                            <?php if (!empty($_GET['output_id'])): ?>
+                                <a href="/rolls/<?=(int)$_GET['output_id']?>/label?server_print=1" target="_blank" class="btnblue" style="font-size:13px;padding:7px 16px;text-decoration:none;font-weight:bold;display:inline-flex;align-items:center;gap:6px;border-radius:4px;background:#4F46E5">
+                                    <i class="fa fa-print"></i> 🖨️ Imprimir Etiqueta Salida
+                                </a>
+                                <a href="/rolls/<?=(int)$_GET['output_id']?>/label" target="_blank" class="btngrey" style="font-size:13px;padding:7px 14px;text-decoration:none;font-weight:bold;display:inline-flex;align-items:center;gap:6px;border-radius:4px">
+                                    <i class="fa fa-eye"></i> Ver Etiqueta
+                                </a>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                <?php endif; ?>
+                <?php if (!empty($_GET['leftover_code'])): ?>
+                    <div style="margin-top:12px;background:#FFFFFF;border:1.5px solid #10B981;padding:14px 18px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+                        <div style="font-size:13px;color:#065F46;margin-bottom:6px">
+                            <i class="fa fa-tags" style="color:#059669"></i> <b>NUEVA BOBINA SOBRANTE GENERADA &mdash; ETIQUETA LISTA PARA IMPRIMIR:</b>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+                            <span style="font-size:17px;font-family:monospace;font-weight:bold;color:#047857;background:#DCFCE7;padding:5px 12px;border-radius:4px;border:1px solid #86EFAC">
+                                <?=htmlspecialchars((string)$_GET['leftover_code'])?>
+                            </span>
+                            <span style="font-size:14px;font-weight:bold;color:#1F2937">
+                                Peso Sobrante: <b style="color:#059669"><?=number_format((float)($_GET['leftover_kg'] ?? 0), 2, ',', '.')?> kg</b>
+                            </span>
+                            <?php if (!empty($_GET['leftover_id'])): ?>
+                                <a href="/rolls/<?=(int)$_GET['leftover_id']?>/label?server_print=1" target="_blank" class="btngreen" style="font-size:13px;padding:7px 16px;text-decoration:none;font-weight:bold;display:inline-flex;align-items:center;gap:6px;border-radius:4px">
+                                    <i class="fa fa-print"></i> 🖨️ Mandar a Imprimir Etiqueta Sobrante (Zebra / 100×70mm)
+                                </a>
+                                <a href="/rolls/<?=(int)$_GET['leftover_id']?>/label" target="_blank" class="btnblue" style="font-size:13px;padding:7px 14px;text-decoration:none;font-weight:bold;display:inline-flex;align-items:center;gap:6px;border-radius:4px">
+                                    <i class="fa fa-eye"></i> 👁️ Ver Etiqueta
+                                </a>
+                            <?php endif; ?>
+                        </div>
+                        <div style="font-size:12px;color:#4B5563;margin-top:8px">
+                            <i class="fa fa-info-circle"></i> La bobina sobrante ha quedado ingresada con trazabilidad completa vinculada a la bobina original y disponible en <b>Bodega 3000</b>.
+                        </div>
+                    </div>
+                <?php else: ?>
+                    <div style="margin-top:6px;font-size:12.5px;color:#047857">
+                        La bobina se registró como consumida en su totalidad para esta orden de trabajo (sin saldo sobrante).
+                    </div>
+                <?php endif; ?>
+                <?php if (!empty($_GET['output_autoprint']) && !empty($_GET['output_id'])): ?>
+                    <script>
+                    window.addEventListener('load', function() {
+                        window.open('/rolls/<?=(int)$_GET['output_id']?>/label?server_print=1', '_blank');
+                    }, { once: true });
+                    </script>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+
+        <?php if (!empty($_GET['mounted'])): ?>
+            <div style="background:#EFF6FF;border:1.5px solid #3B82F6;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#1E40AF;font-size:13px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-check-circle" style="font-size:18px;color:#2563EB"></i>
+                <div>
+                    Bobina montada en máquina exitosamente.
+                    <?php if (!empty($_GET['m_kg'])): ?>
+                        Peso de ingreso a máquina registrado: <b><?=number_format((float)$_GET['m_kg'], 2, ',', '.')?> kg</b>.
+                    <?php endif; ?>
+                </div>
+            </div>
+        <?php endif; ?>
+
+        <?php if (!empty($_GET['unmounted'])): ?>
+            <div style="background:#F1F5F9;border:1.5px solid #94A3B8;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#334155;font-size:13px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-pause-circle" style="font-size:18px"></i> Bobina desmontada temporalmente de la máquina.
+            </div>
+        <?php endif; ?>
+
+        <?php if (!empty($_GET['unassigned'])): ?>
+            <div style="background:#F8FAFC;border:1.5px solid #CBD5E1;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#475569;font-size:13px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-undo" style="font-size:16px"></i> Bobina devuelta a bodega exitosamente.
+            </div>
+        <?php endif; ?>
+
+        <?php if (!empty($_GET['error'])): ?>
+            <div style="background:#FEF2F2;border:1.5px solid #EF4444;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#991B1B;font-size:13px;display:flex;align-items:center;gap:8px">
+                <i class="fa fa-exclamation-triangle" style="font-size:18px;color:#DC2626"></i>
+                <div><?=htmlspecialchars((string)$_GET['error'])?></div>
+            </div>
+        <?php endif; ?>
+
+        <!-- ENCABEZADO Y ACCESO A SOLICITUD EXTERIOR EN BODEGA 3000 -->
+        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:16px 20px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;box-shadow:0 1px 2px rgba(0,0,0,0.04)">
+            <div>
+                <div style="font-size:16px;font-weight:bold;color:#1E3A8A;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-link"></i> Control de Montaje y Salida de Bobinas &mdash; OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>
+                </div>
+                <div style="font-size:12.5px;color:#64748B;margin-top:3px">
+                    Las bobinas se solicitan previamente a Bodega 3000 desde el módulo exterior. Aquí registre el peso de ingreso al montar en desbobinador y la salida de bobinas procesadas.
+                </div>
+            </div>
+            <div>
+                <a href="/production/materials/request?agid=<?=$agId?>" target="_blank" class="btnblue" style="text-decoration:none;font-weight:bold;font-size:13px;padding:8px 18px;display:inline-flex;align-items:center;gap:6px">
+                    <i class="fa fa-dolly"></i> Solicitar más bobinas a Bodega 3000
+                </a>
+            </div>
+        </div>
+
+        <!-- TABLA DE TRAZABILIDAD: BOBINAS DE LA OT (MONTAJE Y SALIDA) -->
+        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:20px">
+            <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-fw fa-industry"></i> Bobinas Asignadas a esta Orden de Trabajo
+                </div>
+                <div style="font-size:12.5px;color:#64748B;font-weight:normal">
+                    Total: <b><?=count($assignedRolls)?></b> bobina(s) registradas
+                </div>
+            </div>
+
+            <?php if (empty($assignedRolls)): ?>
+                <div style="background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:6px;padding:30px 20px;text-align:center;color:#64748B">
+                    <i class="fa fa-boxes" style="font-size:32px;color:#94A3B8;margin-bottom:10px;display:block"></i>
+                    <div style="font-size:14px;font-weight:bold;color:#334155;margin-bottom:4px">No hay bobinas asignadas en este momento</div>
+                    <div style="font-size:12.5px">
+                        Solicite las bobinas desde el módulo exterior de <b>Solicitud de Materiales (Bodega 3000)</b>.<br>
+                        Una vez despachadas por bodega, aparecerán aquí para realizar su montaje y pesaje.
+                    </div>
+                    <div style="margin-top:14px">
+                        <a href="/production/materials/request?agid=<?=$agId?>" class="btnblue" style="text-decoration:none;font-size:13px;padding:7px 16px;display:inline-flex;align-items:center;gap:6px">
+                            <i class="fa fa-dolly"></i> Ir a Solicitar Materiales
+                        </a>
+                    </div>
+                </div>
+            <?php else: ?>
+                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
+                <thead>
+                    <tr style="background:#F1F5F9;color:#334155;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">
+                        <th class="tdheader" align="left" style="padding:10px 8px">Bobina / Código</th>
+                        <th class="tdheader" align="left" style="padding:10px 8px">Material / SKU</th>
+                        <th class="tdheader" align="center" style="padding:10px 8px">Color</th>
+                        <th class="tdheader" align="center" style="padding:10px 8px">Ancho</th>
+                        <th class="tdheader" align="center" style="padding:10px 8px">Peso Inicial</th>
+                        <th class="tdheader" align="center" width="220" style="padding:10px 8px">Estado de Bobina</th>
+                        <th class="tdheader" align="center" width="370" style="padding:10px 8px">Acción / Montaje / Salida</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($assignedRolls as $ar): 
+                    $rollState = (string)($ar['status'] ?? 'ASSIGNED');
+                    $isClosed = in_array($rollState, ['CONSUMED', 'RETURNED'], true);
+                    $isMounted = !empty($ar['is_mounted']) && !$isClosed;
+                    $entryKg = (float)($ar['entry_weight_kg'] ?? $ar['weight_kg'] ?? 0);
+                ?>
+                    <tr style="border-bottom:1px solid #E2E8F0;background:<?=$isClosed ? '#FAFAFA' : ($isMounted ? '#F0FDF4' : '#FFFFFF')?>">
+                        <td class="tdnrm" valign="top">
+                            <div style="font-size:13.5px;font-weight:bold;color:#0F172A">
+                                <?=htmlspecialchars((string)($ar['roll_code'] ?? ('#' . $ar['id'])))?>
+                            </div>
+                            <div style="font-size:11px;color:#64748B;margin-top:2px">ID: #<?=$ar['id']?></div>
+                        </td>
+                        <td class="tdnrm" valign="top">
+                            <div style="font-weight:600;color:#1E293B">
+                                <?=htmlspecialchars((string)($ar['sku_code'] ?? 'Sustrato'))?>
+                            </div>
+                            <div style="font-size:11.5px;color:#64748B;margin-top:2px">
+                                <?=htmlspecialchars((string)($ar['sku_desc'] ?? ''))?>
+                            </div>
+                        </td>
+                        <td class="tdnrm" align="center" valign="top">
+                            <span style="background:#E2E8F0;color:#1E293B;padding:3px 8px;border-radius:4px;font-size:11.5px;font-weight:bold">
+                                <?=htmlspecialchars((string)($ar['color'] ?? '-'))?>
+                            </span>
+                        </td>
+                        <td class="tdnrm" align="center" valign="top">
+                            <?=(float)($ar['width_mm'] ?? 0) > 0 ? (number_format((float)$ar['width_mm'] / 10, 1) . ' cm') : '-'?>
+                        </td>
+                        <td class="tdnrm" align="center" valign="top">
+                            <b style="color:#0F172A;font-size:13px"><?=number_format((float)($ar['weight_kg'] ?? 0), 2, ',', '.')?> kg</b>
+                        </td>
+                        <td class="tdnrm" align="center" valign="top">
+                            <?php if ($isClosed): ?>
+                                <span style="background:#DCFCE7;color:#166534;padding:4px 10px;border-radius:4px;font-size:11.5px;font-weight:bold;display:inline-block">
+                                    <i class="fa fa-check-circle"></i> SALIDA REGISTRADA
+                                </span>
+                                <?php if (!empty($ar['output_at'])): ?>
+                                    <div style="font-size:10.5px;color:#64748B;margin-top:3px"><?=htmlspecialchars($ar['output_at'])?></div>
+                                <?php endif; ?>
+                            <?php elseif ($isMounted): ?>
+                                <span style="background:#DBEAFE;color:#1E40AF;padding:4px 10px;border-radius:4px;font-size:11.5px;font-weight:bold;display:inline-block">
+                                    <i class="fa fa-cog fa-spin"></i> MONTADA EN MÁQUINA
+                                </span>
+                                <div style="font-size:11.5px;color:#1E3A8A;margin-top:4px">
+                                    Peso Ingreso: <b><?=number_format($entryKg, 2, ',', '.')?> kg</b>
+                                </div>
+                                <?php if (!empty($ar['mounted_at'])): ?>
+                                    <div style="font-size:10.5px;color:#64748B;margin-top:2px"><?=htmlspecialchars($ar['mounted_at'])?></div>
+                                <?php endif; ?>
+                            <?php else: ?>
+                                <span style="background:#FEF3C7;color:#92400E;padding:4px 10px;border-radius:4px;font-size:11.5px;font-weight:bold;display:inline-block">
+                                    <i class="fa fa-box"></i> DISPONIBLE (NO MONTADA)
+                                </span>
+                                <div style="font-size:11px;color:#64748B;margin-top:3px">Al pie de máquina</div>
+                            <?php endif; ?>
+                        </td>
+                        <td class="tdnrm" valign="top">
+                            <?php if ($isClosed): ?>
+                                <!-- RESUMEN DE DESMONTAJE CUANDO YA FUE PROCESADA -->
+                                <div style="background:#FFFFFF;border:1px solid #D1D5DB;border-radius:5px;padding:8px 12px;font-size:12px;line-height:1.6">
+                                    <div style="display:flex;justify-content:space-between;gap:8px">
+                                        <span style="color:#4B5563">Peso Ingreso Máquina:</span>
+                                        <b><?=number_format((float)($ar['entry_weight_kg'] ?? $ar['weight_kg'] ?? 0), 2, ',', '.')?> kg</b>
+                                    </div>
+                                    <div style="display:flex;justify-content:space-between;gap:8px">
+                                        <span style="color:#4B5563">Mermas Desmontaje:</span>
+                                        <b style="color:#DC2626"><?=number_format((float)($ar['scrap_kg'] ?? 0), 2, ',', '.')?> kg</b>
+                                    </div>
+                                    <?php if (!empty($ar['output_roll_code']) || (float)($ar['output_bobina_kg'] ?? 0) > 0): ?>
+                                        <div style="margin-top:6px;padding:6px 8px;background:#EEF2FF;border:1px solid #C7D2FE;border-radius:4px">
+                                            <div style="font-size:11.5px;font-weight:bold;color:#3730A3">
+                                                🏷️ Bobina saliente: <?=number_format((float)($ar['output_bobina_kg'] ?? 0), 2, ',', '.')?> kg
+                                                <?php if (!empty($ar['output_meters'])): ?>
+                                                    &bull; <?=number_format((float)$ar['output_meters'], 0, ',', '.')?> m
+                                                <?php endif; ?>
+                                            </div>
+                                            <?php if (!empty($ar['output_roll_code'])): ?>
+                                                <div style="font-size:11.5px;font-family:monospace;font-weight:bold;color:#4338CA;margin-top:2px">
+                                                    <?=htmlspecialchars((string)$ar['output_roll_code'])?>
+                                                </div>
+                                            <?php endif; ?>
+                                            <?php if (!empty($ar['output_roll_id'])): ?>
+                                                <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+                                                    <a href="/rolls/<?=(int)$ar['output_roll_id']?>/label?server_print=1" target="_blank" class="btnblue" style="font-size:10.5px;padding:3px 8px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;border-radius:3px;background:#4F46E5">
+                                                        <i class="fa fa-print"></i> 🖨️ Etiqueta salida
+                                                    </a>
+                                                    <a href="/rolls/<?=(int)$ar['output_roll_id']?>/label" target="_blank" class="btngrey" style="font-size:10.5px;padding:3px 8px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;border-radius:3px">
+                                                        <i class="fa fa-eye"></i> Ver
+                                                    </a>
+                                                </div>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                    <?php if (!empty($ar['mermas_detail']) && is_array($ar['mermas_detail'])): ?>
+                                        <div style="font-size:11px;color:#475569;background:#F8FAFC;padding:4px 6px;border-radius:4px;margin-top:3px;border:1px solid #E2E8F0">
+                                            <?php foreach ($ar['mermas_detail'] as $mtId => $md): 
+                                                $mtName = 'Tipo #' . $mtId;
+                                                foreach ($mermatypes as $mt) {
+                                                    if ((int)$mt['id'] === (int)$mtId) { $mtName = $mt['merma_title']; break; }
+                                                }
+                                            ?>
+                                                <div>&bull; <?=htmlspecialchars($mtName)?>: <b><?=number_format((float)($md['kgs'] ?? 0), 2, ',', '.')?> kg</b><?=!empty($md['comments']) ? (' (' . htmlspecialchars($md['comments']) . ')') : ''?></div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                    <?php if (!empty($ar['leftover_roll_code']) || (float)($ar['leftover_kg'] ?? 0) > 0): ?>
+                                        <div style="margin-top:6px;padding:6px 8px;background:#F0FDF4;border:1px solid #86EFAC;border-radius:4px">
+                                            <div style="font-size:11.5px;font-weight:bold;color:#166534">
+                                                📦 Sobrante de Bobina: <?=number_format((float)($ar['leftover_kg'] ?? 0), 2, ',', '.')?> kg
+                                            </div>
+                                            <div style="font-size:11.5px;font-family:monospace;font-weight:bold;color:#047857;margin-top:2px">
+                                                <?=htmlspecialchars((string)$ar['leftover_roll_code'])?>
+                                            </div>
+                                            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+                                                <?php if (!empty($ar['leftover_roll_id'])): ?>
+                                                    <a href="/rolls/<?=(int)$ar['leftover_roll_id']?>/label?server_print=1" target="_blank" class="btngreen" style="font-size:10.5px;padding:3px 8px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;border-radius:3px">
+                                                        <i class="fa fa-print"></i> 🖨️ Etiqueta
+                                                    </a>
+                                                    <a href="/rolls/<?=(int)$ar['leftover_roll_id']?>/label" target="_blank" class="btnblue" style="font-size:10.5px;padding:3px 8px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;border-radius:3px">
+                                                        <i class="fa fa-eye"></i> Ver
+                                                    </a>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div style="font-size:10px;color:#15803D;margin-top:3px">
+                                                Trazabilidad guardada &bull; En Bodega 3000
+                                            </div>
+                                        </div>
+                                    <?php else: ?>
+                                        <div style="color:#64748B;font-size:11px;margin-top:4px">
+                                            <i class="fa fa-check"></i> Consumida completa (sin sobrante).
+                                        </div>
+                                    <?php endif; ?>
+                                </div>
+                            <?php elseif ($isMounted): ?>
+                                <!-- BOTÓN LIMPIO PARA ABRIR VENTANA FLOTANTE DE SALIDA / DESMONTAJE -->
+                                <div style="background:#F0FDF4;border:1px solid #86EFAC;border-radius:6px;padding:12px;text-align:center">
+                                    <div style="font-size:12px;color:#166534;font-weight:bold;margin-bottom:4px">
+                                        <i class="fa fa-cog fa-spin"></i> En Desbobinador
+                                    </div>
+                                    <div style="font-size:12px;color:#1E3A8A;margin-bottom:10px">
+                                        Peso Ingreso: <b><?=number_format($entryKg, 2, ',', '.')?> kg</b>
+                                    </div>
+                                    <div>
+                                        <button type="button" class="btnblue" style="font-size:12.5px;padding:7px 16px;cursor:pointer;font-weight:bold;display:inline-flex;align-items:center;gap:6px;box-shadow:0 1px 3px rgba(0,0,0,0.12)" onclick="openRollOutputModal(<?= (int)$ar['id'] ?>, <?= htmlspecialchars(json_encode($ar['roll_code'] ?? ('#' . $ar['id']))) ?>, <?= (float)$entryKg ?>)">
+                                            <i class="fa fa-sign-out-alt"></i> ⏹️ Desmontar / Salida / Etiquetas
+                                        </button>
+                                    </div>
+                                    <div style="margin-top:8px">
                                         <form method="post" action="/production/work-orders/materials/mount" style="display:inline">
                                             <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
                                             <input type="hidden" name="agid" value="<?=$agId?>">
                                             <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
                                             <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
                                             <input type="hidden" name="action_type" value="unmount">
-                                            <button type="submit" class="btngrey" style="font-size:11px;padding:3px 8px;cursor:pointer" title="Desmontar temporalmente del desbobinador">
-                                                <i class="fa fa-pause"></i> Desmontar
+                                            <button type="submit" class="btngrey" style="font-size:11px;padding:3px 8px;cursor:pointer" title="Desmontar temporalmente del desbobinador sin registrar salida" onclick="return confirm('¿Desmontar temporalmente esta bobina de la máquina sin registrar consumo ni salida?');">
+                                                <i class="fa fa-pause"></i> Desmontar temp.
                                             </button>
                                         </form>
                                     </div>
-                                <?php else: ?>
-                                    <!-- BOTÓN PARA MONTAR EN MÁQUINA O DEVOLVER A BODEGA -->
-                                    <div style="display:flex;align-items:center;gap:8px">
-                                        <form method="post" action="/production/work-orders/materials/mount" style="margin:0">
-                                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                            <input type="hidden" name="agid" value="<?=$agId?>">
-                                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                                            <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
-                                            <input type="hidden" name="action_type" value="mount">
-                                            <button type="submit" class="btngreen" style="font-size:12px;padding:6px 14px;cursor:pointer;font-weight:bold">
-                                                <i class="fa fa-play-circle"></i> ⚙️ Montar en Máquina
-                                            </button>
-                                        </form>
-                                        <form method="post" action="/production/work-orders/materials/mount" style="margin:0">
-                                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                            <input type="hidden" name="agid" value="<?=$agId?>">
-                                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                                            <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
-                                            <input type="hidden" name="action_type" value="unassign">
-                                            <button type="submit" class="btngrey" style="font-size:12px;padding:6px 10px;cursor:pointer" onclick="return confirm('¿Devolver esta bobina a bodega?')">
-                                                <i class="fa fa-undo"></i> Devolver
-                                            </button>
-                                        </form>
-                                    </div>
-                                    <div style="font-size:11px;color:#64748B;margin-top:4px">Disponible al pie de máquina. Presione <b>Montar</b> para colocar en desbobinador.</div>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                    </table>
-                <?php endif; ?>
-            </div>
-    </div>
+                                </div>
+                            <?php else: ?>
+                                <!-- FORMULARIO PARA MONTAR EN MÁQUINA (PIDIENDO PESO DE INGRESO) -->
+                                <form method="post" action="/production/work-orders/materials/mount" style="margin:0;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:10px">
+                                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                    <input type="hidden" name="agid" value="<?=$agId?>">
+                                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                    <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
+                                    <input type="hidden" name="action_type" value="mount">
 
-    <?php elseif ($mode === 'consumo'): ?>
-        <!-- SUBFORMULARIO: Consumo de Insumos (form.consumo.php) -->
-        <div style="margin-bottom:15px">
-            <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
-                <i class="fa fa-fw fa-arrow-left"></i> Volver al listado de eventos
+                                    <div style="font-size:12px;font-weight:bold;color:#0F172A;margin-bottom:6px">
+                                        <i class="fa fa-play-circle" style="color:#10B981"></i> Montar en Desbobinador
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                                        <label style="font-size:11.5px;font-weight:600;color:#334155">Peso Ingreso (kg) *:</label>
+                                        <input type="number" step="0.01" min="0.1" name="entry_weight_kg" value="<?=number_format((float)($ar['weight_kg'] ?? 0), 2, '.', '')?>" class="inptxt" style="width:90px;padding:4px 6px;font-weight:bold;font-size:12px" required title="Peso real medido al ingresar la bobina a máquina">
+                                        <button type="submit" class="btngreen" style="font-size:12px;padding:5px 12px;cursor:pointer;font-weight:bold">
+                                            <i class="fa fa-play"></i> ⚙️ Montar en Máquina
+                                        </button>
+                                    </div>
+                                </form>
+                                <div style="margin-top:6px;text-align:right">
+                                    <form method="post" action="/production/work-orders/materials/mount" style="display:inline">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="agid" value="<?=$agId?>">
+                                        <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                        <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
+                                        <input type="hidden" name="action_type" value="unassign">
+                                        <button type="submit" class="btngrey" style="font-size:11px;padding:3px 8px;cursor:pointer" onclick="return confirm('¿Devolver esta bobina a bodega?')">
+                                            <i class="fa fa-undo"></i> Devolver a bodega
+                                        </button>
+                                    </form>
+                                </div>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
+        <?php endif; ?>
+
+        <?php if (!$isSeriPulpo): ?>
+        <!-- VENTANA FLOTANTE (MODAL): DESMONTAJE Y SALIDA DE BOBINA -->
+        <div id="modal_roll_output" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.65);z-index:99999;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;backdrop-filter:blur(3px)">
+            <div style="background:#FFFFFF;border-radius:10px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.3),0 10px 10px -5px rgba(0,0,0,0.2);width:100%;max-width:680px;max-height:92vh;overflow-y:auto;position:relative;border:1px solid #CBD5E1">
+                <!-- Modal Header -->
+                <div style="background:#1E3A8A;color:#FFFFFF;padding:14px 20px;border-top-left-radius:9px;border-top-right-radius:9px;display:flex;justify-content:space-between;align-items:center">
+                    <div>
+                        <div style="font-size:16px;font-weight:bold;display:flex;align-items:center;gap:8px">
+                            <i class="fa fa-sign-out-alt"></i> Desmontaje y Salida de Bobina
+                        </div>
+                        <div style="font-size:12.5px;color:#BFDBFE;margin-top:3px" id="modal_roll_subtitle">
+                            Bobina: <b id="modal_roll_code_txt" style="color:#FFFFFF">-</b> &bull; Peso Ingreso: <b id="modal_roll_entry_txt" style="color:#FFFFFF">0.00 kg</b>
+                        </div>
+                    </div>
+                    <button type="button" onclick="closeRollOutputModal()" style="background:transparent;border:none;color:#FFFFFF;font-size:24px;cursor:pointer;padding:0 6px;line-height:1" title="Cerrar ventana">
+                        &times;
+                    </button>
+                </div>
+
+                <!-- Modal Body / Form -->
+                <form method="post" action="/production/work-orders/materials/consume" style="margin:0;padding:20px" onsubmit="return validateRollOutputModal();">
+                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                    <input type="hidden" name="agid" value="<?=$agId?>">
+                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                    <input type="hidden" name="roll_id" id="modal_roll_id" value="0">
+                    <input type="hidden" name="scrap_weight" id="modal_scrap_weight" value="0">
+
+                    <?php if ($isPrinter): ?>
+                    <div style="background:#EEF2FF;border:1.5px solid #C7D2FE;border-radius:8px;padding:14px;margin-bottom:16px">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+                            <label style="font-size:13.5px;font-weight:bold;color:#3730A3;display:flex;align-items:center;gap:8px;cursor:pointer">
+                                <input type="checkbox" name="create_output_roll" id="modal_create_output_roll" value="1" checked onchange="toggleOutputRollSection()">
+                                <span><i class="fa fa-tag"></i> Generar nueva bobina saliente con etiqueta</span>
+                            </label>
+                            <label style="font-size:12px;color:#4338CA;display:flex;align-items:center;gap:6px;cursor:pointer">
+                                <input type="checkbox" name="auto_print_output" value="1" checked>
+                                Imprimir etiqueta al guardar
+                            </label>
+                        </div>
+                        <div id="modal_output_roll_section">
+                            <div style="font-size:12px;color:#4338CA;margin-bottom:10px">
+                                La bobina saliente quedará trazada como semielaborada y lista para impresión de etiqueta desde este mismo desmontaje.
+                            </div>
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:10px">
+                                <div>
+                                    <label style="display:block;font-size:12px;font-weight:bold;color:#312E81;margin-bottom:4px">Peso Bobina Saliente (kg) *</label>
+                                    <input type="number" step="0.01" min="0" name="output_bobina_kg" id="modal_output_bobina_kg" class="inptxt" style="width:100%;padding:8px 10px;font-size:14px;font-weight:bold;border:2px solid #6366F1;border-radius:6px" value="0.00" placeholder="0.00" oninput="recalcModalOutputMeters()" onchange="recalcModalOutputMeters()">
+                                </div>
+                                <div>
+                                    <label style="display:block;font-size:12px;font-weight:bold;color:#312E81;margin-bottom:4px">Metros aprox.</label>
+                                    <input type="number" step="1" min="0" name="output_meters" id="modal_output_meters" class="inptxt" style="width:100%;padding:8px 10px;font-size:14px;font-weight:bold;border:2px solid #A5B4FC;border-radius:6px;background:#F8FAFF" value="<?=$printerOutputSuggestedMeters > 0 ? (int)$printerOutputSuggestedMeters : 0?>" placeholder="0">
+                                </div>
+                                <div style="grid-column:span 2">
+                                    <label style="display:block;font-size:12px;font-weight:bold;color:#312E81;margin-bottom:4px">Descripción / SKU bobina saliente</label>
+                                    <input type="hidden" name="output_sku_code" id="modal_output_sku_code" value="<?=htmlspecialchars($printerOutputDefaultSku)?>">
+                                    <div style="width:100%;padding:8px 10px;font-size:13px;font-weight:bold;color:#312E81;background:#F8FAFF;border:1px solid #C7D2FE;border-radius:6px;box-sizing:border-box">
+                                        <?=htmlspecialchars($printerOutputDefaultSku)?>
+                                    </div>
+                                    <div style="margin-top:4px;font-size:11px;color:#4338CA">
+                                        Código fijo definido por la OT. No se puede editar manualmente.
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="margin-top:10px;background:#E0E7FF;border:1px solid #C7D2FE;border-radius:6px;padding:8px 12px;font-size:12px;color:#3730A3">
+                                <i class="fa fa-calculator"></i> Relación estimada: <b id="modal_output_ratio_text"><?=number_format($printerMetersPerKg, 2, ',', '.')?> m/kg</b> con ancho <b><?=number_format($printerTelaWidth, 1, ',', '.')?> cm</b> y gramaje <b><?=number_format($printerTelaGramms, 0, ',', '.')?> g/m2</b>.
+                                <div style="margin-top:4px;color:#4338CA">
+                                    Cálculo automático actual: <b id="modal_output_calc_text"><?=$printerOutputSuggestedMeters > 0 ? number_format((float)$printerOutputSuggestedMeters, 0, ',', '.') : '0'?> m aprox.</b>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <?php else: ?>
+                        <input type="hidden" name="output_bobina_kg" value="0">
+                    <?php endif; ?>
+
+                    <!-- SECCIÓN 1: DESGLOSE DE MERMAS POR TIPO -->
+                    <div style="background:#FFF1F2;border:1.5px solid #FECDD3;border-radius:8px;padding:14px;margin-bottom:16px">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:8px">
+                            <div>
+                                <label style="font-size:13.5px;font-weight:bold;color:#9F1239;display:flex;align-items:center;gap:6px">
+                                    <i class="fa fa-trash-alt"></i> Mermas de Salida por Tipo
+                                </label>
+                                <div style="font-size:12px;color:#9F1239">
+                                    Desglose los kilos de merma según el tipo que corresponda. En la primera bobina puede cargar aquí <b>Ajuste / Aprobación</b> para absorber la merma de alistamiento.
+                                </div>
+                            </div>
+                            <div style="background:#FFE4E6;border:1px solid #FDA4AF;padding:4px 10px;border-radius:5px;font-size:12px;font-weight:bold;color:#9F1239" id="modal_total_merma_badge">
+                                Total Mermas: 0.00 kg
+                            </div>
+                        </div>
+
+                        <div style="display:flex;flex-direction:column;gap:8px;margin-top:10px">
+                        <?php 
+                        $typesList = !empty($mermatypes) ? $mermatypes : [
+                            ['id' => 6, 'merma_title' => 'Merma Proceso'],
+                            ['id' => 7, 'merma_title' => 'Impresión (Selladora)'],
+                            ['id' => 8, 'merma_title' => 'Otros'],
+                            ['id' => 9, 'merma_title' => 'Ajuste / Aprobación'],
+                        ];
+                        foreach ($typesList as $mt): 
+                            $mtId = (int)$mt['id'];
+                            $mtTitle = (string)$mt['merma_title'];
+                        ?>
+                            <div style="background:#FFFFFF;border:1px solid #FBCFE8;border-radius:6px;padding:8px 10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                <div style="width:170px;font-size:12.5px;font-weight:bold;color:#881337">
+                                    <?=htmlspecialchars($mtTitle)?>:
+                                </div>
+                                <div style="display:flex;align-items:center;gap:4px">
+                                    <input type="number" step="0.01" min="0" name="merma_kgs[<?=$mtId?>]" class="inptxt modal-merma-input" style="width:90px;padding:5px 8px;font-size:13px;font-weight:bold;text-align:right" value="0.00" oninput="calcModalMermaTotal()" placeholder="0.00">
+                                    <span style="font-size:11.5px;color:#64748B">kg</span>
+                                </div>
+                                <div style="flex:1;min-width:180px">
+                                    <input type="text" name="merma_comm[<?=$mtId?>]" class="inptxt" style="width:100%;padding:5px 8px;font-size:12px" placeholder="Motivo / observación (opcional)...">
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                        </div>
+                    </div>
+
+                    <!-- SECCIÓN 2: SOBRANTE DE BOBINA (CON GENERACIÓN DE ETIQUETA) -->
+                    <div style="background:#F0FDF4;border:1.5px solid #86EFAC;border-radius:8px;padding:14px;margin-bottom:16px">
+                        <label style="display:block;font-size:13.5px;font-weight:bold;color:#166534;margin-bottom:4px">
+                            <i class="fa fa-box-open" style="color:#059669"></i> Sobrante de Bobina (kg)
+                        </label>
+                        <div style="font-size:12px;color:#15803D;margin-bottom:8px">
+                            Kilos de tela que quedaron sin utilizar en el cono / eje (dejar en 0 si se consumió por completo).
+                        </div>
+                        <div style="display:flex;align-items:center;gap:10px">
+                            <input type="number" step="0.01" min="0" name="leftover_weight" id="modal_leftover_kg" class="inptxt" style="width:160px;padding:8px 12px;font-size:15px;font-weight:bold;color:#065F46;border:2px solid #10B981;border-radius:6px" value="0.00" placeholder="0.00">
+                            <span style="font-size:13px;font-weight:bold;color:#15803D">kg sobrante</span>
+                        </div>
+                        <div style="margin-top:10px;background:#DCFCE7;border:1px solid #86EFAC;border-radius:6px;padding:8px 12px;font-size:12px;color:#14532D;line-height:1.4">
+                            <i class="fa fa-tag" style="color:#059669"></i> <b>Generación automática de Etiqueta:</b> Si ingresa un sobrante mayor a 0 kg, el sistema creará inmediatamente un <b>nuevo código de bobina</b> con trazabilidad en <b>Bodega 3000</b> y habilitará su <b>etiqueta para impresión Zebra (100×70mm)</b>.
+                        </div>
+                    </div>
+
+                    <!-- SECCIÓN 3: OBSERVACIONES GENERALES -->
+                    <div style="margin-bottom:18px">
+                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:4px">
+                            Observaciones de Desmontaje / Turno (Opcional):
+                        </label>
+                        <input type="text" name="comments" class="inptxt" style="width:100%;padding:7px 10px;font-size:12.5px" placeholder="Detalle adicional del desmontaje...">
+                    </div>
+
+                    <!-- MODAL FOOTER / BOTONES -->
+                    <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;border-top:1px solid #E2E8F0;padding-top:14px">
+                        <button type="button" onclick="closeRollOutputModal()" class="btngrey" style="font-size:13px;padding:8px 18px;cursor:pointer">
+                            Cancelar
+                        </button>
+                        <button type="submit" class="btngreen" style="font-size:13px;padding:8px 22px;cursor:pointer;font-weight:bold;display:inline-flex;align-items:center;gap:6px;box-shadow:0 2px 4px rgba(0,0,0,0.1)">
+                            <i class="fa fa-check-circle"></i> 💾 Confirmar Desmontaje de Bobina
+                        </button>
+                    </div>
+                </form>
             </div>
         </div>
-        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
-            <div style="font-size:16px;font-weight:bold;color:#E1A500;margin-bottom:15px">
-                <i class="fa fa-fw fa-box-open"></i> Registrar Consumo Rápido
-            </div>
-            <form method="post" action="/production/work-orders/events/production">
-                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                <input type="hidden" name="agid" value="<?=$agId?>">
-                <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                <table border="0" width="100%" cellpadding="8" cellspacing="0">
-                <colgroup><col width="220"><col></colgroup>
-                <tr>
-                    <td class="tdleft">Cantidad Consumida (Kg/Mtr)</td>
-                    <td class="tdnrm"><input type="number" step="0.1" name="prod_bobina_kg" class="inptxt" style="width:200px" required></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Comentarios</td>
-                    <td class="tdnrm"><textarea name="evt_comments" class="inptxt" style="width:100%;height:60px"></textarea></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">&nbsp;</td>
-                    <td class="tdnrm">
-                        <button type="submit" class="btnorange" style="font-size:14px;padding:8px 20px">
-                            <i class="fa fa-fw fa-check"></i> Guardar Consumo
-                        </button>
-                    </td>
-                </tr>
-                </table>
-            </form>
+
+        <script>
+        function openRollOutputModal(rollId, rollCode, entryKg) {
+            document.getElementById('modal_roll_id').value = rollId;
+            document.getElementById('modal_roll_code_txt').innerText = rollCode;
+            document.getElementById('modal_roll_entry_txt').innerText = Number(entryKg).toFixed(2) + ' kg';
+            document.getElementById('modal_leftover_kg').value = '0.00';
+            var outputKg = document.getElementById('modal_output_bobina_kg');
+            if (outputKg) outputKg.value = '0.00';
+            var outputMeters = document.getElementById('modal_output_meters');
+            if (outputMeters) outputMeters.value = '<?=$printerOutputSuggestedMeters > 0 ? (int)$printerOutputSuggestedMeters : 0?>';
+            var outputSku = document.getElementById('modal_output_sku_code');
+            if (outputSku) outputSku.value = <?=json_encode($printerOutputDefaultSku, JSON_UNESCAPED_UNICODE)?>;
+            var createChk = document.getElementById('modal_create_output_roll');
+            if (createChk) createChk.checked = true;
+            toggleOutputRollSection();
+            recalcModalOutputMeters();
+            
+            // Reset mermas
+            var mInputs = document.querySelectorAll('.modal-merma-input');
+            mInputs.forEach(function(inp) { inp.value = '0.00'; });
+            calcModalMermaTotal();
+            
+            var modal = document.getElementById('modal_roll_output');
+            modal.style.display = 'flex';
+            setTimeout(function() {
+                var lInp = document.getElementById('modal_leftover_kg');
+                if (lInp) lInp.focus();
+            }, 100);
+        }
+
+        function closeRollOutputModal() {
+            var modal = document.getElementById('modal_roll_output');
+            if (modal) modal.style.display = 'none';
+        }
+
+        function calcModalMermaTotal() {
+            var total = 0;
+            var mInputs = document.querySelectorAll('.modal-merma-input');
+            mInputs.forEach(function(inp) {
+                var val = parseFloat(String(inp.value).replace(',', '.')) || 0;
+                total += val;
+            });
+            var hidScrap = document.getElementById('modal_scrap_weight');
+            if (hidScrap) hidScrap.value = total.toFixed(2);
+            var badge = document.getElementById('modal_total_merma_badge');
+            if (badge) badge.innerText = 'Total Mermas: ' + total.toFixed(2) + ' kg';
+        }
+
+        function toggleOutputRollSection() {
+            var chk = document.getElementById('modal_create_output_roll');
+            var box = document.getElementById('modal_output_roll_section');
+            if (!chk || !box) return;
+            box.style.display = chk.checked ? 'block' : 'none';
+        }
+
+        var MODAL_OUTPUT_METERS_PER_KG = <?=json_encode((float)$printerMetersPerKg)?>;
+        function recalcModalOutputMeters() {
+            var kgInput = document.getElementById('modal_output_bobina_kg');
+            var metersInput = document.getElementById('modal_output_meters');
+            var calcText = document.getElementById('modal_output_calc_text');
+            if (!kgInput || !metersInput) return;
+
+            var kg = parseFloat(String(kgInput.value || '').replace(',', '.')) || 0;
+            var meters = 0;
+            if (kg > 0 && MODAL_OUTPUT_METERS_PER_KG > 0) {
+                meters = Math.max(1, Math.round(kg * MODAL_OUTPUT_METERS_PER_KG));
+            }
+            metersInput.value = meters > 0 ? String(meters) : '0';
+            if (calcText) {
+                calcText.innerText = (meters > 0 ? meters : 0) + ' m aprox.';
+            }
+        }
+
+        function validateRollOutputModal() {
+            var createChk = document.getElementById('modal_create_output_roll');
+            if (createChk && createChk.checked) {
+                var outputKg = parseFloat(String(document.getElementById('modal_output_bobina_kg').value || '').replace(',', '.')) || 0;
+                if (outputKg <= 0) {
+                    alert('Debes ingresar el peso de la nueva bobina saliente para generar su etiqueta.');
+                    return false;
+                }
+            }
+            return confirm('¿Confirmar registro de desmontaje y cierre de esta bobina?');
+        }
+
+        // Cerrar con Escape
+        window.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeRollOutputModal();
+            }
+        });
+        </script>
+        <?php endif; ?>
+
+    <?php elseif ($mode === 'consumo'): ?>
+        <!-- Redirigir a modo materiales para gestionar montaje y salida de bobinas con trazabilidad -->
+        <script>location.href = '/production/work-orders/operate?agid=<?=$agId?>&mode=materiales';</script>
+        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;text-align:center">
+            <p>Redirigiendo a <b>Montaje y Salida de Bobinas</b>...</p>
+            <a href="/production/work-orders/operate?agid=<?=$agId?>&mode=materiales" class="btnblue">Ir a Bobinas y Materiales</a>
         </div>
 
     <?php elseif ($mode === 'reboprod'): ?>
@@ -5920,11 +6985,19 @@ function renderProductionOperatorConsole(
                 <div>
                     <i class="fa fa-fw fa-check-circle" style="font-size:20px;color:#27AE60"></i>
                     <b>¡Producción de corte / rebobinado procesada exitosamente!</b> Se generaron <b><?= (int)($_GET['cuts'] ?? 0) ?></b> bobinas hijas fraccionadas registradas con trazabilidad.
+                    <?php if (!empty($_GET['handle_rolls'])): ?>
+                        <span> Además se consolidó un <b>pallet de manillas</b> con <b><?= (int)$_GET['handle_rolls'] ?></b> rollos.</span>
+                    <?php endif; ?>
                 </div>
                 <div>
                     <?php if (!empty($_GET['first_cut'])): ?>
                         <a href="/rolls/<?= (int)$_GET['first_cut'] ?>/label?server_print=1" target="_blank" class="btnblue" style="text-decoration:none;font-weight:bold">
-                            <i class="fa fa-print"></i> 🖨️ Mandar a Imprimir Etiquetas Bobinas Hijas (100×70mm)
+                            <i class="fa fa-print"></i> Imprimir Etiqueta Bobina (100×70mm)
+                        </a>
+                    <?php endif; ?>
+                    <?php if (!empty($_GET['pallet_id'])): ?>
+                        <a href="/pallets/<?= (int)$_GET['pallet_id'] ?>/label?server_print=1" target="_blank" class="btngreen" style="text-decoration:none;font-weight:bold;margin-left:8px">
+                            <i class="fa fa-pallet"></i> Imprimir Etiqueta Pallet Manillas
                         </a>
                     <?php endif; ?>
                 </div>
@@ -6148,19 +7221,35 @@ function renderProductionOperatorConsole(
                             $cutsList = [];
                             if (!empty($reboValues['rollo'])) {
                                 foreach ($reboValues['rollo'] as $rv) {
-                                    $cutsList[] = ['rollo_amt' => (float)($rv['rollo_amt'] ?? 1), 'rollo_dims' => (float)($rv['rollo_dims'] ?? 0)];
+                                    $cutsList[] = [
+                                        'rollo_amt' => (float)($rv['rollo_amt'] ?? 1),
+                                        'rollo_dims' => (float)($rv['rollo_dims'] ?? 0),
+                                        'destino' => (string)($rv['subprod_destino'] ?? ''),
+                                    ];
                                 }
                             } elseif (!empty($reboValues['metro'])) {
                                 foreach ($reboValues['metro'] as $rv) {
-                                    $cutsList[] = ['rollo_amt' => (float)($rv['rollo_amt'] ?? 1), 'rollo_dims' => (float)($rv['rollo_dims'] ?? 0)];
+                                    $cutsList[] = [
+                                        'rollo_amt' => (float)($rv['rollo_amt'] ?? 1),
+                                        'rollo_dims' => (float)($rv['rollo_dims'] ?? 0),
+                                        'destino' => (string)($rv['subprod_destino'] ?? ''),
+                                    ];
                                 }
                             } elseif (!empty($subproducts)) {
                                 foreach ($subproducts as $sp) {
-                                    $cutsList[] = ['rollo_amt' => (float)($sp['subprod_amount'] ?? 1), 'rollo_dims' => (float)($sp['subprod_ancho_cm'] ?? 0)];
+                                    $cutsList[] = [
+                                        'rollo_amt' => (float)($sp['subprod_amount'] ?? 1),
+                                        'rollo_dims' => (float)($sp['subprod_ancho_cm'] ?? 0),
+                                        'destino' => (string)($sp['subprod_destino'] ?? ''),
+                                    ];
                                 }
                             }
                             if (empty($cutsList)) {
-                                $cutsList[] = ['rollo_amt' => 1, 'rollo_dims' => (float)($itemsel['item_reg_width'] ?? 100)];
+                                $cutsList[] = [
+                                    'rollo_amt' => 1,
+                                    'rollo_dims' => (float)($itemsel['item_reg_width'] ?? 100),
+                                    'destino' => '',
+                                ];
                             }
 
                             $x = 0;
@@ -6171,6 +7260,7 @@ function renderProductionOperatorConsole(
                             foreach ($cutsList as $reboval):
                                 $cReqAmt = isset($_REQUEST["reboamt_{$x}"]) ? (int)$_REQUEST["reboamt_{$x}"] : (int)$reboval['rollo_amt'];
                                 $cReqDims = isset($_REQUEST["rollo_dims_{$x}"]) ? (float)str_replace(',', '.', (string)$_REQUEST["rollo_dims_{$x}"]) : (float)$reboval['rollo_dims'];
+                                $cDestino = trim((string)($_REQUEST["rebo_destino_{$x}"] ?? ($reboval['destino'] ?? '')));
 
                                 $_TOTAL_WIDTH += ($cReqAmt * $cReqDims);
 
@@ -6186,6 +7276,7 @@ function renderProductionOperatorConsole(
                                 <input type="hidden" name="stockplustotalkg_<?=$x?>" value="<?=round($_KG, 2)?>">
                                 <input type="hidden" name="stockpluslargo_<?=$x?>" value="<?=round($_LARGO, 2)?>">
                                 <input type="hidden" name="stockplusitemid_<?=$x?>" value="">
+                                <input type="hidden" name="rebo_destino_<?=$x?>" value="<?=htmlspecialchars($cDestino)?>">
                                 <tr>
                                     <td class="tdnrm" style="border-left:1px solid #DDDDDD;">
                                         <input type="text" class="inptxt clsreboamt" style="width:100%;text-align:center"
@@ -6193,7 +7284,7 @@ function renderProductionOperatorConsole(
                                         onkeyup="$('#idx_btn_term').hide(0);$('#idx_btn_save').show(0);recalcTotalWidth();">
                                     </td>
                                     <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left">
-                                        <b style="color:#007BFF">[CORTE]</b>
+                                        <b style="color:#007BFF">[<?=htmlspecialchars($cDestino !== '' ? mb_strtoupper($cDestino) : 'CORTE')?>]</b>
                                     </td>
                                     <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=htmlspecialchars((string)$itemsel['material'])?></td>
                                     <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left"><?=htmlspecialchars((string)$itemsel['colordesc'])?></td>
@@ -6222,9 +7313,9 @@ function renderProductionOperatorConsole(
                                     <?php
                                     $widthMatches = round($_TOTAL_WIDTH, 1) == round((float)($itemsel['item_reg_width'] ?? 0), 1);
                                     ?>
-                                    <input type="button" class="btngreen" id="idx_btn_term" value="Finalizar Corte (Consumir Bobina)"
+                                    <input type="button" class="btngreen" id="idx_btn_term" value="Finalizar"
                                     style="<?=$widthMatches ? '' : 'display:none;'?>padding:8px 16px;border:0px;font-size:14px;font-weight:bold;cursor:pointer;border-radius:4px"
-                                    onclick="if(confirm('¿Está seguro de finalizar el corte? Se consumirá la bobina del inventario (Bodega 3000), se darán de alta los rollos de subproductos cortados y se registrará en el informe oficial de consumo.')) { document.xform_itemcalc.rebofinalize.value='1'; document.xform_itemcalc.submit(); }">
+                                    onclick="openReboFinalizeModal('corte');">
 
                                     <input type="button" class="btngrey" id="idx_btn_save" value="Actualizar"
                                     style="<?=$widthMatches ? 'display:none;' : ''?>width:100%;padding:6px;border:0px;font-size:14px;cursor:pointer"
@@ -6285,7 +7376,7 @@ function renderProductionOperatorConsole(
                                 <td width="100">
                                     <input type="button" class="btngreen" id="idx_btn_term" value="Finalizar"
                                     style="width:100%;padding:6px;border:0px;font-size:14px;cursor:pointer"
-                                    onclick="if(confirm('¿Está seguro de finalizar el rebobinado? Se consumirá la bobina de inventario y quedará registrada en el informe oficial de consumo.')) { document.xform_itemcalc.rebofinalize.value='1'; document.xform_itemcalc.submit(); }">
+                                    onclick="openReboFinalizeModal('rebobinado');">
                                 </td>
                             </tr>
                             </table>
@@ -6294,6 +7385,59 @@ function renderProductionOperatorConsole(
                 </tr>
                 </table>
             </form>
+
+            <div id="rebo_finalize_modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.6);z-index:99998;align-items:center;justify-content:center;padding:18px;box-sizing:border-box">
+                <div style="background:#FFFFFF;border-radius:10px;box-shadow:0 20px 35px rgba(0,0,0,0.28);width:100%;max-width:560px;border:1px solid #CBD5E1;overflow:hidden">
+                    <div style="background:#0F766E;color:#FFFFFF;padding:14px 18px;font-size:16px;font-weight:bold;display:flex;align-items:center;gap:10px">
+                        <i class="fa fa-check-circle"></i> Confirmar finalización
+                    </div>
+                    <div style="padding:20px 18px;color:#334155;font-size:14px;line-height:1.6">
+                        <div id="rebo_finalize_modal_message">
+                            ¿Desea continuar con este registro?
+                        </div>
+                    </div>
+                    <div style="padding:0 18px 18px;display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap">
+                        <button type="button" class="btngrey" style="padding:8px 18px;border:0;cursor:pointer" onclick="closeReboFinalizeModal()">Cancelar</button>
+                        <button type="button" class="btngreen" style="padding:8px 18px;border:0;cursor:pointer" onclick="submitReboFinalize()">Sí, finalizar</button>
+                    </div>
+                </div>
+            </div>
+            <script>
+            (function () {
+                var reboFinalizeKind = '';
+                window.openReboFinalizeModal = function (kind) {
+                    reboFinalizeKind = kind || 'corte';
+                    var message = document.getElementById('rebo_finalize_modal_message');
+                    if (message) {
+                        if (reboFinalizeKind === 'rebobinado') {
+                            message.innerHTML = 'Se consumirá la bobina de inventario y quedará registrada en el informe oficial de consumo. ¿Desea finalizar el rebobinado ahora?';
+                        } else {
+                            message.innerHTML = 'Se consumirá la bobina del inventario, se darán de alta los rollos cortados y, si existen manillas, se generará además su pallet con etiqueta. ¿Desea finalizar el corte ahora?';
+                        }
+                    }
+                    var modal = document.getElementById('rebo_finalize_modal');
+                    if (modal) {
+                        modal.style.display = 'flex';
+                    }
+                };
+                window.closeReboFinalizeModal = function () {
+                    var modal = document.getElementById('rebo_finalize_modal');
+                    if (modal) {
+                        modal.style.display = 'none';
+                    }
+                };
+                window.submitReboFinalize = function () {
+                    if (!document.xform_itemcalc) return;
+                    document.xform_itemcalc.rebofinalize.value = '1';
+                    document.xform_itemcalc.submit();
+                };
+                window.addEventListener('keydown', function (event) {
+                    if (event.key === 'Escape') {
+                        window.closeReboFinalizeModal();
+                    }
+                });
+            })();
+            </script>
         <?php endif; ?>
 
         <!-- TABLA: BOBINAS ESPECÍFICAMENTE SOLICITADAS PARA ESTA ORDEN (TRAZABILIDAD) -->
@@ -6825,6 +7969,11 @@ function renderProductionOperatorConsole(
         }
         $skuPrintDefault = (string)($agenda['item_title'] ?? $agenda['fab_type'] ?? 'BOBINA-IMPRESA');
         $suggestedMeters = (float)($metros_a_imprimir ?? ($stats['total_meters'] ?? 0));
+        $telaWidth = (float)($agenda['req_operador_tela_width'] ?? ($agenda['fab_med_width'] ?? 80));
+        if ($telaWidth <= 0) $telaWidth = 80.0;
+        $telaGramms = (float)($agenda['fab_mat_gramms'] ?? 80);
+        if ($telaGramms <= 0) $telaGramms = 80.0;
+        $metersPerKg = round(100000.0 / ($telaWidth * $telaGramms), 2);
         ?>
 
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(420px, 1fr));gap:20px;margin-bottom:20px">
@@ -6851,11 +8000,17 @@ function renderProductionOperatorConsole(
                         <td class="tdleft">Bobina Madre (Virgen):</td>
                         <td class="tdnrm">
                             <?php if (!empty($assignedRolls)): ?>
-                                <select name="parent_roll_id" class="inptxt" style="width:100%">
-                                    <option value="">-- Sin bobina directa / Auto-detectar --</option>
-                                    <?php foreach ($assignedRolls as $ar): ?>
-                                        <option value="<?=$ar['id']?>" <?=!empty($ar['is_mounted']) ? 'selected' : ''?>>
-                                            <?=htmlspecialchars($ar['roll_code'])?> (<?=number_format((float)$ar['weight_kg'], 1)?> Kg<?=!empty($ar['is_mounted']) ? ' - MONTADA' : ''?>)
+                                <select name="parent_roll_id" id="parent_roll_id" class="inptxt" style="width:100%" onchange="onParentRollChange()">
+                                    <option value="" data-width="<?=$telaWidth?>" data-gramms="<?=$telaGramms?>">-- Sin bobina directa / Auto-detectar --</option>
+                                    <?php foreach ($assignedRolls as $ar): 
+                                        $arWidth = (float)($ar['width_mm'] ?? 0) > 0 ? round((float)$ar['width_mm'] / 10, 1) : $telaWidth;
+                                        $arGramms = (float)($ar['microns'] ?? 0) > 0 ? (float)$ar['microns'] : $telaGramms;
+                                    ?>
+                                        <option value="<?=$ar['id']?>" 
+                                                data-width="<?=$arWidth?>" 
+                                                data-gramms="<?=$arGramms?>"
+                                                <?=!empty($ar['is_mounted']) ? 'selected' : ''?>>
+                                            <?=htmlspecialchars($ar['roll_code'])?> (<?=number_format((float)$ar['weight_kg'], 1)?> Kg<?=!empty($ar['is_mounted']) ? ' - MONTADA' : ''?> &bull; Ancho: <?=$arWidth?> cm)
                                         </option>
                                     <?php endforeach; ?>
                                 </select>
@@ -6871,31 +8026,41 @@ function renderProductionOperatorConsole(
                         </td>
                     </tr>
                     <tr>
-                        <td class="tdleft">Metros Lineales:</td>
+                        <td class="tdleft" style="font-weight:bold;color:#0F172A">
+                            <i class="fa fa-weight-hanging" style="color:#2563EB"></i> Peso Bobina Saliente (Kg):
+                        </td>
                         <td class="tdnrm">
-                            <div style="display:flex;gap:8px;align-items:center">
-                                <input type="number" step="1" min="1" name="meters" id="flexo-meters" class="inptxt" style="width:130px;font-weight:bold" value="<?=$suggestedMeters > 0 ? (int)$suggestedMeters : 1000?>" required>
-                                <span style="font-size:13px;color:#64748B">metros</span>
-                                <?php if ($suggestedMeters > 0): ?>
-                                    <button type="button" class="btngrey" style="padding:4px 8px;font-size:11px" onclick="document.getElementById('flexo-meters').value = '<?=(int)$suggestedMeters?>'">
-                                        Usar programado (<?=(int)$suggestedMeters?> m)
-                                    </button>
-                                <?php endif; ?>
+                            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                                <input type="number" step="0.01" min="0.1" name="weight_kg" id="flexo-weight-kg" class="inptxt" style="width:140px;font-weight:bold;font-size:16px;color:#0F172A;border:2px solid #3B82F6;border-radius:6px;padding:7px 10px" placeholder="0.00" required oninput="recalcFlexoMetersFromWeight()" onchange="recalcFlexoMetersFromWeight()">
+                                <span style="font-size:14px;font-weight:bold;color:#475569">Kg neto</span>
+                                <button type="button" id="btn-read-scale-flexo" class="btnorange" style="padding:7px 16px;font-size:12.5px;font-weight:bold;cursor:pointer;display:inline-flex;align-items:center;gap:6px" onclick="captureFlexoScaleWeight()">
+                                    <i class="fa fa-balance-scale"></i> ⚖️ Capturar Balanza
+                                </button>
+                            </div>
+                            <div id="scale-status-msg" style="font-size:11.5px;color:#64748B;margin-top:5px">
+                                Ingrese el peso de la bobina impresa saliente o presione <b>Capturar Balanza</b> para pesaje directo en vivo.
                             </div>
                         </td>
                     </tr>
                     <tr>
-                        <td class="tdleft">Peso Balanza (Kg):</td>
+                        <td class="tdleft" style="font-weight:bold;color:#0F172A">
+                            <i class="fa fa-ruler-combined" style="color:#059669"></i> Metros Lineales:
+                        </td>
                         <td class="tdnrm">
                             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                                <input type="number" step="0.01" min="0.1" name="weight_kg" id="flexo-weight-kg" class="inptxt" style="width:130px;font-weight:bold;font-size:15px;color:#0F172A" placeholder="0.00" required>
-                                <span style="font-size:13px;color:#64748B">Kg</span>
-                                <button type="button" id="btn-read-scale-flexo" class="btnorange" style="padding:6px 14px;font-size:12px;font-weight:bold;cursor:pointer" onclick="captureFlexoScaleWeight()">
-                                    <i class="fa fa-balance-scale"></i> ⚖️ Capturar Balanza
+                                <input type="number" step="1" min="1" name="meters" id="flexo-meters" class="inptxt" style="width:140px;font-weight:bold;font-size:16px;color:#065F46;border:2px solid #10B981;border-radius:6px;padding:7px 10px" value="<?=$suggestedMeters > 0 ? (int)$suggestedMeters : 0?>" required>
+                                <span style="font-size:14px;font-weight:bold;color:#065F46">metros aprox.</span>
+                                <button type="button" class="btngrey" style="padding:6px 12px;font-size:11.5px;cursor:pointer;display:inline-flex;align-items:center;gap:4px" onclick="recalcFlexoMetersFromWeight(true)" title="Recalcular metros según el peso actual">
+                                    <i class="fa fa-sync-alt"></i> Recalcular por Peso
                                 </button>
+                                <?php if ($suggestedMeters > 0): ?>
+                                    <button type="button" class="btngrey" style="padding:6px 10px;font-size:11px;cursor:pointer" onclick="document.getElementById('flexo-meters').value = '<?=(int)$suggestedMeters?>'">
+                                        Usar programado (<?=(int)$suggestedMeters?> m)
+                                    </button>
+                                <?php endif; ?>
                             </div>
-                            <div id="scale-status-msg" style="font-size:11.5px;color:#64748B;margin-top:4px">
-                                Puede ingresar el peso manualmente o presionar Capturar Balanza para lectura en vivo.
+                            <div id="meters-calc-info" style="font-size:12px;color:#059669;margin-top:6px;background:#F0FDF4;border:1px solid #BBF7D0;padding:6px 10px;border-radius:4px;display:inline-block">
+                                <i class="fa fa-calculator"></i> <b>Cálculo automático según peso:</b> <span id="meters-ratio-text">~<?=$metersPerKg?> metros por kg</span> (Ancho: <span id="calc-width-text"><?=$telaWidth?></span> cm &bull; Gramaje: <span id="calc-gramms-text"><?=$telaGramms?></span> g/m²).
                             </div>
                         </td>
                     </tr>
@@ -7004,13 +8169,78 @@ function renderProductionOperatorConsole(
         </div>
 
         <script>
+        var defaultTelaWidth = <?=(float)$telaWidth?>;
+        var defaultTelaGramms = <?=(float)$telaGramms?>;
+        var activeTelaWidth = defaultTelaWidth;
+        var activeTelaGramms = defaultTelaGramms;
+
+        function onParentRollChange() {
+            var sel = document.getElementById('parent_roll_id');
+            if (sel) {
+                var opt = sel.options[sel.selectedIndex];
+                if (opt) {
+                    var w = parseFloat(opt.getAttribute('data-width')) || defaultTelaWidth;
+                    var g = parseFloat(opt.getAttribute('data-gramms')) || defaultTelaGramms;
+                    activeTelaWidth = w > 0 ? w : defaultTelaWidth;
+                    activeTelaGramms = g > 0 ? g : defaultTelaGramms;
+                }
+            }
+            updateMetersRatioDisplay();
+            var wInp = document.getElementById('flexo-weight-kg');
+            if (wInp && parseFloat(wInp.value) > 0) {
+                recalcFlexoMetersFromWeight(false);
+            }
+        }
+
+        function updateMetersRatioDisplay() {
+            var ratio = 100000.0 / (activeTelaWidth * activeTelaGramms);
+            var rTxt = document.getElementById('meters-ratio-text');
+            if (rTxt) rTxt.innerText = '~' + ratio.toFixed(2) + ' metros por kg';
+            var wTxt = document.getElementById('calc-width-text');
+            if (wTxt) wTxt.innerText = activeTelaWidth;
+            var gTxt = document.getElementById('calc-gramms-text');
+            if (gTxt) gTxt.innerText = activeTelaGramms;
+        }
+
+        function recalcFlexoMetersFromWeight(forceFlash) {
+            var weightInput = document.getElementById('flexo-weight-kg');
+            var metersInput = document.getElementById('flexo-meters');
+            if (!weightInput || !metersInput) return;
+            
+            var weight = parseFloat(String(weightInput.value).replace(',', '.')) || 0;
+            if (weight > 0) {
+                // Metros aproximados según peso, ancho de tela y gramaje:
+                // metros = (peso_kg * 100000) / (ancho_cm * gramaje_g_m2)
+                var ratio = 100000.0 / (activeTelaWidth * activeTelaGramms);
+                var approxMeters = Math.round(weight * ratio);
+                if (approxMeters <= 0) approxMeters = 1;
+                metersInput.value = approxMeters;
+                
+                var infoBox = document.getElementById('meters-calc-info');
+                if (infoBox) {
+                    infoBox.innerHTML = '<i class="fa fa-check-circle" style="color:#16a34a"></i> <b>Aproximado por peso:</b> <b>' + approxMeters.toLocaleString('es-CL') + ' metros</b> (~' + ratio.toFixed(2) + ' m/kg con Ancho ' + activeTelaWidth + ' cm y ' + activeTelaGramms + ' g/m²).';
+                }
+                
+                if (forceFlash) {
+                    metersInput.style.backgroundColor = '#dcfce7';
+                    setTimeout(function() { metersInput.style.backgroundColor = '#ffffff'; }, 1000);
+                }
+            } else {
+                var infoBox = document.getElementById('meters-calc-info');
+                if (infoBox) {
+                    var ratio = 100000.0 / (activeTelaWidth * activeTelaGramms);
+                    infoBox.innerHTML = '<i class="fa fa-calculator"></i> <b>Cálculo automático según peso:</b> ~' + ratio.toFixed(2) + ' metros por kg (Ancho: ' + activeTelaWidth + ' cm &bull; Gramaje: ' + activeTelaGramms + ' g/m²). Ingrese el peso para calcular.';
+                }
+            }
+        }
+
         async function captureFlexoScaleWeight() {
             var btn = document.getElementById('btn-read-scale-flexo');
             var input = document.getElementById('flexo-weight-kg');
             var statusMsg = document.getElementById('scale-status-msg');
             if (!input || !btn) return;
             var oldHtml = btn.innerHTML;
-            btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Leyendo...';
+            btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Leyendo balanza...';
             btn.disabled = true;
             try {
                 var res = await fetch('/api/scale/weight', { cache: 'no-store' });
@@ -7022,6 +8252,8 @@ function renderProductionOperatorConsole(
                     if (statusMsg) {
                         statusMsg.innerHTML = '<span style="color:#16a34a;font-weight:bold"><i class="fa fa-check"></i> Peso capturado desde balanza: ' + w.toFixed(2) + ' Kg</span>';
                     }
+                    // Calcular de inmediato los metros aproximados según el peso:
+                    recalcFlexoMetersFromWeight(true);
                     setTimeout(function() { input.style.backgroundColor = '#ffffff'; }, 1200);
                 } else {
                     alert('No se pudo obtener peso de balanza: ' + (data.error || 'Sin lectura'));
@@ -7033,23 +8265,33 @@ function renderProductionOperatorConsole(
                 btn.disabled = false;
             }
         }
+
+        // Inicializar al cargar
+        window.addEventListener('DOMContentLoaded', function() {
+            onParentRollChange();
+        });
         </script>
 
     <?php elseif ($mode === 'terminarot'): ?>
         <!-- SUBFORMULARIO: Cierre de OT con Supervisor (fancy.embalaje.termot.php) -->
-        <div style="margin-bottom:15px">
-            <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
-                <i class="fa fa-fw fa-arrow-left"></i> Cancelar y Volver a la OT
+        <?php $useCloseSupervisorModal = ($isFlexo || $isSeri || $isSeriPulpo); ?>
+        <?php if (!$useCloseSupervisorModal): ?>
+            <div style="margin-bottom:15px">
+                <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
+                    <i class="fa fa-fw fa-arrow-left"></i> Cancelar y Volver a la OT
+                </div>
             </div>
-        </div>
-        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:25px;max-width:700px;margin:0 auto">
-            <div style="font-size:18px;font-weight:bold;color:#D64141;margin-bottom:10px;text-align:center">
-                <i class="fa fa-fw fa-lock"></i> Finalizar y Cerrar Orden de Trabajo
-            </div>
-            <div style="text-align:center;color:#666;margin-bottom:20px;font-size:13px">
-                Se requiere autorización de Supervisor para cerrar la OT #<b><?=htmlspecialchars((string)$agenda['prd_number'])?></b>.
-            </div>
-            <?php if ($isSeriPulpo): ?>
+        <?php endif; ?>
+        <div style="<?= $useCloseSupervisorModal ? 'padding:0;max-width:none;margin:0;border:none;background:transparent' : 'background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:25px;max-width:700px;margin:0 auto' ?>">
+            <?php if (!$useCloseSupervisorModal): ?>
+                <div style="font-size:18px;font-weight:bold;color:#D64141;margin-bottom:10px;text-align:center">
+                    <i class="fa fa-fw fa-lock"></i> Finalizar y Cerrar Orden de Trabajo
+                </div>
+                <div style="text-align:center;color:#666;margin-bottom:20px;font-size:13px">
+                    Se requiere autorización de Supervisor para cerrar la OT #<b><?=htmlspecialchars((string)$agenda['prd_number'])?></b>.
+                </div>
+            <?php endif; ?>
+            <?php if ($isSeriPulpo && !$useCloseSupervisorModal): ?>
                 <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-radius:5px;padding:14px 18px;margin-bottom:18px">
                     <div style="font-size:13px;font-weight:bold;color:#1E293B;margin-bottom:8px">
                         <i class="fa fa-layer-group" style="color:#008A87"></i> Balance de Producción Serigrafía Pulpo al Cierre:
@@ -7088,40 +8330,436 @@ function renderProductionOperatorConsole(
                     </table>
                 </div>
             <?php endif; ?>
-            <form method="post" action="/production/work-orders/close">
-                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                <input type="hidden" name="agid" value="<?=$agId?>">
-                <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
 
-                <table border="0" width="100%" cellpadding="8" cellspacing="0">
-                <tr>
-                    <td class="tdleft" width="180">Usuario Supervisor</td>
-                    <td class="tdnrm"><input type="text" name="sup_user" class="inptxt" style="width:100%" required autocomplete="off"></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Contraseña</td>
-                    <td class="tdnrm"><input type="password" name="sup_pass" class="inptxt" style="width:100%" required></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Motivo / Cierre</td>
-                    <td class="tdnrm">
-                        <select name="close_reason" class="inptxt" style="width:100%">
-                            <option value="completa">Producción Completada al 100%</option>
-                            <option value="parcial">Cierre Parcial por Cambio de Turno</option>
-                            <option value="interrumpida">Interrumpida por Falla Mecánica / Insumo</option>
-                        </select>
-                    </td>
-                </tr>
-                <tr>
-                    <td class="tdleft">&nbsp;</td>
-                    <td class="tdnrm">
-                        <button type="submit" class="btnred" style="font-size:14px;padding:10px 24px;width:100%">
-                            <i class="fa fa-fw fa-check-circle"></i> Confirmar y Terminar OT
-                        </button>
-                    </td>
-                </tr>
-                </table>
-            </form>
+            <?php
+            // Balance general de producción y mermas de la OT al cierre
+            $otSummaryProduced = 0.0;
+            $otSummaryMlin = 0.0;
+            $otSummaryKg = 0.0;
+            try {
+                $stSumProd = Db::erpPdo()->prepare("
+                    SELECT SUM(evt_amount) AS total_amt, 
+                           SUM(evt_amount_metros_lineales) AS total_mlin, 
+                           SUM(prod_bobina_kg) AS total_kg
+                    FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :ot_id AND evt_type IN ('prod', 'prodsericolor') AND evt_status > 0
+                ");
+                $stSumProd->execute([':ot_id' => $workerOtId]);
+                $rSumProd = $stSumProd->fetch(PDO::FETCH_ASSOC);
+                if ($rSumProd) {
+                    $otSummaryProduced = (float)($rSumProd['total_amt'] ?? 0);
+                    $otSummaryMlin = (float)($rSumProd['total_mlin'] ?? 0);
+                    $otSummaryKg = (float)($rSumProd['total_kg'] ?? 0);
+                }
+            } catch (Throwable) {}
+
+            $prSummary = $prodService->getPrintedRollsSummary($workerOtId);
+
+            $otSummaryWasteKg = 0.0;
+            $otWasteBreakdown = [];
+            $otProducedDetail = [];
+            $otWasteDetail = [];
+            $otSummaryProducedDisplay = 0.0;
+            $parseSeriProdMeta = static function (string $commentsText): array {
+                $result = ['imp_des' => 0, 'img_bast' => 0, 'base' => 0];
+                if ($commentsText === '') {
+                    return $result;
+                }
+                if (preg_match('/\bimp\/des=(\d+(?:\.\d+)?)\b/i', $commentsText, $mImp)) {
+                    $result['imp_des'] = (float)($mImp[1] ?? 0);
+                }
+                if (preg_match('/\bimg\/bast=(\d+(?:\.\d+)?)\b/i', $commentsText, $mBast)) {
+                    $result['img_bast'] = (float)($mBast[1] ?? 0);
+                }
+                if (preg_match('/\bbase=(\d+(?:\.\d+)?)\b/i', $commentsText, $mBase)) {
+                    $result['base'] = (float)($mBase[1] ?? 0);
+                }
+                return $result;
+            };
+            try {
+                $stProdDetail = Db::erpPdo()->prepare("
+                    SELECT id,
+                           evt_type,
+                           evt_amount,
+                           evt_amount2,
+                           evt_amount_metros_lineales,
+                           prod_bobina_kg,
+                           evt_comments,
+                           evt_crtdat
+                    FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_type IN ('prod', 'prodsericolor')
+                      AND evt_status > 0
+                    ORDER BY evt_crtdat ASC, id ASC
+                ");
+                $stProdDetail->execute([':ot_id' => $workerOtId]);
+                while ($pRow = $stProdDetail->fetch(PDO::FETCH_ASSOC)) {
+                    $commentsText = (string)($pRow['evt_comments'] ?? '');
+                    $isSeriDetail = ($isSeri || $isSeriPulpo || (string)($pRow['evt_type'] ?? '') === 'prodsericolor' || str_contains($commentsText, '[SERI_COUNTERS:'));
+                    $meta = $parseSeriProdMeta($commentsText);
+                    $displayCounter = 0.0;
+                    $displayDevPrints = 0.0;
+                    $displayUnits = (float)($pRow['evt_amount'] ?? 0);
+                    if ($isSeriDetail) {
+                        $displayCounter = (float)($pRow['evt_amount2'] ?? 0);
+                        if ($displayCounter <= 0 && (float)$meta['base'] > 0) {
+                            $displayCounter = (float)$meta['base'];
+                        }
+                        $displayDevPrints = (float)$meta['img_bast'];
+                        if ($displayDevPrints <= 0) {
+                            $displayDevPrints = (float)$meta['imp_des'];
+                        }
+                        if ($displayDevPrints <= 0) {
+                            $displayDevPrints = max(1.0, (float)($agenda['req_operador_bastidoramt'] ?? 1));
+                        }
+                        if ($displayUnits <= 0 && $displayCounter > 0) {
+                            $displayUnits = $displayCounter * $displayDevPrints;
+                        }
+                    }
+                    $pRow['display_is_seri'] = $isSeriDetail ? 1 : 0;
+                    $pRow['display_counter'] = $displayCounter;
+                    $pRow['display_devprints'] = $displayDevPrints;
+                    $pRow['display_units'] = $displayUnits;
+                    $otSummaryProducedDisplay += $displayUnits;
+                    $otProducedDetail[] = $pRow;
+                }
+            } catch (Throwable) {}
+            if ($otSummaryProducedDisplay <= 0) {
+                $otSummaryProducedDisplay = $otSummaryProduced;
+            }
+            try {
+                $stSumWaste = Db::erpPdo()->prepare("
+                    SELECT COALESCE(t2.merma_title, 'Merma') AS merma_title,
+                           SUM(d.evt_kgstounits) AS kgs
+                    FROM prod_worker_ot_defectunits d
+                    INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                    LEFT JOIN prod_mermatypes t2 ON d.evt_merma_typeid = t2.id
+                    WHERE e.evt_prod_worker_otid = :ot_id
+                      AND d.evt_status > 0
+                    GROUP BY d.evt_merma_typeid, t2.merma_title
+                    HAVING kgs > 0
+                ");
+                $stSumWaste->execute([':ot_id' => $workerOtId]);
+                while ($wRow = $stSumWaste->fetch(PDO::FETCH_ASSOC)) {
+                    $wKgs = (float)$wRow['kgs'];
+                    $otSummaryWasteKg += $wKgs;
+                    $otWasteBreakdown[] = htmlspecialchars($wRow['merma_title']) . ': <b>' . number_format($wKgs, 2, ',', '.') . ' kg</b>';
+                }
+            } catch (Throwable) {}
+            try {
+                $stWasteDetail = Db::erpPdo()->prepare("
+                    SELECT COALESCE(t2.merma_title, 'Merma') AS merma_title,
+                           d.evt_amount,
+                           d.evt_kgstounits,
+                           d.evt_mtstounits,
+                           d.evt_comments,
+                           d.evt_crtdat
+                    FROM prod_worker_ot_defectunits d
+                    INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                    LEFT JOIN prod_mermatypes t2 ON d.evt_merma_typeid = t2.id
+                    WHERE e.evt_prod_worker_otid = :ot_id
+                      AND d.evt_status > 0
+                    ORDER BY d.evt_crtdat ASC, d.id ASC
+                ");
+                $stWasteDetail->execute([':ot_id' => $workerOtId]);
+                while ($wRow = $stWasteDetail->fetch(PDO::FETCH_ASSOC)) {
+                    $otWasteDetail[] = $wRow;
+                }
+            } catch (Throwable) {}
+            ?>
+            <?php if ($useCloseSupervisorModal): ?>
+                <div id="close_ot_supervisor_modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.62);z-index:99999;align-items:center;justify-content:center;padding:18px;box-sizing:border-box">
+                    <div style="background:#FFFFFF;border-radius:12px;box-shadow:0 24px 48px rgba(0,0,0,0.3);width:100%;max-width:1100px;max-height:92vh;border:1px solid #CBD5E1;overflow:hidden;display:flex;flex-direction:column">
+                        <div style="background:#991B1B;color:#FFFFFF;padding:16px 20px;font-size:17px;font-weight:bold;display:flex;align-items:center;justify-content:space-between;gap:12px">
+                            <span><i class="fa fa-lock"></i> Cierre de OT con Supervisor</span>
+                            <button type="button" onclick="closeCloseOtSupervisorModal()" style="background:transparent;border:none;color:#FFFFFF;font-size:22px;cursor:pointer;line-height:1">&times;</button>
+                        </div>
+                        <div style="padding:18px 20px 6px;color:#475569;font-size:13px">
+                            OT #<b><?=htmlspecialchars((string)$agenda['prd_number'])?></b>. Ingrese las credenciales del supervisor para confirmar el cierre.
+                        </div>
+                        <div style="padding:0 20px 8px;overflow:auto;flex:1 1 auto">
+                            <?php if ($isSeriPulpo): ?>
+                                <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-radius:5px;padding:14px 18px;margin-bottom:16px">
+                                    <div style="font-size:13px;font-weight:bold;color:#1E293B;margin-bottom:8px">
+                                        <i class="fa fa-layer-group" style="color:#008A87"></i> Balance de Producción Serigrafía Pulpo al Cierre
+                                    </div>
+                                    <table border="0" width="100%" cellpadding="4" cellspacing="0" style="font-size:12.5px">
+                                        <tr>
+                                            <td style="color:#64748B" width="220">Pasadas Frente acumuladas:</td>
+                                            <td><b><?=number_format($prevFrente, 0, ',', '.')?></b> pasadas</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="color:#64748B">Pasadas Dorso acumuladas:</td>
+                                            <td><b><?=number_format($prevDorso, 0, ',', '.')?></b> pasadas</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="color:#64748B">Bolsas terminadas completas:</td>
+                                            <td><b style="color:#059669"><?=number_format($prevFinished, 0, ',', '.')?></b> bolsas</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="color:#64748B">Bolsas sin terminar al cierre:</td>
+                                            <td>
+                                                <?php if ($prevSurplusFrente > 0): ?>
+                                                    <span style="color:#D97706;font-weight:bold">
+                                                        <i class="fa fa-exclamation-triangle"></i> <?=number_format($prevSurplusFrente, 0, ',', '.')?> bolsas con Frente impreso (pendientes de dorso). Quedarán guardadas para el próximo ingreso.
+                                                    </span>
+                                                <?php elseif ($prevSurplusDorso > 0): ?>
+                                                    <span style="color:#D97706;font-weight:bold">
+                                                        <i class="fa fa-exclamation-triangle"></i> <?=number_format($prevSurplusDorso, 0, ',', '.')?> bolsas con Dorso impreso (pendientes de frente). Quedarán guardadas para el próximo ingreso.
+                                                    </span>
+                                                <?php else: ?>
+                                                    <span style="color:#059669;font-weight:bold">
+                                                        <i class="fa fa-check-circle"></i> 0 bolsas pendientes (Frente y Dorso al día).
+                                                    </span>
+                                                <?php endif; ?>
+                                            </td>
+                                        </tr>
+                                    </table>
+                                </div>
+                            <?php endif; ?>
+                            <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-radius:5px;padding:14px 18px;margin-bottom:16px">
+                                <div style="font-size:13px;font-weight:bold;color:#1E293B;margin-bottom:8px">
+                                    <i class="fa fa-balance-scale" style="color:#008A87"></i> Resumen Acumulado de la OT al Cierre
+                                </div>
+                                <table border="0" width="100%" cellpadding="4" cellspacing="0" style="font-size:12.5px">
+                                    <?php if ($isFlexo): ?>
+                                        <tr>
+                                            <td style="color:#64748B" width="220">Metros Lineales terminados:</td>
+                                            <td><b style="color:#059669"><?=number_format($prSummary['total_meters'] > 0 ? $prSummary['total_meters'] : $otSummaryMlin, 0, ',', '.')?></b> mtrs <?=($prSummary['total_weight_kg'] > 0 ? ' (' . number_format($prSummary['total_weight_kg'], 2, ',', '.') . ' kg)' : ($otSummaryKg > 0 ? ' (' . number_format($otSummaryKg, 2, ',', '.') . ' kg)' : ''))?></td>
+                                        </tr>
+                                        <?php if ($prSummary['rolls_count'] > 0): ?>
+                                            <tr>
+                                                <td style="color:#64748B">Bobinas Impresas producidas:</td>
+                                                <td>
+                                                    <b style="color:#1E293B"><?=number_format($prSummary['total_weight_kg'], 2, ',', '.')?> kg</b>
+                                                    <span style="font-size:11.5px;color:#64748B;margin-left:6px">(<?=$prSummary['rolls_count']?> bobina<?=$prSummary['rolls_count'] > 1 ? 's' : ''?>: <?=implode(', ', array_map(fn($r) => $r['roll_code'], $prSummary['rolls_list']))?>)</span>
+                                                </td>
+                                            </tr>
+                                        <?php endif; ?>
+                                    <?php else: ?>
+                                        <tr>
+                                            <td style="color:#64748B" width="220">Producción total registrada:</td>
+                                            <td><b style="color:#059669"><?=number_format($otSummaryProducedDisplay, 0, ',', '.')?></b> unidades / bolsas</td>
+                                        </tr>
+                                    <?php endif; ?>
+                                    <tr>
+                                        <td style="color:#64748B">Total Mermas acumuladas:</td>
+                                        <td>
+                                            <?php if ($otSummaryWasteKg > 0): ?>
+                                                <b style="color:#DC2626"><?=number_format($otSummaryWasteKg, 2, ',', '.')?> kg</b>
+                                                <?php if (!empty($otWasteBreakdown)): ?>
+                                                    <span style="font-size:11.5px;color:#64748B;margin-left:6px">(<?=implode(', ', $otWasteBreakdown)?>)</span>
+                                                <?php endif; ?>
+                                            <?php else: ?>
+                                                <span style="color:#64748B">0.00 kg</span>
+                                            <?php endif; ?>
+                                        </td>
+                                    </tr>
+                                </table>
+                            </div>
+
+                            <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:8px;padding:14px 18px;margin-bottom:16px">
+                                <div style="font-size:13px;font-weight:bold;color:#1E293B;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+                                    <i class="fa fa-industry" style="color:#0284C7"></i> Detalle de lo Producido en esta OT
+                                </div>
+                                <?php if ($isFlexo && !empty($prSummary['rolls_list'])): ?>
+                                    <div style="overflow:auto;margin-bottom:12px">
+                                        <table border="0" width="100%" cellpadding="6" cellspacing="0" style="font-size:12.5px;min-width:640px">
+                                            <tr style="background:#F8FAFC;color:#334155">
+                                                <td><b>Bobina</b></td>
+                                                <td><b>Kg</b></td>
+                                                <td><b>Metros</b></td>
+                                            </tr>
+                                            <?php foreach ($prSummary['rolls_list'] as $rollInfo): ?>
+                                                <tr>
+                                                    <td style="border-top:1px solid #E2E8F0"><b><?=htmlspecialchars((string)$rollInfo['roll_code'])?></b></td>
+                                                    <td style="border-top:1px solid #E2E8F0"><?=number_format((float)($rollInfo['weight_kg'] ?? 0), 2, ',', '.')?></td>
+                                                    <td style="border-top:1px solid #E2E8F0"><?=number_format((float)($rollInfo['meters'] ?? 0), 0, ',', '.')?></td>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                        </table>
+                                    </div>
+                                <?php endif; ?>
+
+                                <?php if (!empty($otProducedDetail)): ?>
+                                    <div style="overflow:auto">
+                                        <table border="0" width="100%" cellpadding="6" cellspacing="0" style="font-size:12.5px;min-width:760px">
+                                            <tr style="background:#F8FAFC;color:#334155">
+                                                <td><b>Fecha</b></td>
+                                                <td><b>Tipo</b></td>
+                                                <?php if ($isSeri || $isSeriPulpo): ?>
+                                                    <td><b>Contador</b></td>
+                                                    <td><b>Img/Bast.</b></td>
+                                                    <td><b>Unidades</b></td>
+                                                <?php elseif ($isFlexo): ?>
+                                                    <td><b>Metros</b></td>
+                                                    <td><b>Kg</b></td>
+                                                <?php else: ?>
+                                                    <td><b>Unidades</b></td>
+                                                    <td><b>Kg</b></td>
+                                                <?php endif; ?>
+                                                <?php if ($isSeri || $isSeriPulpo): ?>
+                                                    <td><b>Kg</b></td>
+                                                <?php endif; ?>
+                                            </tr>
+                                            <?php foreach ($otProducedDetail as $prodRow): ?>
+                                                <?php
+                                                $prodTs = (int)($prodRow['evt_crtdat'] ?? 0);
+                                                $prodTypeLabel = ((string)($prodRow['evt_type'] ?? '') === 'prodsericolor') ? 'Producción color' : 'Producción';
+                                                ?>
+                                                <tr>
+                                                    <td style="border-top:1px solid #E2E8F0"><?=($prodTs > 0 ? date('d/m/Y H:i', $prodTs) : '-')?></td>
+                                                    <td style="border-top:1px solid #E2E8F0"><?=$prodTypeLabel?></td>
+                                                    <?php if ($isSeri || $isSeriPulpo): ?>
+                                                        <td style="border-top:1px solid #E2E8F0"><?=number_format((float)($prodRow['display_counter'] ?? 0), 0, ',', '.')?></td>
+                                                        <td style="border-top:1px solid #E2E8F0"><?=number_format((float)($prodRow['display_devprints'] ?? 0), 0, ',', '.')?></td>
+                                                        <td style="border-top:1px solid #E2E8F0"><b style="color:#059669"><?=number_format((float)($prodRow['display_units'] ?? 0), 0, ',', '.')?></b></td>
+                                                        <td style="border-top:1px solid #E2E8F0"><?=number_format((float)($prodRow['prod_bobina_kg'] ?? 0), 2, ',', '.')?></td>
+                                                    <?php elseif ($isFlexo): ?>
+                                                        <td style="border-top:1px solid #E2E8F0"><?=number_format((float)($prodRow['evt_amount_metros_lineales'] ?? 0), 0, ',', '.')?></td>
+                                                        <td style="border-top:1px solid #E2E8F0"><?=number_format((float)($prodRow['prod_bobina_kg'] ?? 0), 2, ',', '.')?></td>
+                                                    <?php else: ?>
+                                                        <td style="border-top:1px solid #E2E8F0"><b style="color:#059669"><?=number_format((float)($prodRow['display_units'] ?? 0), 0, ',', '.')?></b></td>
+                                                        <td style="border-top:1px solid #E2E8F0"><?=number_format((float)($prodRow['prod_bobina_kg'] ?? 0), 2, ',', '.')?></td>
+                                                    <?php endif; ?>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                        </table>
+                                    </div>
+                                <?php else: ?>
+                                    <div style="font-size:12.5px;color:#64748B">No hay registros de producción acumulada para mostrar en esta OT.</div>
+                                <?php endif; ?>
+                            </div>
+
+                            <div style="background:#FFFFFF;border:1px solid #FECACA;border-radius:8px;padding:14px 18px;margin-bottom:16px">
+                                <div style="font-size:13px;font-weight:bold;color:#991B1B;margin-bottom:10px;display:flex;align-items:center;gap:8px">
+                                    <i class="fa fa-trash" style="color:#DC2626"></i> Detalle de Mermas de la OT
+                                </div>
+                                <?php if (!empty($otWasteDetail)): ?>
+                                    <div style="overflow:auto">
+                                        <table border="0" width="100%" cellpadding="6" cellspacing="0" style="font-size:12.5px;min-width:760px">
+                                            <tr style="background:#FEF2F2;color:#7F1D1D">
+                                                <td><b>Fecha</b></td>
+                                                <td><b>Tipo de merma</b></td>
+                                                <td><b>Unidades</b></td>
+                                                <td><b>Kg</b></td>
+                                                <td><b>Metros</b></td>
+                                                <td><b>Observación</b></td>
+                                            </tr>
+                                            <?php foreach ($otWasteDetail as $wasteRow): ?>
+                                                <?php $wasteTs = (int)($wasteRow['evt_crtdat'] ?? 0); ?>
+                                                <tr>
+                                                    <td style="border-top:1px solid #FECACA"><?=($wasteTs > 0 ? date('d/m/Y H:i', $wasteTs) : '-')?></td>
+                                                    <td style="border-top:1px solid #FECACA"><b><?=htmlspecialchars((string)($wasteRow['merma_title'] ?? 'Merma'))?></b></td>
+                                                    <td style="border-top:1px solid #FECACA"><?=number_format((float)($wasteRow['evt_amount'] ?? 0), 0, ',', '.')?></td>
+                                                    <td style="border-top:1px solid #FECACA;color:#B91C1C"><?=number_format((float)($wasteRow['evt_kgstounits'] ?? 0), 2, ',', '.')?></td>
+                                                    <td style="border-top:1px solid #FECACA"><?=number_format((float)($wasteRow['evt_mtstounits'] ?? 0), 0, ',', '.')?></td>
+                                                    <td style="border-top:1px solid #FECACA;color:#7F1D1D"><?=htmlspecialchars((string)($wasteRow['evt_comments'] ?? ''))?></td>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                        </table>
+                                    </div>
+                                <?php else: ?>
+                                    <div style="font-size:12.5px;color:#64748B">No hay mermas registradas en esta OT.</div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+
+                        <form method="post" action="/production/work-orders/close" id="close_ot_supervisor_form">
+                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                            <input type="hidden" name="agid" value="<?=$agId?>">
+                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+
+                            <div style="padding:14px 20px 20px;border-top:1px solid #E2E8F0">
+                                <div style="display:grid;grid-template-columns:1fr;gap:14px">
+                                    <div>
+                                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Usuario Supervisor</label>
+                                        <input type="text" name="sup_user" id="close_ot_sup_user" class="inptxt" style="width:100%" required autocomplete="off">
+                                    </div>
+                                    <div>
+                                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Contraseña</label>
+                                        <input type="password" name="sup_pass" id="close_ot_sup_pass" class="inptxt" style="width:100%" required>
+                                    </div>
+                                    <div>
+                                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Motivo / Cierre</label>
+                                        <select name="close_reason" class="inptxt" style="width:100%">
+                                            <option value="completa">Producción Completada al 100%</option>
+                                            <option value="parcial">Cierre Parcial por Cambio de Turno</option>
+                                            <option value="interrumpida">Interrumpida por Falla Mecánica / Insumo</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:18px">
+                                    <button type="button" class="btngrey" style="font-size:14px;padding:10px 18px;border:none;cursor:pointer" onclick="closeCloseOtSupervisorModal()">Cancelar</button>
+                                    <button type="submit" class="btnred" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer">
+                                        <i class="fa fa-fw fa-check-circle"></i> Terminar
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+                <script>
+                (function () {
+                    var modal = document.getElementById('close_ot_supervisor_modal');
+                    var firstInput = document.getElementById('close_ot_sup_user');
+                    window.openCloseOtSupervisorModal = function () {
+                        if (!modal) return;
+                        modal.style.display = 'flex';
+                        if (firstInput) {
+                            setTimeout(function () { firstInput.focus(); }, 50);
+                        }
+                    };
+                    window.closeCloseOtSupervisorModal = function () {
+                        if (!modal) return;
+                        modal.style.display = 'none';
+                    };
+                    window.addEventListener('keydown', function (event) {
+                        if (event.key === 'Escape' && modal && modal.style.display === 'flex') {
+                            window.closeCloseOtSupervisorModal();
+                        }
+                    });
+                    <?php if ($mode === 'terminarot'): ?>
+                    window.openCloseOtSupervisorModal();
+                    <?php endif; ?>
+                })();
+                </script>
+            <?php else: ?>
+                <form method="post" action="/production/work-orders/close">
+                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                    <input type="hidden" name="agid" value="<?=$agId?>">
+                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+
+                    <table border="0" width="100%" cellpadding="8" cellspacing="0">
+                    <tr>
+                        <td class="tdleft" width="180">Usuario Supervisor</td>
+                        <td class="tdnrm"><input type="text" name="sup_user" class="inptxt" style="width:100%" required autocomplete="off"></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Contraseña</td>
+                        <td class="tdnrm"><input type="password" name="sup_pass" class="inptxt" style="width:100%" required></td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Motivo / Cierre</td>
+                        <td class="tdnrm">
+                            <select name="close_reason" class="inptxt" style="width:100%">
+                                <option value="completa">Producción Completada al 100%</option>
+                                <option value="parcial">Cierre Parcial por Cambio de Turno</option>
+                                <option value="interrumpida">Interrumpida por Falla Mecánica / Insumo</option>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm">
+                            <button type="submit" class="btnred" style="font-size:14px;padding:10px 24px;width:100%">
+                                <i class="fa fa-fw fa-check-circle"></i> Terminar
+                            </button>
+                        </td>
+                    </tr>
+                    </table>
+                </form>
+            <?php endif; ?>
         </div>
 
     <?php endif; ?>
@@ -7131,104 +8769,100 @@ function renderProductionOperatorConsole(
         <!-- BARRA DE BOTONES DE ACCIÓN (editxid.php líneas 4647 - 4780)    -->
         <!-- Visible en Alistamiento, en Producción y en Pulpo/Serigrafía    -->
         <!-- ============================================================== -->
+        <?php
+        $isBarExpanded = ($hasAlis || $isSeri || $isRebobinadora);
+        $hidePauseShortcut = ($isSeri || $isSeriPulpo);
+        $actionBtnBaseStyle = 'border-radius:8px;padding:10px 14px;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;min-height:42px;box-shadow:0 1px 3px rgba(15,23,42,0.16);cursor:pointer';
+        $actionBtnBlockStyle = $actionBtnBaseStyle . ($isBarExpanded ? '' : 'width:100%;box-sizing:border-box;text-align:center;display:flex;');
+        $materialsActionLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
+        ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;margin-bottom:10px">
         <tr>
             <?php if (!$hasAlis && $hasApertura && !$isRebobinadora): ?>
                 <td style="padding-right:4px">
-                    <div class="btnorange" style="background:#E1A500;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1'">
-                        <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> ⏹️ Terminar alistamiento / Autocontrol&nbsp;</nobr>
+                    <div class="btnorange" style="<?=$actionBtnBaseStyle?>;background:#E1A500" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1'">
+                        <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar&nbsp;</nobr>
                     </div>
                 </td>
             <?php endif; ?>
             <?php if ($hasAlis || $isSeri || $isRebobinadora): ?>
                 <?php if ($isRebobinadora): ?>
                     <td style="padding-right:4px">
-                        <div class="btngreen" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=reboprod'">
+                        <div class="btngreen" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=reboprod'">
                             <nobr><i class="fa fa-fw fa-cogs" style="color:white;"></i> Rebobinado&nbsp;</nobr>
                         </div>
                     </td>
                 <?php else: ?>
                     <td style="padding-right:4px">
                         <?php if ($openProdId > 0): ?>
-                            <div class="btnorange" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$openProdId?>&submode=end'">
-                                <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> ⏹️ Finalizar producción&nbsp;</nobr>
+                            <div class="btnorange" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$openProdId?>&submode=end'">
+                                <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> Finalizar&nbsp;</nobr>
                             </div>
                         <?php else: ?>
-                            <div class="btngreen" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&action=start'">
-                                <nobr><i class="fa fa-fw fa-play" style="color:white;"></i> ▶️ Iniciar producción&nbsp;</nobr>
+                            <div class="btngreen" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&action=start'">
+                                <nobr><i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar&nbsp;</nobr>
                             </div>
                         <?php endif; ?>
                     </td>
-                    <?php if ($isFlexo): ?>
-                        <td style="padding-right:4px">
-                            <div class="btnblue" style="background:#6366f1;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=semielaborado'">
-                                <nobr><i class="fa fa-fw fa-tag" style="color:white;"></i> Bobina Impresa (SE)&nbsp;</nobr>
-                            </div>
-                        </td>
-                    <?php endif; ?>
                     <?php if ($isSelladora): ?>
                         <td style="padding-right:4px">
-                            <div class="btngrey" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=embalaje'">
-                                <nobr><i class="fa fa-fw fa-box" style="color:white;"></i> Embalaje / Cajas&nbsp;</nobr>
+                            <div class="btngrey" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=embalaje'">
+                                <nobr><i class="fa fa-fw fa-box" style="color:white;"></i> Embalaje&nbsp;</nobr>
                             </div>
                         </td>
                     <?php endif; ?>
                 <?php endif; ?>
             <?php endif; ?>
 
-            <?php $isBarExpanded = ($hasAlis || $isSeri || $isRebobinadora); ?>
             <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding-right:2px;width:25%'?>">
-                <div class="btnblue" style="<?=$isBarExpanded ? '' : 'width:100%;box-sizing:border-box;background-color:#293865;padding:10px 0;text-align:center;display:block'?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales'">
-                    <nobr><i class="fa fa-fw <?= $isRebobinadora ? 'fa-dolly' : 'fa-cubes' ?>" style="color:white;"></i> <?= $isRebobinadora ? 'Solicitar bobina' : ($isSeriPulpo ? 'Solicitar / Cargar materiales' : ($isSeri ? 'Cargar Insumos / Tintas' : 'Utilizar materiales')) ?>&nbsp;</nobr>
+                <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#293865" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales'">
+                    <nobr><i class="fa fa-fw <?= $isRebobinadora ? 'fa-dolly' : 'fa-cubes' ?>" style="color:white;"></i> <?=$materialsActionLabel?>&nbsp;</nobr>
                 </div>
             </td>
 
             <?php if (!$isPrinter && $hasAlis && !$isRebobinadora): ?>
                 <td style="padding-right:4px;padding-left:4px">
-                    <div class="btnorange" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=apertura'">
-                        <nobr><i class="fa fa-fw fa-wrench" style="color:white;"></i> Apertura de Medida&nbsp;</nobr>
+                    <div class="btnorange" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=apertura'">
+                        <nobr><i class="fa fa-fw fa-wrench" style="color:white;"></i> Apertura&nbsp;</nobr>
                     </div>
                 </td>
             <?php endif; ?>
 
             <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:25%'?>">
-                <div class="btnred" style="<?=$isBarExpanded ? '' : 'width:100%;box-sizing:border-box;background-color:#D64141;padding:10px 0;text-align:center;display:block'?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion'">
-                    <nobr><i class="fa fa-fw fa-tools" style="color:white;"></i> Registrar mantención&nbsp;</nobr>
+                <div class="btnred" style="<?=$actionBtnBlockStyle?>;background-color:#D64141" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion'">
+                    <nobr><i class="fa fa-fw fa-tools" style="color:white;"></i> Mantención&nbsp;</nobr>
                 </div>
             </td>
 
-            <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:25%'?>">
-                <div class="btngrey" style="<?=$isBarExpanded ? '' : 'width:100%;box-sizing:border-box;background-color:#7F7F7F;padding:10px 0;text-align:center;display:block'?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause'">
-                    <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Pausa&nbsp;</nobr>
-                </div>
-            </td>
+            <?php if (!$hidePauseShortcut): ?>
+                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:25%'?>">
+                    <div class="btngrey" style="<?=$actionBtnBlockStyle?>;background-color:#7F7F7F" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause'">
+                        <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Pausa&nbsp;</nobr>
+                    </div>
+                </td>
+            <?php endif; ?>
 
             <?php if ($isSeri || $isSeriPulpo): ?>
                 <!-- BOTÓN COLACIÓN ESPECÍFICO SERIGRAFÍA Y PULPO -->
                 <td style="padding-right:4px;padding-left:4px">
-                    <div class="btnblue" style="background-color:#0284C7;cursor:pointer" onclick="openLunchModal()" title="Registrar horario de colación">
+                    <div class="btnblue" style="<?=$actionBtnBaseStyle?>;background-color:#0284C7" onclick="openLunchModal()" title="Registrar horario de colación">
                         <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Colación&nbsp;</nobr>
                     </div>
                 </td>
                 <!-- BOTÓN SIN PRODUCCIÓN ESPECÍFICO SERIGRAFÍA Y PULPO -->
                 <td style="padding-right:4px;padding-left:4px">
                     <?php if ($activeStandby !== null): ?>
-                        <div class="btnorange" style="background-color:#EA580C;cursor:pointer" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
-                            <nobr><i class="fa fa-fw fa-play-circle" style="color:white;"></i> Finalizar Sin Prod.&nbsp;</nobr>
+                        <div class="btnorange" style="<?=$actionBtnBaseStyle?>;background-color:#EA580C" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
+                            <nobr><i class="fa fa-fw fa-play-circle" style="color:white;"></i> Reanudar&nbsp;</nobr>
                         </div>
                     <?php else: ?>
-                        <div class="btnorange" style="background-color:#D97706;cursor:pointer" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
-                            <nobr><i class="fa fa-fw fa-pause-circle" style="color:white;"></i> Sin Producción&nbsp;</nobr>
+                        <div class="btnorange" style="<?=$actionBtnBaseStyle?>;background-color:#D97706" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
+                            <nobr><i class="fa fa-fw fa-pause-circle" style="color:white;"></i> Espera&nbsp;</nobr>
                         </div>
                     <?php endif; ?>
                 </td>
             <?php endif; ?>
 
-            <td style="<?=$isBarExpanded ? 'padding-left:4px' : 'padding-left:2px;width:25%'?>">
-                <div class="btnorange" style="<?=$isBarExpanded ? '' : 'width:100%;box-sizing:border-box;background-color:#E1A500;padding:10px 0;text-align:center;display:block'?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=consumo'">
-                    <nobr><i class="fa fa-fw fa-box-open" style="color:white;"></i> Consumo&nbsp;</nobr>
-                </div>
-            </td>
         </tr>
         </table>
     <?php endif; ?>
@@ -7274,6 +8908,7 @@ function renderProductionOperatorConsole(
                     $evttype = match($ev['evt_type']) {
                         'prod', 'prodsericolor' => ((int)($ev['overrideembalaje_act'] ?? 0) === 1 ? 'Prod. Embalaje' : 'Producción'),
                         'apertura' => 'Alistamiento',
+                        'merma' => 'Merma de Bobina',
                         'mantencion' => !empty($ev['repair_name']) ? 'Mantención: ' . htmlspecialchars((string)$ev['repair_name']) : 'Mantención',
                         'pause' => !empty($ev['pause_name']) ? 'Pausa: ' . htmlspecialchars((string)$ev['pause_name']) : 'Pausa',
                         default => ucfirst((string)$ev['evt_type'])
@@ -7292,18 +8927,46 @@ function renderProductionOperatorConsole(
                         } else {
                             $amtStr = $fmt($ev['evt_amount_metros_lineales']) . ' m lin';
                         }
-                    } elseif ((float)($ev['evt_amount'] ?? 0) > 0 || (float)($ev['evt_amount_pulpo_frente'] ?? 0) > 0 || (float)($ev['evt_amount_pulpo_dorso'] ?? 0) > 0) {
-                        $amtStr = $fmt($ev['evt_amount'] ?? 0) . ' bols';
-                        if ((float)($ev['evt_amount_pulpo_frente'] ?? 0) > 0 || (float)($ev['evt_amount_pulpo_dorso'] ?? 0) > 0) {
-                            $amtStr .= '<br><span style="font-size:11px;color:#64748B;font-weight:normal">(F: ' . $fmt($ev['evt_amount_pulpo_frente'] ?? 0) . ', D: ' . $fmt($ev['evt_amount_pulpo_dorso'] ?? 0) . ')</span>';
+                        if ((float)($ev['prod_bobina_kg'] ?? 0) > 0) {
+                            $amtStr .= '<br><span style="font-size:11px;color:#15803D;font-weight:bold">' . number_format((float)$ev['prod_bobina_kg'], 2, ',', '.') . ' kg</span>';
                         }
+                    } elseif ((float)($ev['evt_amount'] ?? 0) > 0 || (float)($ev['evt_amount_pulpo_frente'] ?? 0) > 0 || (float)($ev['evt_amount_pulpo_dorso'] ?? 0) > 0) {
+                        if ($ev['evt_type'] === 'merma') {
+                            $amtStr = number_format((float)($ev['evt_amount'] ?? 0), 2, ',', '.') . ' kg';
+                        } else {
+                            $amtStr = $fmt($ev['evt_amount'] ?? 0) . ' bols';
+                            if ((float)($ev['prod_bobina_kg'] ?? 0) > 0) {
+                                $amtStr .= '<br><span style="font-size:11px;color:#15803D;font-weight:bold">' . number_format((float)$ev['prod_bobina_kg'], 2, ',', '.') . ' kg</span>';
+                            }
+                            if ((float)($ev['evt_amount_pulpo_frente'] ?? 0) > 0 || (float)($ev['evt_amount_pulpo_dorso'] ?? 0) > 0) {
+                                $amtStr .= '<br><span style="font-size:11px;color:#64748B;font-weight:normal">(F: ' . $fmt($ev['evt_amount_pulpo_frente'] ?? 0) . ', D: ' . $fmt($ev['evt_amount_pulpo_dorso'] ?? 0) . ')</span>';
+                            }
+                        }
+                    } elseif ((float)($ev['prod_bobina_kg'] ?? 0) > 0) {
+                        $amtStr = '<span style="font-size:11px;color:#15803D;font-weight:bold">' . number_format((float)$ev['prod_bobina_kg'], 2, ',', '.') . ' kg</span>';
                     }
+                    $targetMode = match($ev['evt_type']) {
+                        'prod', 'merma' => 'production',
+                        default => $ev['evt_type']
+                    };
+                    $isDurational = in_array($ev['evt_type'], ['prod', 'prodsericolor', 'apertura', 'pause', 'mantencion'], true);
+                    $isSemiRoll = (strpos((string)($ev['evt_comments'] ?? ''), 'Bobina Semielaborada') !== false);
+                    if ($isSemiRoll) {
+                        $isDurational = false;
+                    }
+                    $isCompleted = (!$isDurational) || ($end > 0) || ((int)($ev['evt_status'] ?? 0) === 2);
                     ?>
                     <tr>
                         <td class="tdnrm"><b><?=$evttype?></b></td>
                         <td class="tdnrm"><?=date('d.m.Y H:i:s', $start)?></td>
-                        <td class="tdnrm"><?=$end > 0 ? date('d.m.Y H:i:s', $end) : '<span style="color:#00A85A;font-weight:bold"><i class="fa fa-clock"></i> En curso</span>'?></td>
-                        <td class="tdnrm" align="center"><?=$hours?>h <?=$mins?>m</td>
+                        <td class="tdnrm">
+                            <?php if (!$isCompleted): ?>
+                                <span style="color:#00A85A;font-weight:bold"><i class="fa fa-clock"></i> En curso</span>
+                            <?php else: ?>
+                                <?=date('d.m.Y H:i:s', $end > 0 ? $end : $start)?>
+                            <?php endif; ?>
+                        </td>
+                        <td class="tdnrm" align="center"><?=$isDurational ? ($hours . 'h ' . $mins . 'm') : '-'?></td>
                         <td class="tdnrm" align="center"><b><?=$amtStr?></b></td>
                         <td class="tdnrm">
                             <?php if ($ev['evt_type'] === 'apertura'): ?>
@@ -7325,28 +8988,38 @@ function renderProductionOperatorConsole(
                             <?=htmlspecialchars((string)($ev['evt_comments'] ?? ''))?>
                         </td>
                         <td class="tdnrm" align="center">
-                            <?php if ($end === 0): ?>
+                            <?php if (!$isCompleted): ?>
                                 <?php if ($ev['evt_type'] === 'apertura'): ?>
                                     <div class="btnorange" style="padding:4px 10px;font-size:12px;display:inline-block;cursor:pointer"
                                          onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1'">
-                                        <i class="fa fa-stop"></i> Terminar Alistamiento / Autocontrol
-                                    </div>
-                                <?php else: ?>
-                                    <div class="btnorange" style="padding:4px 10px;font-size:12px;display:inline-block;cursor:pointer"
-                                         onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=<?=$ev['evt_type']?>&refid=<?=$ev['id']?>'">
                                         <i class="fa fa-stop"></i> Terminar
+                                    </div>
+                                <?php elseif (in_array($ev['evt_type'], ['prod', 'prodsericolor'], true)): ?>
+                                    <div class="btnorange" style="padding:4px 10px;font-size:12px;display:inline-block;cursor:pointer"
+                                         onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$ev['id']?>&submode=end'">
+                                        <i class="fa fa-stop"></i> Finalizar
+                                    </div>
+                                <?php elseif ($ev['evt_type'] === 'pause'): ?>
+                                    <div class="btnorange" style="padding:4px 10px;font-size:12px;display:inline-block;cursor:pointer"
+                                         onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&refid=<?=$ev['id']?>'">
+                                        <i class="fa fa-stop"></i> Terminar Pausa
+                                    </div>
+                                <?php elseif ($ev['evt_type'] === 'mantencion'): ?>
+                                    <div class="btnorange" style="padding:4px 10px;font-size:12px;display:inline-block;cursor:pointer"
+                                         onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion&refid=<?=$ev['id']?>'">
+                                        <i class="fa fa-stop"></i> Terminar Mantención
                                     </div>
                                 <?php endif; ?>
                             <?php else: ?>
-                                <?php if ($ev['evt_type'] !== 'apertura'): ?>
+                                <?php if (in_array($ev['evt_type'], ['prod', 'prodsericolor'], true) && !$isSemiRoll): ?>
                                     <div class="btngrey" style="padding:4px 10px;font-size:12px;display:inline-block;cursor:pointer"
-                                         onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=<?=$ev['evt_type']?>&refid=<?=$ev['id']?>'">
+                                         onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$ev['id']?>'">
                                         <i class="fa fa-edit"></i> Ver
                                     </div>
                                 <?php endif; ?>
                             <?php endif; ?>
                             <div class="btnred" style="padding:4px 8px;font-size:12px;display:inline-block;margin-left:4px;cursor:pointer"
-                                 onclick="if(confirm('¿Seguro de eliminar este evento?')) location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=eventdelete&delid=<?=$ev['id']?>&worker_ot_id=<?=$workerOtId?>'">
+                                  onclick="if(confirm('¿Seguro de eliminar este evento?')) location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=eventdelete&delid=<?=$ev['id']?>&worker_ot_id=<?=$workerOtId?>'">
                                 <i class="fa fa-trash"></i>
                             </div>
                         </td>
@@ -7437,9 +9110,9 @@ function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, 
                     <input type="hidden" name="redirect_to" value="<?=htmlspecialchars($redirectTo)?>">
                 <?php endif; ?>
                 <?php if ($activeInit !== null): ?>
-                    <input type="hidden" name="init_id" value="<?=(int)$activeInit['id']?>">
-                    <input type="hidden" name="machine_id" value="<?=(int)$activeInit['win_equipoid']?>">
-                    <input type="hidden" name="machine_name" value="<?=htmlspecialchars((string)$activeInit['equipo_name'])?>">
+                    <input type="hidden" name="init_id" value="<?=(int)($activeInit['id'] ?? 0)?>">
+                    <input type="hidden" name="machine_id" value="<?=(int)($activeInit['win_equipoid'] ?? $activeInit['equipo_id'] ?? 0)?>">
+                    <input type="hidden" name="machine_name" value="<?=htmlspecialchars((string)($activeInit['equipo_name'] ?? ''))?>">
                 <?php endif; ?>
 
                 <div style="margin-bottom:12px">
@@ -7804,7 +9477,10 @@ function renderProductionNewWorkOrderScreen(
     string $operatorName,
     string $plantaName,
     ?array $activeStandby = null,
-    ?string $dateFilter = null
+    ?string $dateFilter = null,
+    array $unscheduledOrders = [],
+    string $activeTab = 'scheduled',
+    ?string $searchQuery = null
 ): void {
     $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
     $isRebobinadora = ($equipoTypeId === 12 || stripos((string)($activeInit['type_ant_title'] ?? ''), 'rebobin') !== false || stripos((string)($activeInit['equipo_name'] ?? ''), 'rebobin') !== false);
@@ -7818,442 +9494,258 @@ function renderProductionNewWorkOrderScreen(
         || stripos((string)($activeInit['equipo_name'] ?? ''), 'seri') !== false
         || stripos((string)($activeInit['equipo_name'] ?? ''), 'pulpo') !== false;
 
+    $machineName = (string)($activeInit['equipo_name'] ?? ($isFlexo ? 'Flexografía' : ($isRebobinadora ? 'Rebobinadora' : ($isSeri ? 'Serigrafía' : 'Máquina'))));
+
     ob_start();
     ?>
-    <?php if ($isRebobinadora): ?>
-        <!-- ============================================================== -->
-        <!-- DISEÑO ESPECÍFICO REBOBINADORA: OTs Programadas para esta Máquina -->
-        <!-- ============================================================== -->
-        <div style="font-size:20px;margin-bottom:10px"><b>Ordenes de trabajo</b></div>
-        <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
-        <tr>
-            <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
-                <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
-                <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
-                <b>Iniciar nueva OT</b> en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Rebobinadora'))?></b>
-            </td>
-        </tr>
-        </table>
-
-        <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
-            <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:12px">
-                <i class="fa fa-fw fa-tasks"></i> OTs Programadas para esta Máquina
+    <!-- ============================================================== -->
+    <!-- CABECERA PRINCIPAL Y ACCIONES RÁPIDAS                          -->
+    <!-- ============================================================== -->
+    <div style="font-size:20px;margin-bottom:10px"><b>Ordenes de trabajo</b></div>
+    <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px">
+    <tr>
+        <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+                <div>
+                    <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
+                    <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
+                    <b>Iniciar nueva OT</b> en máquina <b><?=htmlspecialchars($machineName)?></b>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
+                        <i class="fa fa-dolly"></i> Solicitar Bobinas
+                    </a>
+                    <button type="button" class="btnblue" style="background:#0284C7;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px" onclick="openLunchModal()" title="Registrar horario de colación">
+                        <i class="fa fa-coffee"></i> Registrar Colación
+                    </button>
+                    <?php if ($activeStandby !== null): ?>
+                        <button type="button" class="btnorange" style="background:#EA580C;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
+                            <i class="fa fa-play-circle"></i> Finalizar Sin Producción
+                        </button>
+                    <?php else: ?>
+                        <button type="button" class="btnorange" style="background:#D97706;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
+                            <i class="fa fa-pause-circle"></i> Sin Producción
+                        </button>
+                    <?php endif; ?>
+                </div>
             </div>
-            <table border="0" width="100%" cellpadding="8" cellspacing="0">
-            <colgroup>
-                <col width="95">
-                <col width="85">
-                <col>
-                <col width="120">
-                <col width="85">
-                <col width="160">
-                <col width="120">
-                <col width="90">
-                <col width="115">
-            </colgroup>
-            <thead>
-                <tr>
-                    <td class="tdheader">N° C.C.</td>
-                    <td class="tdheader">N° O.T.</td>
-                    <td class="tdheader">Cliente</td>
-                    <td class="tdheader" align="center">Diseño</td>
-                    <td class="tdheader" align="center">Material</td>
-                    <td class="tdheader">Actividad</td>
-                    <td class="tdheader">Medidas</td>
-                    <td class="tdheader" align="right">Metros</td>
-                    <td class="tdheader" align="center">Acción</td>
-                </tr>
-            </thead>
-            <tbody>
-            <?php if (empty($scheduledOrders)): ?>
-                <tr><td colspan="9" class="tdnrm" style="text-align:center;padding:25px;color:#999">No hay órdenes de trabajo programadas para esta máquina.</td></tr>
-            <?php else: ?>
-                <?php foreach ($scheduledOrders as $so):
-                    $imgHash = trim((string)($so['fab_design_imagehash'] ?? $so['item_img_hash'] ?? ''));
-                    $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
-                    $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
-                    $designName = (string)($so['fab_design_name'] ?? '');
-                    $w = (int)($so['fab_med_width'] ?? 0);
-                    $h = (int)($so['fab_med_height'] ?? 0);
-                    $fuelle = (int)($so['fab_med_fuelle'] ?? 0);
-                    $medidasStr = $w > 0 ? ("{$w}x{$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : ((float)($so['req_operador_tela_width'] ?? 0) > 0 ? (float)$so['req_operador_tela_width'] . ' cm' : '-');
-                    $mat = !empty($so['fab_type']) ? (string)$so['fab_type'] : 'TNT';
-                    $actividad = !empty($so['rebo_distribucion']) && $so['rebo_distribucion'] !== '-' ? $so['rebo_distribucion'] : (!empty($so['req_rebo_type']) ? ('Corte ' . ucfirst((string)$so['req_rebo_type'])) : 'Corte / Rebobinado');
-                    $metros = (float)($so['ag_amount'] ?? 0);
-                ?>
-                    <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['prd_number'])?></b></td>
-                        <td class="tdnrm">
-                            <b><?=htmlspecialchars((string)$so['cust_name'])?></b>
-                            <?php if (!empty($so['item_title'])): ?>
-                                <div style="font-size:11.5px;color:#64748B"><?=htmlspecialchars((string)$so['item_title'])?></div>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" align="center">
-                            <?php if ($hasImg): ?>
-                                <div style="display:inline-flex;align-items:center;gap:6px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($designName))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
-                                    <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
-                                    <i class="fa fa-search-plus" style="color:#0284C7;font-size:12px"></i>
-                                </div>
-                            <?php else: ?>
-                                <span style="color:#94A3B8;font-size:12px"><i>Sin foto</i></span>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" align="center">
-                            <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
-                        </td>
-                        <td class="tdnrm">
-                            <span style="color:#0F766E;font-weight:600;font-size:12.5px"><i class="fa fa-cut"></i> <?=htmlspecialchars($actividad)?></span>
-                        </td>
-                        <td class="tdnrm"><?=htmlspecialchars($medidasStr)?></td>
-                        <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
-                        <td class="tdnrm" align="center">
-                            <form method="post" action="/production/work-orders/init" style="margin:0">
-                                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
-                                <button type="submit" class="btngreen" style="padding:6px 14px"><i class="fa fa-play"></i> Iniciar OT</button>
-                            </form>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            <?php endif; ?>
-            </tbody>
-            </table>
-        </div>
-    <?php elseif ($isFlexo): ?>
-        <!-- ============================================================== -->
-        <!-- DISEÑO ESPECÍFICO FLEXOGRAFÍA: OTs Programadas para esta Máquina -->
-        <!-- ============================================================== -->
-        <div style="font-size:20px;margin-bottom:10px"><b>Ordenes de trabajo</b></div>
-        <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
-        <tr>
-            <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
-                <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
-                <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
-                <b>Iniciar nueva OT</b> en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Flexografía'))?></b>
-            </td>
-        </tr>
-        </table>
+        </td>
+    </tr>
+    </table>
 
+    <?php if ($activeStandby !== null): ?>
+        <div style="background:#FFF7ED;border:1.5px solid #F97316;border-radius:5px;padding:12px 16px;margin-bottom:12px;color:#9A3412;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+            <div style="display:flex;align-items:center;gap:10px">
+                <i class="fa fa-pause-circle" style="font-size:22px;color:#EA580C"></i>
+                <div>
+                    <span style="font-weight:bold;font-size:14px;text-transform:uppercase">MÁQUINA EN ESPERA / SIN PRODUCCIÓN: <?=htmlspecialchars((string)$activeStandby['reason'])?></span>
+                    <div style="font-size:12.5px;color:#C2410C;margin-top:2px">
+                        Iniciado a las <b><?=htmlspecialchars((string)$activeStandby['start_time'])?></b> por <b><?=htmlspecialchars((string)$activeStandby['operator_name'])?></b>
+                        <?php if (!empty($activeStandby['comments'])): ?>
+                            &bull; <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="btnorange" style="background:#EA580C;padding:7px 16px;font-size:13px;cursor:pointer;border:none" onclick="openStandbyEndModal()">
+                <i class="fa fa-play"></i> Finalizar Sin Producción
+            </button>
+        </div>
+    <?php endif; ?>
+
+    <!-- PESTAÑA: PROGRAMADAS EN AGENDA -->
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:6px">
+            <a href="/production/work-orders/new?tab=scheduled<?= !empty($dateFilter) ? '&plan_date=' . urlencode($dateFilter) : '' ?>"
+               style="padding:8px 16px;border-radius:6px;font-size:13px;font-weight:bold;text-decoration:none;display:inline-flex;align-items:center;gap:8px;border:1.5px solid <?= $activeTab === 'scheduled' ? '#0F766E' : '#CBD5E1' ?>;background:<?= $activeTab === 'scheduled' ? '#0F766E' : '#FFFFFF' ?>;color:<?= $activeTab === 'scheduled' ? '#FFFFFF' : '#475569' ?>;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+                <i class="fa fa-calendar-check"></i> OTs Programadas en Agenda
+                <span style="background:<?= $activeTab === 'scheduled' ? '#115E59' : '#E2E8F0' ?>;color:<?= $activeTab === 'scheduled' ? '#FFFFFF' : '#334155' ?>;padding:2px 8px;border-radius:10px;font-size:11px">
+                    <?= count($scheduledOrders) ?>
+                </span>
+            </a>
+        </div>
+    </div>
+
+    <?php if ($activeTab === 'unscheduled'): ?>
+        <!-- ============================================================== -->
+        <!-- VISTA DE PRODUCTOS FUERA DE PLANIFICACIÓN (BACKLOG)           -->
+        <!-- ============================================================== -->
         <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;overflow-x:auto">
-            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
-                <div style="font-size:15px;font-weight:bold;color:#115452;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                    <span><i class="fa fa-fw fa-tasks"></i> OTs Programadas para esta Máquina</span>
-                    <?php if (!empty($dateFilter)): ?>
-                        <span style="font-size:12px;background:#E0F2FE;color:#0369A1;padding:3px 10px;border-radius:12px;font-weight:600;border:1px solid #BAE6FD">
-                            <i class="fa fa-calendar-day"></i> Planificado para: <b><?=htmlspecialchars($dateFilter)?></b><?= $dateFilter === date('d.m.Y') ? ' (Hoy)' : '' ?>
+            <div style="background:#FFFBEB;border:1.5px solid #FCD34D;border-radius:6px;padding:12px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+                <div>
+                    <div style="font-size:14.5px;font-weight:bold;color:#92400E;display:flex;align-items:center;gap:8px">
+                        <i class="fa fa-exclamation-triangle" style="font-size:16px"></i>
+                        <span>Productos Aprobados Fuera de Planificación de Agenda</span>
+                        <span style="background:#FEF3C7;color:#92400E;border:1px solid #F59E0B;font-size:12px;padding:2px 8px;border-radius:12px">
+                            <?= count($unscheduledOrders) ?> órdenes disponibles
                         </span>
-                    <?php else: ?>
-                        <span style="font-size:12px;background:#F1F5F9;color:#475569;padding:3px 10px;border-radius:12px;font-weight:600">
-                            Todas las fechas
-                        </span>
-                    <?php endif; ?>
+                    </div>
+                    <div style="font-size:12.5px;color:#78350F;margin-top:3px">
+                        Estas órdenes cuentan con ficha técnica aprobada en ERP, pero aún no están calendarizadas en la agenda de esta máquina.
+                        Puedes iniciar cualquiera de ellas de urgencia haciendo clic en <b>"Iniciar OT"</b>.
+                    </div>
                 </div>
                 <div style="display:flex;align-items:center;gap:8px">
                     <form method="get" action="/production/work-orders/new" style="margin:0;display:inline-flex;align-items:center;gap:6px">
-                        <label style="font-size:12px;color:#64748B;font-weight:600"><i class="fa fa-calendar-alt"></i> Fecha:</label>
-                        <input type="date" name="plan_date" value="<?= !empty($dateFilter) && preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $dateFilter, $mD) ? "{$mD[3]}-{$mD[2]}-{$mD[1]}" : date('Y-m-d') ?>" style="padding:4px 8px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px" onchange="this.form.submit()">
-                        <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
-                            <a href="/production/work-orders/new" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
-                        <?php endif; ?>
-                        <?php if (!empty($dateFilter)): ?>
-                            <a href="/production/work-orders/new?plan_date=all" class="btngrey" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Todas</a>
-                        <?php else: ?>
-                            <a href="/production/work-orders/new" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
+                        <input type="hidden" name="tab" value="unscheduled">
+                        <input type="text" name="search" value="<?=htmlspecialchars((string)$searchQuery)?>" placeholder="Buscar OT, CC, cliente..." style="padding:5px 10px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px;width:220px">
+                        <button type="submit" class="btnblue" style="padding:5px 10px;font-size:12px"><i class="fa fa-search"></i> Buscar</button>
+                        <?php if (!empty($searchQuery)): ?>
                         <?php endif; ?>
                     </form>
                 </div>
             </div>
-            <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1150px">
+
+            <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1100px">
             <colgroup>
                 <col width="90">
-                <col width="75">
-                <col width="150">
-                <col width="170">
-                <col width="70">
-                <col width="105">
-                <col width="140">
-                <col width="85">
-                <col width="95">
-                <col width="85">
-                <col width="90">
-                <col width="65">
-                <col width="105">
-            </colgroup>
-            <thead>
-                <tr>
-                    <td class="tdheader">N° C.C.</td>
-                    <td class="tdheader">N° O.T.</td>
-                    <td class="tdheader">Cliente</td>
-                    <td class="tdheader">Diseño</td>
-                    <td class="tdheader" align="center">Material</td>
-                    <td class="tdheader">Medidas</td>
-                    <td class="tdheader">Colores</td>
-                    <td class="tdheader" align="center">Rodillo [Z]</td>
-                    <td class="tdheader" align="center">Ubicación Clisé</td>
-                    <td class="tdheader" align="right">Metros</td>
-                    <td class="tdheader" align="right">Cantidad Bolsas</td>
-                    <td class="tdheader" align="center">Imagen</td>
-                    <td class="tdheader" align="center">Opciones</td>
-                </tr>
-            </thead>
-            <tbody>
-            <?php if (empty($scheduledOrders)): ?>
-                <tr>
-                    <td colspan="13" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
-                        <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
-                        No hay órdenes de trabajo planificadas para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
-                        <div style="margin-top:10px">
-                            <a href="/production/work-orders/new?plan_date=all" class="btnblue" style="font-size:12px;text-decoration:none;padding:5px 14px;display:inline-block">
-                                <i class="fa fa-list"></i> Ver todas las órdenes de la agenda
-                            </a>
-                        </div>
-                    </td>
-                </tr>
-            <?php else: ?>
-                <?php foreach ($scheduledOrders as $so):
-                    $imgHash = trim((string)($so['fab_design_imagehash'] ?? $so['item_img_hash'] ?? ''));
-                    $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
-                    $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
-                    
-                    $prodSku = trim((string)($so['item_number_prod'] ?? ''));
-                    $prodTitle = trim((string)($so['item_title'] ?? ''));
-                    $designName = trim((string)($so['fab_design_name'] ?? ''));
-                    $fullDesign = ($prodSku !== '' && $prodTitle !== '') ? "{$prodSku} | {$prodTitle}" : ($prodTitle ?: ($prodSku ?: ($designName ?: '-')));
-                    
-                    $w = (int)($so['fab_med_width'] ?? 0);
-                    $h = (int)($so['fab_med_height'] ?? 0);
-                    $fuelle = (int)($so['fab_med_fuelle'] ?? 0);
-                    $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : '-';
-                    $mat = !empty($so['fab_type']) ? (string)$so['fab_type'] : 'TNT';
-                    
-                    $colores = [];
-                    for ($i = 1; $i <= 6; $i++) {
-                        $c = trim((string)($so["fab_print_colordesc_{$i}"] ?? ''));
-                        if ($c !== '') {
-                            $colores[] = $c;
-                        }
-                    }
-                    
-                    $z = (int)($so['flexo_z'] ?? 0);
-                    $ubicacion = trim((string)($so['req_infoaddprd_cliche_ubicacion'] ?? ''));
-                    $codCliche = trim((string)($so['req_infoaddprd_cliche_codigo'] ?? ''));
-                    
-                    $metros = (float)($so['flexo_metros'] ?? 0);
-                    $cantBolsas = (float)($so['ag_amount'] ?? 0);
-                ?>
-                    <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['prd_number'])?></b></td>
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['cust_name'])?></b></td>
-                        <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($fullDesign)?></td>
-                        <td class="tdnrm" align="center">
-                            <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
-                        </td>
-                        <td class="tdnrm" style="white-space:nowrap"><?=htmlspecialchars($medidasStr)?></td>
-                        <td class="tdnrm">
-                            <?php if (empty($colores)): ?>
-                                <span style="color:#94A3B8;font-size:12px"><i>Sin colores</i></span>
-                            <?php else: ?>
-                                <div style="display:flex;flex-direction:column;gap:2px">
-                                    <?php foreach ($colores as $idx => $colorName): ?>
-                                        <span style="font-size:11px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:3px;padding:1px 5px;color:#334155;white-space:nowrap">
-                                            <b><?=($idx + 1)?>:</b> <?=htmlspecialchars($colorName)?>
-                                        </span>
-                                    <?php endforeach; ?>
-                                </div>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" align="center">
-                            <?php if ($z > 0): ?>
-                                <span style="background:#FEF3C7;color:#92400E;padding:3px 8px;border-radius:4px;font-weight:700;font-size:12px">Z = <?=$z?></span>
-                            <?php else: ?>
-                                <span style="color:#94A3B8;font-size:12px">-</span>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" align="center">
-                            <?php if ($ubicacion !== ''): ?>
-                                <div style="font-weight:700;color:#0F766E;font-size:13px"><?=htmlspecialchars($ubicacion)?></div>
-                                <?php if ($codCliche !== '' && $codCliche !== $ubicacion): ?>
-                                    <div style="font-size:10.5px;color:#64748B"><?=htmlspecialchars($codCliche)?></div>
-                                <?php endif; ?>
-                            <?php elseif ($codCliche !== ''): ?>
-                                <div style="font-weight:600;font-size:12px;color:#334155"><?=htmlspecialchars($codCliche)?></div>
-                            <?php else: ?>
-                                <span style="color:#94A3B8;font-size:12px">-</span>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
-                        <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
-                        <td class="tdnrm" align="center">
-                            <?php if ($hasImg): ?>
-                                <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
-                                    <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
-                                    <i class="fa fa-search-plus" style="color:#0284C7;font-size:11px"></i>
-                                </div>
-                            <?php else: ?>
-                                <span style="color:#94A3B8;font-size:12px"><i>Sin foto</i></span>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" align="center">
-                            <form method="post" action="/production/work-orders/init" style="margin:0">
-                                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
-                                <button type="submit" class="btngreen" style="padding:6px 14px"><i class="fa fa-play"></i> Iniciar OT</button>
-                            </form>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            <?php endif; ?>
-            </tbody>
-            </table>
-        </div>
-    <?php elseif ($isSeri): ?>
-        <!-- ============================================================== -->
-        <!-- DISEÑO ESPECÍFICO SERIGRAFÍA: Iniciar nueva OT                 -->
-        <!-- ============================================================== -->
-        <div style="font-size:20px;margin-bottom:10px"><b>Ordenes de trabajo</b></div>
-        <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
-        <tr>
-            <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
-                <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
-                <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
-                <b>Iniciar nueva OT</b> en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Serigrafía'))?></b>
-            </td>
-        </tr>
-        </table>
-
-        <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-                <div style="font-size:15px;font-weight:bold;color:#115452">
-                    <i class="fa fa-fw fa-paint-brush"></i> OTs Programadas para Serigrafía
-                    <?php if (!empty($dateFilter)): ?>
-                        <span style="font-size:13px;font-weight:normal;color:#666666;margin-left:8px">
-                            (Fecha: <b><?=htmlspecialchars($dateFilter)?></b>)
-                        </span>
-                    <?php else: ?>
-                        <span style="font-size:13px;font-weight:normal;color:#666666;margin-left:8px">
-                            (Todas las fechas)
-                        </span>
-                    <?php endif; ?>
-                </div>
-
-                <!-- Filtro rápido por fecha -->
-                <div style="display:flex;align-items:center;gap:8px">
-                    <form method="get" action="/production/work-orders/new" style="margin:0;display:inline-flex;align-items:center;gap:6px">
-                        <label style="font-size:12px;color:#64748B;font-weight:600"><i class="fa fa-calendar-alt"></i> Fecha:</label>
-                        <input type="date" name="plan_date" value="<?= !empty($dateFilter) && preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $dateFilter, $mD) ? "{$mD[3]}-{$mD[2]}-{$mD[1]}" : date('Y-m-d') ?>" style="padding:4px 8px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px" onchange="this.form.submit()">
-                        <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
-                            <a href="/production/work-orders/new" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
-                        <?php endif; ?>
-                        <?php if (!empty($dateFilter)): ?>
-                            <a href="/production/work-orders/new?plan_date=all" class="btngrey" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Todas</a>
-                        <?php else: ?>
-                            <a href="/production/work-orders/new" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
-                        <?php endif; ?>
-                    </form>
-                </div>
-            </div>
-            <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1050px">
-            <colgroup>
-                <col width="90">
-                <col width="75">
+                <col width="80">
                 <col width="160">
                 <col width="180">
                 <col width="75">
                 <col width="110">
-                <col width="150">
-                <col width="95">
-                <col width="95">
+                <?php if ($isFlexo): ?>
+                    <col width="140">
+                    <col width="85">
+                    <col width="90">
+                <?php elseif ($isSeri): ?>
+                    <col width="140">
+                    <col width="90">
+                <?php elseif ($isRebobinadora): ?>
+                    <col width="150">
+                    <col width="90">
+                <?php else: ?>
+                    <col width="130">
+                <?php endif; ?>
+                <col width="90">
                 <col width="65">
-                <col width="110">
+                <col width="120">
             </colgroup>
             <thead>
                 <tr>
                     <td class="tdheader">N° C.C.</td>
                     <td class="tdheader">N° O.T.</td>
                     <td class="tdheader">Cliente</td>
-                    <td class="tdheader">Diseño</td>
+                    <td class="tdheader">Diseño / Producto</td>
                     <td class="tdheader" align="center">Material</td>
                     <td class="tdheader">Medidas</td>
-                    <td class="tdheader">Colores</td>
-                    <td class="tdheader" align="right">Contador</td>
+                    <?php if ($isFlexo): ?>
+                        <td class="tdheader">Colores</td>
+                        <td class="tdheader" align="center">Rodillo [Z]</td>
+                        <td class="tdheader" align="right">Metros</td>
+                    <?php elseif ($isSeri): ?>
+                        <td class="tdheader">Colores</td>
+                        <td class="tdheader" align="right">Contador</td>
+                    <?php elseif ($isRebobinadora): ?>
+                        <td class="tdheader">Actividad</td>
+                        <td class="tdheader" align="right">Metros</td>
+                    <?php else: ?>
+                        <td class="tdheader">Tipo Impresión</td>
+                    <?php endif; ?>
                     <td class="tdheader" align="right">Cantidad Bolsas</td>
                     <td class="tdheader" align="center">Imagen</td>
-                    <td class="tdheader" align="center">Opciones</td>
+                    <td class="tdheader" align="center">Acción</td>
                 </tr>
             </thead>
             <tbody>
-            <?php if (empty($scheduledOrders)): ?>
+            <?php if (empty($unscheduledOrders)): ?>
                 <tr>
-                    <td colspan="11" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
-                        <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
-                        No hay órdenes de trabajo planificadas para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
-                        <div style="margin-top:10px">
-                            <a href="/production/work-orders/new?plan_date=all" class="btnblue" style="font-size:12px;text-decoration:none;padding:5px 14px;display:inline-block">
-                                <i class="fa fa-list"></i> Ver todas las órdenes de la agenda
-                            </a>
-                        </div>
+                    <td colspan="12" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                        <i class="fa fa-check-circle" style="font-size:28px;color:#10B981;margin-bottom:8px;display:block"></i>
+                        <?php if (!empty($searchQuery)): ?>
+                            No se encontraron órdenes fuera de planificación que coincidan con "<b><?=htmlspecialchars($searchQuery)?></b>".
+                        <?php else: ?>
+                            ¡Excelente! No hay órdenes pendientes fuera de planificación compatibles con esta máquina.
+                        <?php endif; ?>
                     </td>
                 </tr>
             <?php else: ?>
-                <?php foreach ($scheduledOrders as $so):
-                    $imgHash = trim((string)($so['fab_design_imagehash'] ?? $so['item_img_hash'] ?? ''));
+                <?php foreach ($unscheduledOrders as $uo):
+                    $imgHash = trim((string)($uo['fab_design_imagehash'] ?? $uo['item_img_hash'] ?? ''));
                     $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
                     $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
                     
-                    $prodSku = trim((string)($so['item_number_prod'] ?? ''));
-                    $prodTitle = trim((string)($so['item_title'] ?? ''));
-                    $designName = trim((string)($so['fab_design_name'] ?? ''));
+                    $prodSku = trim((string)($uo['item_number_prod'] ?? ''));
+                    $prodTitle = trim((string)($uo['item_title'] ?? ''));
+                    $designName = trim((string)($uo['fab_design_name'] ?? ''));
                     $fullDesign = ($prodSku !== '' && $prodTitle !== '') ? "{$prodSku} | {$prodTitle}" : ($prodTitle ?: ($prodSku ?: ($designName ?: '-')));
                     
-                    $w = (int)($so['fab_med_width'] ?? 0);
-                    $h = (int)($so['fab_med_height'] ?? 0);
-                    $fuelle = (int)($so['fab_med_fuelle'] ?? 0);
-                    $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : '-';
-                    $mat = !empty($so['fab_type']) ? (string)$so['fab_type'] : 'TNT';
+                    $w = (int)($uo['fab_med_width'] ?? 0);
+                    $h = (int)($uo['fab_med_height'] ?? 0);
+                    $fuelle = (int)($uo['fab_med_fuelle'] ?? 0);
+                    $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : ((float)($uo['req_operador_tela_width'] ?? 0) > 0 ? (float)$uo['req_operador_tela_width'] . ' cm' : '-');
+                    $mat = !empty($uo['fab_type']) ? (string)$uo['fab_type'] : 'TNT';
                     
                     $colores = [];
                     for ($i = 1; $i <= 6; $i++) {
-                        $c = trim((string)($so["fab_print_colordesc_{$i}"] ?? ''));
+                        $c = trim((string)($uo["fab_print_colordesc_{$i}"] ?? ''));
                         if ($c !== '') {
                             $colores[] = $c;
                         }
                     }
                     
-                    $cantBolsas = (float)($so['ag_amount'] ?? 0);
-                    $contador = (float)($so['seri_contador'] ?? 0);
+                    $cantBolsas = (float)($uo['item_amount'] ?? 0);
+                    $metros = (float)($uo['flexo_metros'] ?? 0);
+                    $z = (int)($uo['flexo_z'] ?? 0);
+                    $contador = (float)($uo['seri_contador'] ?? 0);
+                    $actividad = !empty($uo['rebo_distribucion']) && $uo['rebo_distribucion'] !== '-' ? $uo['rebo_distribucion'] : (!empty($uo['req_rebo_type']) ? ('Corte ' . ucfirst((string)$uo['req_rebo_type'])) : 'Corte / Rebobinado');
                 ?>
-                    <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['prd_number'])?></b></td>
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)$so['cust_name'])?></b></td>
+                    <tr onmouseover="this.style.backgroundColor='#FEF9C3'" onmouseout="this.style.backgroundColor='transparent'">
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$uo['req_number'])?></b></td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$uo['prd_number'])?></b></td>
+                        <td class="tdnrm"><b><?=htmlspecialchars((string)$uo['cust_name'])?></b></td>
                         <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($fullDesign)?></td>
                         <td class="tdnrm" align="center">
                             <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
                         </td>
                         <td class="tdnrm" style="white-space:nowrap"><?=htmlspecialchars($medidasStr)?></td>
-                        <td class="tdnrm">
-                            <?php if (empty($colores)): ?>
-                                <span style="color:#94A3B8;font-size:12px"><i>Sin colores</i></span>
-                            <?php else: ?>
-                                <div style="display:flex;flex-direction:column;gap:2px">
-                                    <?php foreach ($colores as $idx => $colorName): ?>
-                                        <span style="font-size:11px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:3px;padding:1px 5px;color:#334155;white-space:nowrap">
-                                            <b><?=($idx + 1)?>:</b> <?=htmlspecialchars($colorName)?>
-                                        </span>
-                                    <?php endforeach; ?>
-                                </div>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" align="right">
-                            <b style="color:#0F766E"><?=number_format($contador, 0, ',', '.')?></b>
-                        </td>
+                        <?php if ($isFlexo): ?>
+                            <td class="tdnrm">
+                                <?php if (empty($colores)): ?>
+                                    <span style="color:#94A3B8;font-size:12px"><i>Sin colores</i></span>
+                                <?php else: ?>
+                                    <div style="display:flex;flex-direction:column;gap:2px">
+                                        <?php foreach ($colores as $idx => $colorName): ?>
+                                            <span style="font-size:11px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:3px;padding:1px 5px;color:#334155;white-space:nowrap">
+                                                <b><?=($idx + 1)?>:</b> <?=htmlspecialchars($colorName)?>
+                                            </span>
+                                        <?php endforeach; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($z > 0): ?>
+                                    <span style="background:#FEF3C7;color:#92400E;padding:3px 8px;border-radius:4px;font-weight:700;font-size:12px">Z = <?=$z?></span>
+                                <?php else: ?>
+                                    <span style="color:#94A3B8;font-size:12px">-</span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
+                        <?php elseif ($isSeri): ?>
+                            <td class="tdnrm">
+                                <?php if (empty($colores)): ?>
+                                    <span style="color:#94A3B8;font-size:12px"><i>Sin colores</i></span>
+                                <?php else: ?>
+                                    <div style="display:flex;flex-direction:column;gap:2px">
+                                        <?php foreach ($colores as $idx => $colorName): ?>
+                                            <span style="font-size:11px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:3px;padding:1px 5px;color:#334155;white-space:nowrap">
+                                                <b><?=($idx + 1)?>:</b> <?=htmlspecialchars($colorName)?>
+                                            </span>
+                                        <?php endforeach; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($contador, 0, ',', '.')?></b></td>
+                        <?php elseif ($isRebobinadora): ?>
+                            <td class="tdnrm"><span style="color:#0F766E;font-weight:600;font-size:12.5px"><i class="fa fa-cut"></i> <?=htmlspecialchars($actividad)?></span></td>
+                            <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
+                        <?php else: ?>
+                            <td class="tdnrm"><?=htmlspecialchars((string)$uo['fab_printtype'])?></td>
+                        <?php endif; ?>
                         <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
                         <td class="tdnrm" align="center">
                             <?php if ($hasImg): ?>
-                                <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
+                                <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$uo['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$uo['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
                                     <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
                                     <i class="fa fa-search-plus" style="color:#0284C7;font-size:11px"></i>
                                 </div>
@@ -8262,11 +9754,18 @@ function renderProductionNewWorkOrderScreen(
                             <?php endif; ?>
                         </td>
                         <td class="tdnrm" align="center">
-                            <form method="post" action="/production/work-orders/init" style="margin:0">
-                                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
-                                <button type="submit" class="btngreen" style="padding:6px 14px"><i class="fa fa-play"></i> Iniciar OT</button>
-                            </form>
+                            <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                <form method="post" action="/production/work-orders/init-unscheduled" style="margin:0">
+                                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                    <input type="hidden" name="prd_id" value="<?=$uo['prd_id']?>">
+                                    <button type="submit" class="btngreen" style="padding:6px 12px;background:#15803D" onclick="return confirm('¿Confirmas incorporar esta OT no planificada (#<?=htmlspecialchars((string)$uo['prd_number'])?>) a esta máquina e iniciar producción ahora?');">
+                                        <i class="fa fa-play"></i> Iniciar OT
+                                    </button>
+                                </form>
+                                <a href="/production/materials/request?prd_id=<?=$uo['prd_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas para esta OT no planificada">
+                                    <i class="fa fa-dolly"></i> Solicitar Bobina
+                                </a>
+                            </div>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -8276,169 +9775,520 @@ function renderProductionNewWorkOrderScreen(
         </div>
     <?php else: ?>
         <!-- ============================================================== -->
-        <!-- FORMATO ESTÁNDAR / LEGACY DE UNIBAG PARA OTRAS MÁQUINAS         -->
+        <!-- VISTA DE PRODUCTOS PROGRAMADOS EN AGENDA                       -->
         <!-- ============================================================== -->
-        <font style="font-size:20px"><b>Iniciar nueva OT</b></font>
-        <div style="clear:both;height:10px"></div>
-        <table border="0" width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-            <td style="background-color:#FFFFFF;padding:10px;color:#666666;font-size:14px;border-radius:5px;padding:20px">
-                <i class="fa fa-fw fa-laptop-code" style="font-size:14px;"></i> Ordenes de trabajo
-                <i class="fa fa-fw fa-chevron-right" style="font-size:14px;"></i>
-                Iniciar nueva OT
-            </td>
-        </tr>
-        </table>
-        <div style="clear:both;height:10px"></div>
-
-        <?php if (!empty($activeInit['id'])): ?>
-        <?php if ($activeStandby !== null): ?>
-            <div style="background:#FFF7ED;border:1.5px solid #F97316;border-radius:5px;padding:12px 16px;margin-bottom:12px;color:#9A3412;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-                <div style="display:flex;align-items:center;gap:10px">
-                    <i class="fa fa-pause-circle" style="font-size:22px;color:#EA580C"></i>
+        <?php if (empty($scheduledOrders)): ?>
+            <div style="background:#EFF6FF;border:1px solid #BFDBFE;color:#1E40AF;padding:14px 18px;border-radius:6px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+                <div style="display:flex;align-items:center;gap:10px;font-size:13.5px">
+                    <i class="fa fa-info-circle" style="font-size:22px;color:#3B82F6"></i>
                     <div>
-                        <span style="font-weight:bold;font-size:14px;text-transform:uppercase">MÁQUINA EN ESPERA / SIN PRODUCCIÓN: <?=htmlspecialchars((string)$activeStandby['reason'])?></span>
-                        <div style="font-size:12.5px;color:#C2410C;margin-top:2px">
-                            Iniciado a las <b><?=htmlspecialchars((string)$activeStandby['start_time'])?></b> por <b><?=htmlspecialchars((string)$activeStandby['operator_name'])?></b>
-                            <?php if (!empty($activeStandby['comments'])): ?>
-                                &bull; <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i>
-                            <?php endif; ?>
-                        </div>
+                        <b>No hay órdenes de trabajo programadas para esta fecha.</b>
                     </div>
                 </div>
-                <button type="button" class="btnorange" style="background:#EA580C;padding:7px 16px;font-size:13px;cursor:pointer;border:none" onclick="openStandbyEndModal()">
-                    <i class="fa fa-play"></i> Finalizar Sin Producción
-                </button>
             </div>
         <?php endif; ?>
-        <table border="0" width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-            <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
-                <table border="0" width="100%" cellpadding="6" cellspacing="0">
-                <colgroup>
-                    <col width="120">
-                    <col>
-                </colgroup>
-                <tr>
-                    <td class="tdleft">Fecha inicio</td>
-                    <td class="tdnrm"><?=date("d.m.Y", (int)($activeInit["win_crtdat"] ?? time()))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Hora inicio</td>
-                    <td class="tdnrm"><?=date("H:i:s", (int)($activeInit["win_crtdat"] ?? time()))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Tipo</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($activeInit["type_ant_title"] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Máquina</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($activeInit["equipo_name"] ?? '-'))?></td>
-                </tr>
-                <tr>
-                    <td class="tdleft">Acciones</td>
-                    <td class="tdnrm">
-                        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                            <button type="button" class="btnblue" style="background:#0284C7;padding:6px 14px;cursor:pointer;border:none" onclick="openLunchModal()" title="Registrar horario de colación">
-                                <i class="fa fa-coffee"></i> Registrar Colación
-                            </button>
-                            <?php if ($activeStandby !== null): ?>
-                                <button type="button" class="btnorange" style="background:#EA580C;padding:6px 14px;cursor:pointer;border:none" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
-                                    <i class="fa fa-play-circle"></i> Finalizar Sin Producción
-                                </button>
-                            <?php else: ?>
-                                <button type="button" class="btnorange" style="background:#D97706;padding:6px 14px;cursor:pointer;border:none" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
-                                    <i class="fa fa-pause-circle"></i> Sin Producción
-                                </button>
-                            <?php endif; ?>
-                        </div>
-                    </td>
-                </tr>
-                </table>
-                <div style="clear:both;height:10px"></div>
-            </td>
-        </tr>
-        </table>
-        <div style="clear:both;height:10px"></div>
-        <?php endif; ?>
 
-        <table border="0" width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-            <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
-                <?php if (empty($scheduledOrders)): ?>
-                    <b class="msg_save_err" style="color:#C00"><i class="fa fa-fw fa-exclamation-triangle"></i> No existen OT's planificadas.</b>
-                <?php else: ?>
-                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
-                    <colgroup>
-                        <col width="60">
-                        <col width="60">
-                        <col>
-                        <col>
-                        <col>
-                        <col>
-                        <col>
-                        <col>
-                        <col>
-                        <col>
-                        <col>
-                        <col width="110">
-                    </colgroup>
+        <?php if ($isRebobinadora): ?>
+            <!-- DISEÑO REBOBINADORA: OTs Programadas -->
+            <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
+                <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:12px">
+                    <i class="fa fa-fw fa-tasks"></i> OTs Programadas para esta Máquina
+                </div>
+                <table border="0" width="100%" cellpadding="8" cellspacing="0">
+                <colgroup>
+                    <col width="95">
+                    <col width="85">
+                    <col>
+                    <col width="120">
+                    <col width="85">
+                    <col width="160">
+                    <col width="120">
+                    <col width="90">
+                    <col width="115">
+                </colgroup>
+                <thead>
                     <tr>
-                        <td class="tdheader">OT</td>
-                        <td class="tdheader">CC</td>
+                        <td class="tdheader">N° C.C.</td>
+                        <td class="tdheader">N° O.T.</td>
                         <td class="tdheader">Cliente</td>
-                        <td class="tdheader">Código</td>
-                        <td class="tdheader">Descripción</td>
-                        <td class="tdheader">Tipo</td>
-                        <td class="tdheader">Material</td>
-                        <td class="tdheader" align="center">Cantidad</td>
-                        <td class="tdheader" align="center">Producido</td>
-                        <td class="tdheader" align="center">Saldo</td>
-                        <td class="tdheader" align="center">Estado</td>
+                        <td class="tdheader" align="center">Diseño</td>
+                        <td class="tdheader" align="center">Material</td>
+                        <td class="tdheader">Actividad</td>
+                        <td class="tdheader">Medidas</td>
+                        <td class="tdheader" align="right">Metros</td>
+                        <td class="tdheader" align="center">Acción</td>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php if (empty($scheduledOrders)): ?>
+                    <tr><td colspan="9" class="tdnrm" style="text-align:center;padding:25px;color:#999">No hay órdenes de trabajo programadas para esta máquina.</td></tr>
+                <?php else: ?>
+                    <?php foreach ($scheduledOrders as $so):
+                        $imgHash = trim((string)($so['fab_design_imagehash'] ?? $so['item_img_hash'] ?? ''));
+                        $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
+                        $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
+                        $designName = (string)($so['fab_design_name'] ?? '');
+                        $w = (int)($so['fab_med_width'] ?? 0);
+                        $h = (int)($so['fab_med_height'] ?? 0);
+                        $fuelle = (int)($so['fab_med_fuelle'] ?? 0);
+                        $medidasStr = $w > 0 ? ("{$w}x{$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : ((float)($so['req_operador_tela_width'] ?? 0) > 0 ? (float)$so['req_operador_tela_width'] . ' cm' : '-');
+                        $mat = !empty($so['fab_type']) ? (string)$so['fab_type'] : 'TNT';
+                        $actividad = !empty($so['rebo_distribucion']) && $so['rebo_distribucion'] !== '-' ? $so['rebo_distribucion'] : (!empty($so['req_rebo_type']) ? ('Corte ' . ucfirst((string)$so['req_rebo_type'])) : 'Corte / Rebobinado');
+                        $metros = (float)($so['ag_amount'] ?? 0);
+                    ?>
+                        <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
+                            <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
+                            <td class="tdnrm"><b><?=htmlspecialchars((string)$so['prd_number'])?></b></td>
+                            <td class="tdnrm">
+                                <b><?=htmlspecialchars((string)$so['cust_name'])?></b>
+                                <?php if (!empty($so['item_title'])): ?>
+                                    <div style="font-size:11.5px;color:#64748B"><?=htmlspecialchars((string)$so['item_title'])?></div>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($hasImg): ?>
+                                    <div style="display:inline-flex;align-items:center;gap:6px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($designName))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
+                                        <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+                                        <i class="fa fa-search-plus" style="color:#0284C7;font-size:12px"></i>
+                                    </div>
+                                <?php else: ?>
+                                    <span style="color:#94A3B8;font-size:12px"><i>Sin foto</i></span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
+                            </td>
+                            <td class="tdnrm">
+                                <span style="color:#0F766E;font-weight:600;font-size:12.5px"><i class="fa fa-cut"></i> <?=htmlspecialchars($actividad)?></span>
+                            </td>
+                            <td class="tdnrm"><?=htmlspecialchars($medidasStr)?></td>
+                            <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
+                            <td class="tdnrm" align="center">
+                                <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                    <form method="post" action="/production/work-orders/init" style="margin:0">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
+                                        <button type="submit" class="btngreen" style="padding:6px 12px"><i class="fa fa-play"></i> Iniciar OT</button>
+                                    </form>
+                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas antes de iniciar la OT">
+                                        <i class="fa fa-dolly"></i> Solicitar Bobina
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+                </tbody>
+                </table>
+            </div>
+        <?php elseif ($isFlexo): ?>
+            <!-- DISEÑO FLEXOGRAFÍA: OTs Programadas -->
+            <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;overflow-x:auto">
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px">
+                    <div style="font-size:15px;font-weight:bold;color:#115452;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                        <span><i class="fa fa-fw fa-tasks"></i> OTs Programadas para esta Máquina</span>
+                        <?php if (!empty($dateFilter)): ?>
+                            <span style="font-size:12px;background:#E0F2FE;color:#0369A1;padding:3px 10px;border-radius:12px;font-weight:600;border:1px solid #BAE6FD">
+                                <i class="fa fa-calendar-day"></i> Planificado para: <b><?=htmlspecialchars($dateFilter)?></b><?= $dateFilter === date('d.m.Y') ? ' (Hoy)' : '' ?>
+                            </span>
+                        <?php else: ?>
+                            <span style="font-size:12px;background:#F1F5F9;color:#475569;padding:3px 10px;border-radius:12px;font-weight:600">
+                                Todas las fechas
+                            </span>
+                        <?php endif; ?>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <form method="get" action="/production/work-orders/new" style="margin:0;display:inline-flex;align-items:center;gap:6px">
+                            <label style="font-size:12px;color:#64748B;font-weight:600"><i class="fa fa-calendar-alt"></i> Fecha:</label>
+                            <input type="date" name="plan_date" value="<?= !empty($dateFilter) && preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $dateFilter, $mD) ? "{$mD[3]}-{$mD[2]}-{$mD[1]}" : date('Y-m-d') ?>" style="padding:4px 8px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px" onchange="this.form.submit()">
+                            <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
+                                <a href="/production/work-orders/new" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
+                            <?php endif; ?>
+                            <?php if (empty($dateFilter)): ?>
+                                <a href="/production/work-orders/new" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
+                            <?php endif; ?>
+                        </form>
+                    </div>
+                </div>
+                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1150px">
+                <colgroup>
+                    <col width="90">
+                    <col width="75">
+                    <col width="150">
+                    <col width="170">
+                    <col width="70">
+                    <col width="105">
+                    <col width="140">
+                    <col width="85">
+                    <col width="95">
+                    <col width="85">
+                    <col width="90">
+                    <col width="65">
+                    <col width="105">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <td class="tdheader">N° C.C.</td>
+                        <td class="tdheader">N° O.T.</td>
+                        <td class="tdheader">Cliente</td>
+                        <td class="tdheader">Diseño</td>
+                        <td class="tdheader" align="center">Material</td>
+                        <td class="tdheader">Medidas</td>
+                        <td class="tdheader">Colores</td>
+                        <td class="tdheader" align="center">Rodillo [Z]</td>
+                        <td class="tdheader" align="center">Ubicación Clisé</td>
+                        <td class="tdheader" align="right">Metros</td>
+                        <td class="tdheader" align="right">Cantidad Bolsas</td>
+                        <td class="tdheader" align="center">Imagen</td>
                         <td class="tdheader" align="center">Opciones</td>
                     </tr>
-                    <?php foreach ($scheduledOrders as $so):
-                        $prodAmt = (float)($so["total_produced"] ?? 0);
-                        $itemAmt = (float)($so["item_amount"] ?? $so["ag_amount"]);
-                        $saldo = max(0, $itemAmt - $prodAmt);
-                        $isActive = (int)($so["ag_active"] ?? 1) > 0;
-                        $btnCls = $isActive ? "btngreen" : "btnorange";
-                    ?>
-                    <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
-                        <td class="tdleft"><?=htmlspecialchars((string)$so["prd_number"])?>&nbsp;</td>
-                        <td class="tdnrm"><nobr><?=htmlspecialchars((string)$so["req_number"])?></nobr>&nbsp;</td>
-                        <td class="tdnrm"><?=htmlspecialchars((string)$so["cust_name"])?>&nbsp;</td>
-                        <td class="tdnrm"><?=htmlspecialchars((string)$so["item_number_prod"])?>&nbsp;</td>
-                        <td class="tdnrm"><?=htmlspecialchars((string)$so["item_title"])?>&nbsp;</td>
-                        <td class="tdnrm"><?=htmlspecialchars((string)$so["fab_printtype"])?>&nbsp;</td>
-                        <td class="tdnrm"><?=htmlspecialchars((string)$so["fab_type"])?>&nbsp;</td>
-                        <td class="tdnrm" align="center"><?=number_format((float)$so["ag_amount"], 0, ',', '.')?>&nbsp;</td>
-                        <td class="tdnrm" align="center"><?=number_format($prodAmt, 0, ',', '.')?></td>
-                        <td class="tdnrm" align="center"><?=number_format($saldo, 0, ',', '.')?></td>
-                        <td class="tdnrm" align="center">
-                            <?php if ($isActive): ?>
-                                <b class="msg_save_ok" style="color:#00A85A">Activado</b>
-                            <?php else: ?>
-                                <b class="msg_save_err" style="color:#C00">Inactivo</b>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" align="center">
-                            <form method="post" action="/production/work-orders/init" style="margin:0">
-                                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
-                                <div class="<?=$btnCls?>" style="cursor:pointer;display:inline-block" onclick="this.closest('form').submit();">
-                                    <nobr><i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar OT&nbsp;</nobr>
-                                </div>
-                            </form>
+                </thead>
+                <tbody>
+                <?php if (empty($scheduledOrders)): ?>
+                    <tr>
+                        <td colspan="13" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                            <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
+                            No hay órdenes de trabajo planificadas para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
                         </td>
                     </tr>
+                <?php else: ?>
+                    <?php foreach ($scheduledOrders as $so):
+                        $imgHash = trim((string)($so['fab_design_imagehash'] ?? $so['item_img_hash'] ?? ''));
+                        $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
+                        $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
+                        
+                        $prodSku = trim((string)($so['item_number_prod'] ?? ''));
+                        $prodTitle = trim((string)($so['item_title'] ?? ''));
+                        $designName = trim((string)($so['fab_design_name'] ?? ''));
+                        $fullDesign = ($prodSku !== '' && $prodTitle !== '') ? "{$prodSku} | {$prodTitle}" : ($prodTitle ?: ($prodSku ?: ($designName ?: '-')));
+                        
+                        $w = (int)($so['fab_med_width'] ?? 0);
+                        $h = (int)($so['fab_med_height'] ?? 0);
+                        $fuelle = (int)($so['fab_med_fuelle'] ?? 0);
+                        $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : '-';
+                        $mat = !empty($so['fab_type']) ? (string)$so['fab_type'] : 'TNT';
+                        
+                        $colores = [];
+                        for ($i = 1; $i <= 6; $i++) {
+                            $c = trim((string)($so["fab_print_colordesc_{$i}"] ?? ''));
+                            if ($c !== '') {
+                                $colores[] = $c;
+                            }
+                        }
+                        
+                        $z = (int)($so['flexo_z'] ?? 0);
+                        $ubicacion = trim((string)($so['req_infoaddprd_cliche_ubicacion'] ?? ''));
+                        $codCliche = trim((string)($so['req_infoaddprd_cliche_codigo'] ?? ''));
+                        
+                        $metros = (float)($so['flexo_metros'] ?? 0);
+                        $cantBolsas = (float)($so['ag_amount'] ?? 0);
+                    ?>
+                        <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
+                            <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
+                            <td class="tdnrm"><b><?=htmlspecialchars((string)$so['prd_number'])?></b></td>
+                            <td class="tdnrm"><b><?=htmlspecialchars((string)$so['cust_name'])?></b></td>
+                            <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($fullDesign)?></td>
+                            <td class="tdnrm" align="center">
+                                <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
+                            </td>
+                            <td class="tdnrm" style="white-space:nowrap"><?=htmlspecialchars($medidasStr)?></td>
+                            <td class="tdnrm">
+                                <?php if (empty($colores)): ?>
+                                    <span style="color:#94A3B8;font-size:12px"><i>Sin colores</i></span>
+                                <?php else: ?>
+                                    <div style="display:flex;flex-direction:column;gap:2px">
+                                        <?php foreach ($colores as $idx => $colorName): ?>
+                                            <span style="font-size:11px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:3px;padding:1px 5px;color:#334155;white-space:nowrap">
+                                                <b><?=($idx + 1)?>:</b> <?=htmlspecialchars($colorName)?>
+                                            </span>
+                                        <?php endforeach; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($z > 0): ?>
+                                    <span style="background:#FEF3C7;color:#92400E;padding:3px 8px;border-radius:4px;font-weight:700;font-size:12px">Z = <?=$z?></span>
+                                <?php else: ?>
+                                    <span style="color:#94A3B8;font-size:12px">-</span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($ubicacion !== ''): ?>
+                                    <div style="font-weight:700;color:#0F766E;font-size:13px"><?=htmlspecialchars($ubicacion)?></div>
+                                    <?php if ($codCliche !== '' && $codCliche !== $ubicacion): ?>
+                                        <div style="font-size:10.5px;color:#64748B"><?=htmlspecialchars($codCliche)?></div>
+                                    <?php endif; ?>
+                                <?php elseif ($codCliche !== ''): ?>
+                                    <div style="font-weight:600;font-size:12px;color:#334155"><?=htmlspecialchars($codCliche)?></div>
+                                <?php else: ?>
+                                    <span style="color:#94A3B8;font-size:12px">-</span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
+                            <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($hasImg): ?>
+                                    <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
+                                        <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+                                        <i class="fa fa-search-plus" style="color:#0284C7;font-size:11px"></i>
+                                    </div>
+                                <?php else: ?>
+                                    <span style="color:#94A3B8;font-size:12px"><i>Sin foto</i></span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                    <form method="post" action="/production/work-orders/init" style="margin:0">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
+                                        <button type="submit" class="btngreen" style="padding:6px 12px"><i class="fa fa-play"></i> Iniciar OT</button>
+                                    </form>
+                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas antes de iniciar la OT">
+                                        <i class="fa fa-dolly"></i> Solicitar Bobina
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
                     <?php endforeach; ?>
-                    </table>
                 <?php endif; ?>
-            </td>
-        </tr>
-        </table>
+                </tbody>
+                </table>
+            </div>
+        <?php elseif ($isSeri): ?>
+            <!-- DISEÑO SERIGRAFÍA: OTs Programadas -->
+            <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+                    <div style="font-size:15px;font-weight:bold;color:#115452">
+                        <i class="fa fa-fw fa-paint-brush"></i> OTs Programadas para Serigrafía
+                        <?php if (!empty($dateFilter)): ?>
+                            <span style="font-size:13px;font-weight:normal;color:#666666;margin-left:8px">
+                                (Fecha: <b><?=htmlspecialchars($dateFilter)?></b>)
+                            </span>
+                        <?php else: ?>
+                            <span style="font-size:13px;font-weight:normal;color:#666666;margin-left:8px">
+                                (Todas las fechas)
+                            </span>
+                        <?php endif; ?>
+                    </div>
+
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <form method="get" action="/production/work-orders/new" style="margin:0;display:inline-flex;align-items:center;gap:6px">
+                            <label style="font-size:12px;color:#64748B;font-weight:600"><i class="fa fa-calendar-alt"></i> Fecha:</label>
+                            <input type="date" name="plan_date" value="<?= !empty($dateFilter) && preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $dateFilter, $mD) ? "{$mD[3]}-{$mD[2]}-{$mD[1]}" : date('Y-m-d') ?>" style="padding:4px 8px;border:1px solid #CBD5E1;border-radius:4px;font-size:12px" onchange="this.form.submit()">
+                            <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
+                                <a href="/production/work-orders/new" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
+                            <?php endif; ?>
+                            <?php if (empty($dateFilter)): ?>
+                                <a href="/production/work-orders/new" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
+                            <?php endif; ?>
+                        </form>
+                    </div>
+                </div>
+                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1050px">
+                <colgroup>
+                    <col width="90">
+                    <col width="75">
+                    <col width="160">
+                    <col width="180">
+                    <col width="75">
+                    <col width="110">
+                    <col width="150">
+                    <col width="95">
+                    <col width="95">
+                    <col width="65">
+                    <col width="110">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <td class="tdheader">N° C.C.</td>
+                        <td class="tdheader">N° O.T.</td>
+                        <td class="tdheader">Cliente</td>
+                        <td class="tdheader">Diseño</td>
+                        <td class="tdheader" align="center">Material</td>
+                        <td class="tdheader">Medidas</td>
+                        <td class="tdheader">Colores</td>
+                        <td class="tdheader" align="right">Contador</td>
+                        <td class="tdheader" align="right">Cantidad Bolsas</td>
+                        <td class="tdheader" align="center">Imagen</td>
+                        <td class="tdheader" align="center">Opciones</td>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php if (empty($scheduledOrders)): ?>
+                    <tr>
+                        <td colspan="11" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                            <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
+                            No hay órdenes de trabajo planificadas para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
+                        </td>
+                    </tr>
+                <?php else: ?>
+                    <?php foreach ($scheduledOrders as $so):
+                        $imgHash = trim((string)($so['fab_design_imagehash'] ?? $so['item_img_hash'] ?? ''));
+                        $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
+                        $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
+                        
+                        $prodSku = trim((string)($so['item_number_prod'] ?? ''));
+                        $prodTitle = trim((string)($so['item_title'] ?? ''));
+                        $designName = trim((string)($so['fab_design_name'] ?? ''));
+                        $fullDesign = ($prodSku !== '' && $prodTitle !== '') ? "{$prodSku} | {$prodTitle}" : ($prodTitle ?: ($prodSku ?: ($designName ?: '-')));
+                        
+                        $w = (int)($so['fab_med_width'] ?? 0);
+                        $h = (int)($so['fab_med_height'] ?? 0);
+                        $fuelle = (int)($so['fab_med_fuelle'] ?? 0);
+                        $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($fuelle > 0 ? " + {$fuelle}" : "") . " cm") : '-';
+                        $mat = !empty($so['fab_type']) ? (string)$so['fab_type'] : 'TNT';
+                        
+                        $colores = [];
+                        for ($i = 1; $i <= 6; $i++) {
+                            $c = trim((string)($so["fab_print_colordesc_{$i}"] ?? ''));
+                            if ($c !== '') {
+                                $colores[] = $c;
+                            }
+                        }
+                        
+                        $cantBolsas = (float)($so['ag_amount'] ?? 0);
+                        $contador = (float)($so['seri_contador'] ?? 0);
+                    ?>
+                        <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
+                            <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
+                            <td class="tdnrm"><b><?=htmlspecialchars((string)$so['prd_number'])?></b></td>
+                            <td class="tdnrm"><b><?=htmlspecialchars((string)$so['cust_name'])?></b></td>
+                            <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($fullDesign)?></td>
+                            <td class="tdnrm" align="center">
+                                <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
+                            </td>
+                            <td class="tdnrm" style="white-space:nowrap"><?=htmlspecialchars($medidasStr)?></td>
+                            <td class="tdnrm">
+                                <?php if (empty($colores)): ?>
+                                    <span style="color:#94A3B8;font-size:12px"><i>Sin colores</i></span>
+                                <?php else: ?>
+                                    <div style="display:flex;flex-direction:column;gap:2px">
+                                        <?php foreach ($colores as $idx => $colorName): ?>
+                                            <span style="font-size:11px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:3px;padding:1px 5px;color:#334155;white-space:nowrap">
+                                                <b><?=($idx + 1)?>:</b> <?=htmlspecialchars($colorName)?>
+                                            </span>
+                                        <?php endforeach; ?>
+                                    </div>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="right">
+                                <b style="color:#0F766E"><?=number_format($contador, 0, ',', '.')?></b>
+                            </td>
+                            <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($hasImg): ?>
+                                    <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
+                                        <img src="<?=htmlspecialchars($imgUrl)?>" style="width:36px;height:36px;object-fit:cover;border-radius:4px;border:1px solid #CBD5E1;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+                                        <i class="fa fa-search-plus" style="color:#0284C7;font-size:11px"></i>
+                                    </div>
+                                <?php else: ?>
+                                    <span style="color:#94A3B8;font-size:12px"><i>Sin foto</i></span>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                    <form method="post" action="/production/work-orders/init" style="margin:0">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
+                                        <button type="submit" class="btngreen" style="padding:6px 12px"><i class="fa fa-play"></i> Iniciar OT</button>
+                                    </form>
+                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas antes de iniciar la OT">
+                                        <i class="fa fa-dolly"></i> Solicitar Bobina
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+                </tbody>
+                </table>
+            </div>
+        <?php else: ?>
+            <!-- DISEÑO ESTÁNDAR / OTRAS MÁQUINAS -->
+            <table border="0" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+                <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
+                    <?php if (empty($scheduledOrders)): ?>
+                        <b class="msg_save_err" style="color:#C00"><i class="fa fa-fw fa-exclamation-triangle"></i> No existen OT's planificadas para esta fecha.</b>
+                    <?php else: ?>
+                        <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                        <colgroup>
+                            <col width="60">
+                            <col width="60">
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col>
+                            <col width="110">
+                        </colgroup>
+                        <tr>
+                            <td class="tdheader">OT</td>
+                            <td class="tdheader">CC</td>
+                            <td class="tdheader">Cliente</td>
+                            <td class="tdheader">Código</td>
+                            <td class="tdheader">Descripción</td>
+                            <td class="tdheader">Tipo</td>
+                            <td class="tdheader">Material</td>
+                            <td class="tdheader" align="center">Cantidad</td>
+                            <td class="tdheader" align="center">Producido</td>
+                            <td class="tdheader" align="center">Saldo</td>
+                            <td class="tdheader" align="center">Estado</td>
+                            <td class="tdheader" align="center">Opciones</td>
+                        </tr>
+                        <?php foreach ($scheduledOrders as $so):
+                            $prodAmt = (float)($so["total_produced"] ?? 0);
+                            $itemAmt = (float)($so["item_amount"] ?? $so["ag_amount"]);
+                            $saldo = max(0, $itemAmt - $prodAmt);
+                            $isActive = (int)($so["ag_active"] ?? 1) > 0;
+                            $btnCls = $isActive ? "btngreen" : "btnorange";
+                        ?>
+                        <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
+                            <td class="tdleft"><?=htmlspecialchars((string)$so["prd_number"])?>&nbsp;</td>
+                            <td class="tdnrm"><nobr><?=htmlspecialchars((string)$so["req_number"])?></nobr>&nbsp;</td>
+                            <td class="tdnrm"><?=htmlspecialchars((string)$so["cust_name"])?>&nbsp;</td>
+                            <td class="tdnrm"><?=htmlspecialchars((string)$so["item_number_prod"])?>&nbsp;</td>
+                            <td class="tdnrm"><?=htmlspecialchars((string)$so["item_title"])?>&nbsp;</td>
+                            <td class="tdnrm"><?=htmlspecialchars((string)$so["fab_printtype"])?>&nbsp;</td>
+                            <td class="tdnrm"><?=htmlspecialchars((string)$so["fab_type"])?>&nbsp;</td>
+                            <td class="tdnrm" align="center"><?=number_format((float)$so["ag_amount"], 0, ',', '.')?>&nbsp;</td>
+                            <td class="tdnrm" align="center"><?=number_format($prodAmt, 0, ',', '.')?></td>
+                            <td class="tdnrm" align="center"><?=number_format($saldo, 0, ',', '.')?></td>
+                            <td class="tdnrm" align="center">
+                                <?php if ($isActive): ?>
+                                    <b class="msg_save_ok" style="color:#00A85A">Activado</b>
+                                <?php else: ?>
+                                    <b class="msg_save_err" style="color:#C00">Inactivo</b>
+                                <?php endif; ?>
+                            </td>
+                            <td class="tdnrm" align="center">
+                                <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                    <form method="post" action="/production/work-orders/init" style="margin:0">
+                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                        <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
+                                        <div class="<?=$btnCls?>" style="cursor:pointer;display:inline-block" onclick="this.closest('form').submit();">
+                                            <nobr><i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar OT&nbsp;</nobr>
+                                        </div>
+                                    </form>
+                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas antes de iniciar la OT">
+                                        <nobr><i class="fa fa-dolly"></i> Solicitar Bobina</nobr>
+                                    </a>
+                                </div>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                        </table>
+                    <?php endif; ?>
+                </td>
+            </tr>
+            </table>
+        <?php endif; ?>
     <?php endif; ?>
+
     <?php
     echo renderDesignPreviewModal();
     renderStandbyAndLunchModals($activeStandby, $activeInit, $operatorName, '/production/work-orders/new');
@@ -8476,9 +10326,18 @@ function renderProductionActiveOrdersScreen(
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
         <tr>
             <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
-                <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
-                <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
-                <b>En cursos</b> (OTs actualmente abiertas en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Rebobinadora'))?></b>)
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+                    <div>
+                        <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
+                        <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
+                        <b>En cursos</b> (OTs actualmente abiertas en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Rebobinadora'))?></b>)
+                    </div>
+                    <div>
+                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
+                            <i class="fa fa-dolly"></i> Solicitar Bobinas
+                        </a>
+                    </div>
+                </div>
             </td>
         </tr>
         </table>
@@ -8554,9 +10413,14 @@ function renderProductionActiveOrdersScreen(
                         <td class="tdnrm"><?=htmlspecialchars($medidasStr)?></td>
                         <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
                         <td class="tdnrm" align="center">
-                            <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 14px;text-decoration:none">
-                                <i class="fa fa-desktop"></i> Operar
-                            </a>
+                            <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 12px;text-decoration:none">
+                                    <i class="fa fa-desktop"></i> Operar
+                                </a>
+                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar bobinas para esta OT">
+                                    <i class="fa fa-dolly"></i> Bobinas
+                                </a>
+                            </div>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -8572,9 +10436,18 @@ function renderProductionActiveOrdersScreen(
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
         <tr>
             <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
-                <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
-                <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
-                <b>En cursos</b> (OTs actualmente abiertas en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Flexografía'))?></b>)
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+                    <div>
+                        <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
+                        <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
+                        <b>En cursos</b> (OTs actualmente abiertas en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Flexografía'))?></b>)
+                    </div>
+                    <div>
+                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
+                            <i class="fa fa-dolly"></i> Solicitar Bobinas
+                        </a>
+                    </div>
+                </div>
             </td>
         </tr>
         </table>
@@ -8600,9 +10473,7 @@ function renderProductionActiveOrdersScreen(
                         <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
                             <a href="/production/work-orders/active" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
                         <?php endif; ?>
-                        <?php if (!empty($dateFilter)): ?>
-                            <a href="/production/work-orders/active?plan_date=all" class="btngrey" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Todas</a>
-                        <?php else: ?>
+                        <?php if (empty($dateFilter)): ?>
                             <a href="/production/work-orders/active" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
                         <?php endif; ?>
                     </form>
@@ -8650,7 +10521,7 @@ function renderProductionActiveOrdersScreen(
                         </div>
                         <?php if (!empty($dateFilter)): ?>
                             <div style="font-size:12.5px;color:#64748B;margin-top:6px">
-                                Puedes revisar <a href="/production/work-orders/active?plan_date=all" style="color:#0284C7;font-weight:600;text-decoration:underline">todas las fechas</a> o iniciar una orden planificada para hoy en <a href="/production/work-orders/new" style="color:#059669;font-weight:600;text-decoration:underline">Iniciar nueva OT</a>.
+                                Puedes iniciar una orden planificada para hoy en <a href="/production/work-orders/new" style="color:#059669;font-weight:600;text-decoration:underline">Iniciar nueva OT</a>.
                             </div>
                         <?php endif; ?>
                     </td>
@@ -8748,9 +10619,14 @@ function renderProductionActiveOrdersScreen(
                             <?php endif; ?>
                         </td>
                         <td class="tdnrm" align="center">
-                            <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 14px;text-decoration:none">
-                                <i class="fa fa-desktop"></i> Operar
-                            </a>
+                            <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 12px;text-decoration:none">
+                                    <i class="fa fa-desktop"></i> Operar
+                                </a>
+                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar bobinas para esta OT">
+                                    <i class="fa fa-dolly"></i> Bobinas
+                                </a>
+                            </div>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -8766,9 +10642,18 @@ function renderProductionActiveOrdersScreen(
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
         <tr>
             <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
-                <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
-                <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
-                <b>En curso</b> en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Serigrafía'))?></b>
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+                    <div>
+                        <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
+                        <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
+                        <b>En curso</b> en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Serigrafía'))?></b>
+                    </div>
+                    <div>
+                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
+                            <i class="fa fa-dolly"></i> Solicitar Bobinas
+                        </a>
+                    </div>
+                </div>
             </td>
         </tr>
         </table>
@@ -8796,9 +10681,7 @@ function renderProductionActiveOrdersScreen(
                         <?php if (!empty($dateFilter) && $dateFilter !== date('d.m.Y')): ?>
                             <a href="/production/work-orders/active" class="btn" style="background:#0284C7;color:#fff;padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Hoy</a>
                         <?php endif; ?>
-                        <?php if (!empty($dateFilter)): ?>
-                            <a href="/production/work-orders/active?plan_date=all" class="btngrey" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Ver Todas</a>
-                        <?php else: ?>
+                        <?php if (empty($dateFilter)): ?>
                             <a href="/production/work-orders/active" class="btngreen" style="padding:4px 10px;font-size:11.5px;border-radius:4px;text-decoration:none">Solo Hoy</a>
                         <?php endif; ?>
                     </form>
@@ -8839,11 +10722,6 @@ function renderProductionActiveOrdersScreen(
                     <td colspan="11" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
                         <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
                         No hay órdenes en curso para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
-                        <div style="margin-top:10px">
-                            <a href="/production/work-orders/active?plan_date=all" class="btnblue" style="font-size:12px;text-decoration:none;padding:5px 14px;display:inline-block">
-                                <i class="fa fa-list"></i> Ver todas las órdenes de la agenda
-                            </a>
-                        </div>
                     </td>
                 </tr>
             <?php else: ?>
@@ -8911,9 +10789,14 @@ function renderProductionActiveOrdersScreen(
                             <?php endif; ?>
                         </td>
                         <td class="tdnrm" align="center">
-                            <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 14px;text-decoration:none">
-                                <i class="fa fa-desktop"></i> Operar
-                            </a>
+                            <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 12px;text-decoration:none">
+                                    <i class="fa fa-desktop"></i> Operar
+                                </a>
+                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar bobinas para esta OT">
+                                    <i class="fa fa-dolly"></i> Bobinas
+                                </a>
+                            </div>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -8929,10 +10812,19 @@ function renderProductionActiveOrdersScreen(
         <div style="clear:both;height:10px"></div>
         <table border="0" width="100%" cellpadding="0" cellspacing="0">
         <tr>
-            <td style="background-color:#FFFFFF;padding:10px;color:#666666;font-size:14px;border-radius:5px;padding:20px">
-                <i class="fa fa-fw fa-laptop-code" style="font-size:14px;"></i> Ordenes de trabajo
-                <i class="fa fa-fw fa-chevron-right" style="font-size:14px;"></i>
-                En cursos
+            <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px">
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+                    <div>
+                        <i class="fa fa-fw fa-laptop-code" style="font-size:14px;"></i> Ordenes de trabajo
+                        <i class="fa fa-fw fa-chevron-right" style="font-size:14px;"></i>
+                        En cursos
+                    </div>
+                    <div>
+                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
+                            <i class="fa fa-dolly"></i> Solicitar Bobinas
+                        </a>
+                    </div>
+                </div>
             </td>
         </tr>
         </table>
@@ -9064,8 +10956,13 @@ function renderProductionActiveOrdersScreen(
                             <b class="msg_save_ok" style="color:#00A85A">Activado</b>
                         </td>
                         <td class="tdnrm" align="center">
-                            <div class="btngreen" style="cursor:pointer;display:inline-block" onclick="location.href='/production/work-orders/operate?agid=<?=$row['ag_id']?>'">
-                                <nobr><i class="fa fa-fw fa-edit" style="color:white;"></i> Ingresar a OT&nbsp;</nobr>
+                            <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                <div class="btngreen" style="cursor:pointer;display:inline-block" onclick="location.href='/production/work-orders/operate?agid=<?=$row['ag_id']?>'">
+                                    <nobr><i class="fa fa-fw fa-edit" style="color:white;"></i> Ingresar a OT&nbsp;</nobr>
+                                </div>
+                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar bobinas para esta OT">
+                                    <nobr><i class="fa fa-dolly"></i> Bobinas</nobr>
+                                </a>
                             </div>
                         </td>
                     </tr>
@@ -9180,6 +11077,33 @@ function renderProductionTraceabilityScreen(
         $body .= '<div class="muted">Verifica que el identificador ingresado esté escrito correctamente o haya sido recepcionado en el sistema.</div>';
         $body .= '</div>';
         renderProdwrkShell('Trazabilidad Integral', $body, 6, $operatorName, $plantaName);
+        return;
+    }
+
+    if (function_exists('unibagBuildTraceabilityTreeHtml')) {
+        $treeForFlow = $tree;
+        $treeForFlow['query'] = $query;
+
+        $body .= '<div class="card" style="margin-bottom:18px;background:#ffffff;border:1px solid #dbeafe;border-radius:12px;padding:16px 18px;box-shadow:0 2px 8px rgba(15,23,42,0.05)">';
+        $body .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">';
+        $body .= '<div>';
+        $body .= '<div style="font-size:17px;font-weight:900;color:#0f172a;margin-bottom:4px">Flujo real de planta</div>';
+        $body .= '<div style="font-size:12.5px;color:#475569;max-width:820px">';
+        $body .= 'La trazabilidad se muestra siguiendo el recorrido operativo del material: origen y compra, ingreso físico a bodega, uso en máquina, transformación a bobinas hijas o cajas, y finalmente cadena de custodia / despacho.';
+        $body .= '</div>';
+        $body .= '</div>';
+        $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+        $body .= '<span style="background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;padding:5px 10px;border-radius:999px;font-size:11.5px;font-weight:800">Origen</span>';
+        $body .= '<span style="background:#f0fdfa;color:#0f766e;border:1px solid #99f6e4;padding:5px 10px;border-radius:999px;font-size:11.5px;font-weight:800">Bodega</span>';
+        $body .= '<span style="background:#fffbeb;color:#b45309;border:1px solid #fde68a;padding:5px 10px;border-radius:999px;font-size:11.5px;font-weight:800">Producción</span>';
+        $body .= '<span style="background:#faf5ff;color:#6d28d9;border:1px solid #e9d5ff;padding:5px 10px;border-radius:999px;font-size:11.5px;font-weight:800">Bobinas / Cajas</span>';
+        $body .= '<span style="background:#f8fafc;color:#334155;border:1px solid #cbd5e1;padding:5px 10px;border-radius:999px;font-size:11.5px;font-weight:800">Custodia</span>';
+        $body .= '</div>';
+        $body .= '</div>';
+        $body .= '</div>';
+
+        $body .= unibagBuildTraceabilityTreeHtml($treeForFlow, false);
+        renderProdwrkShell('Trazabilidad ' . htmlspecialchars($query), $body, 6, $operatorName, $plantaName);
         return;
     }
 
@@ -9492,6 +11416,97 @@ function renderProductionTraceabilityScreen(
     renderProdwrkShell('Trazabilidad ' . htmlspecialchars($query), $body, 6, $operatorName, $plantaName);
 }
 
+function productionNormalizeMaterialToken(string $value): string
+{
+    $value = trim(mb_strtolower($value));
+    if ($value === '') {
+        return '';
+    }
+    $map = [
+        'á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u', 'ü' => 'u', 'ñ' => 'n',
+    ];
+    $value = strtr($value, $map);
+    $value = preg_replace('/[^a-z0-9]+/u', ' ', $value) ?? '';
+    return trim($value);
+}
+
+function productionResolveInkWarehouseForAgenda(array $activeInit, ?array $selectedAgenda): array
+{
+    $machineText = implode(' ', array_filter([
+        (string)($activeInit['equipo_name'] ?? ''),
+        (string)($activeInit['type_ant_title'] ?? ''),
+        (string)($selectedAgenda['equipo_name'] ?? ''),
+        (string)($selectedAgenda['type_ant_title'] ?? ''),
+    ]));
+    $machineNorm = productionNormalizeMaterialToken($machineText);
+    $isFlexo = (int)($activeInit['equipo_prod_isprinter_flexo'] ?? $selectedAgenda['equipo_prod_isprinter_flexo'] ?? 0) === 1
+        || str_contains($machineNorm, 'flexo');
+    $isPulpo = str_contains($machineNorm, 'pulpo');
+    $isSeri = (int)($activeInit['equipo_prod_isprinter_seri'] ?? $selectedAgenda['equipo_prod_isprinter_seri'] ?? 0) === 1
+        || str_contains($machineNorm, 'seri');
+
+    if ($isFlexo) {
+        return ['code' => 900, 'name' => 'TINTAS FLEXOGRAFIA'];
+    }
+    if ($isPulpo) {
+        return ['code' => 920, 'name' => 'TINTAS PULPO SERIGRAFICO'];
+    }
+    if ($isSeri) {
+        return ['code' => 910, 'name' => 'TINTAS SERIGRAFIA'];
+    }
+
+    return ['code' => 910, 'name' => 'TINTAS SERIGRAFIA'];
+}
+
+/**
+ * @param array<int,array<string,mixed>> $chemicals
+ * @param array<int,string> $colors
+ * @return array{recommended: array<int,array<string,mixed>>, others: array<int,array<string,mixed>>}
+ */
+function productionSplitChemicalsForOt(array $chemicals, array $colors): array
+{
+    $tokens = [];
+    foreach ($colors as $color) {
+        $norm = productionNormalizeMaterialToken((string)$color);
+        if ($norm === '') {
+            continue;
+        }
+        $tokens[] = $norm;
+        foreach (preg_split('/\s+/', $norm) ?: [] as $part) {
+            if (mb_strlen($part) >= 3) {
+                $tokens[] = $part;
+            }
+        }
+    }
+    $tokens = array_values(array_unique(array_filter($tokens)));
+
+    if ($tokens === []) {
+        return ['recommended' => [], 'others' => $chemicals];
+    }
+
+    $recommended = [];
+    $others = [];
+    foreach ($chemicals as $chemical) {
+        $haystack = productionNormalizeMaterialToken(
+            trim((string)($chemical['code'] ?? '')) . ' ' . trim((string)($chemical['name'] ?? ''))
+        );
+        $matched = false;
+        foreach ($tokens as $token) {
+            if ($token !== '' && str_contains($haystack, $token)) {
+                $matched = true;
+                break;
+            }
+        }
+        if ($matched) {
+            $recommended[] = $chemical;
+        } else {
+            $others[] = $chemical;
+        }
+    }
+
+    return ['recommended' => $recommended, 'others' => $others];
+}
+
 // =============================================================================
 // PANTALLA: SOLICITAR / CARGAR MATERIALES A LA MÁQUINA (mid=7)
 // =============================================================================
@@ -9505,8 +11520,11 @@ function renderProductionMaterialsRequestScreen(
     array $bodega3000Rolls,
     array $centralRolls,
     array $assignedRolls,
+    array $chemicals,
+    array $inkWarehouse,
     string $operatorName,
-    string $plantaName
+    string $plantaName,
+    array $unscheduledOrders = []
 ): void {
     $machineName = (string)($activeInit['equipo_name'] ?? 'MÁQUINA');
     $allOrders = array_merge($activeOrders, $scheduledOrders);
@@ -9518,8 +11536,14 @@ function renderProductionMaterialsRequestScreen(
             $uniqueOrders[$aid] = $ord;
         }
     }
+    if ($selectedAgId > 0 && $selectedAgenda !== null && !isset($uniqueOrders[$selectedAgId])) {
+        $uniqueOrders[$selectedAgId] = $selectedAgenda;
+    }
 
     $savedMaterial = isset($_GET['saved_material']);
+    $savedRequest = isset($_GET['saved_request']);
+    $savedRequestType = trim((string)($_GET['request_type'] ?? ''));
+    $materialKind = trim((string)($_GET['material_kind'] ?? ''));
     $noTrace = isset($_GET['no_trace']);
     $error = isset($_GET['error']) ? trim((string)$_GET['error']) : '';
 
@@ -9552,6 +11576,44 @@ function renderProductionMaterialsRequestScreen(
     $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
     $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
 
+    $otGrams = (float)($selectedAgenda['ot_grams'] ?? 0);
+    $otGramsStr = (string)($selectedAgenda['ot_grams_str'] ?? ($otGrams > 0 ? (int)$otGrams . ' gr' : '-'));
+    $compatibleCentralRolls = array_values(array_filter(
+        $centralRolls,
+        static fn(array $roll): bool => !empty($roll['is_compatible'])
+    ));
+    $inkSuggestion = !empty($colores) ? ('Colores OT: ' . implode(', ', $colores)) : '';
+    $inkWarehouseCode = (int)($inkWarehouse['code'] ?? 0);
+    $inkWarehouseName = (string)($inkWarehouse['name'] ?? '');
+    $inkItemsCount = count($chemicals);
+    $preferredMaterialKind = ($materialKind === 'inks' || $savedRequestType === 'chemical') ? 'inks' : 'rolls';
+    $isPulpoRequest = (
+        stripos((string)($activeInit['equipo_name'] ?? ''), 'pulpo') !== false
+        || stripos((string)($activeInit['type_ant_title'] ?? ''), 'pulpo') !== false
+        || ($selectedAgenda !== null && stripos((string)($selectedAgenda['equipo_name'] ?? ''), 'pulpo') !== false)
+        || ($selectedAgenda !== null && in_array((int)($selectedAgenda['equipo_type_id'] ?? 0), [11, 22], true) && stripos((string)($selectedAgenda['type_ant_title'] ?? ''), 'seri') !== false)
+    );
+    $isPrinterMachine = (
+        (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
+        || (int)($activeInit['equipo_prod_isprinter_seri'] ?? 0) === 1
+        || in_array((int)($activeInit['equipo_type_id'] ?? 0), [7, 11, 22], true)
+        || stripos((string)($activeInit['equipo_name'] ?? ''), 'flexo') !== false
+        || stripos((string)($activeInit['equipo_name'] ?? ''), 'seri') !== false
+        || stripos((string)($activeInit['equipo_name'] ?? ''), 'pulpo') !== false
+        || stripos((string)($activeInit['type_ant_title'] ?? ''), 'flexo') !== false
+        || stripos((string)($activeInit['type_ant_title'] ?? ''), 'seri') !== false
+        || ($selectedAgenda !== null && (
+            (int)($selectedAgenda['equipo_prod_isprinter_flexo'] ?? 0) === 1
+            || (int)($selectedAgenda['equipo_prod_isprinter_seri'] ?? 0) === 1
+            || in_array((int)($selectedAgenda['equipo_type_id'] ?? 0), [7, 11, 22], true)
+            || stripos((string)($selectedAgenda['type_ant_title'] ?? ''), 'seri') !== false
+            || stripos((string)($selectedAgenda['equipo_name'] ?? ''), 'seri') !== false
+            || stripos((string)($selectedAgenda['type_ant_title'] ?? ''), 'flexo') !== false
+            || stripos((string)($selectedAgenda['equipo_name'] ?? ''), 'flexo') !== false
+            || stripos((string)($selectedAgenda['equipo_name'] ?? ''), 'pulpo') !== false
+        ))
+    );
+
     ob_start();
     ?>
     <div style="font-size:20px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
@@ -9580,10 +11642,24 @@ function renderProductionMaterialsRequestScreen(
         </div>
     <?php endif; ?>
 
+    <?php if ($savedRequest): ?>
+        <div style="background:#DBEAFE;border:1.5px solid #60A5FA;border-radius:6px;padding:12px 18px;margin-bottom:15px;color:#1D4ED8;font-size:13px;display:flex;align-items:center;gap:10px">
+            <i class="fa fa-paper-plane" style="font-size:20px;color:#2563EB"></i>
+            <div>
+                <?php if ($savedRequestType === 'chemical'): ?>
+                    <b>Solicitud de tinta registrada correctamente.</b>
+                    La OT quedó solicitada contra la bodega sugerida <?=$inkWarehouseCode > 0 ? '<b>' . htmlspecialchars((string)$inkWarehouseCode) . '</b>' : ''?><?=($inkWarehouseName !== '' ? ' (' . htmlspecialchars($inkWarehouseName) . ')' : '')?>.
+                <?php else: ?>
+                    <b>Solicitud de material registrada correctamente.</b>
+                <?php endif; ?>
+            </div>
+        </div>
+    <?php endif; ?>
+
     <?php if ($error !== ''): ?>
         <div style="background:#FEE2E2;border:1.5px solid #EF4444;border-radius:6px;padding:12px 18px;margin-bottom:15px;color:#991B1B;font-size:13px;display:flex;align-items:center;gap:10px">
             <i class="fa fa-exclamation-triangle" style="font-size:20px;color:#DC2626"></i>
-            <div><b>Error al cargar material:</b> <?=htmlspecialchars($error)?></div>
+            <div><b>Error en la solicitud de material:</b> <?=htmlspecialchars($error)?></div>
         </div>
     <?php endif; ?>
 
@@ -9596,8 +11672,10 @@ function renderProductionMaterialsRequestScreen(
         </div>
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
             <label style="font-size:13px;color:#334155;font-weight:bold">Orden de Trabajo:</label>
-            <select class="inptxt" style="width:100%;max-width:550px;background:#FFF;font-size:13px;padding:8px" onchange="location.href='/production/materials/request?agid=' + this.value;">
-                <option value="">&lt; Seleccione una OT en producción de esta máquina &gt;</option>
+            <select class="inptxt" style="width:100%;max-width:550px;background:#FFF;font-size:13px;padding:8px" onchange="if(this.value.startsWith('prd:')){ location.href='/production/materials/request?prd_id=' + this.value.substring(4); } else if(this.value !== '') { location.href='/production/materials/request?agid=' + this.value; }">
+                <option value="">&lt; Seleccione una OT de esta máquina &gt;</option>
+                <?php if (!empty($uniqueOrders)): ?>
+                <optgroup label="OTs en Producción / Programadas">
                 <?php foreach ($uniqueOrders as $ord):
                     $aid = (int)$ord['ag_id'];
                     $pNum = (string)($ord['prd_number'] ?? $ord['ag_id']);
@@ -9609,6 +11687,23 @@ function renderProductionMaterialsRequestScreen(
                         OT #<?=$pNum?> &mdash; <?=htmlspecialchars($cName)?> (<?=htmlspecialchars(mb_substr($pTitle, 0, 40))?>)
                     </option>
                 <?php endforeach; ?>
+                </optgroup>
+                <?php endif; ?>
+                <?php if (!empty($unscheduledOrders)): ?>
+                <optgroup label="OTs Fuera de Planificación">
+                <?php foreach ($unscheduledOrders as $uo):
+                    $uPrdId = (int)($uo['prd_id'] ?? 0);
+                    $pNum = (string)($uo['prd_number'] ?? $uPrdId);
+                    $cName = (string)($uo['cust_name'] ?? '');
+                    $pTitle = (string)($uo['item_title'] ?? $uo['fab_design_name'] ?? '');
+                    $isSelected = ($selectedAgenda !== null && (int)($selectedAgenda['prd_id'] ?? 0) === $uPrdId);
+                ?>
+                    <option value="prd:<?=$uPrdId?>" <?=$isSelected ? 'selected' : ''?>>
+                        OT #<?=$pNum?> &mdash; <?=htmlspecialchars($cName)?> (<?=htmlspecialchars(mb_substr($pTitle, 0, 40))?>) [Sin planificar]
+                    </option>
+                <?php endforeach; ?>
+                </optgroup>
+                <?php endif; ?>
             </select>
 
             <?php if ($selectedAgId > 0): ?>
@@ -9660,21 +11755,25 @@ function renderProductionMaterialsRequestScreen(
                             <?php endif; ?>
                         </td>
                     </tr>
-                    <?php if (!empty($fabricColor) || !empty($colores) || $agAmount > 0): ?>
-                        <tr>
-                            <td colspan="7" style="background:#FFFFFF;padding:8px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">
-                                <?php if (!empty($fabricColor)): ?>
-                                    <span style="margin-right:15px"><b>Color Tela:</b> <span style="background:#FEF3C7;color:#92400E;padding:2px 6px;border-radius:3px"><?=htmlspecialchars($fabricColor)?></span></span>
-                                <?php endif; ?>
-                                <?php if (!empty($colores)): ?>
-                                    <span style="margin-right:15px"><b>Colores Impresión:</b> <?=htmlspecialchars(implode(', ', $colores))?></span>
-                                <?php endif; ?>
-                                <?php if ($agAmount > 0): ?>
-                                    <span><b>Cantidad Programada:</b> <b style="color:#0F766E"><?=number_format($agAmount, 0, ',', '.')?></b> bolsas</span>
-                                <?php endif; ?>
-                            </td>
-                        </tr>
-                    <?php endif; ?>
+                    <tr>
+                        <td colspan="7" style="background:#FFFFFF;padding:8px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">
+                            <?php if (!empty($fabricColor)): ?>
+                                <span style="margin-right:15px"><b>Color Tela:</b> <span style="background:#FEF3C7;color:#92400E;padding:2px 6px;border-radius:3px"><?=htmlspecialchars($fabricColor)?></span></span>
+                            <?php endif; ?>
+                            <?php if ($otGrams > 0): ?>
+                                <span style="margin-right:15px"><b>Gramaje Requerido:</b> <span style="background:#E0E7FF;color:#3730A3;padding:2px 6px;border-radius:3px;font-weight:bold"><?=htmlspecialchars($otGramsStr)?></span></span>
+                            <?php endif; ?>
+                            <?php if ($isPrinterMachine): ?>
+                                <span style="margin-right:15px;background:#F0FDF4;color:#166534;border:1px solid #BBF7D0;padding:2px 8px;border-radius:4px;font-weight:bold"><i class="fa fa-print"></i> Requiere Bobina Virgen (Sin Impresión)</span>
+                            <?php endif; ?>
+                            <?php if (!empty($colores)): ?>
+                                <span style="margin-right:15px"><b>Colores Impresión:</b> <?=htmlspecialchars(implode(', ', $colores))?></span>
+                            <?php endif; ?>
+                            <?php if ($agAmount > 0): ?>
+                                <span><b>Cantidad Programada:</b> <b style="color:#0F766E"><?=number_format($agAmount, 0, ',', '.')?></b> bolsas</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
                 </tbody>
                 </table>
             </div>
@@ -9691,6 +11790,16 @@ function renderProductionMaterialsRequestScreen(
         <!-- ============================================================== -->
         <!-- SECCIÓN 2: PESTAÑAS DE CARGA DE MATERIALES                     -->
         <!-- ============================================================== -->
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+            <button type="button" id="request_kind_btn_rolls" onclick="switchMaterialKind('rolls')" style="padding:9px 16px;border-radius:6px;border:1px solid <?=$preferredMaterialKind === 'rolls' ? '#86efac' : '#cbd5e1'?>;background:<?=$preferredMaterialKind === 'rolls' ? '#ecfdf5' : '#fff'?>;color:<?=$preferredMaterialKind === 'rolls' ? '#166534' : '#475569'?>;font-size:13px;font-weight:<?=$preferredMaterialKind === 'rolls' ? '800' : '700'?>;cursor:pointer">
+                <i class="fa fa-dolly"></i> Bobinas Compatibles
+            </button>
+            <button type="button" id="request_kind_btn_inks" onclick="switchMaterialKind('inks')" style="padding:9px 16px;border-radius:6px;border:1px solid <?=$preferredMaterialKind === 'inks' ? '#93c5fd' : '#cbd5e1'?>;background:<?=$preferredMaterialKind === 'inks' ? '#eff6ff' : '#fff'?>;color:<?=$preferredMaterialKind === 'inks' ? '#1d4ed8' : '#475569'?>;font-size:13px;font-weight:<?=$preferredMaterialKind === 'inks' ? '800' : '700'?>;cursor:pointer">
+                <i class="fa fa-tint"></i> Tintas e Insumos
+            </button>
+        </div>
+
+        <div id="material_kind_rolls" style="display:<?=$preferredMaterialKind === 'inks' ? 'none' : 'block'?>">
         <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05);margin-bottom:18px">
             <div style="display:flex;border-bottom:1px solid #CBD5E1;background:#F8FAFC">
                 <button type="button" id="tab_btn_bodega3000" class="tab-btn active" onclick="switchMaterialTab('bodega3000')" style="padding:12px 20px;font-size:13px;font-weight:bold;border:none;background:#FFF;border-bottom:3px solid #00A85A;color:#065F46;cursor:pointer;display:flex;align-items:center;gap:8px">
@@ -9708,9 +11817,21 @@ function renderProductionMaterialsRequestScreen(
             <div id="tab_pane_bodega3000" style="padding:18px;display:block">
                 <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:6px;padding:12px 16px;margin-bottom:15px;color:#065F46;font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
                     <div>
-                        <i class="fa fa-info-circle" style="color:#059669"></i>
-                        <b>Bobinas actualmente ubicadas en Bodega 3000 (Planta / Insumos en Producción).</b>
-                        Estas bobinas ya fueron trasladadas a producción y pueden cargarse directamente a la máquina y operario con 1 clic.
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                            <i class="fa fa-info-circle" style="color:#059669"></i>
+                            <b>Bobinas actualmente ubicadas en Bodega 3000 (Planta / Insumos en Producción).</b>
+                            <?php if ($isPrinterMachine): ?>
+                                <span style="background:#E0F2FE;border:1px solid #BAE6FD;color:#0369A1;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold">
+                                    <i class="fa fa-filter"></i> Solo Telas Vírgenes (TEL...)
+                                </span>
+                            <?php endif; ?>
+                        </div>
+                        <div style="margin-top:4px;font-size:12px;color:#047857">
+                            Estas bobinas ya fueron trasladadas a producción y se muestran solo si son compatibles con la OT seleccionada.
+                            <?php if ($isPrinterMachine): ?>
+                                <span style="color:#0284C7;font-weight:500">(En Flexografía, Serigrafía y Pulpo se listan exclusivamente telas vírgenes TEL compatibles con la OT).</span>
+                            <?php endif; ?>
+                        </div>
                     </div>
                     <div>
                         <input type="text" id="filter_b3000" placeholder="🔍 Buscar por código, color o descripción..." class="inptxt" style="width:260px;font-size:12px;padding:6px 10px" onkeyup="filterTable('tbl_b3000', this.value)">
@@ -9748,8 +11869,13 @@ function renderProductionMaterialsRequestScreen(
                         <tr>
                             <td colspan="9" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
                                 <i class="fa fa-box-open" style="font-size:28px;color:#94A3B8;margin-bottom:8px;display:block"></i>
-                                No hay bobinas registradas actualmente en Bodega 3000.<br>
-                                Puede cargar una bobina manual en la pestaña <b>"Cargar Sin Trazabilidad"</b> o solicitar bobinas desde la Bodega Central (100 / 200).
+                                <?php if ($isPrinterMachine): ?>
+                                    No hay bobinas de tela virgen compatibles con esta OT registradas actualmente con stock en Bodega 3000.<br>
+                                    Puede cargar una bobina manual en la pestaña <b>"Cargar Sin Trazabilidad"</b> o solicitar telas desde la Bodega Central (100 / 200).
+                                <?php else: ?>
+                                    No hay bobinas compatibles registradas actualmente en Bodega 3000 para esta OT.<br>
+                                    Puede cargar una bobina manual en la pestaña <b>"Cargar Sin Trazabilidad"</b> o solicitar bobinas desde la Bodega Central (100 / 200).
+                                <?php endif; ?>
                             </td>
                         </tr>
                     <?php else: ?>
@@ -9759,26 +11885,39 @@ function renderProductionMaterialsRequestScreen(
                             $rDesc = (string)($bRoll['sku_desc'] ?? '-');
                             $rCol = (string)($bRoll['color'] ?? '-');
                             $rW = (float)($bRoll['width_cm'] ?? round(($bRoll['width_mm'] ?? 0) / 10));
-                            $rGramms = (int)($bRoll['microns'] ?? 80);
+                            $rGramms = (int)($bRoll['grammage'] ?? $bRoll['microns'] ?? 80);
                             $rMts = (float)($bRoll['meters'] ?? 0);
                             $rKg = (float)($bRoll['weight_kg'] ?? $bRoll['current_weight_kg'] ?? 0);
                             $isCompat = !empty($bRoll['is_compatible']);
                             $rawId = (string)($bRoll['id'] ?? $bRoll['raw_id'] ?? '');
+                            $rIsPrinted = !empty($bRoll['is_printed']);
+                            $isBlockedForPrinter = ($isPrinterMachine && $rIsPrinted);
                         ?>
                             <tr style="<?=$isCompat ? 'background-color:#F0FDF4' : ''?>" onmouseover="this.style.backgroundColor='#E6F4EA'" onmouseout="this.style.backgroundColor='<?=$isCompat ? '#F0FDF4' : '#FFFFFF'?>'">
-                                <td class="tdnrm"><b><?=htmlspecialchars($rCode)?></b></td>
+                                <td class="tdnrm">
+                                    <b><?=htmlspecialchars($rCode)?></b>
+                                    <?php if ($rIsPrinted): ?>
+                                        <div style="margin-top:2px"><span style="background:#FEE2E2;color:#991B1B;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold"><i class="fa fa-print"></i> Bobina Impresa</span></div>
+                                    <?php else: ?>
+                                        <div style="margin-top:2px"><span style="background:#F0FDF4;color:#166534;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold"><i class="fa fa-check"></i> Bobina Virgen</span></div>
+                                    <?php endif; ?>
+                                </td>
                                 <td class="tdnrm" align="center">
                                     <span style="background:#E2E8F0;color:#1E293B;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:bold"><?=htmlspecialchars($rMat)?></span>
                                 </td>
                                 <td class="tdnrm" style="font-size:12px"><?=htmlspecialchars($rDesc)?></td>
                                 <td class="tdnrm"><?=htmlspecialchars($rCol)?></td>
                                 <td class="tdnrm" align="center" style="white-space:nowrap">
-                                    <?=$rW > 0 ? "{$rW} cm" : '-'?> &bull; <?=$rGramms > 0 ? "{$rGramms}g" : '-'?>
+                                    <b><?=$rW > 0 ? "{$rW} cm" : '-'?></b> &bull; <?=$rGramms > 0 ? "{$rGramms}g" : '-'?>
                                 </td>
                                 <td class="tdnrm" align="right"><?=$rMts > 0 ? number_format($rMts, 0, ',', '.') . ' m' : '-'?></td>
                                 <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($rKg, 1, ',', '.')?> kg</b></td>
                                 <td class="tdnrm" align="center">
-                                    <?php if ($isCompat): ?>
+                                    <?php if ($isBlockedForPrinter): ?>
+                                        <span style="background:#FEE2E2;color:#991B1B;border:1px solid #FCA5A5;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:bold" title="No apta para Flexo/Serigrafía porque ya fue impresa">
+                                            🚫 YA IMPRESA
+                                        </span>
+                                    <?php elseif ($isCompat): ?>
                                         <span style="background:#D1FAE5;color:#065F46;border:1px solid #6EE7B7;padding:3px 8px;border-radius:4px;font-size:11px;font-weight:bold">
                                             ⭐ COMPATIBLE
                                         </span>
@@ -9787,17 +11926,23 @@ function renderProductionMaterialsRequestScreen(
                                     <?php endif; ?>
                                 </td>
                                 <td class="tdnrm" align="center">
-                                    <form method="post" action="/production/materials/request/assign" style="margin:0" onsubmit="return confirm('¿Confirmar carga de bobina <?=htmlspecialchars(addslashes($rCode))?> (<?=$rKg?> kg) a la máquina y operario?');">
-                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                        <input type="hidden" name="agid" value="<?=$selectedAgId?>">
-                                        <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                                        <input type="hidden" name="action_mode" value="bodega3000">
-                                        <input type="hidden" name="roll_id" value="<?=htmlspecialchars($rawId)?>">
-                                        <input type="hidden" name="weight_kg" value="<?=$rKg?>">
-                                        <button type="submit" class="btngreen" style="padding:5px 12px;font-size:12px;cursor:pointer">
-                                            <i class="fa fa-arrow-circle-right"></i> Cargar a Máquina
+                                    <?php if ($isBlockedForPrinter): ?>
+                                        <button type="button" class="btnblue" style="background:#94A3B8;border-color:#94A3B8;cursor:not-allowed;padding:5px 12px;font-size:12px;opacity:0.7" title="Las máquinas de impresión requieren bobinas vírgenes sin uso previo" disabled>
+                                            <i class="fa fa-ban"></i> No Apta
                                         </button>
-                                    </form>
+                                    <?php else: ?>
+                                        <form method="post" action="/production/materials/request/assign" style="margin:0" onsubmit="return confirm('¿Confirmar carga de bobina <?=htmlspecialchars(addslashes($rCode))?> (<?=$rKg?> kg) a la máquina y operario?');">
+                                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                            <input type="hidden" name="agid" value="<?=$selectedAgId?>">
+                                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                            <input type="hidden" name="action_mode" value="bodega3000">
+                                            <input type="hidden" name="roll_id" value="<?=htmlspecialchars($rawId)?>">
+                                            <input type="hidden" name="weight_kg" value="<?=$rKg?>">
+                                            <button type="submit" class="btngreen" style="padding:5px 12px;font-size:12px;cursor:pointer">
+                                                <i class="fa fa-arrow-circle-right"></i> Cargar a Máquina
+                                            </button>
+                                        </form>
+                                    <?php endif; ?>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
@@ -9885,7 +12030,7 @@ function renderProductionMaterialsRequestScreen(
                 <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:6px;padding:12px 16px;margin-bottom:15px;color:#1E40AF;font-size:13px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
                     <div>
                         <i class="fa fa-info-circle"></i> <b>Stock disponible en Bodega Central (100 PLA / 200 PP).</b>
-                        Seleccione las bobinas que requiere transferir a la máquina (Bodega 3000) para su uso en esta OT.
+                        Seleccione las bobinas compatibles que requiere transferir a la máquina (Bodega 3000) para su uso en esta OT.
                     </div>
                     <div>
                         <input type="text" placeholder="🔍 Filtrar stock central..." class="inptxt" style="width:240px;font-size:12px;padding:6px 10px" onkeyup="filterTable('tbl_central', this.value)">
@@ -9917,10 +12062,10 @@ function renderProductionMaterialsRequestScreen(
                         </tr>
                     </thead>
                     <tbody>
-                    <?php if (empty($centralRolls)): ?>
+                    <?php if (empty($compatibleCentralRolls)): ?>
                         <tr><td colspan="8" class="tdnrm" style="text-align:center;padding:30px;color:#94A3B8">No se encontraron bobinas adicionales en las bodegas centrales para las características de esta OT.</td></tr>
                     <?php else: ?>
-                        <?php foreach (array_slice($centralRolls, 0, 80) as $cRoll):
+                        <?php foreach (array_slice($compatibleCentralRolls, 0, 80) as $cRoll):
                             $rCode = (string)($cRoll['roll_code'] ?? $cRoll['sku_code'] ?? '-');
                             $rMat = (string)($cRoll['roll_material'] ?? 'TNT');
                             $rDesc = (string)($cRoll['sku_desc'] ?? '-');
@@ -9962,6 +12107,170 @@ function renderProductionMaterialsRequestScreen(
                     </tbody>
                     </table>
                 </div>
+            </div>
+        </div>
+        </div>
+
+        <div id="material_kind_inks" style="display:<?=$preferredMaterialKind === 'inks' ? 'block' : 'none'?>">
+            <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:6px;padding:18px;box-shadow:0 1px 3px rgba(0,0,0,0.05);margin-bottom:18px">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:14px">
+                    <div>
+                        <div style="font-size:17px;font-weight:800;color:#1E3A8A;display:flex;align-items:center;gap:9px;margin-bottom:4px">
+                            <span style="width:34px;height:34px;border-radius:10px;background:#DBEAFE;color:#1D4ED8;display:inline-flex;align-items:center;justify-content:center;font-size:15px">
+                                <i class="fa fa-tint"></i>
+                            </span>
+                            Solicitud de Tintas para la OT
+                        </div>
+                        <div style="font-size:12.5px;color:#64748B;line-height:1.55;max-width:760px">
+                            Seleccione las tintas disponibles en la bodega correspondiente y registre la cantidad necesaria para la orden de trabajo.
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <span style="background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;padding:6px 10px;border-radius:999px;font-size:11.5px;font-weight:800">
+                            <i class="fa fa-warehouse"></i> Bodega <?=htmlspecialchars((string)$inkWarehouseCode)?>
+                        </span>
+                        <span style="background:#F8FAFC;color:#334155;border:1px solid #E2E8F0;padding:6px 10px;border-radius:999px;font-size:11.5px;font-weight:800">
+                            <i class="fa fa-list"></i> <?=htmlspecialchars((string)$inkItemsCount)?> items con stock
+                        </span>
+                    </div>
+                </div>
+
+                <?php if ($isPulpoRequest): ?>
+                    <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-radius:10px;padding:12px 14px;margin-bottom:14px;color:#334155;font-size:12.5px;line-height:1.55">
+                        <i class="fa fa-info-circle" style="color:#2563EB"></i>
+                        En <b>Pulpo</b>, esta pantalla es solo para <b>solicitar tintas e insumos a bodega</b>. La utilización de tinta por color se configura después en la tabla de <b>10 Unidades de Bastidores / Secadores</b> dentro de la OT.
+                    </div>
+                <?php endif; ?>
+
+                <div style="display:grid;grid-template-columns:minmax(260px, 1.2fr) minmax(240px, 1fr);gap:12px;margin-bottom:16px">
+                    <div style="background:linear-gradient(180deg,#F8FBFF 0%,#EFF6FF 100%);border:1px solid #BFDBFE;border-radius:10px;padding:14px 16px;color:#1E40AF">
+                        <div style="font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#2563EB;margin-bottom:6px">Bodega de Solicitud</div>
+                        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                            <span style="background:#DBEAFE;color:#1D4ED8;padding:4px 10px;border-radius:999px;font-weight:900;font-size:13px"><?=htmlspecialchars((string)$inkWarehouseCode)?></span>
+                            <span style="font-size:13px;font-weight:700"><?=htmlspecialchars($inkWarehouseName)?></span>
+                        </div>
+                        <div style="margin-top:6px;font-size:12px;line-height:1.5;color:#1D4ED8">
+                            La solicitud queda asociada a esta bodega para que el equipo de bodega la prepare correctamente.
+                        </div>
+                    </div>
+                    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px 16px;color:#334155">
+                        <div style="font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#475569;margin-bottom:6px">Referencia de la OT</div>
+                        <div style="font-size:12.5px;line-height:1.55;color:#475569">
+                            <?php if ($inkSuggestion !== ''): ?>
+                                <?=htmlspecialchars($inkSuggestion)?>
+                            <?php else: ?>
+                                Sin referencia de color cargada en la OT.
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <form method="post" action="/production/materials/request/assign" style="max-width:980px">
+                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                    <input type="hidden" name="agid" value="<?=$selectedAgId?>">
+                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                    <input type="hidden" name="action_mode" value="chemical_request">
+                    <input type="hidden" name="warehouse_code" value="<?=$inkWarehouseCode?>">
+                    <input type="hidden" name="warehouse_name" value="<?=htmlspecialchars($inkWarehouseName)?>">
+                    <input type="hidden" name="material_unit" value="Unid.">
+
+                    <table border="0" width="100%" cellpadding="8" cellspacing="0">
+                    <colgroup><col width="220"><col></colgroup>
+                    <tr>
+                        <td class="tdleft">Tinta en Bodega *</td>
+                        <td class="tdnrm">
+                            <div style="margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                    <input type="text" id="filter_inks" placeholder="Buscar por codigo, descripcion o stock..." class="inptxt" style="width:100%;max-width:360px;font-size:12px;padding:8px 12px;border-radius:8px;background:#FFF" onkeyup="filterTable('tbl_inks', this.value)">
+                                    <span style="font-size:11.5px;color:#64748B">Seleccione una fila para solicitarla.</span>
+                                </div>
+                                <div style="font-size:11.5px;color:#64748B;font-weight:700">
+                                    Vista tipo lista para busqueda rapida
+                                </div>
+                            </div>
+                            <div style="overflow:auto;max-height:360px;border:1px solid #CBD5E1;border-radius:10px;background:#FFF;box-shadow:inset 0 1px 0 rgba(255,255,255,0.5)">
+                                <table id="tbl_inks" border="0" width="100%" cellpadding="9" cellspacing="0" style="min-width:760px">
+                                    <colgroup>
+                                        <col width="70">
+                                        <col width="170">
+                                        <col>
+                                        <col width="140">
+                                        <col width="120">
+                                    </colgroup>
+                                    <thead style="position:sticky;top:0;background:#F8FAFC;z-index:1;box-shadow:0 1px 0 #E2E8F0">
+                                        <tr>
+                                            <td class="tdheader" align="center">Sel.</td>
+                                            <td class="tdheader">Codigo</td>
+                                            <td class="tdheader">Descripcion</td>
+                                            <td class="tdheader" align="right">Stock</td>
+                                            <td class="tdheader" align="center">Unidad</td>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                    <?php if (empty($chemicals)): ?>
+                                        <tr>
+                                            <td colspan="5" class="tdnrm" style="text-align:center;padding:18px;color:#64748B">
+                                                No se encontraron articulos con stock en esta bodega de tintas.
+                                            </td>
+                                        </tr>
+                                    <?php else: ?>
+                                        <?php foreach ($chemicals as $idx => $chemical): ?>
+                                            <?php
+                                                $itemCode = trim((string)($chemical['code'] ?? ''));
+                                                $itemName = trim((string)($chemical['name'] ?? ''));
+                                                $itemUnit = trim((string)($chemical['unit_name'] ?? 'UNID'));
+                                                $itemStock = (float)($chemical['available_qty'] ?? 0);
+                                                $requestLabel = (string)($chemical['request_label'] ?? '');
+                                                $radioId = 'ink_item_' . $idx;
+                                            ?>
+                                            <tr onclick="var radio=document.getElementById('<?=htmlspecialchars($radioId)?>'); if(radio){ radio.checked = true; }" style="cursor:pointer;border-bottom:1px solid #F1F5F9" onmouseover="this.style.backgroundColor='#F8FBFF'" onmouseout="this.style.backgroundColor=''">
+                                                <td class="tdnrm" align="center" style="vertical-align:middle">
+                                                    <input type="radio" id="<?=htmlspecialchars($radioId)?>" name="requested_item_text" value="<?=htmlspecialchars($requestLabel)?>" required style="transform:scale(1.1)">
+                                                </td>
+                                                <td class="tdnrm" style="vertical-align:middle">
+                                                    <div style="font-weight:800;color:#0F172A"><?=htmlspecialchars($itemCode !== '' ? $itemCode : '-')?></div>
+                                                </td>
+                                                <td class="tdnrm" style="vertical-align:middle">
+                                                    <div style="color:#0F172A;font-weight:700"><?=htmlspecialchars($itemName !== '' ? $itemName : $requestLabel)?></div>
+                                                    <div style="margin-top:2px;font-size:11px;color:#64748B">Disponible en bodega <?=htmlspecialchars((string)$inkWarehouseCode)?></div>
+                                                </td>
+                                                <td class="tdnrm" align="right" style="vertical-align:middle">
+                                                    <span style="display:inline-flex;align-items:center;justify-content:flex-end;min-width:88px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:999px;padding:4px 10px;font-weight:800;color:#0F766E">
+                                                        <?=htmlspecialchars(number_format($itemStock, 2, ',', '.'))?>
+                                                    </span>
+                                                </td>
+                                                <td class="tdnrm" align="center" style="vertical-align:middle">
+                                                    <span style="display:inline-flex;align-items:center;justify-content:center;background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:800">
+                                                        <?=htmlspecialchars($itemUnit !== '' ? $itemUnit : 'UNID')?>
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">Cantidad de Unidades *</td>
+                        <td class="tdnrm">
+                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                <input type="number" step="1" min="1" name="material_qty" class="inptxt" style="width:180px;height:40px;font-weight:800;text-align:center;border-radius:8px" value="1" required>
+                                <span style="color:#475569;font-size:12px;font-weight:bold">unidades</span>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="tdleft">&nbsp;</td>
+                        <td class="tdnrm" style="padding-top:12px">
+                            <button type="submit" class="btnblue" style="padding:11px 22px;font-size:13px;font-weight:800;cursor:pointer;border-radius:8px;box-shadow:0 2px 6px rgba(37,99,235,0.18)">
+                                <i class="fa fa-paper-plane"></i> Solicitar Tinta a Bodega <?=htmlspecialchars((string)$inkWarehouseCode)?>
+                            </button>
+                        </td>
+                    </tr>
+                    </table>
+                </form>
             </div>
         </div>
 
@@ -10029,6 +12338,27 @@ function renderProductionMaterialsRequestScreen(
         var activePane = document.getElementById('tab_pane_' + tabName);
         if (activePane) {
             activePane.style.display = 'block';
+        }
+    }
+
+    function switchMaterialKind(kindName) {
+        var rollsBtn = document.getElementById('request_kind_btn_rolls');
+        var inksBtn = document.getElementById('request_kind_btn_inks');
+        var rollsPane = document.getElementById('material_kind_rolls');
+        var inksPane = document.getElementById('material_kind_inks');
+
+        if (rollsPane) rollsPane.style.display = (kindName === 'rolls') ? 'block' : 'none';
+        if (inksPane) inksPane.style.display = (kindName === 'inks') ? 'block' : 'none';
+
+        if (rollsBtn) {
+            rollsBtn.style.background = (kindName === 'rolls') ? '#ecfdf5' : '#fff';
+            rollsBtn.style.color = (kindName === 'rolls') ? '#166534' : '#475569';
+            rollsBtn.style.borderColor = (kindName === 'rolls') ? '#86efac' : '#cbd5e1';
+        }
+        if (inksBtn) {
+            inksBtn.style.background = (kindName === 'inks') ? '#eff6ff' : '#fff';
+            inksBtn.style.color = (kindName === 'inks') ? '#1d4ed8' : '#475569';
+            inksBtn.style.borderColor = (kindName === 'inks') ? '#93c5fd' : '#cbd5e1';
         }
     }
 
@@ -10185,4 +12515,3 @@ function renderProductionBodega3000Screen(
     $content = ob_get_clean();
     renderProdwrkShell('Bobinas Bodega 3000', $content, 8, $operatorName, $plantaName);
 }
-
