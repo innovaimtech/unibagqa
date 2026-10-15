@@ -9877,7 +9877,10 @@ function renderProductionOperatorConsole(
                            SUM(evt_amount_metros_lineales) AS total_mlin, 
                            SUM(prod_bobina_kg) AS total_kg
                     FROM prod_worker_ot_events
-                    WHERE evt_prod_worker_otid = :ot_id AND evt_type IN ('prod', 'prodsericolor') AND evt_status > 0
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_type IN ('prod', 'prodsericolor')
+                      AND evt_status > 0
+                      AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
                 ");
                 $stSumProd->execute([':ot_id' => $workerOtId]);
                 $rSumProd = $stSumProd->fetch(PDO::FETCH_ASSOC);
@@ -9925,6 +9928,7 @@ function renderProductionOperatorConsole(
                     WHERE evt_prod_worker_otid = :ot_id
                       AND evt_type IN ('prod', 'prodsericolor')
                       AND evt_status > 0
+                      AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
                     ORDER BY evt_crtdat ASC, id ASC
                 ");
                 $stProdDetail->execute([':ot_id' => $workerOtId]);

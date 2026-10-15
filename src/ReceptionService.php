@@ -10451,13 +10451,13 @@ SQL;
             SELECT 
                 e.evt_prod_worker_otid,
                 SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
-                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE \'%Bobina Semielaborada%\')
                          THEN e.evt_amount ELSE 0 END) AS produced_units,
                 SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
-                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE \'%Bobina Semielaborada%\')
                          THEN e.evt_amount_metros_lineales ELSE 0 END) AS produced_meters,
                 SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
-                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE \\'%Bobina Semielaborada%\\')
                          THEN e.evt_amount_metros_maquina ELSE 0 END) AS produced_meters_maquina,
                 SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
                           AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
@@ -13456,6 +13456,7 @@ SQL;
                  INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
                  WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
                    AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                   AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                    AND eq.equipo_type_id = 8"
             );
             $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
@@ -13537,7 +13538,7 @@ SQL;
 
             try {
                 $stmt = $this->erpPdo->prepare(
-                    'SELECT COALESCE(SUM(t.requested_units), 0) AS requested_units
+                    "SELECT COALESCE(SUM(t.requested_units), 0) AS requested_units
                      FROM (
                         SELECT ph.prd_number AS work_order_number, MAX(pa.ag_amount) AS requested_units
                         FROM prod_worker_ot_events e
@@ -13545,9 +13546,10 @@ SQL;
                         INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
                         INNER JOIN prod_header ph ON ph.id = pa.ag_prdid
                         WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
-                          AND LOWER(e.evt_type) IN ("production","prod","prodsericolor")
+                          AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                         GROUP BY ph.prd_number
-                     ) t'
+                     ) t"
                 );
                 $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
                 $wasteRequestedUnits = (float)($stmt->fetchColumn() ?: 0.0);
@@ -13586,6 +13588,7 @@ LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
 LEFT JOIN workers w ON w.id = pwi.win_wrkid
 WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
   AND LOWER(e.evt_type) IN ("production","prod","prodsericolor")
+  AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
   AND eq.equipo_type_id = 8
 GROUP BY ph.prd_number, ph.prd_reqid, ph.prd_desc
 HAVING produced_units > 0
@@ -13642,6 +13645,7 @@ LEFT JOIN (
 ) cat ON cat.item_id = it.id
 WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
   AND LOWER(e.evt_type) IN ("production","prod","prodsericolor")
+  AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
   AND eq.equipo_type_id = 8
 GROUP BY ph.prd_number, cost_center, ph.prd_desc
 HAVING produced_units > 0
@@ -13683,6 +13687,7 @@ SQL;
                     INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
                     WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
                       AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                      AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                       AND eq.equipo_type_id = 8
                     GROUP BY ph.prd_number
                  ) t"
@@ -20986,6 +20991,7 @@ SQL;
                 INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
                 WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
                   AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                  AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
             ";
             $stmt = $this->erpPdo->prepare($kpiSql);
             $stmt->execute([':start_ts' => $startTs, ':end_ts' => $endTs]);
@@ -21026,6 +21032,7 @@ SQL;
                 INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
                 WHERE e.evt_crtdat BETWEEN :six_ts AND :end_ts
                   AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                  AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                 GROUP BY ym
                 ORDER BY ym ASC
             ";
@@ -21060,6 +21067,7 @@ SQL;
                     INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
                     WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
                       AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                      AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                     GROUP BY date_key, date_label
                     ORDER BY date_key ASC
                 ";
@@ -21077,6 +21085,7 @@ SQL;
                     INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
                     WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
                       AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                      AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                     GROUP BY date_key, date_label
                     ORDER BY date_key ASC
                 ";
@@ -21113,6 +21122,7 @@ SQL;
                 LEFT JOIN equipo_type eqt ON eqt.id = eq.equipo_type_id
                 WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
                   AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                  AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                 GROUP BY process_name
                 ORDER BY units DESC
             ";
@@ -21145,6 +21155,7 @@ SQL;
                 INNER JOIN equipo eq ON eq.id = pa.ag_equipo_id
                 WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
                   AND LOWER(e.evt_type) IN ('production','prod','prodsericolor')
+                  AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                 GROUP BY machine_name, process_name
                 ORDER BY units DESC
                 LIMIT 12

@@ -1463,7 +1463,8 @@ final class ProductionService
                  FROM prod_worker_ot_events
                  WHERE evt_prod_worker_otid = :ot_id
                    AND evt_type = 'prod'
-                   AND evt_status > 0"
+                   AND evt_status > 0
+                   AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')"
             );
             $stmtTot->execute([':ot_id' => (int)$workerOt['id']]);
             $tRow = $stmtTot->fetch();
@@ -1490,7 +1491,8 @@ final class ProductionService
                  INNER JOIN prod_worker_ot_events t3 ON t3.evt_prod_worker_otid = t2.id
                  WHERE t2.wok_ag_id = :ag_id
                    AND t3.evt_type = 'prod'
-                   AND t3.evt_status > 0"
+                   AND t3.evt_status > 0
+                   AND (t3.evt_comments IS NULL OR t3.evt_comments NOT LIKE '%Bobina Semielaborada%')"
             );
             $stmtAgTot->execute([':ag_id' => $agId]);
             $agRow = $stmtAgTot->fetch();
@@ -1821,6 +1823,11 @@ final class ProductionService
                     OR (t1.overrideembalaje_act = 1 AND t1.overrideembalaje_selladora_evtrefid = :ot_id2)
                 )
                 AND t1.evt_status > 0
+                AND (
+                    LOWER(t1.evt_type) NOT IN ('prod', 'production', 'prodsericolor')
+                    OR t1.evt_comments IS NULL
+                    OR t1.evt_comments NOT LIKE '%Bobina Semielaborada%'
+                )
                 ORDER BY t1.evt_crtdat DESC, t1.id DESC";
 
         try {
