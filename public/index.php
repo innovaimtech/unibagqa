@@ -11722,13 +11722,10 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
                     continue;
                 }
                 $label = $operatorLabelFromName($name);
-                if (isset($cysOperatorNamesMap[$name]) || in_array($label, $opCols, true)) {
-                    if (!in_array($label, $opCols, true)) {
-                        $opCols[] = $label;
-                        sort($opCols, SORT_NATURAL | SORT_FLAG_CASE);
-                    }
-                    $opPackUnits[$label] = (float)($opPackUnits[$label] ?? 0.0) + (float)$u;
+                if (!in_array($label, $opCols, true)) {
+                    continue;
                 }
+                $opPackUnits[$label] = (float)($opPackUnits[$label] ?? 0.0) + (float)$u;
             }
         }
         $opPackPay = [];

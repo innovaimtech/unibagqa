@@ -1403,6 +1403,46 @@ final class ProductionService
         $equipoParams = null;
         if ($openInit !== null && !empty($openInit['win_equipoid'])) {
             try {
+                $targetEqId = (int)$openInit['win_equipoid'];
+                $isPrintMachine = !empty($openInit['equipo_prod_isprinter_flexo']) || !empty($openInit['equipo_prod_isprinter_seri']) || in_array((int)($openInit['equipo_type_id'] ?? 0), [7, 11], true);
+                if (!$isPrintMachine && $this->erpPdo !== null) {
+                    $reqId = (int)($agendaData['ag_reqid'] ?? 0);
+                    if ($reqId > 0) {
+                        try {
+                            $stmtPrn = $this->erpPdo->prepare("
+                                SELECT t3.win_equipoid
+                                FROM prod_worker_ot t1
+                                INNER JOIN prod_agenda t2 ON t1.wok_ag_id = t2.id
+                                INNER JOIN prod_worker_init t3 ON t1.wok_init_id = t3.id
+                                INNER JOIN equipo t7 ON t3.win_equipoid = t7.id
+                                WHERE t2.ag_reqid = :reqid AND t7.equipo_type_id IN (7, 11)
+                                ORDER BY t1.id DESC LIMIT 1
+                            ");
+                            $stmtPrn->execute([':reqid' => $reqId]);
+                            $foundPrn = (int)$stmtPrn->fetchColumn();
+                            if ($foundPrn > 0) {
+                                $targetEqId = $foundPrn;
+                            } else {
+                                $stmtPrnAg = $this->erpPdo->prepare("
+                                    SELECT pa.ag_equipo_id
+                                    FROM prod_agenda pa
+                                    INNER JOIN equipo eq ON pa.ag_equipo_id = eq.id
+                                    WHERE pa.ag_reqid = :reqid AND eq.equipo_type_id IN (7, 11)
+                                    ORDER BY pa.id DESC LIMIT 1
+                                ");
+                                $stmtPrnAg->execute([':reqid' => $reqId]);
+                                $foundPrnAg = (int)$stmtPrnAg->fetchColumn();
+                                if ($foundPrnAg > 0) {
+                                    $targetEqId = $foundPrnAg;
+                                }
+                            }
+                        } catch (Throwable) {}
+                    }
+                    if ($targetEqId <= 0 || $targetEqId === (int)$openInit['win_equipoid']) {
+                        $targetEqId = (($agendaData['fab_printtype'] ?? '') === 'SERI') ? 14 : 33;
+                    }
+                }
+
                 $stmtEq = $this->erpPdo->prepare(
                     "SELECT * FROM equipo_params
                      WHERE param_equipo_id = :eq_id
@@ -1411,26 +1451,38 @@ final class ProductionService
                      LIMIT 1"
                 );
                 $stmtEq->execute([
-                    ':eq_id' => (int)$openInit['win_equipoid'],
+                    ':eq_id' => $targetEqId,
                     ':medida' => $paramMedida,
                 ]);
                 $equipoParams = $stmtEq->fetch(PDO::FETCH_ASSOC);
+                if (!$equipoParams && $targetEqId !== 33 && $targetEqId !== 13) {
+                    $stmtEq->execute([
+                        ':eq_id' => 33,
+                        ':medida' => $paramMedida,
+                    ]);
+                    $equipoParams = $stmtEq->fetch(PDO::FETCH_ASSOC);
+                }
+
                 if (is_array($equipoParams)) {
                     $polType = (string)($agendaData['req_solic_devprints_poltype'] ?? '');
-                    if ($polType === 'pol284' && isset($equipoParams['param_poly28'])) {
-                        $corteM2 = (float)$equipoParams['param_poly28'];
-                        $corteZ = (int)($equipoParams['param_z'] ?? 0);
-                    } elseif ($polType === 'pol170' && isset($equipoParams['param_poly17'])) {
-                        $corteM2 = (float)$equipoParams['param_poly17'];
-                        $corteZ = (int)($equipoParams['param_z'] ?? 0);
-                    } else {
+                    $isSeriPrint = (($agendaData['fab_printtype'] ?? '') === 'SERI') || (int)($equipoParams['equipo_prod_isprinter_seri'] ?? 0) === 1;
+                    if ($isSeriPrint) {
                         $corteM2 = (float)($equipoParams['param_corte'] ?? 0);
-                        $corteZ = (int)($equipoParams['param_z'] ?? 0);
+                    } elseif ($polType === 'pol284' && !empty($equipoParams['param_poly28']) && (float)$equipoParams['param_poly28'] > 0) {
+                        $corteM2 = (float)$equipoParams['param_poly28'];
+                    } elseif ($polType === 'pol170' && !empty($equipoParams['param_poly17']) && (float)$equipoParams['param_poly17'] > 0) {
+                        $corteM2 = (float)$equipoParams['param_poly17'];
+                    } else {
+                        $corteM2 = (float)(!empty($equipoParams['param_poly28']) ? $equipoParams['param_poly28'] : ($equipoParams['param_corte'] ?? 0));
                     }
+                    $corteZ = (int)($equipoParams['param_z'] ?? 0);
                 }
             } catch (Throwable) {
                 // Ignore missing params
             }
+        }
+        if ($corteM2 <= 0.0) {
+            $corteM2 = round(((float)($agendaData['fab_med_height'] ?? 0) + (float)($agendaData['fab_med_fuelle'] ?? 0)) / 100, 4);
         }
 
         // Entregas programadas desde prod_amtplan
@@ -1614,19 +1666,15 @@ final class ProductionService
         $orderAmountDisplay = (float)($agendaData['item_amount'] ?? $agAmount);
         $displayProducedThis = $totProducedThis;
         $displayProducedAll = $totProducedAll;
-        if ($isFlexo) {
-            $orderBagAmount = (float)($agendaData['item_amount'] ?? $agAmount);
-            $orderMlinProg = round($orderBagAmount * $corteM2);
-            $orderMlinAddi = round(($orderMlinProg / 100) * $mermaPerc);
-            $orderMetersTarget = round($orderMlinProg + $orderMlinAddi);
-            if ($orderMetersTarget <= 0) {
-                $orderMetersTarget = $metrosAImprimir;
-            }
-            $targetAmountThis = (float)$metrosAImprimir;
-            $orderAmountDisplay = (float)$orderMetersTarget;
-            $displayProducedThis = $totMetersThis;
-            $displayProducedAll = $totMetersAll;
+
+        $orderBagAmount = (float)($agendaData['item_amount'] ?? $agAmount);
+        $orderMlinProg = round($orderBagAmount * $corteM2);
+        $orderMlinAddi = round(($orderMlinProg / 100) * $mermaPerc);
+        $orderMetersTarget = round($orderMlinProg + $orderMlinAddi);
+        if ($orderMetersTarget <= 0) {
+            $orderMetersTarget = $metrosAImprimir;
         }
+
         $saldoTotal = max(0.0, $orderAmountDisplay - $displayProducedAll);
         $percentCompletedThis = $targetAmountThis > 0
             ? round(($displayProducedThis / $targetAmountThis) * 100, 2)

@@ -2278,20 +2278,81 @@ function renderProductionOperatorConsole(
     $corte_m2 = 0.0;
     $corte_z = 0;
     if ($isFlexo || $isSeriPlana || $isSelladora) {
-        $param_medida = (int)$agenda['fab_med_width'];
+        $param_medida = (int)($agenda['fab_med_width'] ?? 0);
         if ((int)($agenda['item_prodcalc_fuelle_act'] ?? 0) === 1) {
-            $param_medida += (int)$agenda['fab_med_fuelle'];
+            $param_medida += (int)($agenda['fab_med_fuelle'] ?? 0);
         }
         $erpPdo = Db::erpPdo();
-        $winEquipoid = (int)($machineInit['win_equipoid'] ?? 0);
+        $targetEqId = (int)($machineInit['win_equipoid'] ?? 0);
+
+        // Si la máquina actual no es impresora (ej. Selladora tipo 8), buscar la impresora (Flexo o Seri) de la OT
+        $isPrintMachine = $isFlexo || $isSeri;
+        if (!$isPrintMachine) {
+            $reqId = (int)($agenda['ag_reqid'] ?? 0);
+            if ($reqId > 0) {
+                try {
+                    $stmtPrn = $erpPdo->prepare("
+                        SELECT t3.win_equipoid
+                        FROM prod_worker_ot t1
+                        INNER JOIN prod_agenda t2 ON t1.wok_ag_id = t2.id
+                        INNER JOIN prod_worker_init t3 ON t1.wok_init_id = t3.id
+                        INNER JOIN equipo t7 ON t3.win_equipoid = t7.id
+                        WHERE t2.ag_reqid = :reqid AND t7.equipo_type_id IN (7, 11)
+                        ORDER BY t1.id DESC LIMIT 1
+                    ");
+                    $stmtPrn->execute([':reqid' => $reqId]);
+                    $foundPrn = (int)$stmtPrn->fetchColumn();
+                    if ($foundPrn > 0) {
+                        $targetEqId = $foundPrn;
+                    } else {
+                        $stmtPrnAg = $erpPdo->prepare("
+                            SELECT pa.ag_equipo_id
+                            FROM prod_agenda pa
+                            INNER JOIN equipo eq ON pa.ag_equipo_id = eq.id
+                            WHERE pa.ag_reqid = :reqid AND eq.equipo_type_id IN (7, 11)
+                            ORDER BY pa.id DESC LIMIT 1
+                        ");
+                        $stmtPrnAg->execute([':reqid' => $reqId]);
+                        $foundPrnAg = (int)$stmtPrnAg->fetchColumn();
+                        if ($foundPrnAg > 0) {
+                            $targetEqId = $foundPrnAg;
+                        }
+                    }
+                } catch (\Throwable) {}
+            }
+            if ($targetEqId <= 0 || $targetEqId === (int)($machineInit['win_equipoid'] ?? 0)) {
+                $targetEqId = (($agenda['fab_printtype'] ?? '') === 'SERI') ? 14 : 33;
+            }
+        }
+
         $stmtEq = $erpPdo->prepare("SELECT * FROM equipo_params WHERE param_equipo_id = :eq AND param_medida >= :med ORDER BY param_medida ASC LIMIT 1");
-        $stmtEq->execute([':eq' => $winEquipoid, ':med' => $param_medida]);
+        $stmtEq->execute([':eq' => $targetEqId, ':med' => $param_medida]);
         $eqParams = $stmtEq->fetch();
+        if (!$eqParams && $targetEqId !== 33 && $targetEqId !== 13) {
+            $stmtEq->execute([':eq' => 33, ':med' => $param_medida]);
+            $eqParams = $stmtEq->fetch();
+        }
+
         if ($eqParams) {
-            $corte_m2 = (float)($eqParams['param_corte'] ?? 0);
             $corte_z = (int)($eqParams['param_z'] ?? 0);
-        } else {
-            $corte_m2 = round(((float)$agenda['fab_med_height'] + (float)$agenda['fab_med_fuelle']) / 100, 4);
+            $polType = (string)($agenda['req_solic_devprints_poltype'] ?? '');
+            $isSeriPrint = (($agenda['fab_printtype'] ?? '') === 'SERI') || (int)($eqParams['equipo_prod_isprinter_seri'] ?? 0) === 1;
+
+            if ($isSeriPrint) {
+                $corte_m2 = (float)($eqParams['param_corte'] ?? 0);
+            } else {
+                // Flexografía: selección según espesor de polímero del diseño (2.84 mm vs 1.7 mm)
+                if ($polType === 'pol284' && !empty($eqParams['param_poly28']) && (float)$eqParams['param_poly28'] > 0) {
+                    $corte_m2 = (float)$eqParams['param_poly28'];
+                } elseif ($polType === 'pol170' && !empty($eqParams['param_poly17']) && (float)$eqParams['param_poly17'] > 0) {
+                    $corte_m2 = (float)$eqParams['param_poly17'];
+                } else {
+                    $corte_m2 = (float)(!empty($eqParams['param_poly28']) ? $eqParams['param_poly28'] : ($eqParams['param_corte'] ?? 0));
+                }
+            }
+        }
+        if ($corte_m2 <= 0.0) {
+            $corte_m2 = round(((float)($agenda['fab_med_height'] ?? 0) + (float)($agenda['fab_med_fuelle'] ?? 0)) / 100, 4);
         }
     }
 
@@ -3018,37 +3079,37 @@ function renderProductionOperatorConsole(
                     <tr>
                         <td class="tdleft">Ancho Bobina / Tela</td>
                         <td class="tdnrm"><b><?= $acTelaWidth > 0 ? $acTelaWidth . ' cm' : '-' ?></b></td>
-                        <td class="tdleft">Anilox N° 1</td>
+                        <td class="tdleft">Unidad N° 1</td>
                         <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[1] ?? '-'))?></td>
                     </tr>
                     <tr>
                         <td class="tdleft">Impresiones por desarrollo</td>
                         <td class="tdnrm"><?=(int)($agenda['req_solic_devprints_cc'] ?? 0)?> impresiones</td>
-                        <td class="tdleft">Anilox N° 2</td>
+                        <td class="tdleft">Unidad N° 2</td>
                         <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[2] ?? '-'))?></td>
                     </tr>
                     <tr>
                         <td class="tdleft">% de merma</td>
                         <td class="tdnrm"><?=$fmt($agenda['req_operador_mermaperc'], 2)?> %</td>
-                        <td class="tdleft">Anilox N° 3</td>
+                        <td class="tdleft">Unidad N° 3</td>
                         <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[3] ?? '-'))?></td>
                     </tr>
                     <tr>
                         <td class="tdleft">Metros a imprimir</td>
                         <td class="tdnrm"><b><?=$fmt($metrosAImprimir, 2)?> mtrs</b></td>
-                        <td class="tdleft">Anilox N° 4</td>
+                        <td class="tdleft">Unidad N° 4</td>
                         <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[4] ?? '-'))?></td>
                     </tr>
                     <tr>
                         <td class="tdleft">Color Tela</td>
                         <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></b></td>
-                        <td class="tdleft">Anilox N° 5</td>
+                        <td class="tdleft">Unidad N° 5</td>
                         <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[5] ?? '-'))?></td>
                     </tr>
                     <tr>
                         <td class="tdleft">Saldo total</td>
                         <td class="tdnrm"><b><?=$fmt($stats['saldo_total'] ?? 0)?> unidades</b></td>
-                        <td class="tdleft">Anilox N° 6</td>
+                        <td class="tdleft">Unidad N° 6</td>
                         <td class="tdnrm"><?=htmlspecialchars((string)($aniloxDescMap[6] ?? '-'))?></td>
                     </tr>
                     <tr>
@@ -3826,37 +3887,37 @@ function renderProductionOperatorConsole(
                 <tr>
                     <td class="tdleft">Impresiones al eje</td>
                     <td class="tdnrm">Sin información</td>
-                    <td class="tdleft">Anilox N° 1</td>
+                    <td class="tdleft">Unidad N° 1</td>
                     <td class="tdnrm" id="summary_anilox_1"><?=htmlspecialchars((string)($aniloxDescMap[1] ?? '-'))?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Impresiones por desarrollo</td>
                     <td class="tdnrm"><?=(int)($agenda['req_solic_devprints_cc'] ?? 0)?> impresiones</td>
-                    <td class="tdleft">Anilox N° 2</td>
+                    <td class="tdleft">Unidad N° 2</td>
                     <td class="tdnrm" id="summary_anilox_2"><?=htmlspecialchars((string)($aniloxDescMap[2] ?? '-'))?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">% de merma</td>
                     <td class="tdnrm"><?=$fmt($agenda['req_operador_mermaperc'], 2)?> %</td>
-                    <td class="tdleft">Anilox N° 3</td>
+                    <td class="tdleft">Unidad N° 3</td>
                     <td class="tdnrm" id="summary_anilox_3"><?=htmlspecialchars((string)($aniloxDescMap[3] ?? '-'))?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft"><?=$isFlexo ? 'Metros producidos / en curso' : 'Bolsas producidas / en curso'?></td>
-                    <td class="tdnrm"><?=$fmt($stats['total_produced_this'])?> de <?=$fmt($stats['target_amount'] ?? $agenda['ag_amount'])?> (<?=$fmt($stats['percent_completed_this'], 2)?> %)<?=$isFlexo ? ' mtrs' : ''?></td>
-                    <td class="tdleft">Anilox N° 4</td>
+                    <td class="tdleft">Bolsas producidas / en curso</td>
+                    <td class="tdnrm"><?=$fmt($stats['total_produced_this'])?> de <?=$fmt($stats['target_amount'] ?? $agenda['ag_amount'])?> (<?=$fmt($stats['percent_completed_this'], 2)?> %)</td>
+                    <td class="tdleft">Unidad N° 4</td>
                     <td class="tdnrm" id="summary_anilox_4"><?=htmlspecialchars((string)($aniloxDescMap[4] ?? '-'))?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft"><?=$isFlexo ? 'Metros producidos / total' : 'Bolsas producidas / total'?></td>
-                    <td class="tdnrm"><?=$fmt($stats['total_produced_all'])?> de <?=$fmt($stats['order_amount'] ?? $agenda['item_amount'])?> (<?=$fmt($stats['percent_completed_all'], 2)?> %)<?=$isFlexo ? ' mtrs' : ''?></td>
-                    <td class="tdleft">Anilox N° 5</td>
+                    <td class="tdleft">Bolsas producidas / total</td>
+                    <td class="tdnrm"><?=$fmt($stats['total_produced_all'])?> de <?=$fmt($stats['order_amount'] ?? $agenda['item_amount'])?> (<?=$fmt($stats['percent_completed_all'], 2)?> %)</td>
+                    <td class="tdleft">Unidad N° 5</td>
                     <td class="tdnrm" id="summary_anilox_5"><?=htmlspecialchars((string)($aniloxDescMap[5] ?? '-'))?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Saldo total</td>
-                    <td class="tdnrm"><b><?=$fmt($stats['saldo_total'])?> <?=$isFlexo ? 'mtrs' : 'unidades'?></b></td>
-                    <td class="tdleft">Anilox N° 6</td>
+                    <td class="tdnrm"><b><?=$fmt($stats['saldo_total'])?> unidades</b></td>
+                    <td class="tdleft">Unidad N° 6</td>
                     <td class="tdnrm" id="summary_anilox_6"><?=htmlspecialchars((string)($aniloxDescMap[6] ?? '-'))?></td>
                 </tr>
                 <tr>
@@ -4823,16 +4884,16 @@ function renderProductionOperatorConsole(
                     <td class="tdnrm" colspan="2"><?=$fmt($agenda['req_operador_mermaperc'], 2)?> %</td>
                 </tr>
                 <tr>
-                    <td class="tdleft"><?=$isFlexo ? 'Metros producidos / en curso' : 'Bolsas producidas / en curso'?></td>
-                    <td class="tdnrm" colspan="3"><?=$fmt($stats['total_produced_this'])?> de <?=$fmt($stats['target_amount'] ?? $agenda['ag_amount'])?> (<?=$fmt($stats['percent_completed_this'], 2)?> %)<?=$isFlexo ? ' mtrs' : ''?></td>
+                    <td class="tdleft">Bolsas producidas / en curso</td>
+                    <td class="tdnrm" colspan="3"><?=$fmt($stats['total_produced_this'])?> de <?=$fmt($stats['target_amount'] ?? $agenda['ag_amount'])?> (<?=$fmt($stats['percent_completed_this'], 2)?> %)</td>
                 </tr>
                 <tr>
-                    <td class="tdleft"><?=$isFlexo ? 'Metros producidos / total' : 'Bolsas producidas / total'?></td>
-                    <td class="tdnrm" colspan="3"><?=$fmt($stats['total_produced_all'])?> de <?=$fmt($stats['order_amount'] ?? $agenda['item_amount'])?> (<?=$fmt($stats['percent_completed_all'], 2)?> %)<?=$isFlexo ? ' mtrs' : ''?></td>
+                    <td class="tdleft">Bolsas producidas / total</td>
+                    <td class="tdnrm" colspan="3"><?=$fmt($stats['total_produced_all'])?> de <?=$fmt($stats['order_amount'] ?? $agenda['item_amount'])?> (<?=$fmt($stats['percent_completed_all'], 2)?> %)</td>
                 </tr>
                 <tr>
                     <td class="tdleft">Saldo total</td>
-                    <td class="tdnrm" colspan="3"><b><?=$fmt($stats['saldo_total'])?> <?=$isFlexo ? 'mtrs' : 'unidades'?></b></td>
+                    <td class="tdnrm" colspan="3"><b><?=$fmt($stats['saldo_total'])?> unidades</b></td>
                 </tr>
                 <?php if ($isSeriPulpo): ?>
                     <tr>
