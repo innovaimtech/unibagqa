@@ -522,7 +522,7 @@ final class ProductionService
                                t1x.fab_print_colordesc_1, t1x.fab_print_colordesc_2, t1x.fab_print_colordesc_3,
                                t1x.fab_print_colordesc_4, t1x.fab_print_colordesc_5, t1x.fab_print_colordesc_6,
                                teq.equipo_name, teqt.type_ant_title, teq.equipo_type_id, teq.equipo_prod_isprinter_flexo, teq.equipo_prod_isprinter_seri,
-                               (SELECT COALESCE(SUM(t_ev.evt_amount), 0) FROM prod_worker_ot t_ot INNER JOIN prod_worker_ot_events t_ev ON t_ev.evt_prod_worker_otid = t_ot.id WHERE t_ot.wok_ag_id = t0.id AND t_ev.evt_type = 'prod' AND t_ev.evt_status > 0) AS total_produced
+                               (SELECT COALESCE(SUM(t_ev.evt_amount), 0) FROM prod_worker_ot t_ot INNER JOIN prod_worker_ot_events t_ev ON t_ev.evt_prod_worker_otid = t_ot.id WHERE t_ot.wok_ag_id = t0.id AND t_ev.evt_type = 'prod' AND t_ev.evt_status > 0 AND (t_ev.evt_comments IS NULL OR t_ev.evt_comments NOT LIKE '%Bobina Semielaborada%')) AS total_produced
                 FROM prod_agenda t0
                 LEFT OUTER JOIN prod_header t3x ON t0.ag_prdid = t3x.id
                 INNER JOIN orders t1 ON t0.ag_reqid = t1.id
@@ -1266,6 +1266,45 @@ final class ProductionService
             ")->execute();
             $stmt = $this->trzPdo->prepare("SELECT id FROM warehouses WHERE code IN (3000, 16, 27) ORDER BY FIELD(code, 3000, 16, 27), id ASC LIMIT 1");
             $stmt->execute();
+            return (int)$stmt->fetchColumn();
+        } catch (Throwable) {
+            return 0;
+        }
+    }
+
+    private function resolveBodega3000InsumosWarehouseId(): int
+    {
+        if ($this->trzPdo === null) {
+            return 0;
+        }
+
+        try {
+            $this->trzPdo->prepare("
+                INSERT INTO warehouses (code, name, erp_storehouse_id)
+                VALUES (3000, '3000 INSUMOS EN PRODUCCION', 16)
+                ON DUPLICATE KEY UPDATE
+                    name = VALUES(name),
+                    erp_storehouse_id = VALUES(erp_storehouse_id)
+            ")->execute();
+
+            $stmt = $this->trzPdo->prepare("
+                SELECT id
+                FROM warehouses
+                WHERE erp_storehouse_id = 16
+                   OR UPPER(name) LIKE '%INSUMOS%'
+                   OR (code = 3000 AND UPPER(name) LIKE '%3000%')
+                ORDER BY
+                    CASE
+                        WHEN erp_storehouse_id = 16 THEN 0
+                        WHEN UPPER(name) LIKE '%INSUMOS%' THEN 1
+                        WHEN code = 3000 THEN 2
+                        ELSE 3
+                    END,
+                    id ASC
+                LIMIT 1
+            ");
+            $stmt->execute();
+
             return (int)$stmt->fetchColumn();
         } catch (Throwable) {
             return 0;
@@ -2095,7 +2134,9 @@ final class ProductionService
                         SET evt_status = 2,
                             evt_enddat = COALESCE(evt_enddat, :now),
                             prod_bobina_kg = 0,
-                            evt_amount = 0
+                            evt_amount = 0,
+                            evt_amount_metros_lineales = 0,
+                            evt_amount_metros_maquina = 0
                         WHERE evt_prod_worker_otid = :ot_id
                           AND evt_comments LIKE '%Bobina Semielaborada%'
                           AND id != :cur_eid
@@ -3452,7 +3493,7 @@ final class ProductionService
                 }
 
                 // Resolver Bodega 3000
-                $whId = $this->resolveBodega3000WarehouseId();
+                $whId = $this->resolveBodega3000InsumosWarehouseId();
                 if ($whId <= 0) {
                     $whId = (int)($roll['warehouse_id'] ?? 1);
                 }
@@ -3491,7 +3532,8 @@ final class ProductionService
                         'new_roll_id' => $newRollId,
                         'new_roll_code' => $leftoverRollCode,
                         'leftover_kg' => $leftoverKg,
-                        'warehouse' => 'Bodega 3000',
+                        'warehouse' => '3000 Insumos de Produccion',
+                        'warehouse_id' => $whId,
                         'worker_ot_id' => $workerOtId,
                         'operator' => $operatorName,
                         'timestamp' => $now,
@@ -3762,7 +3804,7 @@ final class ProductionService
                 'merged_source_rolls' => $mergedSourceRolls,
                 'message' => "Salida de bobina {$rollCode} registrada exitosamente."
                     . (!empty($mergedSourceCodes) ? ' Se consolidaron también: ' . implode(', ', $mergedSourceCodes) . '.' : '')
-                    . ($leftoverRollCode !== '' ? " Se generó sobrante {$leftoverRollCode} ({$leftoverKg} kg) con trazabilidad en Bodega 3000." : "")
+                    . ($leftoverRollCode !== '' ? " Se generó sobrante {$leftoverRollCode} ({$leftoverKg} kg) con trazabilidad en 3000 Insumos de Produccion." : "")
                     . ($remainingMountedRollCode !== '' ? " Quedó montada {$remainingMountedRollCode} ({$remainingMountedKg} kg) para el siguiente tiraje." : '')
             ];
         } catch (Throwable $e) {
@@ -4313,24 +4355,6 @@ final class ProductionService
                     'operator' => $operatorName,
                     'timestamp' => $now,
                 ], JSON_UNESCAPED_UNICODE),
-            ]);
-
-            // Evento en ERP remoto
-            $stmtErp = $this->erpPdo->prepare(
-                "INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_amount_metros_lineales, evt_metrotype, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
-                 VALUES
-                 (:ot_id, :amt, :kg, :mlin, 'metros_lineales', :crtdat, :enddat, 2, 'prod', :comments)"
-            );
-            $stmtErp->execute([
-                ':ot_id' => $workerOtId,
-                ':amt' => $meters > 0 ? $meters : $weightKg,
-                ':kg' => $weightKg,
-                ':mlin' => $meters,
-                ':crtdat' => $now,
-                ':enddat' => $now,
-                ':comments' => "Bobina Semielaborada {$childRollCode} ({$weightKg} kg, {$meters} m)"
-                    . (!empty($sourceRollCodes) ? ' desde: ' . implode(', ', $sourceRollCodes) : ''),
             ]);
 
             return [
@@ -5876,14 +5900,16 @@ final class ProductionService
                     ]);
 
                     $this->erpPdo->prepare("
-                        UPDATE prod_worker_ot_events
-                        SET evt_status = 2,
-                            evt_enddat = COALESCE(evt_enddat, :now),
-                            prod_bobina_kg = 0,
-                            evt_amount = 0
-                        WHERE evt_prod_worker_otid = :ot_id
-                          AND evt_comments LIKE '%Bobina Semielaborada%'
-                          AND id != :cur_eid
+                    UPDATE prod_worker_ot_events
+                    SET evt_status = 2,
+                        evt_enddat = COALESCE(evt_enddat, :now),
+                        prod_bobina_kg = 0,
+                        evt_amount = 0,
+                        evt_amount_metros_lineales = 0,
+                        evt_amount_metros_maquina = 0
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_comments LIKE '%Bobina Semielaborada%'
+                      AND id != :cur_eid
                     ")->execute([':now' => $now, ':ot_id' => $workerOtId, ':cur_eid' => $lastProdId]);
                 }
             } else {
@@ -5908,14 +5934,16 @@ final class ProductionService
                     $lastProdId = (int)$this->erpPdo->lastInsertId();
 
                     $this->erpPdo->prepare("
-                        UPDATE prod_worker_ot_events
-                        SET evt_status = 2,
-                            evt_enddat = COALESCE(evt_enddat, :now),
-                            prod_bobina_kg = 0,
-                            evt_amount = 0
-                        WHERE evt_prod_worker_otid = :ot_id
-                          AND evt_comments LIKE '%Bobina Semielaborada%'
-                          AND id != :cur_eid
+                    UPDATE prod_worker_ot_events
+                    SET evt_status = 2,
+                        evt_enddat = COALESCE(evt_enddat, :now),
+                        prod_bobina_kg = 0,
+                        evt_amount = 0,
+                        evt_amount_metros_lineales = 0,
+                        evt_amount_metros_maquina = 0
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_comments LIKE '%Bobina Semielaborada%'
+                      AND id != :cur_eid
                     ")->execute([':now' => $now, ':ot_id' => $workerOtId, ':cur_eid' => $lastProdId]);
                 }
             }
@@ -5999,7 +6027,7 @@ final class ProductionService
                        t1x.fab_printtype, t1x.fab_design_imagehash, t1x.fab_design_name, t1x.item_img_hash,
                        t1x.fab_print_colordesc_1, t1x.fab_print_colordesc_2, t1x.fab_print_colordesc_3,
                        t1x.fab_print_colordesc_4, t1x.fab_print_colordesc_5, t1x.fab_print_colordesc_6,
-                       (SELECT COALESCE(SUM(evt_amount), 0) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = t1.id AND evt_type = 'prod' AND evt_status > 0) AS total_produced
+                       (SELECT COALESCE(SUM(evt_amount), 0) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = t1.id AND evt_type = 'prod' AND evt_status > 0 AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')) AS total_produced
                 FROM prod_worker_ot t1
                 INNER JOIN prod_worker_init t2 ON t1.wok_init_id = t2.id
                 LEFT OUTER JOIN equipo t7 ON t2.win_equipoid = t7.id
@@ -6051,7 +6079,7 @@ final class ProductionService
                        t0.id AS ag_id, t0.ag_amount,
                        t3x.prd_number,
                        t5.req_number, t4.cust_name, t2x.item_title, t2x.item_number_prod,
-                       (SELECT SUM(evt_amount) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = t1.id AND evt_type = 'prod' AND evt_status > 0) AS total_produced
+                       (SELECT SUM(evt_amount) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = t1.id AND evt_type = 'prod' AND evt_status > 0 AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')) AS total_produced
                 FROM prod_worker_ot t1
                 INNER JOIN prod_worker_init t2 ON t1.wok_init_id = t2.id
                 LEFT OUTER JOIN equipo t7 ON t2.win_equipoid = t7.id

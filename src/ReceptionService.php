@@ -10152,7 +10152,9 @@ SQL;
             LEFT JOIN equipo t7 ON t3.win_equipoid = t7.id
             LEFT JOIN (
                 SELECT evt_prod_worker_otid, 
-                       SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') THEN evt_amount ELSE 0 END) AS produced_units
+                       SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                 AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                THEN evt_amount ELSE 0 END) AS produced_units
                 FROM prod_worker_ot_events
                 GROUP BY evt_prod_worker_otid
             ) pe ON pe.evt_prod_worker_otid = t1.id
@@ -10223,15 +10225,27 @@ SQL;
                 LEFT JOIN customer t12 ON t9.req_cust_id = t12.id
                 INNER JOIN (
                     SELECT evt_prod_worker_otid,
-                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') THEN evt_amount ELSE 0 END) AS produced_units,
-                           SUM(evt_amount_metros_lineales) AS produced_meters,
-                           SUM(prod_bobina_kg) AS produced_kg
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                     AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                    THEN evt_amount ELSE 0 END) AS produced_units,
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                     AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                    THEN evt_amount_metros_lineales ELSE 0 END) AS produced_meters,
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                     AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                    THEN prod_bobina_kg ELSE 0 END) AS produced_kg
                     FROM prod_worker_ot_events
                     GROUP BY evt_prod_worker_otid
                     HAVING (
-                        SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') THEN evt_amount ELSE 0 END) > 0
-                        OR SUM(evt_amount_metros_lineales) > 0
-                        OR SUM(prod_bobina_kg) > 0
+                        SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                  AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                 THEN evt_amount ELSE 0 END) > 0
+                        OR SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                      AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                     THEN evt_amount_metros_lineales ELSE 0 END) > 0
+                        OR SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                      AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                     THEN prod_bobina_kg ELSE 0 END) > 0
                     )
                 ) pe ON pe.evt_prod_worker_otid = t1.id
                 WHERE " . implode(' AND ', $histWhereClauses) . "
@@ -10436,12 +10450,22 @@ SQL;
         LEFT JOIN (
             SELECT 
                 e.evt_prod_worker_otid,
-                SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor') THEN e.evt_amount ELSE 0 END) AS produced_units,
-                SUM(e.evt_amount_metros_lineales) AS produced_meters,
-                SUM(e.evt_amount_metros_maquina) AS produced_meters_maquina,
-                SUM(e.prod_bobina_kg) AS produced_kg,
-                AVG(CASE WHEN e.evt_amount_metros_lineales > 0 AND (e.evt_enddat - e.evt_crtdat) > 0 
-                    THEN (e.evt_amount_metros_lineales / ((e.evt_enddat - e.evt_crtdat) / 60.0)) 
+                SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                         THEN e.evt_amount ELSE 0 END) AS produced_units,
+                SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                         THEN e.evt_amount_metros_lineales ELSE 0 END) AS produced_meters,
+                SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                         THEN e.evt_amount_metros_maquina ELSE 0 END) AS produced_meters_maquina,
+                SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                         THEN e.prod_bobina_kg ELSE 0 END) AS produced_kg,
+                AVG(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
+                           AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                           AND e.evt_amount_metros_lineales > 0 AND (e.evt_enddat - e.evt_crtdat) > 0
+                    THEN (e.evt_amount_metros_lineales / ((e.evt_enddat - e.evt_crtdat) / 60.0))
                     ELSE NULL END) AS speed_m_min,
                 SUM(CASE WHEN LOWER(e.evt_type) = 'setup' AND e.evt_enddat > e.evt_crtdat THEN (e.evt_enddat - e.evt_crtdat) ELSE 0 END) AS setup_seconds,
                 SUM(CASE WHEN LOWER(e.evt_type) = 'pause' AND e.evt_enddat > e.evt_crtdat THEN (e.evt_enddat - e.evt_crtdat) ELSE 0 END) AS pause_seconds,
@@ -10486,6 +10510,91 @@ SQL;
             $rawRows = $stmt->fetchAll() ?: [];
         } catch (Throwable $e) {
             return $result;
+        }
+
+        $productionEventsByOt = [];
+        $reportOtIds = array_values(array_filter(array_unique(array_map(
+            static fn($row) => (int)($row['ot_id'] ?? 0),
+            $rawRows
+        ))));
+        if (!empty($reportOtIds)) {
+            try {
+                $eventPlaceholders = implode(',', array_fill(0, count($reportOtIds), '?'));
+                $sqlEvents = "
+                    SELECT
+                        e.id AS event_id,
+                        e.evt_prod_worker_otid AS ot_id,
+                        e.evt_amount AS produced_units,
+                        e.prod_bobina_kg AS produced_kg,
+                        e.evt_amount_metros_lineales AS produced_meters,
+                        e.evt_amount_metros_maquina AS produced_meters_maquina,
+                        e.evt_crtdat,
+                        e.evt_enddat,
+                        e.evt_status,
+                        e.evt_idayudante AS helper_id,
+                        COALESCE(e.evt_comments, '') AS comments,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' THEN d.evt_amount ELSE 0 END) AS waste_units,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' THEN d.evt_kgstounits ELSE 0 END) AS waste_kg,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid IN (6, 9) THEN d.evt_amount ELSE 0 END) AS waste_setup_units,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid IN (6, 9) THEN d.evt_kgstounits ELSE 0 END) AS waste_setup_kg,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid = 7 THEN d.evt_amount ELSE 0 END) AS waste_print_units,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid = 7 THEN d.evt_kgstounits ELSE 0 END) AS waste_print_kg,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid NOT IN (6, 7, 9) THEN d.evt_amount ELSE 0 END) AS waste_coil_units,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'merma' AND d.evt_merma_typeid NOT IN (6, 7, 9) THEN d.evt_kgstounits ELSE 0 END) AS waste_coil_kg,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'repair' OR d.evt_repair_typeid > 0 THEN d.evt_amount ELSE 0 END) AS waste_repair_units,
+                        SUM(CASE WHEN LOWER(d.evt_type) = 'repair' OR d.evt_repair_typeid > 0 THEN d.evt_kgstounits ELSE 0 END) AS waste_repair_kg
+                    FROM prod_worker_ot_events e
+                    LEFT JOIN prod_worker_ot_defectunits d
+                        ON d.evt_refid = e.id
+                       AND d.evt_status > 0
+                    WHERE e.evt_prod_worker_otid IN ($eventPlaceholders)
+                      AND e.evt_status > 0
+                      AND LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
+                      AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
+                    GROUP BY
+                        e.id, e.evt_prod_worker_otid, e.evt_amount, e.prod_bobina_kg,
+                        e.evt_amount_metros_lineales, e.evt_amount_metros_maquina,
+                        e.evt_crtdat, e.evt_enddat, e.evt_status, e.evt_idayudante, e.evt_comments
+                    ORDER BY e.evt_prod_worker_otid ASC, e.evt_crtdat DESC, e.id DESC
+                ";
+                $stEvents = $this->erpPdo->prepare($sqlEvents);
+                $stEvents->execute($reportOtIds);
+                foreach ($stEvents->fetchAll(PDO::FETCH_ASSOC) ?: [] as $eventRow) {
+                    $eventOtId = (int)($eventRow['ot_id'] ?? 0);
+                    if ($eventOtId <= 0) {
+                        continue;
+                    }
+                    $eventId = (int)($eventRow['event_id'] ?? 0);
+                    $eventStartTs = (int)($eventRow['evt_crtdat'] ?? 0);
+                    $eventEndTs = (int)($eventRow['evt_enddat'] ?? 0);
+                    $productionEventsByOt[$eventOtId][] = [
+                        'event_id' => $eventId,
+                        'event_label' => 'Evento #' . $eventId
+                            . ' | ' . ($eventStartTs > 0 ? date('d/m/Y H:i', $eventStartTs) : 'sin fecha')
+                            . ' | ' . number_format((float)($eventRow['produced_units'] ?? 0), 0, ',', '.') . ' un',
+                        'produced_units' => (float)($eventRow['produced_units'] ?? 0),
+                        'produced_kg' => (float)($eventRow['produced_kg'] ?? 0),
+                        'produced_meters' => (float)($eventRow['produced_meters'] ?? 0),
+                        'produced_meters_maquina' => (float)($eventRow['produced_meters_maquina'] ?? 0),
+                        'started_at' => $eventStartTs > 0 ? date('Y-m-d\TH:i', $eventStartTs) : '',
+                        'ended_at' => $eventEndTs > 0 ? date('Y-m-d\TH:i', $eventEndTs) : '',
+                        'helper_id' => (int)($eventRow['helper_id'] ?? 0),
+                        'comments' => trim((string)($eventRow['comments'] ?? '')),
+                        'waste_units' => (float)($eventRow['waste_units'] ?? 0),
+                        'waste_kg' => (float)($eventRow['waste_kg'] ?? 0),
+                        'waste_setup_units' => (float)($eventRow['waste_setup_units'] ?? 0),
+                        'waste_setup_kg' => (float)($eventRow['waste_setup_kg'] ?? 0),
+                        'waste_print_units' => (float)($eventRow['waste_print_units'] ?? 0),
+                        'waste_print_kg' => (float)($eventRow['waste_print_kg'] ?? 0),
+                        'waste_coil_units' => (float)($eventRow['waste_coil_units'] ?? 0),
+                        'waste_coil_kg' => (float)($eventRow['waste_coil_kg'] ?? 0),
+                        'waste_repair_units' => (float)($eventRow['waste_repair_units'] ?? 0),
+                        'waste_repair_kg' => (float)($eventRow['waste_repair_kg'] ?? 0),
+                    ];
+                }
+            } catch (Throwable) {
+                $productionEventsByOt = [];
+            }
         }
 
         $formattedRows = [];
@@ -10697,6 +10806,7 @@ SQL;
                 }
             }
 
+            $currentOtId = (int)($row['ot_id'] ?? 0);
             $formattedRows[] = [
                 'ot_id' => (int)($row['ot_id'] ?? 0),
                 'ot_number' => trim((string)($row['ot_number'] ?? '')),
@@ -10769,6 +10879,7 @@ SQL;
                 'wok_enddat' => $endTsRow,
                 'operator_id' => (int)($row['operator_id'] ?? 0),
                 'helper_id' => (int)($row['helper_id'] ?? 0),
+                'production_events' => array_values($productionEventsByOt[$currentOtId] ?? []),
             ];
         }
 
@@ -10863,6 +10974,7 @@ SQL;
             $initId = (int)$baseRec['wok_init_id'];
 
             // 2. Parsear parámetros y valores
+            $targetEventId = isset($data['target_event_id']) ? max(0, (int)$data['target_event_id']) : 0;
             $producedUnits = isset($data['produced_units']) ? max(0.0, (float)$data['produced_units']) : 0.0;
             $producedKg = isset($data['produced_kg']) ? max(0.0, (float)$data['produced_kg']) : 0.0;
             $producedMeters = isset($data['produced_meters']) ? max(0.0, (float)$data['produced_meters']) : 0.0;
@@ -10948,26 +11060,43 @@ SQL;
                 ':init_id' => $initId,
             ]);
 
-            // Buscar evento de producción principal (estrictamente prod, nunca pause/colacion)
+            $eventStatus = $status === 1 ? 1 : 2;
+
+            // Consolidar eventos de producción duplicados dentro de la misma OT.
             $stEvt = $this->erpPdo->prepare("
-                SELECT id, evt_comments FROM prod_worker_ot_events 
-                WHERE evt_prod_worker_otid = :ot_id 
+                SELECT id, evt_comments
+                FROM prod_worker_ot_events
+                WHERE evt_prod_worker_otid = :ot_id
                   AND LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
-                ORDER BY id DESC LIMIT 1
+                  AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                  AND evt_status > 0
+                ORDER BY
+                    CASE WHEN evt_enddat > 0 THEN evt_enddat ELSE evt_crtdat END DESC,
+                    id DESC
             ");
             $stEvt->execute([':ot_id' => $otId]);
-            $evtRow = $stEvt->fetch(PDO::FETCH_ASSOC);
+            $prodEventRows = $stEvt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            $evtRow = null;
+            $duplicateProdEventIds = [];
+            if ($targetEventId > 0) {
+                foreach ($prodEventRows as $prodEventRow) {
+                    if ((int)($prodEventRow['id'] ?? 0) === $targetEventId) {
+                        $evtRow = $prodEventRow;
+                        break;
+                    }
+                }
+                if ($evtRow === null) {
+                    throw new RuntimeException('El evento de producción seleccionado ya no existe o no pertenece a esta OT.');
+                }
+            } else {
+                $evtRow = $prodEventRows[0] ?? null;
+            }
 
-            if (!$evtRow) {
-                // Fallback: cualquier evento que NO sea pausa ni colación
-                $stEvtFallback = $this->erpPdo->prepare("
-                    SELECT id, evt_comments FROM prod_worker_ot_events 
-                    WHERE evt_prod_worker_otid = :ot_id 
-                      AND LOWER(evt_type) NOT IN ('pause', 'colacion', 'mantencion')
-                    ORDER BY id DESC LIMIT 1
-                ");
-                $stEvtFallback->execute([':ot_id' => $otId]);
-                $evtRow = $stEvtFallback->fetch(PDO::FETCH_ASSOC);
+            if ($targetEventId <= 0 && count($prodEventRows) > 1) {
+                $duplicateProdEventIds = array_values(array_filter(array_map(
+                    static fn(array $row): int => (int)($row['id'] ?? 0),
+                    array_slice($prodEventRows, 1)
+                )));
             }
 
             if ($evtRow) {
@@ -10983,6 +11112,7 @@ SQL;
                         evt_amount_metros_maquina = :metros_maquina,
                         evt_crtdat = :start_ts,
                         evt_enddat = :end_ts,
+                        evt_status = :evt_status,
                         evt_idayudante = :helper_id,
                         evt_comments = :comments
                     WHERE id = :evt_id
@@ -10994,10 +11124,36 @@ SQL;
                     ':metros_maquina' => $producedMetersMaquina,
                     ':start_ts' => $startTs,
                     ':end_ts' => $endTs,
+                    ':evt_status' => $eventStatus,
                     ':helper_id' => $helperId,
                     ':comments' => $newComments,
                     ':evt_id' => $evtId,
                 ]);
+
+                if (!empty($duplicateProdEventIds)) {
+                    $dupPlaceholders = implode(',', array_fill(0, count($duplicateProdEventIds), '?'));
+
+                    $stMoveDupDef = $this->erpPdo->prepare("
+                        UPDATE prod_worker_ot_defectunits
+                        SET evt_refid = ?
+                        WHERE evt_refid IN ({$dupPlaceholders})
+                    ");
+                    $stMoveDupDef->execute(array_merge([$evtId], $duplicateProdEventIds));
+
+                    $dupAuditNote = ' | [Evento consolidado automáticamente en #' . $evtId . ' por ' . $editor . ' ' . date('Y-m-d H:i') . ']';
+                    $stDisableDupEvt = $this->erpPdo->prepare("
+                        UPDATE prod_worker_ot_events
+                        SET evt_status = 0,
+                            evt_amount = 0,
+                            evt_amount2 = 0,
+                            prod_bobina_kg = 0,
+                            evt_amount_metros_lineales = 0,
+                            evt_amount_metros_maquina = 0,
+                            evt_comments = CONCAT(COALESCE(evt_comments, ''), ?)
+                        WHERE id IN ({$dupPlaceholders})
+                    ");
+                    $stDisableDupEvt->execute(array_merge([$dupAuditNote], $duplicateProdEventIds));
+                }
             } else {
                 // Crear evento prod si no existía
                 $stInsEvt = $this->erpPdo->prepare("
@@ -11008,7 +11164,7 @@ SQL;
                     ) VALUES (
                         :ot_id, :amount, :kg,
                         :metros_lineales, :metros_maquina,
-                        :start_ts, :end_ts, 1, 'prod', :comments, :helper_id
+                        :start_ts, :end_ts, :evt_status, 'prod', :comments, :helper_id
                     )
                 ");
                 $stInsEvt->execute([
@@ -11019,6 +11175,7 @@ SQL;
                     ':metros_maquina' => $producedMetersMaquina,
                     ':start_ts' => $startTs,
                     ':end_ts' => $endTs,
+                    ':evt_status' => $eventStatus,
                     ':comments' => $auditStamp,
                     ':helper_id' => $helperId,
                 ]);
@@ -11027,13 +11184,18 @@ SQL;
 
             // Gestionar defectos/merma en prod_worker_ot_defectunits vinculados a esta orden
             if ($evtId > 0) {
-                $stDef = $this->erpPdo->prepare("
+                $stDefSql = "
                     SELECT d.id, d.evt_refid, d.evt_type, d.evt_merma_typeid, d.evt_repair_typeid, d.evt_amount, d.evt_kgstounits 
                     FROM prod_worker_ot_defectunits d
                     INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
-                    WHERE e.evt_prod_worker_otid = :ot_id AND d.evt_status > 0
-                ");
-                $stDef->execute([':ot_id' => $otId]);
+                    WHERE e.evt_prod_worker_otid = :ot_id AND d.evt_status > 0";
+                $stDefParams = [':ot_id' => $otId];
+                if ($targetEventId > 0) {
+                    $stDefSql .= " AND e.id = :event_id";
+                    $stDefParams[':event_id'] = $targetEventId;
+                }
+                $stDef = $this->erpPdo->prepare($stDefSql);
+                $stDef->execute($stDefParams);
                 $defRows = $stDef->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
                 $hasDetailedWaste = ($wasteSetupKg !== null || $wastePrintKg !== null || $wasteCoilKg !== null || $wasteRepairKg !== null);
@@ -11146,6 +11308,74 @@ SQL;
                 $this->erpPdo->rollBack();
             }
             return ['ok' => false, 'error' => 'Error al actualizar producción: ' . $e->getMessage()];
+        }
+    }
+
+    public function deleteProductionEvent(int $otId, int $eventId, ?string $userName = null): array
+    {
+        if ($otId <= 0 || $eventId <= 0) {
+            return ['ok' => false, 'error' => 'Evento de producción no válido.'];
+        }
+
+        try {
+            $stmtBase = $this->erpPdo->prepare("
+                SELECT id, evt_prod_worker_otid, evt_comments
+                FROM prod_worker_ot_events
+                WHERE id = :event_id
+                  AND evt_prod_worker_otid = :ot_id
+                  AND LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                  AND evt_status > 0
+                LIMIT 1
+            ");
+            $stmtBase->execute([
+                ':event_id' => $eventId,
+                ':ot_id' => $otId,
+            ]);
+            $eventRow = $stmtBase->fetch(PDO::FETCH_ASSOC);
+            if (!$eventRow) {
+                return ['ok' => false, 'error' => 'No se encontró el evento de producción seleccionado o ya fue anulado.'];
+            }
+
+            $editor = trim((string)($userName ?? 'Usuario'));
+            $auditStamp = ' | [Evento anulado por ' . $editor . ' ' . date('Y-m-d H:i') . ']';
+
+            if (!$this->erpPdo->inTransaction()) {
+                $this->erpPdo->beginTransaction();
+            }
+
+            $stDisableDef = $this->erpPdo->prepare("
+                UPDATE prod_worker_ot_defectunits
+                SET evt_status = 0
+                WHERE evt_refid = :event_id
+            ");
+            $stDisableDef->execute([':event_id' => $eventId]);
+
+            $stDisableEvt = $this->erpPdo->prepare("
+                UPDATE prod_worker_ot_events
+                SET evt_status = 0,
+                    evt_amount = 0,
+                    evt_amount2 = 0,
+                    prod_bobina_kg = 0,
+                    evt_amount_metros_lineales = 0,
+                    evt_amount_metros_maquina = 0,
+                    evt_comments = CONCAT(COALESCE(evt_comments, ''), :audit)
+                WHERE id = :event_id
+                  AND evt_prod_worker_otid = :ot_id
+            ");
+            $stDisableEvt->execute([
+                ':audit' => $auditStamp,
+                ':event_id' => $eventId,
+                ':ot_id' => $otId,
+            ]);
+
+            $this->erpPdo->commit();
+
+            return ['ok' => true, 'message' => 'Evento de producción anulado correctamente.'];
+        } catch (Throwable $e) {
+            if ($this->erpPdo->inTransaction()) {
+                $this->erpPdo->rollBack();
+            }
+            return ['ok' => false, 'error' => 'Error al anular el evento de producción: ' . $e->getMessage()];
         }
     }
 
@@ -22146,8 +22376,12 @@ SQL;
                 LEFT JOIN customer t12 ON t9.req_cust_id = t12.id
                 LEFT JOIN (
                     SELECT evt_prod_worker_otid,
-                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor') THEN evt_amount ELSE 0 END) AS produced_units,
-                           SUM(COALESCE(evt_amount_metros_lineales, 0)) AS produced_meters
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                     AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                    THEN evt_amount ELSE 0 END) AS produced_units,
+                           SUM(CASE WHEN LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                                     AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
+                                    THEN COALESCE(evt_amount_metros_lineales, 0) ELSE 0 END) AS produced_meters
                     FROM prod_worker_ot_events
                     GROUP BY evt_prod_worker_otid
                 ) pe ON pe.evt_prod_worker_otid = t1.id

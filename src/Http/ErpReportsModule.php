@@ -4214,6 +4214,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
                 'waste_coil_units' => (float)($row['waste_coil_units'] ?? 0),
                 'waste_repair_kg' => (float)($row['waste_repair_kg'] ?? 0),
                 'waste_repair_units' => (float)($row['waste_repair_units'] ?? 0),
+                'production_events' => $row['production_events'] ?? [],
             ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
  
             if ($canEdit) {
@@ -4257,7 +4258,24 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
             <form id="form-prod-edit" method="post" action="/reports/machine-production/update" style="overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:18px;margin:0">
                 <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
                 <input type="hidden" id="edit_ot_id" name="ot_id" value="">
+                <input type="hidden" id="edit_target_event_id" name="target_event_id" value="">
                 <input type="hidden" name="redirect_url" value="' . h($_SERVER['REQUEST_URI'] ?? '/reports/machine-production') . '">
+
+                <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:14px 18px;">
+                    <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;color:#1d4ed8;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+                        <span>🎯</span> Evento de Producción a Corregir
+                    </div>
+                    <div style="display:grid;grid-template-columns:minmax(260px,1fr) auto;gap:12px;align-items:end;">
+                        <div>
+                            <label style="display:block;font-size:11.5px;font-weight:700;color:#334155;margin-bottom:4px">Selecciona el evento específico</label>
+                            <select id="edit_event_selector" style="width:100%;padding:8px 10px;border:1px solid #93c5fd;border-radius:6px;font-size:13px;background:#fff">
+                                <option value="">Usar resumen consolidado de la OT</option>
+                            </select>
+                            <div id="edit-event-help" style="margin-top:6px;font-size:11px;color:#475569">Si hubo duplicidad, aquí puedes decidir exactamente qué evento modificar o anular.</div>
+                        </div>
+                        <button type="button" id="btn-delete-selected-event" style="padding:9px 14px;border:none;background:#dc2626;color:#fff;border-radius:8px;font-size:12px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(220,38,38,.22)">🗑️ Anular evento</button>
+                    </div>
+                </div>
 
                 <!-- 1. Asignación Operativa & Estado -->
                 <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;">
@@ -4428,14 +4446,15 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
             <form id="form-delete-prod" method="post" action="/reports/machine-production/delete">
                 <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
                 <input type="hidden" name="ot_id" id="delete_ot_id" value="">
+                <input type="hidden" name="event_id" id="delete_event_id" value="">
                 <input type="hidden" name="redirect_url" value="' . h($_SERVER['REQUEST_URI'] ?? '/reports/machine-production') . '">
                 
                 <div style="padding:20px 24px;">
                     <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:12px 14px;margin-bottom:16px;">
-                        <p style="margin:0;font-size:13px;line-height:1.5;color:#991b1b;font-weight:600">
+                        <p id="delete-question-title" style="margin:0;font-size:13px;line-height:1.5;color:#991b1b;font-weight:600">
                             ¿Estás seguro de eliminar este registro de producción?
                         </p>
-                        <p style="margin:6px 0 0;font-size:12px;color:#b91c1c;line-height:1.4">
+                        <p id="delete-question-desc" style="margin:6px 0 0;font-size:12px;color:#b91c1c;line-height:1.4">
                             Esta acción eliminará de forma permanente el turno de la OT, sus eventos y mermas registradas. Úsalo para corregir registros u órdenes duplicadas.
                         </p>
                     </div>
@@ -4445,6 +4464,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
                         <div><strong style="color:#64748b">Máquina:</strong> <span id="del-info-machine" style="font-weight:600;color:#0f172a">-</span></div>
                         <div><strong style="color:#64748b">Operador:</strong> <span id="del-info-worker" style="font-weight:600;color:#0f172a">-</span></div>
                         <div><strong style="color:#64748b">Fecha / Hora:</strong> <span id="del-info-date" style="font-weight:600;color:#0f172a">-</span></div>
+                        <div id="del-info-event-wrap" style="display:none"><strong style="color:#64748b">Evento:</strong> <span id="del-info-event" style="font-weight:600;color:#0f172a">-</span></div>
                     </div>
 
                     <div id="delete-status-msg" style="display:none;margin-top:14px;font-size:12.5px;font-weight:700;padding:8px 12px;border-radius:6px;text-align:center"></div>
@@ -4468,6 +4488,48 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
         var cancelBtn = document.getElementById("modal-prod-cancel-btn");
         var saveBtn = document.getElementById("modal-prod-save-btn");
         var statusDiv = document.getElementById("edit-modal-status");
+        var eventSelector = document.getElementById("edit_event_selector");
+        var deleteSelectedEventBtn = document.getElementById("btn-delete-selected-event");
+        var activeRecord = null;
+        var eventIndexMap = {};
+
+        function fillProductionFormValues(data) {
+            document.getElementById("edit_started_at").value = data.started_at || "";
+            document.getElementById("edit_ended_at").value = data.ended_at || "";
+            document.getElementById("edit_produced_units").value = data.produced_units || 0;
+            document.getElementById("edit_produced_kg").value = data.produced_kg || 0;
+            document.getElementById("edit_produced_meters").value = data.produced_meters || 0;
+            document.getElementById("edit_produced_meters_maquina").value = data.produced_meters_maquina || 0;
+            document.getElementById("edit_waste_kg").value = data.waste_kg || 0;
+            document.getElementById("edit_waste_units").value = data.waste_units || 0;
+            document.getElementById("edit_waste_setup_kg").value = data.waste_setup_kg || 0;
+            document.getElementById("edit_waste_setup_units").value = data.waste_setup_units || 0;
+            document.getElementById("edit_waste_print_kg").value = data.waste_print_kg || 0;
+            document.getElementById("edit_waste_print_units").value = data.waste_print_units || 0;
+            document.getElementById("edit_waste_coil_kg").value = data.waste_coil_kg || 0;
+            document.getElementById("edit_waste_coil_units").value = data.waste_coil_units || 0;
+            document.getElementById("edit_waste_repair_kg").value = data.waste_repair_kg || 0;
+            document.getElementById("edit_waste_repair_units").value = data.waste_repair_units || 0;
+            if (data.helper_id !== undefined) {
+                var selAy = document.getElementById("edit_helper_id");
+                if (selAy) selAy.value = data.helper_id || "0";
+            }
+            recalcMetrics();
+        }
+
+        function applySelectedEvent() {
+            var hiddenTarget = document.getElementById("edit_target_event_id");
+            var help = document.getElementById("edit-event-help");
+            var selectedEventId = eventSelector ? (eventSelector.value || "") : "";
+            if (hiddenTarget) hiddenTarget.value = selectedEventId;
+            if (selectedEventId && eventIndexMap[selectedEventId]) {
+                fillProductionFormValues(eventIndexMap[selectedEventId]);
+                if (help) help.textContent = "Estás modificando solo el evento seleccionado, no el consolidado completo de la OT.";
+            } else if (activeRecord) {
+                fillProductionFormValues(activeRecord);
+                if (help) help.textContent = "Estás usando el resumen consolidado de la OT. Si hubo duplicidad, selecciona un evento específico arriba.";
+            }
+        }
 
         function closeModal() {
             modal.style.display = "none";
@@ -4558,36 +4620,33 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
                     if (selAy) selAy.value = d.helper_id || "0";
                     var selSt = document.getElementById("edit_wok_status");
                     if (selSt) selSt.value = d.status || "2";
-
-                    document.getElementById("edit_started_at").value = d.started_at || "";
-                    document.getElementById("edit_ended_at").value = d.ended_at || "";
-
-                    document.getElementById("edit_produced_units").value = d.produced_units || 0;
-                    document.getElementById("edit_produced_kg").value = d.produced_kg || 0;
-                    document.getElementById("edit_produced_meters").value = d.produced_meters || 0;
-                    document.getElementById("edit_produced_meters_maquina").value = d.produced_meters_maquina || 0;
-
-                    document.getElementById("edit_waste_kg").value = d.waste_kg || 0;
-                    document.getElementById("edit_waste_units").value = d.waste_units || 0;
-
-                    document.getElementById("edit_waste_setup_kg").value = d.waste_setup_kg || 0;
-                    document.getElementById("edit_waste_setup_units").value = d.waste_setup_units || 0;
-                    document.getElementById("edit_waste_print_kg").value = d.waste_print_kg || 0;
-                    document.getElementById("edit_waste_print_units").value = d.waste_print_units || 0;
-                    document.getElementById("edit_waste_coil_kg").value = d.waste_coil_kg || 0;
-                    document.getElementById("edit_waste_coil_units").value = d.waste_coil_units || 0;
-                    document.getElementById("edit_waste_repair_kg").value = d.waste_repair_kg || 0;
-                    document.getElementById("edit_waste_repair_units").value = d.waste_repair_units || 0;
-
+                    activeRecord = d;
+                    eventIndexMap = {};
+                    if (eventSelector) {
+                        eventSelector.innerHTML = "<option value=\"\">Usar resumen consolidado de la OT</option>";
+                        var prodEvents = Array.isArray(d.production_events) ? d.production_events : [];
+                        prodEvents.forEach(function(ev) {
+                            var opt = document.createElement("option");
+                            opt.value = ev.event_id || "";
+                            opt.textContent = ev.event_label || ("Evento #" + (ev.event_id || ""));
+                            eventSelector.appendChild(opt);
+                            eventIndexMap[String(ev.event_id || "")] = ev;
+                        });
+                        eventSelector.value = "";
+                    }
+                    document.getElementById("edit_target_event_id").value = "";
+                    fillProductionFormValues(d);
                     document.getElementById("edit_comments").value = "";
-
-                    recalcMetrics();
                     modal.style.display = "flex";
                 } catch(e) {
                     console.error("Error cargando registro:", e);
                 }
             });
         });
+
+        if (eventSelector) {
+            eventSelector.addEventListener("change", applySelectedEvent);
+        }
 
         if (form) {
             form.addEventListener("submit", function(e) {
@@ -4661,11 +4720,43 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
         var delCancelBtn = document.getElementById("btn-cancel-delete");
         var delConfirmBtn = document.getElementById("btn-confirm-delete");
         var delStatusDiv = document.getElementById("delete-status-msg");
+        var deleteEventIdInput = document.getElementById("delete_event_id");
+        var deleteQuestionTitle = document.getElementById("delete-question-title");
+        var deleteQuestionDesc = document.getElementById("delete-question-desc");
+        var deleteInfoEventWrap = document.getElementById("del-info-event-wrap");
+        var deleteInfoEvent = document.getElementById("del-info-event");
+
+        function openDeleteModal(config) {
+            document.getElementById("delete_ot_id").value = config.otId || "";
+            if (deleteEventIdInput) deleteEventIdInput.value = config.eventId || "";
+            document.getElementById("del-info-ot").textContent = "OT " + (config.otNum || "-") + " (ID: #" + (config.otId || "-") + ")";
+            document.getElementById("del-info-machine").textContent = config.machine || "-";
+            document.getElementById("del-info-worker").textContent = config.worker || "-";
+            document.getElementById("del-info-date").textContent = config.dateStr || "-";
+            if (config.scope === "event") {
+                if (deleteQuestionTitle) deleteQuestionTitle.textContent = "¿Estás seguro de anular este evento de producción?";
+                if (deleteQuestionDesc) deleteQuestionDesc.textContent = "Esta acción desactiva solo el evento seleccionado y sus mermas asociadas, sin borrar toda la OT del informe.";
+                if (deleteInfoEventWrap) deleteInfoEventWrap.style.display = "block";
+                if (deleteInfoEvent) deleteInfoEvent.textContent = config.eventLabel || ("#" + (config.eventId || "-"));
+                if (delForm) delForm.action = "/reports/machine-production/delete-event";
+                if (delConfirmBtn) delConfirmBtn.innerHTML = "🗑️ Sí, Anular Evento";
+            } else {
+                if (deleteQuestionTitle) deleteQuestionTitle.textContent = "¿Estás seguro de eliminar este registro de producción?";
+                if (deleteQuestionDesc) deleteQuestionDesc.textContent = "Esta acción eliminará de forma permanente el turno de la OT, sus eventos y mermas registradas. Úsalo para corregir registros u órdenes duplicadas.";
+                if (deleteInfoEventWrap) deleteInfoEventWrap.style.display = "none";
+                if (deleteInfoEvent) deleteInfoEvent.textContent = "-";
+                if (delForm) delForm.action = "/reports/machine-production/delete";
+                if (delConfirmBtn) delConfirmBtn.innerHTML = "🗑️ Sí, Eliminar Registro";
+            }
+            if (delModal) delModal.style.display = "flex";
+        }
 
         function closeDelModal() {
             if (delModal) delModal.style.display = "none";
             if (delStatusDiv) { delStatusDiv.style.display = "none"; delStatusDiv.textContent = ""; }
             if (delConfirmBtn) { delConfirmBtn.disabled = false; delConfirmBtn.innerHTML = "🗑️ Sí, Eliminar Registro"; }
+            if (deleteEventIdInput) deleteEventIdInput.value = "";
+            if (delForm) delForm.action = "/reports/machine-production/delete";
         }
 
         if (delCloseX) delCloseX.addEventListener("click", closeDelModal);
@@ -4681,21 +4772,44 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
 
         document.querySelectorAll(".btn-delete-prod-trigger").forEach(function(btn) {
             btn.addEventListener("click", function() {
-                var otId = btn.getAttribute("data-otid") || "";
-                var otNum = btn.getAttribute("data-otnum") || "-";
-                var machine = btn.getAttribute("data-machine") || "-";
-                var worker = btn.getAttribute("data-worker") || "-";
-                var dateStr = btn.getAttribute("data-date") || "-";
-
-                document.getElementById("delete_ot_id").value = otId;
-                document.getElementById("del-info-ot").textContent = "OT " + otNum + " (ID: #" + otId + ")";
-                document.getElementById("del-info-machine").textContent = machine;
-                document.getElementById("del-info-worker").textContent = worker;
-                document.getElementById("del-info-date").textContent = dateStr;
-
-                if (delModal) delModal.style.display = "flex";
+                openDeleteModal({
+                    scope: "ot",
+                    otId: btn.getAttribute("data-otid") || "",
+                    otNum: btn.getAttribute("data-otnum") || "-",
+                    machine: btn.getAttribute("data-machine") || "-",
+                    worker: btn.getAttribute("data-worker") || "-",
+                    dateStr: btn.getAttribute("data-date") || "-"
+                });
             });
         });
+
+        if (deleteSelectedEventBtn) {
+            deleteSelectedEventBtn.addEventListener("click", function() {
+                if (!activeRecord) {
+                    return;
+                }
+                var selectedEventId = eventSelector ? (eventSelector.value || "") : "";
+                if (!selectedEventId || !eventIndexMap[selectedEventId]) {
+                    if (statusDiv) {
+                        statusDiv.style.display = "block";
+                        statusDiv.style.color = "#b91c1c";
+                        statusDiv.textContent = "⚠️ Primero selecciona el evento específico que quieres anular.";
+                    }
+                    return;
+                }
+                var selectedEvent = eventIndexMap[selectedEventId];
+                openDeleteModal({
+                    scope: "event",
+                    otId: activeRecord.ot_id || "",
+                    otNum: activeRecord.ot_number || "-",
+                    machine: activeRecord.machine_name || "-",
+                    worker: activeRecord.operator_name || "-",
+                    dateStr: selectedEvent.started_at || "-",
+                    eventId: selectedEventId,
+                    eventLabel: selectedEvent.event_label || ("Evento #" + selectedEventId)
+                });
+            });
+        }
 
         if (delForm) {
             delForm.addEventListener("submit", function(e) {
@@ -8916,6 +9030,65 @@ function handleErpReportRoutes(string $path, string $method, ReceptionService $s
             redirectResponse($redirectUrl . $sep . 'msg=' . rawurlencode((string)($result['message'] ?? 'Registro eliminado con éxito.')));
         } else {
             redirectResponse($redirectUrl . $sep . 'error=' . rawurlencode((string)($result['error'] ?? 'Error al eliminar.')));
+        }
+        return true;
+    }
+
+    if ($path === '/reports/machine-production/delete-event' && $method === 'POST') {
+        if (!userCanAccessArea('ERP', sessionAreaPermissions())) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'error' => 'No tiene permisos suficientes para anular eventos de producción.']);
+            return true;
+        }
+
+        if (!unibagCanUserPerformModifications()) {
+            http_response_code(403);
+            $errPermMsg = 'Acceso denegado: únicamente los usuarios autorizados (HECTOR y JAVIER) pueden anular eventos de producción.';
+            $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+                   || (isset($_SERVER['HTTP_ACCEPT']) && str_contains($_SERVER['HTTP_ACCEPT'], 'application/json'));
+            if ($isAjax) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(['ok' => false, 'error' => $errPermMsg]);
+                return true;
+            }
+            $redirectUrl = trim((string)($_POST['redirect_url'] ?? '/reports/machine-production'));
+            if ($redirectUrl === '' || !str_starts_with($redirectUrl, '/reports/machine-production')) {
+                $redirectUrl = '/reports/machine-production';
+            }
+            $sep = str_contains($redirectUrl, '?') ? '&' : '?';
+            redirectResponse($redirectUrl . $sep . 'error=' . rawurlencode($errPermMsg));
+            return true;
+        }
+
+        requireCsrf();
+
+        $otId = isset($_POST['ot_id']) ? (int)$_POST['ot_id'] : 0;
+        $eventId = isset($_POST['event_id']) ? (int)$_POST['event_id'] : 0;
+        $userName = trim((string)($_SESSION['user_name'] ?? $_SESSION['auth_username'] ?? $_SESSION['user_firstname'] ?? 'Usuario'));
+        $result = $service->deleteProductionEvent($otId, $eventId, $userName);
+
+        $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+               || (isset($_SERVER['HTTP_ACCEPT']) && str_contains($_SERVER['HTTP_ACCEPT'], 'application/json'));
+
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            if ($result['ok'] !== true) {
+                http_response_code(422);
+            }
+            echo json_encode($result, JSON_UNESCAPED_UNICODE);
+            return true;
+        }
+
+        $redirectUrl = trim((string)($_POST['redirect_url'] ?? '/reports/machine-production'));
+        if ($redirectUrl === '' || !str_starts_with($redirectUrl, '/reports/machine-production')) {
+            $redirectUrl = '/reports/machine-production';
+        }
+        $sep = str_contains($redirectUrl, '?') ? '&' : '?';
+        if ($result['ok'] === true) {
+            redirectResponse($redirectUrl . $sep . 'msg=' . rawurlencode((string)($result['message'] ?? 'Evento anulado con éxito.')));
+        } else {
+            redirectResponse($redirectUrl . $sep . 'error=' . rawurlencode((string)($result['error'] ?? 'Error al anular el evento.')));
         }
         return true;
     }

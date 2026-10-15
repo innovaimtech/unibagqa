@@ -11185,7 +11185,8 @@ function renderProductionNewWorkOrderScreen(
                     <?php else: ?>
                         <td class="tdheader">Tipo Impresión</td>
                     <?php endif; ?>
-                    <td class="tdheader" align="right">Cantidad Bolsas</td>
+                    <td class="tdheader" align="right">Planificado</td>
+                    <td class="tdheader" align="right">Producidas</td>
                     <td class="tdheader" align="center">Imagen</td>
                     <td class="tdheader" align="center">Acción</td>
                 </tr>
@@ -11193,7 +11194,7 @@ function renderProductionNewWorkOrderScreen(
             <tbody>
             <?php if (empty($unscheduledOrders)): ?>
                 <tr>
-                    <td colspan="12" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                    <td colspan="13" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
                         <i class="fa fa-check-circle" style="font-size:28px;color:#10B981;margin-bottom:8px;display:block"></i>
                         <?php if (!empty($searchQuery)): ?>
                             No se encontraron órdenes fuera de planificación que coincidan con "<b><?=htmlspecialchars($searchQuery)?></b>".
@@ -11227,7 +11228,8 @@ function renderProductionNewWorkOrderScreen(
                         }
                     }
                     
-                    $cantBolsas = (float)($uo['item_amount'] ?? 0);
+                        $cantBolsas = (float)($uo['item_amount'] ?? 0);
+                        $producidas = (float)($uo['total_produced'] ?? 0);
                     $metros = (float)($uo['flexo_metros'] ?? 0);
                     $z = (int)($uo['flexo_z'] ?? 0);
                     $contador = (float)($uo['seri_contador'] ?? 0);
@@ -11286,6 +11288,7 @@ function renderProductionNewWorkOrderScreen(
                             <td class="tdnrm"><?=htmlspecialchars((string)$uo['fab_printtype'])?></td>
                         <?php endif; ?>
                         <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                        <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
                         <td class="tdnrm" align="center">
                             <?php if ($hasImg): ?>
                                 <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$uo['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$uo['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
@@ -11481,7 +11484,8 @@ function renderProductionNewWorkOrderScreen(
                         <td class="tdheader" align="center">Rodillo [Z]</td>
                         <td class="tdheader" align="center">Ubicación Clisé</td>
                         <td class="tdheader" align="right">Metros</td>
-                        <td class="tdheader" align="right">Cantidad Bolsas</td>
+                        <td class="tdheader" align="right">Planificado</td>
+                        <td class="tdheader" align="right">Producidas</td>
                         <td class="tdheader" align="center">Imagen</td>
                         <td class="tdheader" align="center">Opciones</td>
                     </tr>
@@ -11489,7 +11493,7 @@ function renderProductionNewWorkOrderScreen(
                 <tbody>
                 <?php if (empty($scheduledOrders)): ?>
                     <tr>
-                        <td colspan="13" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                        <td colspan="14" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
                             <i class="fa fa-calendar-times" style="font-size:26px;color:#94A3B8;margin-bottom:8px;display:block"></i>
                             No hay órdenes de trabajo planificadas para esta máquina en la fecha <b><?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?></b>.
                         </td>
@@ -11525,6 +11529,7 @@ function renderProductionNewWorkOrderScreen(
                         
                         $metros = (float)($so['flexo_metros'] ?? 0);
                         $cantBolsas = (float)($so['ag_amount'] ?? 0);
+                        $producidas = (float)($so['total_produced'] ?? 0);
                     ?>
                         <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
                             <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
@@ -11569,6 +11574,7 @@ function renderProductionNewWorkOrderScreen(
                             </td>
                             <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
                             <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                            <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
                             <td class="tdnrm" align="center">
                                 <?php if ($hasImg): ?>
                                     <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
@@ -12050,7 +12056,8 @@ function renderProductionActiveOrdersScreen(
                     <td class="tdheader" align="center">Rodillo [Z]</td>
                     <td class="tdheader" align="center">Ubicación Clisé</td>
                     <td class="tdheader" align="right">Metros</td>
-                    <td class="tdheader" align="right">Cantidad Bolsas</td>
+                    <td class="tdheader" align="right">Planificado</td>
+                    <td class="tdheader" align="right">Producidas</td>
                     <td class="tdheader" align="center">Imagen</td>
                     <td class="tdheader" align="center">Opciones</td>
                 </tr>
@@ -12058,7 +12065,7 @@ function renderProductionActiveOrdersScreen(
             <tbody>
             <?php if (empty($activeList)): ?>
                 <tr>
-                    <td colspan="13" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                    <td colspan="14" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
                         <div style="font-size:16px;font-weight:bold;color:#334155;margin-bottom:6px">
                             <i class="fa fa-info-circle" style="color:#0284C7"></i> No hay órdenes en curso <?= !empty($dateFilter) ? 'planificadas para el ' . htmlspecialchars($dateFilter) : 'activas actualmente' ?>.
                         </div>
@@ -12100,6 +12107,7 @@ function renderProductionActiveOrdersScreen(
                     
                     $metros = (float)($row['flexo_metros'] ?? 0);
                     $cantBolsas = (float)($row['ag_amount'] ?? 0);
+                    $producidas = (float)($row['total_produced'] ?? 0);
                 ?>
                     <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
                         <td class="tdnrm"><b><?=htmlspecialchars((string)$row['req_number'])?></b></td>
@@ -12150,7 +12158,8 @@ function renderProductionActiveOrdersScreen(
                             <?php endif; ?>
                         </td>
                         <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
-                        <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                    <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                    <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
                         <td class="tdnrm" align="center">
                             <?php if ($hasImg): ?>
                                 <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$row['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$row['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
