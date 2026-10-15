@@ -1031,6 +1031,31 @@ function handleProductionRoutes(
                 $confirmedTraceabilityCode,
                 $traceabilityMode
             );
+            if (!empty($res['ok'])) {
+                $assignedRollId = (int)($res['roll_id'] ?? 0);
+                if ($assignedRollId > 0) {
+                    $mountRes = $prodService->mountRollOnMachine($workerOtId, $assignedRollId, $currentOperatorName, $weightKg, $comments);
+                    if (!empty($mountRes['ok'])) {
+                        $res = [
+                            'ok' => true,
+                            'mounted' => true,
+                            'entry_weight_kg' => (float)($mountRes['entry_weight_kg'] ?? $weightKg),
+                            'roll_id' => $assignedRollId,
+                            'roll_code' => (string)($res['roll_code'] ?? $mountRes['roll_code'] ?? ''),
+                        ];
+                    } else {
+                        $res = [
+                            'ok' => false,
+                            'error' => (string)($mountRes['error'] ?? 'La bobina se tomó desde Bodega 3000, pero no se pudo montar directamente en máquina.'),
+                        ];
+                    }
+                } else {
+                    $res = [
+                        'ok' => false,
+                        'error' => 'La bobina se asignó a la OT, pero no se pudo resolver su identificador para montarla en máquina.',
+                    ];
+                }
+            }
         } elseif (!empty($rollIds)) {
             $res = $prodService->requestRollsForWorkOrder(
                 $workerOtId,
@@ -1069,6 +1094,9 @@ function handleProductionRoutes(
         }
 
         if ($res['ok']) {
+            if ($actionMode === 'take_bodega3000') {
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&mounted=1&m_kg=' . rawurlencode((string)($res['entry_weight_kg'] ?? $weightKg ?? 0)) . '&restore_scroll=1');
+            }
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&saved_material=1');
         } else {
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&error=' . rawurlencode((string)($res['error'] ?? 'Error al solicitar material.')));
@@ -1129,13 +1157,13 @@ function handleProductionRoutes(
         if ($actionType === 'mount') {
             $entryWeightKg = (float)str_replace(',', '.', (string)($_REQUEST['entry_weight_kg'] ?? 0));
             $res = $prodService->mountRollOnMachine($workerOtId, $rollId, $currentOperatorName, $entryWeightKg, $comments);
-            $param = $res['ok'] ? ('&mounted=1&m_kg=' . ($res['entry_weight_kg'] ?? $entryWeightKg)) : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al montar bobina'));
+            $param = $res['ok'] ? ('&mounted=1&m_kg=' . ($res['entry_weight_kg'] ?? $entryWeightKg) . '&restore_scroll=1') : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al montar bobina'));
         } elseif ($actionType === 'unmount') {
             $res = $prodService->unmountRollFromMachine($workerOtId, $rollId, $currentOperatorName);
-            $param = $res['ok'] ? '&unmounted=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al desmontar bobina'));
+            $param = $res['ok'] ? '&unmounted=1&restore_scroll=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al desmontar bobina'));
         } elseif ($actionType === 'unassign') {
             $res = $prodService->unassignRollFromWorkOrder($workerOtId, $rollId, $currentOperatorName);
-            $param = $res['ok'] ? '&unassigned=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al devolver bobina'));
+            $param = $res['ok'] ? '&unassigned=1&restore_scroll=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al devolver bobina'));
         } else {
             $param = '&error=' . rawurlencode('Acción no válida');
         }
@@ -1162,6 +1190,9 @@ function handleProductionRoutes(
         }
         $outputMeters = (float)str_replace(',', '.', (string)($_REQUEST['output_meters'] ?? 0));
         $autoPrintOutput = !empty($_REQUEST['auto_print_output']);
+        $keepRemainingMounted = !empty($_REQUEST['keep_remaining_mounted']);
+        $remainingMountedRollId = (int)($_REQUEST['remaining_mounted_roll_id'] ?? 0);
+        $remainingMountedKg = (float)str_replace(',', '.', (string)($_REQUEST['remaining_mounted_kg'] ?? 0));
 
         // Desglose de mermas por tipo si vienen en el formulario
         $mermasDetail = [];
@@ -1205,7 +1236,10 @@ function handleProductionRoutes(
             $createOutputRoll,
             $outputSkuCode,
             $outputMeters,
-            $mergedSourceRollIds
+            $mergedSourceRollIds,
+            $keepRemainingMounted,
+            $remainingMountedRollId,
+            $remainingMountedKg
         );
 
         if ($res['ok']) {
@@ -1223,6 +1257,10 @@ function handleProductionRoutes(
             }
             if (!empty($res['leftover_roll_code'])) {
                 $param .= '&leftover_id=' . (int)($res['leftover_roll_id'] ?? 0) . '&leftover_code=' . rawurlencode((string)$res['leftover_roll_code']) . '&leftover_kg=' . $res['leftover_kg'];
+            }
+            if (!empty($res['remaining_mounted_roll_code'])) {
+                $param .= '&remaining_mounted_code=' . rawurlencode((string)$res['remaining_mounted_roll_code'])
+                    . '&remaining_mounted_kg=' . rawurlencode((string)($res['remaining_mounted_kg'] ?? 0));
             }
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales' . $param);
         } else {
@@ -7295,6 +7333,31 @@ function renderProductionOperatorConsole(
                 'weight_kg' => (float)($candidateRoll['entry_weight_kg'] ?? $candidateRoll['weight_kg'] ?? 0),
             ];
         }
+        $compactMaterialCode = static function (string $code, string $fallback = ''): string {
+            $code = trim($code);
+            $fallback = trim($fallback);
+            if ($fallback !== '' && preg_match('/^(TEL|TIN)[A-Z0-9\-]+$/i', $fallback)) {
+                return strtoupper($fallback);
+            }
+            if ($code !== '' && preg_match('/\b((?:TEL|TIN)[A-Z0-9\-]+)\b/i', $code, $m)) {
+                return strtoupper((string)$m[1]);
+            }
+            if ($fallback !== '') {
+                return strtoupper($fallback);
+            }
+            return strtoupper($code);
+        };
+        $activeAssignedRolls = [];
+        $closedAssignedRolls = [];
+        foreach ($assignedRolls as $assignedRoll) {
+            $assignedStatus = (string)($assignedRoll['status'] ?? 'ASSIGNED');
+            $assignedClosed = in_array($assignedStatus, ['CONSUMED', 'RETURNED'], true);
+            if ($assignedClosed) {
+                $closedAssignedRolls[] = $assignedRoll;
+            } else {
+                $activeAssignedRolls[] = $assignedRoll;
+            }
+        }
         ?>
         <div style="margin-bottom:15px">
             <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
@@ -7452,6 +7515,23 @@ function renderProductionOperatorConsole(
                             <i class="fa fa-info-circle"></i> La bobina sobrante ha quedado ingresada con trazabilidad completa vinculada a la bobina original y disponible en <b>Bodega 3000</b>.
                         </div>
                     </div>
+                <?php elseif (!empty($_GET['remaining_mounted_code'])): ?>
+                    <div style="margin-top:12px;background:#FFFFFF;border:1.5px solid #3B82F6;padding:14px 18px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+                        <div style="font-size:13px;color:#1D4ED8;margin-bottom:6px">
+                            <i class="fa fa-layer-group" style="color:#2563EB"></i> <b>BOBINA QUE QUEDÓ MONTADA PARA EL SIGUIENTE TIRAJE:</b>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+                            <span style="font-size:17px;font-family:monospace;font-weight:bold;color:#1D4ED8;background:#DBEAFE;padding:5px 12px;border-radius:4px;border:1px solid #93C5FD">
+                                <?=htmlspecialchars((string)$_GET['remaining_mounted_code'])?>
+                            </span>
+                            <span style="font-size:14px;font-weight:bold;color:#1F2937">
+                                Peso que sigue montado: <b style="color:#2563EB"><?=number_format((float)($_GET['remaining_mounted_kg'] ?? 0), 2, ',', '.')?> kg</b>
+                            </span>
+                        </div>
+                        <div style="font-size:12px;color:#475569;margin-top:8px">
+                            <i class="fa fa-info-circle"></i> No se generó un código nuevo para este remanente; la misma bobina quedó activa y montada para el siguiente uso.
+                        </div>
+                    </div>
                 <?php else: ?>
                     <div style="margin-top:6px;font-size:12.5px;color:#047857">
                         La bobina se registró como consumida en su totalidad para esta orden de trabajo (sin saldo sobrante).
@@ -7498,442 +7578,410 @@ function renderProductionOperatorConsole(
             </div>
         <?php endif; ?>
 
-        <!-- ENCABEZADO Y ACCESO A SOLICITUD EXTERIOR EN BODEGA 3000 -->
+        <!-- ENCABEZADO Y TABLERO COMPACTO FLEXOGRAFÍA -->
         <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:16px 20px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;box-shadow:0 1px 2px rgba(0,0,0,0.04)">
             <div>
                 <div style="font-size:16px;font-weight:bold;color:#1E3A8A;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-link"></i> Control de Montaje y Salida de Bobinas &mdash; OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>
+                    <i class="fa fa-link"></i> Control de Bobinas Flexografía &mdash; OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>
                 </div>
                 <div style="font-size:12.5px;color:#64748B;margin-top:3px">
-                    Las bobinas primero se traspasan a <b>Bodega 3000</b>. Desde aquí se toma la bobina compatible para la OT, se monta en máquina y luego se registra su salida o sobrante.
+                    Izquierda: stock compatible en <b>Bodega 3000</b>. Derecha: bobinas que ya están en la máquina o al pie de máquina para seguir operando.
                 </div>
             </div>
-            <div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <a href="/production/materials/request?agid=<?=$agId?>" target="_blank" class="btnblue" style="text-decoration:none;font-weight:bold;font-size:13px;padding:8px 18px;display:inline-flex;align-items:center;gap:6px">
-                    <i class="fa fa-dolly"></i> Solicitar más bobinas a Bodega 3000
+                    <i class="fa fa-dolly"></i> Solicitar más bobinas
                 </a>
             </div>
         </div>
 
-        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:20px;margin-bottom:18px">
-            <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-                <div style="display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-fw fa-warehouse"></i> Stock disponible en Bodega 3000 para esta OT
+        <div style="display:grid;grid-template-columns:minmax(0,1.2fr) minmax(360px,0.9fr);gap:18px;margin-bottom:18px;align-items:start">
+            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:18px;min-width:0">
+                <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <i class="fa fa-fw fa-warehouse"></i> Bodega 3000
+                    </div>
+                    <div style="font-size:12px;color:#64748B;font-weight:normal">
+                        <b><?=$availableBodega3000Count?></b> rollos &bull; <b><?=number_format($availableBodega3000Kg, 1, ',', '.')?></b> kg aprox.
+                    </div>
                 </div>
-                <div style="font-size:12.5px;color:#64748B;font-weight:normal">
-                    Disponibles: <b><?=$availableBodega3000Count?></b> bobina(s) &bull; Stock estimado: <b><?=number_format($availableBodega3000Kg, 1, ',', '.')?></b> kg
-                </div>
+
+                <?php if (empty($availableBodega3000Rolls)): ?>
+                    <div style="background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:6px;padding:24px 20px;text-align:center;color:#64748B">
+                        <i class="fa fa-box-open" style="font-size:28px;color:#94A3B8;margin-bottom:10px;display:block"></i>
+                        No hay bobinas compatibles disponibles ahora mismo en <b>Bodega 3000</b>.
+                    </div>
+                <?php else: ?>
+                    <table border="0" width="100%" cellpadding="7" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
+                        <thead>
+                            <tr style="background:#F8FAFC;color:#334155;font-size:11.5px;text-transform:uppercase;letter-spacing:0.3px">
+                                <th class="tdheader" align="left" style="padding:9px 8px">Código</th>
+                                <th class="tdheader" align="left" style="padding:9px 8px">Descripción</th>
+                                <th class="tdheader" align="center" style="padding:9px 8px">Stock</th>
+                                <th class="tdheader" align="center" style="padding:9px 8px">Peso</th>
+                                <th class="tdheader" align="center" style="padding:9px 8px">Acción</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($availableBodega3000Rolls as $b3000Roll):
+                            $b3000Id = (string)($b3000Roll['id'] ?? $b3000Roll['raw_id'] ?? '');
+                            $b3000Code = (string)($b3000Roll['roll_code'] ?? $b3000Roll['sku_code'] ?? '-');
+                            $b3000Desc = (string)($b3000Roll['sku_desc'] ?? '-');
+                            $b3000Weight = (float)($b3000Roll['weight_kg'] ?? $b3000Roll['current_weight_kg'] ?? 0);
+                            $b3000Qty = max(1.0, (float)($b3000Roll['stock_qty'] ?? 1));
+                            $b3000Source = (string)($b3000Roll['source'] ?? '');
+                            $b3000HasTraceability = ($b3000Source === 'TRZ');
+                            $b3000IsCompatible = !empty($b3000Roll['is_compatible']);
+                            $b3000DisplayCode = $compactMaterialCode($b3000Code, (string)($b3000Roll['sku_code'] ?? ''));
+                        ?>
+                            <tr style="border-bottom:1px solid #E2E8F0" onmouseover="this.style.backgroundColor='#F8FBFF'" onmouseout="this.style.backgroundColor=''">
+                                <td class="tdnrm" style="padding:9px 8px;vertical-align:top">
+                                    <div style="font-weight:800;color:#0F172A;font-size:13px"><?=htmlspecialchars($b3000DisplayCode)?></div>
+                                    <div style="font-size:10.5px;color:#64748B;margin-top:2px">
+                                        <?=$b3000HasTraceability ? 'Con trazabilidad' : 'Sin trazabilidad'?>
+                                    </div>
+                                </td>
+                                <td class="tdnrm" style="padding:9px 8px;vertical-align:top">
+                                    <div style="font-size:12.5px;color:#1E293B;line-height:1.35"><?=htmlspecialchars($b3000Desc)?></div>
+                                </td>
+                                <td class="tdnrm" align="center" style="padding:9px 8px;vertical-align:middle">
+                                    <span style="background:#ECFDF5;color:#166534;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">
+                                        <?=number_format($b3000Qty, 0, ',', '.')?>
+                                    </span>
+                                </td>
+                                <td class="tdnrm" align="center" style="padding:9px 8px;vertical-align:middle">
+                                    <b><?=number_format($b3000Weight, 1, ',', '.')?> kg</b>
+                                </td>
+                                <td class="tdnrm" align="center" style="padding:9px 8px;vertical-align:middle">
+                                    <?php if ($b3000IsCompatible): ?>
+                                        <button
+                                            type="button"
+                                            class="btngreen"
+                                            style="font-size:12px;padding:6px 12px;cursor:pointer;font-weight:bold"
+                                            onclick="openTakeBodega3000Modal(
+                                                <?=htmlspecialchars(json_encode($b3000Id), ENT_QUOTES)?>,
+                                                <?=htmlspecialchars(json_encode($b3000Code, JSON_UNESCAPED_UNICODE), ENT_QUOTES)?>,
+                                                <?=htmlspecialchars(json_encode($b3000DisplayCode, JSON_UNESCAPED_UNICODE), ENT_QUOTES)?>,
+                                                <?=htmlspecialchars(json_encode($b3000Desc, JSON_UNESCAPED_UNICODE), ENT_QUOTES)?>,
+                                                <?=htmlspecialchars(json_encode($b3000Source), ENT_QUOTES)?>,
+                                                <?=htmlspecialchars(json_encode(number_format($b3000Weight, 2, '.', '')), ENT_QUOTES)?>,
+                                                <?=htmlspecialchars(json_encode($b3000HasTraceability ? 'with' : 'without'), ENT_QUOTES)?>,
+                                                <?=htmlspecialchars(json_encode($b3000HasTraceability), ENT_QUOTES)?>
+                                            )"
+                                        >
+                                            <i class="fa fa-sign-in-alt"></i> Montar en máquina
+                                        </button>
+                                    <?php else: ?>
+                                        <button type="button" class="btngrey" style="font-size:12px;padding:6px 12px;font-weight:bold;opacity:.75;cursor:not-allowed" disabled>
+                                            <i class="fa fa-ban"></i> No tomar
+                                        </button>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endif; ?>
             </div>
 
-            <?php if (empty($availableBodega3000Rolls)): ?>
-                <div style="background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:6px;padding:24px 20px;text-align:center;color:#64748B">
-                    <i class="fa fa-box-open" style="font-size:28px;color:#94A3B8;margin-bottom:10px;display:block"></i>
-                    No hay bobinas compatibles disponibles ahora mismo en <b>Bodega 3000</b> para esta OT.<br>
-                    Solicite más material desde el módulo exterior o espere el traspaso desde bodega.
-                </div>
-            <?php else: ?>
-                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
-                    <thead>
-                        <tr style="background:#F1F5F9;color:#334155;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">
-                            <th class="tdheader" align="left" style="padding:10px 8px">Código / SKU</th>
-                            <th class="tdheader" align="left" style="padding:10px 8px">Descripción</th>
-                            <th class="tdheader" align="center" style="padding:10px 8px">Compatibilidad</th>
-                            <th class="tdheader" align="center" style="padding:10px 8px">Trazabilidad</th>
-                            <th class="tdheader" align="center" style="padding:10px 8px">Color</th>
-                            <th class="tdheader" align="center" style="padding:10px 8px">Ancho</th>
-                            <th class="tdheader" align="center" style="padding:10px 8px">Stock 3000</th>
-                            <th class="tdheader" align="center" style="padding:10px 8px">Peso Ref.</th>
-                            <th class="tdheader" align="center" width="210" style="padding:10px 8px">Acción</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                    <?php foreach ($availableBodega3000Rolls as $b3000Roll):
-                        $b3000Id = (string)($b3000Roll['id'] ?? $b3000Roll['raw_id'] ?? '');
-                        $b3000RowKey = md5($b3000Id . '|' . (string)($b3000Roll['roll_code'] ?? $b3000Roll['sku_code'] ?? ''));
-                        $b3000Code = (string)($b3000Roll['roll_code'] ?? $b3000Roll['sku_code'] ?? '-');
-                        $b3000Desc = (string)($b3000Roll['sku_desc'] ?? '-');
-                        $b3000Color = (string)($b3000Roll['color'] ?? '-');
-                        $b3000Width = (float)($b3000Roll['width_cm'] ?? round(((float)($b3000Roll['width_mm'] ?? 0)) / 10, 1));
-                        $b3000Weight = (float)($b3000Roll['weight_kg'] ?? $b3000Roll['current_weight_kg'] ?? 0);
-                        $b3000Qty = max(1.0, (float)($b3000Roll['stock_qty'] ?? 1));
-                        $b3000Source = (string)($b3000Roll['source'] ?? '');
-                        $b3000HasTraceability = ($b3000Source === 'TRZ');
-                        $b3000IsCompatible = !empty($b3000Roll['is_compatible']);
-                        $b3000ActionLabel = $b3000HasTraceability ? 'Tomar código' : 'Ingresar a máquina';
-                        $b3000ConfirmText = $b3000HasTraceability
-                            ? ('¿Tomar el código trazable ' . addslashes($b3000Code) . ' desde Bodega 3000 para esta OT?')
-                            : ('¿Tomar stock sin trazabilidad individual de Bodega 3000 y generar un código nuevo para esta OT a partir de ' . addslashes($b3000Code) . '?');
-                    ?>
-                        <tr style="border-bottom:1px solid #E2E8F0">
-                            <td class="tdnrm">
-                                <div style="font-weight:700;color:#0F172A"><?=htmlspecialchars($b3000Code)?></div>
-                                <div style="font-size:11px;color:#64748B;margin-top:2px"><?=htmlspecialchars((string)($b3000Roll['warehouse_name'] ?? 'Bodega 3000'))?></div>
-                            </td>
-                            <td class="tdnrm"><?=htmlspecialchars($b3000Desc)?></td>
-                            <td class="tdnrm" align="center">
-                                <?php if ($b3000IsCompatible): ?>
-                                    <div>
-                                        <span style="background:#DBEAFE;color:#1D4ED8;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">COMPATIBLE</span>
-                                    </div>
-                                    <div style="margin-top:4px;font-size:10.5px;color:#64748B">Lista para esta OT</div>
-                                <?php else: ?>
-                                    <div>
-                                        <span style="background:#FEE2E2;color:#B91C1C;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">NO COMPATIBLE</span>
-                                    </div>
-                                    <div style="margin-top:4px;font-size:10.5px;color:#64748B">Existe en 3000, pero no calza con esta OT</div>
-                                <?php endif; ?>
-                            </td>
-                            <td class="tdnrm" align="center">
-                                <?php if ($b3000HasTraceability): ?>
-                                    <div>
-                                        <span style="background:#DCFCE7;color:#166534;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">SI</span>
-                                    </div>
-                                    <div style="margin-top:4px;font-size:11px;color:#166534;font-family:monospace;font-weight:700">
-                                        <?=htmlspecialchars($b3000Code)?>
-                                    </div>
-                                    <div style="margin-top:2px;font-size:10.5px;color:#64748B">
-                                        Se descuenta este codigo exacto
-                                    </div>
-                                <?php else: ?>
-                                    <div>
-                                        <span style="background:#E0F2FE;color:#0369A1;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">ELEGIR</span>
-                                    </div>
-                                    <div style="margin-top:4px;font-size:10.5px;color:#64748B;line-height:1.35">
-                                        Indique si la unidad a ingresar<br>tiene o no tiene trazabilidad.
-                                    </div>
-                                <?php endif; ?>
-                            </td>
-                            <td class="tdnrm" align="center"><?=htmlspecialchars($b3000Color)?></td>
-                            <td class="tdnrm" align="center"><?=$b3000Width > 0 ? number_format($b3000Width, 1, ',', '.') . ' cm' : '-'?></td>
-                            <td class="tdnrm" align="center">
-                                <span style="background:#ECFDF5;color:#166534;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:800">
-                                    <?=htmlspecialchars(number_format($b3000Qty, 0, ',', '.'))?>
-                                </span>
-                            </td>
-                            <td class="tdnrm" align="center"><b><?=number_format($b3000Weight, 1, ',', '.')?> kg</b></td>
-                            <td class="tdnrm" align="center">
-                                <?php if ($b3000IsCompatible): ?>
-                                    <form method="post" action="/production/work-orders/materials/assign" style="margin:0" onsubmit="return confirm('<?=htmlspecialchars($b3000ConfirmText)?>');">
-                                        <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                        <input type="hidden" name="agid" value="<?=$agId?>">
-                                        <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                                        <input type="hidden" name="action_mode" value="take_bodega3000">
-                                        <input type="hidden" name="roll_id" value="<?=htmlspecialchars($b3000Id)?>">
-                                        <input type="hidden" name="traceability_source" value="<?=htmlspecialchars($b3000Source)?>">
-                                        <input type="hidden" name="expected_traceability_code" value="<?=htmlspecialchars($b3000Code)?>">
-                                        <input type="hidden" name="weight_kg" value="<?=htmlspecialchars(number_format($b3000Weight, 2, '.', ''))?>">
-                                        <?php if ($b3000HasTraceability): ?>
-                                            <input type="hidden" name="traceability_mode" value="with">
-                                            <input
-                                                type="text"
-                                                name="confirmed_traceability_code"
-                                                value=""
-                                                placeholder="Escanee / escriba el codigo"
-                                                autocomplete="off"
-                                                required
-                                                style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px;font-family:monospace;text-transform:uppercase"
-                                            >
-                                        <?php else: ?>
-                                            <select
-                                                name="traceability_mode"
-                                                id="traceability_mode_<?=$b3000RowKey?>"
-                                                onchange="toggleBodega3000TraceabilitySelection('<?=$b3000RowKey?>', this.value)"
-                                                style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px"
-                                            >
-                                                <option value="without" selected>Sin trazabilidad</option>
-                                                <option value="with">Con trazabilidad</option>
-                                            </select>
-                                            <div id="traceability_scan_wrap_<?=$b3000RowKey?>" style="display:none">
-                                                <input
-                                                    type="text"
-                                                    name="confirmed_traceability_code"
-                                                    value=""
-                                                    placeholder="Escanee codigo trazable"
-                                                    autocomplete="off"
-                                                    style="width:100%;margin-bottom:6px;padding:6px 8px;border:1px solid #cbd5e1;border-radius:6px;font-size:11.5px;font-family:monospace;text-transform:uppercase"
-                                                >
-                                            </div>
-                                        <?php endif; ?>
-                                        <button type="submit" class="btngreen" style="font-size:12px;padding:6px 12px;cursor:pointer;font-weight:bold">
-                                            <i class="fa fa-sign-in-alt"></i> <?=$b3000ActionLabel?>
-                                        </button>
-                                    </form>
-                                <?php else: ?>
-                                    <button type="button" class="btngrey" style="font-size:12px;padding:6px 12px;font-weight:bold;opacity:.75;cursor:not-allowed" disabled>
-                                        <i class="fa fa-ban"></i> No tomar
-                                    </button>
-                                <?php endif; ?>
-                                <div style="font-size:10.5px;color:#64748B;margin-top:4px">
-                                    <?=$b3000HasTraceability ? 'Bobina trazable 3000' : 'Stock general 3000'?>
-                                </div>
-                            </td>
-                        </tr>
-                    <?php endforeach; ?>
-                    </tbody>
-                </table>
-                <script>
-                function toggleBodega3000TraceabilitySelection(rowKey, mode) {
-                    var wrap = document.getElementById('traceability_scan_wrap_' + rowKey);
-                    if (!wrap) return;
-                    var input = wrap.querySelector('input[name="confirmed_traceability_code"]');
-                    var useTraceability = String(mode || '').toLowerCase() === 'with';
-                    wrap.style.display = useTraceability ? 'block' : 'none';
-                    if (input) {
-                        input.required = useTraceability;
-                        if (!useTraceability) {
-                            input.value = '';
-                        } else {
-                            input.focus();
-                        }
+            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:18px;min-width:0">
+                <?php
+                $mountedCount = 0;
+                foreach ($activeAssignedRolls as $activeAssignedRoll) {
+                    if (!empty($activeAssignedRoll['is_mounted'])) {
+                        $mountedCount++;
                     }
                 }
-                </script>
-            <?php endif; ?>
-        </div>
-
-        <!-- TABLA DE TRAZABILIDAD: BOBINAS DE LA OT (MONTAJE Y SALIDA) -->
-        <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:20px">
-            <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:15px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-                <div style="display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-fw fa-industry"></i> Bobinas tomadas / consumidas en esta Orden de Trabajo
-                </div>
-                <div style="font-size:12.5px;color:#64748B;font-weight:normal">
-                    Total: <b><?=count($assignedRolls)?></b> bobina(s) registradas
-                </div>
-            </div>
-
-            <?php if (empty($assignedRolls)): ?>
-                <div style="background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:6px;padding:30px 20px;text-align:center;color:#64748B">
-                    <i class="fa fa-boxes" style="font-size:32px;color:#94A3B8;margin-bottom:10px;display:block"></i>
-                    <div style="font-size:14px;font-weight:bold;color:#334155;margin-bottom:4px">Aún no se toma ninguna bobina para esta OT</div>
-                    <div style="font-size:12.5px">
-                        Use primero el bloque superior de <b>Stock disponible en Bodega 3000</b> para tomar una bobina compatible.<br>
-                        Cuando la tome, quedará ligada a esta OT y dejará de estar disponible para otras máquinas.
-                    </div>
-                    <div style="margin-top:14px">
-                        <a href="/production/materials/request?agid=<?=$agId?>" class="btnblue" style="text-decoration:none;font-size:13px;padding:7px 16px;display:inline-flex;align-items:center;gap:6px">
-                            <i class="fa fa-dolly"></i> Ir a Solicitar Materiales
-                        </a>
-                    </div>
-                </div>
-            <?php else: ?>
-                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
-                <thead>
-                    <tr style="background:#F1F5F9;color:#334155;font-size:12px;text-transform:uppercase;letter-spacing:0.5px">
-                        <th class="tdheader" align="left" style="padding:10px 8px">Bobina / Código</th>
-                        <th class="tdheader" align="left" style="padding:10px 8px">Material / SKU</th>
-                        <th class="tdheader" align="center" style="padding:10px 8px">Color</th>
-                        <th class="tdheader" align="center" style="padding:10px 8px">Ancho</th>
-                        <th class="tdheader" align="center" style="padding:10px 8px">Peso Inicial</th>
-                        <th class="tdheader" align="center" width="220" style="padding:10px 8px">Estado de Bobina</th>
-                        <th class="tdheader" align="center" width="370" style="padding:10px 8px">Acción / Montaje / Salida</th>
-                    </tr>
-                </thead>
-                <tbody>
-                <?php foreach ($assignedRolls as $ar): 
-                    $rollState = (string)($ar['status'] ?? 'ASSIGNED');
-                    $isClosed = in_array($rollState, ['CONSUMED', 'RETURNED'], true);
-                    $isMounted = !empty($ar['is_mounted']) && !$isClosed;
-                    $entryKg = (float)($ar['entry_weight_kg'] ?? $ar['weight_kg'] ?? 0);
                 ?>
-                    <tr style="border-bottom:1px solid #E2E8F0;background:<?=$isClosed ? '#FAFAFA' : ($isMounted ? '#F0FDF4' : '#FFFFFF')?>">
-                        <td class="tdnrm" valign="top">
-                            <div style="font-size:13.5px;font-weight:bold;color:#0F172A">
-                                <?=htmlspecialchars((string)($ar['roll_code'] ?? ('#' . $ar['id'])))?>
-                            </div>
-                            <div style="font-size:11px;color:#64748B;margin-top:2px">ID: #<?=$ar['id']?></div>
-                        </td>
-                        <td class="tdnrm" valign="top">
-                            <div style="font-weight:600;color:#1E293B">
-                                <?=htmlspecialchars((string)($ar['sku_code'] ?? 'Sustrato'))?>
-                            </div>
-                            <div style="font-size:11.5px;color:#64748B;margin-top:2px">
-                                <?=htmlspecialchars((string)($ar['sku_desc'] ?? ''))?>
-                            </div>
-                        </td>
-                        <td class="tdnrm" align="center" valign="top">
-                            <span style="background:#E2E8F0;color:#1E293B;padding:3px 8px;border-radius:4px;font-size:11.5px;font-weight:bold">
-                                <?=htmlspecialchars((string)($ar['color'] ?? '-'))?>
-                            </span>
-                        </td>
-                        <td class="tdnrm" align="center" valign="top">
-                            <?=(float)($ar['width_mm'] ?? 0) > 0 ? (number_format((float)$ar['width_mm'] / 10, 1) . ' cm') : '-'?>
-                        </td>
-                        <td class="tdnrm" align="center" valign="top">
-                            <b style="color:#0F172A;font-size:13px"><?=number_format((float)($ar['weight_kg'] ?? 0), 2, ',', '.')?> kg</b>
-                        </td>
-                        <td class="tdnrm" align="center" valign="top">
-                            <?php if ($isClosed): ?>
-                                <span style="background:#DCFCE7;color:#166534;padding:4px 10px;border-radius:4px;font-size:11.5px;font-weight:bold;display:inline-block">
-                                    <i class="fa fa-check-circle"></i> SALIDA REGISTRADA
-                                </span>
-                                <?php if (!empty($ar['output_at'])): ?>
-                                    <div style="font-size:10.5px;color:#64748B;margin-top:3px"><?=htmlspecialchars($ar['output_at'])?></div>
-                                <?php endif; ?>
-                            <?php elseif ($isMounted): ?>
-                                <span style="background:#DBEAFE;color:#1E40AF;padding:4px 10px;border-radius:4px;font-size:11.5px;font-weight:bold;display:inline-block">
-                                    <i class="fa fa-cog fa-spin"></i> MONTADA EN MÁQUINA
-                                </span>
-                                <div style="font-size:11.5px;color:#1E3A8A;margin-top:4px">
-                                    Peso Ingreso: <b><?=number_format($entryKg, 2, ',', '.')?> kg</b>
-                                </div>
-                                <?php if (!empty($ar['mounted_at'])): ?>
-                                    <div style="font-size:10.5px;color:#64748B;margin-top:2px"><?=htmlspecialchars($ar['mounted_at'])?></div>
-                                <?php endif; ?>
-                            <?php else: ?>
-                                <span style="background:#FEF3C7;color:#92400E;padding:4px 10px;border-radius:4px;font-size:11.5px;font-weight:bold;display:inline-block">
-                                    <i class="fa fa-box"></i> DISPONIBLE (NO MONTADA)
-                                </span>
-                                <div style="font-size:11px;color:#64748B;margin-top:3px">Al pie de máquina</div>
-                            <?php endif; ?>
-                        </td>
-                        <td class="tdnrm" valign="top">
-                            <?php if ($isClosed): ?>
-                                <!-- RESUMEN DE DESMONTAJE CUANDO YA FUE PROCESADA -->
-                                <div style="background:#FFFFFF;border:1px solid #D1D5DB;border-radius:5px;padding:8px 12px;font-size:12px;line-height:1.6">
-                                    <div style="display:flex;justify-content:space-between;gap:8px">
-                                        <span style="color:#4B5563">Peso Ingreso Máquina:</span>
-                                        <b><?=number_format((float)($ar['entry_weight_kg'] ?? $ar['weight_kg'] ?? 0), 2, ',', '.')?> kg</b>
-                                    </div>
-                                    <div style="display:flex;justify-content:space-between;gap:8px">
-                                        <span style="color:#4B5563">Mermas Desmontaje:</span>
-                                        <b style="color:#DC2626"><?=number_format((float)($ar['scrap_kg'] ?? 0), 2, ',', '.')?> kg</b>
-                                    </div>
-                                    <?php if (!empty($ar['output_roll_code']) || (float)($ar['output_bobina_kg'] ?? 0) > 0): ?>
-                                        <div style="margin-top:6px;padding:6px 8px;background:#EEF2FF;border:1px solid #C7D2FE;border-radius:4px">
-                                            <div style="font-size:11.5px;font-weight:bold;color:#3730A3">
-                                                🏷️ Bobina saliente: <?=number_format((float)($ar['output_bobina_kg'] ?? 0), 2, ',', '.')?> kg
-                                                <?php if (!empty($ar['output_meters'])): ?>
-                                                    &bull; <?=number_format((float)$ar['output_meters'], 0, ',', '.')?> m
-                                                <?php endif; ?>
-                                            </div>
-                                            <?php if (!empty($ar['output_roll_code'])): ?>
-                                                <div style="font-size:11.5px;font-family:monospace;font-weight:bold;color:#4338CA;margin-top:2px">
-                                                    <?=htmlspecialchars((string)$ar['output_roll_code'])?>
-                                                </div>
-                                            <?php endif; ?>
-                                            <?php if (!empty($ar['output_roll_id'])): ?>
-                                                <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
-                                                    <a href="/rolls/<?=(int)$ar['output_roll_id']?>/label?server_print=1" target="_blank" class="btnblue" style="font-size:10.5px;padding:3px 8px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;border-radius:3px;background:#4F46E5">
-                                                        <i class="fa fa-print"></i> 🖨️ Etiqueta salida
-                                                    </a>
-                                                    <a href="/rolls/<?=(int)$ar['output_roll_id']?>/label" target="_blank" class="btngrey" style="font-size:10.5px;padding:3px 8px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;border-radius:3px">
-                                                        <i class="fa fa-eye"></i> Ver
-                                                    </a>
-                                                </div>
-                                            <?php endif; ?>
-                                        </div>
-                                    <?php endif; ?>
-                                    <?php if (!empty($ar['mermas_detail']) && is_array($ar['mermas_detail'])): ?>
-                                        <div style="font-size:11px;color:#475569;background:#F8FAFC;padding:4px 6px;border-radius:4px;margin-top:3px;border:1px solid #E2E8F0">
-                                            <?php foreach ($ar['mermas_detail'] as $mtId => $md): 
-                                                $mtName = 'Tipo #' . $mtId;
-                                                foreach ($mermatypes as $mt) {
-                                                    if ((int)$mt['id'] === (int)$mtId) { $mtName = $mt['merma_title']; break; }
-                                                }
-                                            ?>
-                                                <div>&bull; <?=htmlspecialchars($mtName)?>: <b><?=number_format((float)($md['kgs'] ?? 0), 2, ',', '.')?> kg</b><?=!empty($md['comments']) ? (' (' . htmlspecialchars($md['comments']) . ')') : ''?></div>
-                                            <?php endforeach; ?>
-                                        </div>
-                                    <?php endif; ?>
-                                    <?php if (!empty($ar['leftover_roll_code']) || (float)($ar['leftover_kg'] ?? 0) > 0): ?>
-                                        <div style="margin-top:6px;padding:6px 8px;background:#F0FDF4;border:1px solid #86EFAC;border-radius:4px">
-                                            <div style="font-size:11.5px;font-weight:bold;color:#166534">
-                                                📦 Sobrante de Bobina: <?=number_format((float)($ar['leftover_kg'] ?? 0), 2, ',', '.')?> kg
-                                            </div>
-                                            <div style="font-size:11.5px;font-family:monospace;font-weight:bold;color:#047857;margin-top:2px">
-                                                <?=htmlspecialchars((string)$ar['leftover_roll_code'])?>
-                                            </div>
-                                            <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
-                                                <?php if (!empty($ar['leftover_roll_id'])): ?>
-                                                    <a href="/rolls/<?=(int)$ar['leftover_roll_id']?>/label?server_print=1" target="_blank" class="btngreen" style="font-size:10.5px;padding:3px 8px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;border-radius:3px">
-                                                        <i class="fa fa-print"></i> 🖨️ Etiqueta
-                                                    </a>
-                                                    <a href="/rolls/<?=(int)$ar['leftover_roll_id']?>/label" target="_blank" class="btnblue" style="font-size:10.5px;padding:3px 8px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;border-radius:3px">
-                                                        <i class="fa fa-eye"></i> Ver
-                                                    </a>
-                                                <?php endif; ?>
-                                            </div>
-                                            <div style="font-size:10px;color:#15803D;margin-top:3px">
-                                                Trazabilidad guardada &bull; En Bodega 3000
-                                            </div>
-                                        </div>
-                                    <?php else: ?>
-                                        <div style="color:#64748B;font-size:11px;margin-top:4px">
-                                            <i class="fa fa-check"></i> Consumida completa (sin sobrante).
-                                        </div>
-                                    <?php endif; ?>
-                                </div>
-                            <?php elseif ($isMounted): ?>
-                                <!-- BOTÓN LIMPIO PARA ABRIR VENTANA FLOTANTE DE SALIDA / DESMONTAJE -->
-                                <div style="background:#F0FDF4;border:1px solid #86EFAC;border-radius:6px;padding:12px;text-align:center">
-                                    <div style="font-size:12px;color:#166534;font-weight:bold;margin-bottom:4px">
-                                        <i class="fa fa-cog fa-spin"></i> En Desbobinador
-                                    </div>
-                                    <div style="font-size:12px;color:#1E3A8A;margin-bottom:10px">
-                                        Peso Ingreso: <b><?=number_format($entryKg, 2, ',', '.')?> kg</b>
-                                    </div>
+                <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <i class="fa fa-fw fa-industry"></i> Máquina / pie de máquina
+                    </div>
+                    <div style="font-size:12px;color:#64748B;font-weight:normal">
+                        <b><?=$mountedCount?></b> montadas &bull; <b><?=count($activeAssignedRolls)?></b> activas
+                    </div>
+                </div>
+
+                <?php if (empty($activeAssignedRolls)): ?>
+                    <div style="background:#F8FAFC;border:1px dashed #CBD5E1;border-radius:6px;padding:24px 18px;text-align:center;color:#64748B">
+                        <i class="fa fa-cogs" style="font-size:28px;color:#94A3B8;margin-bottom:10px;display:block"></i>
+                        Aún no hay bobinas activas en esta máquina.
+                    </div>
+                <?php else: ?>
+                    <div style="display:flex;flex-direction:column;gap:12px">
+                        <?php foreach ($activeAssignedRolls as $ar):
+                            $isMounted = !empty($ar['is_mounted']);
+                            $entryKg = (float)($ar['entry_weight_kg'] ?? $ar['weight_kg'] ?? 0);
+                            $arDisplayCode = $compactMaterialCode((string)($ar['roll_code'] ?? ('#' . $ar['id'])), (string)($ar['sku_code'] ?? ''));
+                        ?>
+                            <div style="border:1px solid <?=$isMounted ? '#86EFAC' : '#E2E8F0'?>;background:<?=$isMounted ? '#F0FDF4' : '#F8FAFC'?>;border-radius:8px;padding:12px 14px">
+                                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
                                     <div>
-                                        <button type="button" class="btnblue" style="font-size:12.5px;padding:7px 16px;cursor:pointer;font-weight:bold;display:inline-flex;align-items:center;gap:6px;box-shadow:0 1px 3px rgba(0,0,0,0.12)" onclick="openRollOutputModal(<?= (int)$ar['id'] ?>, <?= htmlspecialchars(json_encode($ar['roll_code'] ?? ('#' . $ar['id']))) ?>, <?= (float)$entryKg ?>)">
-                                            <i class="fa fa-sign-out-alt"></i> ⏹️ Desmontar / Salida / Etiquetas
-                                        </button>
+                                        <div style="font-size:14px;font-weight:800;color:#0F172A"><?=htmlspecialchars($arDisplayCode)?></div>
+                                        <div style="font-size:12px;color:#475569;margin-top:2px"><?=htmlspecialchars((string)($ar['sku_desc'] ?? ''))?></div>
                                     </div>
-                                    <div style="margin-top:8px">
-                                        <form method="post" action="/production/work-orders/materials/mount" style="display:inline">
+                                    <div style="text-align:right">
+                                        <div style="font-size:12px;font-weight:bold;color:<?=$isMounted ? '#166534' : '#92400E'?>">
+                                            <?=$isMounted ? 'Montada en máquina' : 'Al pie de máquina'?>
+                                        </div>
+                                        <div style="font-size:12px;color:#334155;margin-top:2px">
+                                            <?=number_format($entryKg > 0 ? $entryKg : (float)($ar['weight_kg'] ?? 0), 2, ',', '.')?> kg
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                                    <?php if ($isMounted): ?>
+                                        <button type="button" class="btnblue" style="font-size:12px;padding:7px 12px;cursor:pointer;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openRollOutputModal(<?= (int)$ar['id'] ?>, <?= htmlspecialchars(json_encode($ar['roll_code'] ?? ('#' . $ar['id']))) ?>, <?= (float)$entryKg ?>)">
+                                            <i class="fa fa-sign-out-alt"></i> Desmontar / salida
+                                        </button>
+                                        <form method="post" action="/production/work-orders/materials/mount" style="display:inline" class="js-preserve-material-scroll">
                                             <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
                                             <input type="hidden" name="agid" value="<?=$agId?>">
                                             <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
                                             <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
                                             <input type="hidden" name="action_type" value="unmount">
-                                            <button type="submit" class="btngrey" style="font-size:11px;padding:3px 8px;cursor:pointer" title="Desmontar temporalmente del desbobinador sin registrar salida" onclick="return confirm('¿Desmontar temporalmente esta bobina de la máquina sin registrar consumo ni salida?');">
+                                            <button type="submit" class="btngrey" style="font-size:11px;padding:6px 10px;cursor:pointer">
                                                 <i class="fa fa-pause"></i> Desmontar temp.
                                             </button>
                                         </form>
-                                    </div>
-                                    <div style="margin-top:6px;font-size:10.5px;color:#64748B">
-                                        Si fue tomada por error, primero desmóntela y luego use <b>Devolver a Bodega 3000</b>.
-                                    </div>
-                                </div>
-                            <?php else: ?>
-                                <!-- FORMULARIO PARA MONTAR EN MÁQUINA (PIDIENDO PESO DE INGRESO) -->
-                                <form method="post" action="/production/work-orders/materials/mount" style="margin:0;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:10px">
-                                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                    <input type="hidden" name="agid" value="<?=$agId?>">
-                                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                                    <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
-                                    <input type="hidden" name="action_type" value="mount">
-
-                                    <div style="font-size:12px;font-weight:bold;color:#0F172A;margin-bottom:6px">
-                                        <i class="fa fa-play-circle" style="color:#10B981"></i> Montar en Desbobinador
-                                    </div>
-                                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                                        <label style="font-size:11.5px;font-weight:600;color:#334155">Peso Ingreso (kg) *:</label>
-                                        <input type="number" step="0.01" min="0.1" name="entry_weight_kg" value="<?=number_format((float)($ar['weight_kg'] ?? 0), 2, '.', '')?>" class="inptxt" style="width:90px;padding:4px 6px;font-weight:bold;font-size:12px" required title="Peso real medido al ingresar la bobina a máquina">
-                                        <button type="submit" class="btngreen" style="font-size:12px;padding:5px 12px;cursor:pointer;font-weight:bold">
-                                            <i class="fa fa-play"></i> ⚙️ Montar en Máquina
-                                        </button>
-                                    </div>
-                                </form>
-                                <div style="margin-top:6px;text-align:right">
-                                    <form method="post" action="/production/work-orders/materials/mount" style="display:inline">
+                                    <?php else: ?>
+                                        <form method="post" action="/production/work-orders/materials/mount" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center" class="js-preserve-material-scroll">
+                                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                            <input type="hidden" name="agid" value="<?=$agId?>">
+                                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                            <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
+                                            <input type="hidden" name="action_type" value="mount">
+                                            <input type="number" step="0.01" min="0.1" name="entry_weight_kg" value="<?=number_format((float)($ar['weight_kg'] ?? 0), 2, '.', '')?>" class="inptxt" style="width:100px;padding:5px 7px;font-weight:bold;font-size:12px" required title="Peso real medido al ingresar la bobina a máquina">
+                                            <button type="submit" class="btngreen" style="font-size:12px;padding:6px 10px;cursor:pointer;font-weight:bold">
+                                                <i class="fa fa-play"></i> Montar
+                                            </button>
+                                        </form>
+                                    <?php endif; ?>
+                                    <form method="post" action="/production/work-orders/materials/mount" style="display:inline" class="js-preserve-material-scroll">
                                         <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
                                         <input type="hidden" name="agid" value="<?=$agId?>">
                                         <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
                                         <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
                                         <input type="hidden" name="action_type" value="unassign">
-                                        <button type="submit" class="btngrey" style="font-size:11px;padding:3px 8px;cursor:pointer" onclick="return confirm('¿Devolver esta bobina a Bodega 3000 y dejarla nuevamente disponible?')">
-                                            <i class="fa fa-undo"></i> Devolver a Bodega 3000
+                                        <button type="submit" class="btngrey" style="font-size:11px;padding:6px 10px;cursor:pointer">
+                                            <i class="fa fa-undo"></i> Devolver a 3000
                                         </button>
                                     </form>
                                 </div>
-                            <?php endif; ?>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody>
-                </table>
-            <?php endif; ?>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
         </div>
+
+        <?php if (!empty($closedAssignedRolls)): ?>
+            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:18px;margin-bottom:18px">
+                <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:12px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-history"></i> Historial de salidas registradas
+                </div>
+                <div style="display:flex;flex-direction:column;gap:10px">
+                    <?php foreach ($closedAssignedRolls as $ar): ?>
+                        <div style="border:1px solid #E2E8F0;background:#FAFAFA;border-radius:8px;padding:12px 14px">
+                            <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                                <div>
+                                    <div style="font-size:13.5px;font-weight:800;color:#0F172A"><?=htmlspecialchars($compactMaterialCode((string)($ar['roll_code'] ?? ('#' . $ar['id'])), (string)($ar['sku_code'] ?? '')))?></div>
+                                    <div style="font-size:12px;color:#64748B;margin-top:2px"><?=htmlspecialchars((string)($ar['sku_desc'] ?? ''))?></div>
+                                </div>
+                                <div style="font-size:12px;color:#166534;font-weight:bold">
+                                    Salida registrada
+                                </div>
+                            </div>
+                            <div style="margin-top:8px;font-size:12px;color:#334155;display:flex;gap:14px;flex-wrap:wrap">
+                                <span>Ingreso: <b><?=number_format((float)($ar['entry_weight_kg'] ?? $ar['weight_kg'] ?? 0), 2, ',', '.')?> kg</b></span>
+                                <span>Salida: <b><?=number_format((float)($ar['output_bobina_kg'] ?? 0), 2, ',', '.')?> kg</b></span>
+                                <span>Mermas: <b style="color:#DC2626"><?=number_format((float)($ar['scrap_kg'] ?? 0), 2, ',', '.')?> kg</b></span>
+                                <?php if (!empty($ar['output_at'])): ?>
+                                    <span><?=htmlspecialchars((string)$ar['output_at'])?></span>
+                                <?php endif; ?>
+                            </div>
+                            <?php if (!empty($ar['remaining_mounted_roll_code']) || (float)($ar['remaining_mounted_kg'] ?? 0) > 0): ?>
+                                <div style="margin-top:8px;background:#EFF6FF;border:1px solid #93C5FD;border-radius:6px;padding:8px 10px;font-size:12px;color:#1D4ED8">
+                                    <b>Quedó montada:</b> <?=htmlspecialchars((string)($ar['remaining_mounted_roll_code'] ?? ''))?> (<?=number_format((float)($ar['remaining_mounted_kg'] ?? 0), 2, ',', '.')?> kg)
+                                    <?php if (!empty($ar['remaining_mounted_formula'])): ?>
+                                        <div style="font-size:11px;color:#334155;margin-top:3px">Cálculo: <?=htmlspecialchars((string)$ar['remaining_mounted_formula'])?></div>
+                                    <?php endif; ?>
+                                </div>
+                            <?php elseif (!empty($ar['leftover_roll_code']) || (float)($ar['leftover_kg'] ?? 0) > 0): ?>
+                                <div style="margin-top:8px;background:#F0FDF4;border:1px solid #86EFAC;border-radius:6px;padding:8px 10px;font-size:12px;color:#166534">
+                                    <b>Sobrante:</b> <?=htmlspecialchars((string)($ar['leftover_roll_code'] ?? ''))?> (<?=number_format((float)($ar['leftover_kg'] ?? 0), 2, ',', '.')?> kg)
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+        <?php endif; ?>
+
+        <div id="modal_take_bodega3000" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.62);z-index:99998;align-items:center;justify-content:center;padding:18px;box-sizing:border-box">
+            <div style="width:100%;max-width:560px;background:#FFFFFF;border-radius:10px;box-shadow:0 20px 45px rgba(15,23,42,0.35);border:1px solid #CBD5E1;overflow:hidden">
+                <div style="background:#1E3A8A;color:#FFFFFF;padding:14px 18px;display:flex;justify-content:space-between;align-items:center">
+                    <div>
+                        <div style="font-size:16px;font-weight:bold"><i class="fa fa-sign-in-alt"></i> Montar bobina en máquina</div>
+                        <div style="font-size:12px;color:#BFDBFE;margin-top:3px" id="modal_take_bodega3000_subtitle">-</div>
+                    </div>
+                    <button type="button" onclick="closeTakeBodega3000Modal()" style="background:transparent;border:none;color:#FFFFFF;font-size:24px;cursor:pointer;line-height:1">&times;</button>
+                </div>
+                <form method="post" action="/production/work-orders/materials/assign" style="margin:0;padding:18px" class="js-preserve-material-scroll" onsubmit="return validateTakeBodega3000Modal()">
+                    <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                    <input type="hidden" name="agid" value="<?=$agId?>">
+                    <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                    <input type="hidden" name="action_mode" value="take_bodega3000">
+                    <input type="hidden" name="roll_id" id="modal_take_bodega3000_roll_id" value="">
+                    <input type="hidden" name="traceability_source" id="modal_take_bodega3000_source" value="">
+                    <input type="hidden" name="expected_traceability_code" id="modal_take_bodega3000_expected_code" value="">
+
+                    <div style="font-size:13px;color:#334155;line-height:1.5;margin-bottom:14px">
+                        <b id="modal_take_bodega3000_display_code">-</b><br>
+                        <span id="modal_take_bodega3000_desc">-</span>
+                    </div>
+
+                    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:12px">
+                        <div>
+                            <label style="display:block;font-size:12px;font-weight:bold;color:#334155;margin-bottom:5px">Peso ingreso máquina (kg)</label>
+                            <input type="number" step="0.01" min="0.1" name="weight_kg" id="modal_take_bodega3000_weight" class="inptxt" style="width:100%;padding:8px 10px;font-size:14px;font-weight:bold" required>
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:12px;font-weight:bold;color:#334155;margin-bottom:5px">Trazabilidad</label>
+                            <select name="traceability_mode" id="modal_take_bodega3000_traceability_mode" class="inptxt" style="width:100%;padding:8px 10px;font-size:13px" onchange="toggleTakeBodega3000TraceabilityMode()">
+                                <option value="without">Sin trazabilidad</option>
+                                <option value="with">Con trazabilidad</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="modal_take_bodega3000_trace_scan_wrap" style="display:none;margin-bottom:14px">
+                        <label style="display:block;font-size:12px;font-weight:bold;color:#334155;margin-bottom:5px">Código de trazabilidad</label>
+                        <input type="text" name="confirmed_traceability_code" id="modal_take_bodega3000_trace_code" class="inptxt" style="width:100%;padding:8px 10px;font-size:13px;font-family:monospace;text-transform:uppercase" placeholder="Escanee o escriba el código">
+                        <div id="modal_take_bodega3000_trace_hint" style="font-size:11px;color:#64748B;margin-top:4px"></div>
+                    </div>
+
+                    <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+                        <button type="button" class="btngrey" style="padding:7px 14px;cursor:pointer" onclick="closeTakeBodega3000Modal()">Cancelar</button>
+                        <button type="submit" class="btngreen" style="padding:7px 16px;cursor:pointer;font-weight:bold">
+                            <i class="fa fa-check"></i> Montar en máquina
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script>
+        var MATERIAL_SCROLL_KEY = 'unibag_material_scroll_<?=$agId?>';
+
+        function rememberMaterialScrollPosition() {
+            try {
+                sessionStorage.setItem(MATERIAL_SCROLL_KEY, String(window.scrollY || window.pageYOffset || 0));
+            } catch (e) {}
+        }
+
+        (function restoreMaterialScrollPosition() {
+            try {
+                var params = new URLSearchParams(window.location.search || '');
+                if (params.get('restore_scroll') !== '1') {
+                    return;
+                }
+                var savedScroll = sessionStorage.getItem(MATERIAL_SCROLL_KEY);
+                if (savedScroll === null || savedScroll === '') {
+                    return;
+                }
+                window.addEventListener('load', function() {
+                    window.scrollTo(0, parseInt(savedScroll, 10) || 0);
+                }, { once: true });
+            } catch (e) {}
+        })();
+
+        function openTakeBodega3000Modal(rollId, code, displayCode, desc, source, weightKg, traceabilityMode, forceTraceability) {
+            var modal = document.getElementById('modal_take_bodega3000');
+            if (!modal) return;
+            document.getElementById('modal_take_bodega3000_roll_id').value = rollId || '';
+            document.getElementById('modal_take_bodega3000_source').value = source || '';
+            document.getElementById('modal_take_bodega3000_expected_code').value = code || '';
+            document.getElementById('modal_take_bodega3000_display_code').innerText = displayCode || code || '-';
+            document.getElementById('modal_take_bodega3000_desc').innerText = desc || '-';
+            document.getElementById('modal_take_bodega3000_subtitle').innerText = 'Código base: ' + (code || '-');
+            document.getElementById('modal_take_bodega3000_weight').value = weightKg || '';
+
+            var select = document.getElementById('modal_take_bodega3000_traceability_mode');
+            if (select) {
+                select.value = traceabilityMode || 'without';
+                select.dataset.forceTraceability = forceTraceability ? '1' : '0';
+            }
+            var traceInput = document.getElementById('modal_take_bodega3000_trace_code');
+            if (traceInput) {
+                traceInput.value = '';
+            }
+            toggleTakeBodega3000TraceabilityMode();
+            modal.style.display = 'flex';
+            setTimeout(function() {
+                var weightInput = document.getElementById('modal_take_bodega3000_weight');
+                if (weightInput) weightInput.focus();
+            }, 40);
+        }
+
+        function closeTakeBodega3000Modal() {
+            var modal = document.getElementById('modal_take_bodega3000');
+            if (modal) modal.style.display = 'none';
+        }
+
+        function toggleTakeBodega3000TraceabilityMode() {
+            var select = document.getElementById('modal_take_bodega3000_traceability_mode');
+            var wrap = document.getElementById('modal_take_bodega3000_trace_scan_wrap');
+            var input = document.getElementById('modal_take_bodega3000_trace_code');
+            var hint = document.getElementById('modal_take_bodega3000_trace_hint');
+            var expectedCode = String((document.getElementById('modal_take_bodega3000_expected_code') || {}).value || '');
+            if (select && String(select.dataset.forceTraceability || '') === '1') {
+                select.value = 'with';
+            }
+            var useTraceability = select && String(select.value || '').toLowerCase() === 'with';
+            if (wrap) wrap.style.display = useTraceability ? 'block' : 'none';
+            if (input) {
+                input.required = useTraceability;
+                if (!useTraceability) {
+                    input.value = '';
+                }
+            }
+            if (hint) {
+                hint.innerText = useTraceability
+                    ? ((select && String(select.dataset.forceTraceability || '') === '1')
+                        ? ('Este rollo ya tiene trazabilidad. Confirme el código exacto: ' + expectedCode)
+                        : ('Confirme el código exacto que ingresará a máquina: ' + expectedCode))
+                    : 'Se registrará como ingreso sin trazabilidad individual.';
+            }
+        }
+
+        function validateTakeBodega3000Modal() {
+            var weight = parseFloat(String((document.getElementById('modal_take_bodega3000_weight') || {}).value || '').replace(',', '.')) || 0;
+            if (weight <= 0) {
+                return false;
+            }
+            var select = document.getElementById('modal_take_bodega3000_traceability_mode');
+            var traceInput = document.getElementById('modal_take_bodega3000_trace_code');
+            if (select && String(select.value || '').toLowerCase() === 'with') {
+                if (!traceInput || String(traceInput.value || '').trim() === '') {
+                    if (traceInput) traceInput.focus();
+                    return false;
+                }
+            }
+            rememberMaterialScrollPosition();
+            return true;
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            var forms = document.querySelectorAll('.js-preserve-material-scroll');
+            forms.forEach(function(form) {
+                form.addEventListener('submit', function() {
+                    rememberMaterialScrollPosition();
+                });
+            });
+        });
+        </script>
         <?php endif; ?>
 
         <?php if (!$isSeriPulpo): ?>
@@ -8031,6 +8079,8 @@ function renderProductionOperatorConsole(
                                     <label
                                         class="modal-merge-roll-row"
                                         data-roll-id="<?=$mergeCandidate['id']?>"
+                                        data-roll-code="<?=htmlspecialchars($mergeCandidate['roll_code'], ENT_QUOTES)?>"
+                                        data-roll-weight="<?=number_format((float)$mergeCandidate['weight_kg'], 2, '.', '')?>"
                                         style="background:#FFFFFF;border:1px solid #BFDBFE;border-radius:6px;padding:8px 10px;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer"
                                     >
                                         <div style="display:flex;align-items:center;gap:10px;min-width:0">
@@ -8055,6 +8105,36 @@ function renderProductionOperatorConsole(
                                 No hay otras bobinas montadas disponibles para combinar en esta salida.
                             </div>
                         <?php endif; ?>
+                    </div>
+
+                    <div style="background:#F8FAFC;border:1.5px solid #CBD5E1;border-radius:8px;padding:14px;margin-bottom:16px">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+                            <label style="font-size:13.5px;font-weight:bold;color:#0F172A;display:flex;align-items:center;gap:8px;cursor:pointer">
+                                <input type="checkbox" name="keep_remaining_mounted" id="modal_keep_remaining_mounted" value="1" onchange="toggleRemainingMountedSection()">
+                                <span><i class="fa fa-layer-group"></i> Dejar bobina montada para el siguiente tiraje</span>
+                            </label>
+                        </div>
+                        <div id="modal_remaining_mounted_section" style="display:none">
+                            <div style="font-size:12px;color:#334155;margin-bottom:10px">
+                                El sistema calculará el peso remanente para la bobina que seguirá montada, sin generar un código nuevo. La referencia base será:
+                                <b>peso entrada total - bobina saliente - mermas</b>.
+                            </div>
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:10px">
+                                <div>
+                                    <label style="display:block;font-size:12px;font-weight:bold;color:#334155;margin-bottom:4px">Bobina que quedará montada</label>
+                                    <select name="remaining_mounted_roll_id" id="modal_remaining_mounted_roll_id" class="inptxt" style="width:100%;padding:8px 10px;font-size:13px" onchange="recalcRemainingMountedWeight()">
+                                        <option value="0">Seleccione bobina</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label style="display:block;font-size:12px;font-weight:bold;color:#334155;margin-bottom:4px">Peso que quedará montado (kg)</label>
+                                    <input type="number" step="0.01" min="0" name="remaining_mounted_kg" id="modal_remaining_mounted_kg" class="inptxt" style="width:100%;padding:8px 10px;font-size:14px;font-weight:bold;background:#EFF6FF;border:2px solid #93C5FD;border-radius:6px;color:#1D4ED8" value="0.00" readonly>
+                                </div>
+                            </div>
+                            <div id="modal_remaining_formula" style="margin-top:10px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:6px;padding:8px 12px;font-size:12px;color:#1D4ED8">
+                                Cálculo: 0,00 - 0,00 - 0,00 = 0,00 kg
+                            </div>
+                        </div>
                     </div>
 
                     <!-- SECCIÓN 1: DESGLOSE DE MERMAS POR TIPO -->
@@ -8116,6 +8196,9 @@ function renderProductionOperatorConsole(
                         <div style="margin-top:10px;background:#DCFCE7;border:1px solid #86EFAC;border-radius:6px;padding:8px 12px;font-size:12px;color:#14532D;line-height:1.4">
                             <i class="fa fa-tag" style="color:#059669"></i> <b>Generación automática de Etiqueta:</b> Si ingresa un sobrante mayor a 0 kg, el sistema creará inmediatamente un <b>nuevo código de bobina</b> con trazabilidad en <b>Bodega 3000</b> y habilitará su <b>etiqueta para impresión Zebra (100×70mm)</b>.
                         </div>
+                        <div id="modal_leftover_mount_note" style="display:none;margin-top:10px;background:#DBEAFE;border:1px solid #93C5FD;border-radius:6px;padding:8px 12px;font-size:12px;color:#1D4ED8;line-height:1.4">
+                            <i class="fa fa-info-circle"></i> El remanente quedará montado en máquina. En este modo no se generará un código nuevo de sobrante en Bodega 3000.
+                        </div>
                     </div>
 
                     <!-- SECCIÓN 3: OBSERVACIONES GENERALES -->
@@ -8140,6 +8223,117 @@ function renderProductionOperatorConsole(
         </div>
 
         <script>
+        function getModalCurrentEntryWeight() {
+            var txt = document.getElementById('modal_roll_entry_txt');
+            if (!txt) return 0;
+            var raw = String(txt.innerText || '').replace(' kg', '').replace(',', '.');
+            return parseFloat(raw) || 0;
+        }
+
+        function getSelectedMergeRolls() {
+            var rolls = [];
+            var rows = document.querySelectorAll('.modal-merge-roll-row');
+            rows.forEach(function(row) {
+                var checkbox = row.querySelector('.modal-merge-roll-checkbox');
+                if (!checkbox || !checkbox.checked || checkbox.disabled) return;
+                rolls.push({
+                    id: parseInt(row.getAttribute('data-roll-id') || '0', 10) || 0,
+                    code: String(row.getAttribute('data-roll-code') || ''),
+                    weight: parseFloat(String(row.getAttribute('data-roll-weight') || '').replace(',', '.')) || 0
+                });
+            });
+            return rolls;
+        }
+
+        function rebuildRemainingMountedOptions() {
+            var select = document.getElementById('modal_remaining_mounted_roll_id');
+            var currentRollId = parseInt(document.getElementById('modal_roll_id').value || '0', 10) || 0;
+            var currentRollCode = String(document.getElementById('modal_roll_code_txt').innerText || '').trim();
+            var currentEntryWeight = getModalCurrentEntryWeight();
+            if (!select) return;
+
+            var currentValue = parseInt(select.value || '0', 10) || 0;
+            var options = [
+                {
+                    id: currentRollId,
+                    code: currentRollCode,
+                    weight: currentEntryWeight
+                }
+            ].concat(getSelectedMergeRolls());
+
+            select.innerHTML = '';
+            if (options.length === 0) {
+                select.innerHTML = '<option value="0">Seleccione bobina</option>';
+                return;
+            }
+            options.forEach(function(item) {
+                if (!item || !item.id) return;
+                var opt = document.createElement('option');
+                opt.value = String(item.id);
+                opt.text = item.code + ' (' + item.weight.toFixed(2).replace('.', ',') + ' kg)';
+                select.appendChild(opt);
+            });
+            if (currentValue > 0) {
+                select.value = String(currentValue);
+            }
+            if (!select.value && options.length > 0) {
+                select.value = String(options[0].id);
+            }
+        }
+
+        function recalcRemainingMountedWeight() {
+            var section = document.getElementById('modal_remaining_mounted_section');
+            if (!section || section.style.display === 'none') return;
+
+            var currentEntryWeight = getModalCurrentEntryWeight();
+            var selectedMergeRolls = getSelectedMergeRolls();
+            var totalEntry = currentEntryWeight;
+            selectedMergeRolls.forEach(function(item) { totalEntry += item.weight || 0; });
+
+            var outputKg = parseFloat(String((document.getElementById('modal_output_bobina_kg') || {}).value || '').replace(',', '.')) || 0;
+            var scrapKg = parseFloat(String((document.getElementById('modal_scrap_weight') || {}).value || '').replace(',', '.')) || 0;
+            var remainingKg = Math.max(0, totalEntry - outputKg - scrapKg);
+
+            var remainInput = document.getElementById('modal_remaining_mounted_kg');
+            if (remainInput) remainInput.value = remainingKg.toFixed(2);
+
+            var formula = document.getElementById('modal_remaining_formula');
+            if (formula) {
+                formula.innerHTML = 'Cálculo: <b>' + totalEntry.toFixed(2).replace('.', ',')
+                    + '</b> kg entrada total - <b>' + outputKg.toFixed(2).replace('.', ',')
+                    + '</b> kg salida - <b>' + scrapKg.toFixed(2).replace('.', ',')
+                    + '</b> kg mermas = <b>' + remainingKg.toFixed(2).replace('.', ',')
+                    + '</b> kg que seguirá montado.';
+            }
+        }
+
+        function toggleRemainingMountedSection() {
+            var chk = document.getElementById('modal_keep_remaining_mounted');
+            var box = document.getElementById('modal_remaining_mounted_section');
+            var leftoverInput = document.getElementById('modal_leftover_kg');
+            var leftoverNote = document.getElementById('modal_leftover_mount_note');
+            if (!chk || !box) return;
+
+            box.style.display = chk.checked ? 'block' : 'none';
+            if (leftoverInput) {
+                if (chk.checked) {
+                    leftoverInput.value = '0.00';
+                    leftoverInput.readOnly = true;
+                    leftoverInput.style.background = '#F1F5F9';
+                    leftoverInput.style.opacity = '0.85';
+                } else {
+                    leftoverInput.readOnly = false;
+                    leftoverInput.style.background = '#FFFFFF';
+                    leftoverInput.style.opacity = '1';
+                }
+            }
+            if (leftoverNote) {
+                leftoverNote.style.display = chk.checked ? 'block' : 'none';
+            }
+            rebuildRemainingMountedOptions();
+            recalcRemainingMountedWeight();
+        }
+
         function resetMergeRollSelection(currentRollId) {
             var rows = document.querySelectorAll('.modal-merge-roll-row');
             rows.forEach(function(row) {
@@ -8175,6 +8369,8 @@ function renderProductionOperatorConsole(
             if (badge) {
                 badge.innerText = 'Adicionales: ' + count;
             }
+            rebuildRemainingMountedOptions();
+            recalcRemainingMountedWeight();
         }
 
         function openRollOutputModal(rollId, rollCode, entryKg) {
@@ -8190,9 +8386,12 @@ function renderProductionOperatorConsole(
             if (outputSku) outputSku.value = <?=json_encode($printerOutputDefaultSku, JSON_UNESCAPED_UNICODE)?>;
             var createChk = document.getElementById('modal_create_output_roll');
             if (createChk) createChk.checked = true;
+            var keepMountedChk = document.getElementById('modal_keep_remaining_mounted');
+            if (keepMountedChk) keepMountedChk.checked = false;
             toggleOutputRollSection();
             recalcModalOutputMeters();
             resetMergeRollSelection(parseInt(rollId, 10) || 0);
+            toggleRemainingMountedSection();
             
             // Reset mermas
             var mInputs = document.querySelectorAll('.modal-merma-input');
@@ -8223,6 +8422,7 @@ function renderProductionOperatorConsole(
             if (hidScrap) hidScrap.value = total.toFixed(2);
             var badge = document.getElementById('modal_total_merma_badge');
             if (badge) badge.innerText = 'Total Mermas: ' + total.toFixed(2) + ' kg';
+            recalcRemainingMountedWeight();
         }
 
         function toggleOutputRollSection() {
@@ -8248,6 +8448,7 @@ function renderProductionOperatorConsole(
             if (calcText) {
                 calcText.innerText = (meters > 0 ? meters : 0) + ' m aprox.';
             }
+            recalcRemainingMountedWeight();
         }
 
         function validateRollOutputModal() {
@@ -8267,6 +8468,19 @@ function renderProductionOperatorConsole(
                 var outputKg = parseFloat(String(document.getElementById('modal_output_bobina_kg').value || '').replace(',', '.')) || 0;
                 if (outputKg <= 0) {
                     alert('Debes ingresar el peso de la nueva bobina saliente para generar su etiqueta.');
+                    return false;
+                }
+            }
+            var keepMountedChk = document.getElementById('modal_keep_remaining_mounted');
+            if (keepMountedChk && keepMountedChk.checked) {
+                var keepRollId = parseInt(String((document.getElementById('modal_remaining_mounted_roll_id') || {}).value || '0'), 10) || 0;
+                var keepWeight = parseFloat(String((document.getElementById('modal_remaining_mounted_kg') || {}).value || '').replace(',', '.')) || 0;
+                if (keepRollId <= 0) {
+                    alert('Debe seleccionar qué bobina quedará montada para el siguiente tiraje.');
+                    return false;
+                }
+                if (keepWeight <= 0) {
+                    alert('El cálculo del peso que quedará montado dio 0 kg. Revise el peso de salida o las mermas antes de guardar.');
                     return false;
                 }
             }
@@ -11563,8 +11777,8 @@ function renderProductionNewWorkOrderScreen(
                             <td class="tdheader">Descripción</td>
                             <td class="tdheader">Tipo</td>
                             <td class="tdheader">Material</td>
-                            <td class="tdheader" align="center">Cantidad</td>
-                            <td class="tdheader" align="center">Producido</td>
+                            <td class="tdheader" align="center"><?=$isFlexo ? 'Planificado' : 'Cantidad'?></td>
+                            <td class="tdheader" align="center"><?=$isFlexo ? 'Producidas' : 'Producido'?></td>
                             <td class="tdheader" align="center">Saldo</td>
                             <td class="tdheader" align="center">Estado</td>
                             <td class="tdheader" align="center">Opciones</td>
@@ -12259,8 +12473,8 @@ function renderProductionActiveOrdersScreen(
                         <td class="tdheader">Descripción</td>
                         <td class="tdheader">Tipo</td>
                         <td class="tdheader">Material</td>
-                        <td class="tdheader" align="center">Cantidad</td>
-                        <td class="tdheader" align="center">Producido</td>
+                        <td class="tdheader" align="center"><?=$isFlexo ? 'Planificado' : 'Cantidad'?></td>
+                        <td class="tdheader" align="center"><?=$isFlexo ? 'Producidas' : 'Producido'?></td>
                         <td class="tdheader" align="center">Saldo</td>
                         <td class="tdheader" align="center">Estado</td>
                         <td class="tdheader" align="center">Opciones</td>

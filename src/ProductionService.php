@@ -2721,6 +2721,10 @@ final class ProductionService
                         $ar['leftover_kg'] = (float)($outData['leftover_kg'] ?? 0);
                         $ar['leftover_roll_code'] = (string)($outData['leftover_roll_code'] ?? '');
                         $ar['leftover_roll_id'] = (int)($outData['leftover_roll_id'] ?? 0);
+                        $ar['remaining_mounted_roll_id'] = (int)($outData['remaining_mounted_roll_id'] ?? 0);
+                        $ar['remaining_mounted_roll_code'] = (string)($outData['remaining_mounted_roll_code'] ?? '');
+                        $ar['remaining_mounted_kg'] = (float)($outData['remaining_mounted_kg'] ?? 0);
+                        $ar['remaining_mounted_formula'] = (string)($outData['remaining_mounted_formula'] ?? '');
                         if ($ar['leftover_roll_id'] <= 0 && $ar['leftover_roll_code'] !== '') {
                             $stFindSob = $this->trzPdo->prepare("SELECT id FROM rolls WHERE roll_code = :c LIMIT 1");
                             $stFindSob->execute([':c' => $ar['leftover_roll_code']]);
@@ -3192,7 +3196,10 @@ final class ProductionService
         bool $createOutputRoll = false,
         string $outputSkuCode = '',
         float $outputMeters = 0.0,
-        array $mergedSourceRollIds = []
+        array $mergedSourceRollIds = [],
+        bool $keepRemainingMounted = false,
+        int $remainingMountedRollId = 0,
+        float $remainingMountedKg = 0.0
     ): array {
         if ($rollId <= 0 || $workerOtId <= 0) {
             return ['ok' => false, 'error' => 'Parámetros inválidos para registrar salida de bobina.'];
@@ -3353,6 +3360,65 @@ final class ProductionService
             $outputRollId = 0;
             $outputRollCode = '';
             $outputMeters = max(0.0, $outputMeters);
+            $totalSourceWeightKg = round($entryWeight + $mergedSourceWeightKg, 2);
+            $remainingMountedRollCode = '';
+            $remainingMountedFormula = '';
+            $remainingMountedTargetRoll = null;
+
+            if ($keepRemainingMounted) {
+                $allowedRemainingRollIds = [$rollId];
+                foreach ($mergedSourceRolls as $mergedSourceRoll) {
+                    $allowedRemainingRollIds[] = (int)$mergedSourceRoll['id'];
+                }
+                $allowedRemainingRollIds = array_values(array_unique($allowedRemainingRollIds));
+
+                if ($remainingMountedRollId <= 0) {
+                    $remainingMountedRollId = $rollId;
+                }
+                if (!in_array($remainingMountedRollId, $allowedRemainingRollIds, true)) {
+                    return ['ok' => false, 'error' => 'La bobina que debe seguir montada no coincide con las bobinas usadas en esta salida.'];
+                }
+
+                if ($remainingMountedKg <= 0) {
+                    $remainingMountedKg = max(0.0, round($totalSourceWeightKg - $outputBobinaKg - $scrapKg, 2));
+                } else {
+                    $remainingMountedKg = max(0.0, round($remainingMountedKg, 2));
+                }
+                if ($remainingMountedKg <= 0) {
+                    return ['ok' => false, 'error' => 'El remanente calculado para dejar montado quedó en 0 kg. Revise la salida o las mermas.'];
+                }
+
+                if ($remainingMountedRollId === $rollId) {
+                    $remainingMountedTargetRoll = [
+                        'id' => $rollId,
+                        'roll_code' => $rollCode,
+                        'entry_weight_kg' => $entryWeight,
+                        'meters' => (float)($roll['meters'] ?? 0),
+                    ];
+                } else {
+                    foreach ($mergedSourceRolls as $mergedSourceRoll) {
+                        if ((int)$mergedSourceRoll['id'] === $remainingMountedRollId) {
+                            $remainingMountedTargetRoll = [
+                                'id' => (int)$mergedSourceRoll['id'],
+                                'roll_code' => (string)$mergedSourceRoll['roll_code'],
+                                'entry_weight_kg' => (float)$mergedSourceRoll['entry_weight_kg'],
+                                'meters' => (float)($mergeRowsById[$remainingMountedRollId]['meters'] ?? 0),
+                            ];
+                            break;
+                        }
+                    }
+                }
+                if ($remainingMountedTargetRoll === null) {
+                    return ['ok' => false, 'error' => 'No se pudo resolver la bobina que seguirá montada.'];
+                }
+
+                $remainingMountedRollCode = (string)($remainingMountedTargetRoll['roll_code'] ?? '');
+                $remainingMountedFormula = number_format($totalSourceWeightKg, 2, '.', '')
+                    . ' - ' . number_format($outputBobinaKg, 2, '.', '')
+                    . ' - ' . number_format($scrapKg, 2, '.', '')
+                    . ' = ' . number_format($remainingMountedKg, 2, '.', '') . ' kg';
+                $leftoverKg = 0.0;
+            }
 
             if ($createOutputRoll && $outputBobinaKg > 0) {
                 $resolvedOutputSku = trim($outputSkuCode) !== '' ? trim($outputSkuCode) : $skuCode;
@@ -3374,7 +3440,7 @@ final class ProductionService
             }
 
             // 1. SI HAY SOBRANTE EN LA BOBINA -> GENERAR NUEVO CÓDIGO CON TRAZABILIDAD
-            if ($leftoverKg > 0) {
+            if (!$keepRemainingMounted && $leftoverKg > 0) {
                 $dateSuffix = date('ymd');
                 $randSuffix = strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
                 if (str_starts_with(strtoupper($skuCode), 'TEL')) {
@@ -3433,26 +3499,73 @@ final class ProductionService
                 ]);
             }
 
-            // 2. CERRAR BOBINA MADRE EN TRZ (CONSUMIDA EN LA OT, PERO VINCULADA EN SOURCE PARA HISTORIAL)
-            $this->trzPdo->prepare("
-                UPDATE rolls
-                SET status = 'CONSUMED',
-                    source_work_order_id = :src_ot,
-                    current_work_order_id = NULL
-                WHERE id = :id
-            ")->execute([':id' => $rollId, ':src_ot' => $workerOtId]);
-
-            foreach ($mergedSourceRolls as $mergedSourceRoll) {
+            // 2. CERRAR / ACTUALIZAR BOBINAS SEGÚN EL RESULTADO DEL DESMONTAJE
+            if ($keepRemainingMounted && $remainingMountedRollId === $rollId) {
+                $remainingMeters = null;
+                $rollMeters = (float)($roll['meters'] ?? 0);
+                if ($entryWeight > 0 && $rollMeters > 0) {
+                    $remainingMeters = round(($remainingMountedKg / $entryWeight) * $rollMeters, 1);
+                }
+                $this->trzPdo->prepare("
+                    UPDATE rolls
+                    SET weight_kg = :weight_kg,
+                        meters = :meters,
+                        status = 'IN_PROCESS',
+                        source_work_order_id = :src_ot,
+                        current_work_order_id = :curr_ot
+                    WHERE id = :id
+                ")->execute([
+                    ':id' => $rollId,
+                    ':weight_kg' => $remainingMountedKg,
+                    ':meters' => $remainingMeters,
+                    ':src_ot' => $workerOtId,
+                    ':curr_ot' => $traceabilityWorkOrderId > 0 ? $traceabilityWorkOrderId : $currentWorkOrderId,
+                ]);
+            } else {
                 $this->trzPdo->prepare("
                     UPDATE rolls
                     SET status = 'CONSUMED',
                         source_work_order_id = :src_ot,
                         current_work_order_id = NULL
                     WHERE id = :id
-                ")->execute([
-                    ':id' => (int)$mergedSourceRoll['id'],
-                    ':src_ot' => $workerOtId,
-                ]);
+                ")->execute([':id' => $rollId, ':src_ot' => $workerOtId]);
+            }
+
+            foreach ($mergedSourceRolls as $mergedSourceRoll) {
+                if ($keepRemainingMounted && (int)$mergedSourceRoll['id'] === $remainingMountedRollId) {
+                    $mergeMeters = (float)($mergeRowsById[(int)$mergedSourceRoll['id']]['meters'] ?? 0);
+                    $mergeEntryWeight = (float)($mergedSourceRoll['entry_weight_kg'] ?? 0);
+                    $remainingMeters = null;
+                    if ($mergeEntryWeight > 0 && $mergeMeters > 0) {
+                        $remainingMeters = round(($remainingMountedKg / $mergeEntryWeight) * $mergeMeters, 1);
+                    }
+                    $this->trzPdo->prepare("
+                        UPDATE rolls
+                        SET weight_kg = :weight_kg,
+                            meters = :meters,
+                            status = 'IN_PROCESS',
+                            source_work_order_id = :src_ot,
+                            current_work_order_id = :curr_ot
+                        WHERE id = :id
+                    ")->execute([
+                        ':id' => (int)$mergedSourceRoll['id'],
+                        ':weight_kg' => $remainingMountedKg,
+                        ':meters' => $remainingMeters,
+                        ':src_ot' => $workerOtId,
+                        ':curr_ot' => $traceabilityWorkOrderId > 0 ? $traceabilityWorkOrderId : $workerOtId,
+                    ]);
+                } else {
+                    $this->trzPdo->prepare("
+                        UPDATE rolls
+                        SET status = 'CONSUMED',
+                            source_work_order_id = :src_ot,
+                            current_work_order_id = NULL
+                        WHERE id = :id
+                    ")->execute([
+                        ':id' => (int)$mergedSourceRoll['id'],
+                        ':src_ot' => $workerOtId,
+                    ]);
+                }
 
                 $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
                     ':type' => 'ROLL_MERGED_IN_OUTPUT',
@@ -3472,9 +3585,35 @@ final class ProductionService
                 ]);
             }
 
-            // Kilos consumidos reales de tela = ingreso - sobrante
-            $netConsumedKg = max(0.0, round($entryWeight - $leftoverKg, 2));
-            $totalNetConsumedKg = round($netConsumedKg + $mergedSourceWeightKg, 2);
+            if ($keepRemainingMounted) {
+                if ($remainingMountedRollId === $rollId) {
+                    $netConsumedKg = max(0.0, round($entryWeight - $remainingMountedKg, 2));
+                } else {
+                    $netConsumedKg = round($entryWeight, 2);
+                }
+                $totalNetConsumedKg = max(0.0, round($totalSourceWeightKg - $remainingMountedKg, 2));
+
+                $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
+                    ':type' => 'ROLL_REMAINED_MOUNTED_AFTER_OUTPUT',
+                    ':payload' => json_encode([
+                        'remaining_mounted_roll_id' => $remainingMountedRollId,
+                        'remaining_mounted_roll_code' => $remainingMountedRollCode,
+                        'remaining_mounted_kg' => $remainingMountedKg,
+                        'remaining_mounted_formula' => $remainingMountedFormula,
+                        'total_source_weight_kg' => $totalSourceWeightKg,
+                        'output_bobina_kg' => $outputBobinaKg,
+                        'scrap_kg' => $scrapKg,
+                        'worker_ot_id' => $workerOtId,
+                        'operator' => $operatorName,
+                        'comments' => $comments,
+                        'timestamp' => $now,
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+            } else {
+                // Kilos consumidos reales de tela = ingreso - sobrante
+                $netConsumedKg = max(0.0, round($entryWeight - $leftoverKg, 2));
+                $totalNetConsumedKg = round($netConsumedKg + $mergedSourceWeightKg, 2);
+            }
 
             // Registrar evento de salida de bobina en TRZ
             $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
@@ -3492,10 +3631,16 @@ final class ProductionService
                     'leftover_kg' => $leftoverKg,
                     'leftover_roll_id' => $newRollId,
                     'leftover_roll_code' => $leftoverRollCode,
+                    'keep_remaining_mounted' => $keepRemainingMounted,
+                    'remaining_mounted_roll_id' => $remainingMountedRollId,
+                    'remaining_mounted_roll_code' => $remainingMountedRollCode,
+                    'remaining_mounted_kg' => $remainingMountedKg,
+                    'remaining_mounted_formula' => $remainingMountedFormula,
                     'merged_source_roll_ids' => array_column($mergedSourceRolls, 'id'),
                     'merged_source_roll_codes' => $mergedSourceCodes,
                     'merged_source_rolls' => $mergedSourceRolls,
                     'merged_source_weight_kg' => round($mergedSourceWeightKg, 2),
+                    'total_source_weight_kg' => $totalSourceWeightKg,
                     'mermas_detail' => $mermasDetail,
                     'net_consumed_kg' => $netConsumedKg,
                     'total_net_consumed_kg' => $totalNetConsumedKg,
@@ -3511,7 +3656,9 @@ final class ProductionService
             if (!empty($mergedSourceCodes)) {
                 $descMat .= ', Unida con: ' . implode(', ', $mergedSourceCodes);
             }
-            if ($leftoverKg > 0) {
+            if ($keepRemainingMounted && $remainingMountedKg > 0) {
+                $descMat .= ", Queda montada: {$remainingMountedRollCode} ({$remainingMountedKg} kg). Cálculo: {$remainingMountedFormula}";
+            } elseif ($leftoverKg > 0) {
                 $descMat .= ", Sobrante: {$leftoverKg} kg (Código: {$leftoverRollCode})";
             } else {
                 $descMat .= " (Consumida completa)";
@@ -3605,6 +3752,9 @@ final class ProductionService
                 'output_meters' => $outputMeters,
                 'output_bobina_kg' => $outputBobinaKg,
                 'output_binas_kg' => $outputBobinaKg,
+                'remaining_mounted_roll_id' => $remainingMountedRollId,
+                'remaining_mounted_roll_code' => $remainingMountedRollCode,
+                'remaining_mounted_kg' => $remainingMountedKg,
                 'scrap_kg' => $scrapKg,
                 'mermas_detail' => $mermasDetail,
                 'net_consumed_kg' => $netConsumedKg,
@@ -3613,6 +3763,7 @@ final class ProductionService
                 'message' => "Salida de bobina {$rollCode} registrada exitosamente."
                     . (!empty($mergedSourceCodes) ? ' Se consolidaron también: ' . implode(', ', $mergedSourceCodes) . '.' : '')
                     . ($leftoverRollCode !== '' ? " Se generó sobrante {$leftoverRollCode} ({$leftoverKg} kg) con trazabilidad en Bodega 3000." : "")
+                    . ($remainingMountedRollCode !== '' ? " Quedó montada {$remainingMountedRollCode} ({$remainingMountedKg} kg) para el siguiente tiraje." : '')
             ];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al registrar salida de bobina: ' . $e->getMessage()];
@@ -3727,7 +3878,7 @@ final class ProductionService
             $traceabilityWorkOrderId = $this->resolveTraceabilityWorkOrderId($workerOtId, null, false);
             $warehouse3000Id = $this->resolveBodega3000WarehouseId();
             $stmtRoll = $this->trzPdo->prepare("
-                SELECT r.roll_code, r.reception_mode, s.code AS sku_code
+                SELECT r.roll_code, r.reception_mode, r.weight_kg, s.code AS sku_code
                 FROM rolls r
                 LEFT JOIN skus s ON r.sku_id = s.id
                 WHERE r.id = :id
@@ -3745,6 +3896,50 @@ final class ProductionService
             $roll = $stmtRoll->fetch(PDO::FETCH_ASSOC);
             if (!$roll) {
                 return ['ok' => false, 'error' => 'La bobina no está tomada por esta OT.'];
+            }
+
+            $rollCode = trim((string)($roll['roll_code'] ?? ''));
+            $rollWeightKg = (float)($roll['weight_kg'] ?? 0);
+            $skuCode = trim((string)($roll['sku_code'] ?? ''));
+            $wasMounted = false;
+            $entryWeightKg = $rollWeightKg;
+
+            $stmtLastMovement = $this->trzPdo->prepare("
+                SELECT type, payload
+                FROM events
+                WHERE type IN ('ROLL_MOUNTED_ON_MACHINE', 'ROLL_UNMOUNTED_FROM_MACHINE')
+                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                ORDER BY id DESC
+                LIMIT 1
+            ");
+            $stmtLastMovement->execute([
+                ':rid' => (string)$rollId,
+                ':otid' => (string)$workerOtId,
+            ]);
+            $lastMovement = $stmtLastMovement->fetch(PDO::FETCH_ASSOC) ?: null;
+            if ($lastMovement) {
+                $wasMounted = (string)($lastMovement['type'] ?? '') === 'ROLL_MOUNTED_ON_MACHINE';
+                $movementPayload = json_decode((string)($lastMovement['payload'] ?? ''), true);
+                if (!empty($movementPayload['entry_weight_kg'])) {
+                    $entryWeightKg = (float)$movementPayload['entry_weight_kg'];
+                }
+            }
+
+            $stmtEvent = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
+            if ($wasMounted) {
+                $stmtEvent->execute([
+                    ':type' => 'ROLL_UNMOUNTED_FROM_MACHINE',
+                    ':payload' => json_encode([
+                        'roll_id' => $rollId,
+                        'roll_code' => $rollCode,
+                        'weight_kg' => $rollWeightKg,
+                        'worker_ot_id' => $workerOtId,
+                        'operator' => $operatorName,
+                        'timestamp' => $now,
+                        'reason' => 'RETURNED_TO_WAREHOUSE',
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
             }
 
             $stmt = $this->trzPdo->prepare("
@@ -3772,17 +3967,77 @@ final class ProductionService
                 $this->adjustBodega3000InventoryBySku((string)$roll['sku_code'], 1);
             }
 
-            $stmtEvent = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
             $stmtEvent->execute([
                 ':type' => 'ROLL_RETURNED_TO_WAREHOUSE',
                 ':payload' => json_encode([
                     'roll_id' => $rollId,
+                    'roll_code' => $rollCode,
+                    'sku_code' => $skuCode,
+                    'weight_kg' => $rollWeightKg,
+                    'entry_weight_kg' => $entryWeightKg,
+                    'was_mounted' => $wasMounted,
+                    'warehouse_id' => $warehouse3000Id,
                     'worker_ot_id' => $workerOtId,
                     'operator' => $operatorName,
                     'timestamp' => $now,
                 ], JSON_UNESCAPED_UNICODE),
             ]);
-            return ['ok' => true];
+
+            if ($this->erpPdo !== null) {
+                if ($wasMounted) {
+                    $erpUnmountComment = 'Desmontaje de Bobina '
+                        . ($rollCode !== '' ? $rollCode : ('#' . $rollId))
+                        . ' para devolución a Bodega 3000';
+                    if ($entryWeightKg > 0) {
+                        $erpUnmountComment .= ' (Peso ingreso: ' . number_format($entryWeightKg, 2, '.', '') . ' kg)';
+                    }
+                    if (trim($operatorName) !== '') {
+                        $erpUnmountComment .= ' por ' . trim($operatorName);
+                    }
+
+                    $stmtErpUnmount = $this->erpPdo->prepare("
+                        INSERT INTO prod_worker_ot_events
+                        (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                        VALUES
+                        (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
+                    ");
+                    $stmtErpUnmount->execute([
+                        ':ot_id' => $workerOtId,
+                        ':crtdat' => $now,
+                        ':enddat' => $now,
+                        ':comments' => $erpUnmountComment,
+                    ]);
+                }
+
+                $erpReturnComment = 'Bobina '
+                    . ($rollCode !== '' ? $rollCode : ('#' . $rollId))
+                    . ' devuelta a Bodega 3000';
+                if ($skuCode !== '') {
+                    $erpReturnComment .= ' [' . $skuCode . ']';
+                }
+                if ($rollWeightKg > 0) {
+                    $erpReturnComment .= ' (' . number_format($rollWeightKg, 2, '.', '') . ' kg)';
+                }
+                if (trim($operatorName) !== '') {
+                    $erpReturnComment .= ' por ' . trim($operatorName);
+                }
+
+                $stmtErpReturn = $this->erpPdo->prepare("
+                    INSERT INTO prod_worker_ot_events
+                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                    VALUES
+                    (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                ");
+                $stmtErpReturn->execute([
+                    ':ot_id' => $workerOtId,
+                    ':amt' => $rollWeightKg,
+                    ':crtdat' => $now,
+                    ':enddat' => $now,
+                    ':comments' => $erpReturnComment,
+                ]);
+            }
+
+            return ['ok' => true, 'roll_code' => $rollCode];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al devolver bobina: ' . $e->getMessage()];
         }
@@ -9540,7 +9795,7 @@ final class ProductionService
                 ':comments' => $evtComment,
             ]);
 
-            return ['ok' => true, 'roll_code' => $rollCode, 'message' => "Bobina {$rollCode} asignada exitosamente a la OT y máquina."];
+            return ['ok' => true, 'roll_id' => (int)($newRollId ?? 0), 'roll_code' => $rollCode, 'message' => "Bobina {$rollCode} asignada exitosamente a la OT y máquina."];
         }
 
         // Caso B: ID numérico de roll en TRZ
@@ -9637,7 +9892,7 @@ final class ProductionService
                     ':comments' => $evtComment,
                 ]);
 
-                return ['ok' => true, 'roll_code' => $rCode, 'message' => "Bobina {$rCode} asignada exitosamente a la máquina y OT."];
+                return ['ok' => true, 'roll_id' => $trzRollId, 'roll_code' => $rCode, 'message' => "Bobina {$rCode} asignada exitosamente a la máquina y OT."];
             }
         }
 
