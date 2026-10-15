@@ -6142,7 +6142,11 @@ function renderProductionOperatorConsole(
                 $valMlin = (int)round($printedRollsSummary['total_meters']);
             }
             if ($valAmount <= 0) {
-                $valAmount = (float)$valMlin;
+                if ((float)($corte_m2 ?? 0) > 0) {
+                    $valAmount = (float)round($valMlin / (float)$corte_m2);
+                } else {
+                    $valAmount = 0.0;
+                }
             }
         }
 
@@ -6153,6 +6157,9 @@ function renderProductionOperatorConsole(
         if ((float)($agenda['ag_amount'] ?? 0) > 0 && ($kgAImprimir ?? 0) > 0) {
             $prodUnitWeightKg = round(((float)$kgAImprimir) / (float)$agenda['ag_amount'], 4);
         }
+        $flexoApproxUnits = $valAmount > 0
+            ? (int)round($valAmount)
+            : (((float)($corte_m2 ?? 0) > 0 && $valMlin > 0) ? (int)round($valMlin / (float)$corte_m2) : 0);
         ?>
         <div style="margin-bottom:15px">
             <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
@@ -6272,7 +6279,6 @@ function renderProductionOperatorConsole(
                     <?php if ($isFlexo): ?>
                         <input type="hidden" name="evt_metrotype" value="metros_lineales">
                         <input type="hidden" name="evt_amount_metros_maquina" value="<?=$valMmaq?>">
-                        <input type="hidden" name="prod_amount" id="inp_flexo_amount" value="0">
                         <?php if (!empty($printedRollsSummary['rolls_count']) && $printedRollsSummary['rolls_count'] > 0): ?>
                             <tr>
                                 <td colspan="2" style="padding:0 0 14px 0">
@@ -6297,6 +6303,16 @@ function renderProductionOperatorConsole(
                                 <?php if (!empty($printedRollsSummary['rolls_count'])): ?>
                                     <span style="font-size:11px;background:#059669;color:#FFFFFF;padding:3px 8px;border-radius:4px;margin-left:6px;font-weight:bold"><i class="fa fa-check-circle"></i> Suma de <?=count($printedRollsSummary['rolls_list'])?> bobinas impresas</span>
                                 <?php endif; ?>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="tdleft">Unidades Aproximadas *</td>
+                            <td class="tdnrm">
+                                <input type="number" step="1" min="0" name="prod_amount" id="inp_flexo_amount" class="inptxt" style="width:200px;font-size:15px;font-weight:bold;background:#F8FAFC" value="<?=$flexoApproxUnits > 0 ? $flexoApproxUnits : ''?>" placeholder="0" required>
+                                <div id="flexo_units_hint" style="font-size:11.5px;color:#64748B;margin-top:5px">
+                                    <i class="fa fa-info-circle"></i>
+                                    Aproximado segun el corte de la bolsa (<?=number_format((float)($corte_m2 ?? 0), 4, ',', '.')?> m por unidad). Puede corregirlo antes de guardar.
+                                </div>
                             </td>
                         </tr>
                         <tr>
@@ -6577,10 +6593,31 @@ function renderProductionOperatorConsole(
                 <script>
                 var PROD_METER_WEIGHT_KG = <?=(float)$prodMeterWeightKg?>;
                 var PROD_UNIT_WEIGHT_KG = <?=(float)$prodUnitWeightKg?>;
+                var FLEXO_CUT_M2 = <?=(float)($corte_m2 ?? 0)?>;
                 var IS_FLEXO = <?=$isFlexo ? 'true' : 'false'?>;
                 var HAS_PRINTED_ROLLS = <?=!empty($printedRollsSummary['rolls_count']) ? 'true' : 'false'?>;
                 var PRINTED_ROLLS_TOTAL_KG = <?=(float)($printedRollsSummary['total_weight_kg'] ?? 0)?>;
                 var PRINTED_ROLLS_TOTAL_METERS = <?=(float)($printedRollsSummary['total_meters'] ?? 0)?>;
+
+                function calcFlexoApproxUnits(mlin) {
+                    var meters = parseFloat(mlin) || 0;
+                    if (meters <= 0) return 0;
+                    if (FLEXO_CUT_M2 > 0) {
+                        return Math.round(meters / FLEXO_CUT_M2);
+                    }
+                    return 0;
+                }
+
+                function updateFlexoUnitsHint(estimatedUnits) {
+                    var hint = document.getElementById('flexo_units_hint');
+                    if (!hint) return;
+                    var units = parseInt(String(estimatedUnits || '0'), 10) || 0;
+                    if (units > 0) {
+                        hint.innerHTML = '<i class=\"fa fa-info-circle\"></i> Aproximado segun el corte de la bolsa (' + String(FLEXO_CUT_M2 || 0).replace('.', ',') + ' m por unidad): <b>' + units.toLocaleString('es-CL') + ' unidades</b>. Puede corregirlo antes de guardar.';
+                    } else {
+                        hint.innerHTML = '<i class=\"fa fa-info-circle\"></i> Aproximado segun el corte de la bolsa (' + String(FLEXO_CUT_M2 || 0).replace('.', ',') + ' m por unidad). Puede corregirlo antes de guardar.';
+                    }
+                }
 
                 function restorePrintedRollsValues() {
                     var mlinInp = document.getElementById('inp_flexo_mlin');
@@ -6588,7 +6625,8 @@ function renderProductionOperatorConsole(
                     var amtInp = document.getElementById('inp_flexo_amount');
                     if (mlinInp) mlinInp.value = Math.round(PRINTED_ROLLS_TOTAL_METERS);
                     if (kgsInp) kgsInp.value = PRINTED_ROLLS_TOTAL_KG.toFixed(2);
-                    if (amtInp) amtInp.value = 0;
+                    if (amtInp) amtInp.value = calcFlexoApproxUnits(PRINTED_ROLLS_TOTAL_METERS) || '';
+                    updateFlexoUnitsHint(calcFlexoApproxUnits(PRINTED_ROLLS_TOTAL_METERS));
                 }
 
                 function calcFlexoKgs() {
@@ -6603,8 +6641,14 @@ function renderProductionOperatorConsole(
                         var kgs = (mlin * PROD_METER_WEIGHT_KG).toFixed(2);
                         kgsInp.value = kgs;
                     }
-                    if (amtInp) amtInp.value = 0;
+                    if (amtInp) {
+                        var approxUnits = calcFlexoApproxUnits(mlin);
+                        amtInp.value = approxUnits > 0 ? approxUnits : '';
+                        updateFlexoUnitsHint(approxUnits);
+                    }
                 }
+
+                updateFlexoUnitsHint(calcFlexoApproxUnits(document.getElementById('inp_flexo_mlin') ? document.getElementById('inp_flexo_mlin').value : 0));
 
                 function calcSeriUnitsFromCounters() {
                     var factorInp = document.getElementById('idx_seri_bastidor_multiplier');

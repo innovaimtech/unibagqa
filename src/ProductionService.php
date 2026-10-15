@@ -1937,6 +1937,49 @@ final class ProductionService
                 }
             }
         }
+        if (($metroType === 'metros_lineales' || $metroType === '') && $amount <= 0.0 && $metrosLineales > 0) {
+            try {
+                $stmtAg = $this->erpPdo->prepare("SELECT wok_ag_id FROM prod_worker_ot WHERE id = :worker_ot_id LIMIT 1");
+                $stmtAg->execute([':worker_ot_id' => $workerOtId]);
+                $agId = (int)$stmtAg->fetchColumn();
+                if ($agId > 0) {
+                    $agendaData = $this->getWorkOrderAgendaDetails($agId);
+                    if (is_array($agendaData)) {
+                        $paramMedida = (int)($agendaData['fab_med_width'] ?? 0);
+                        if (!empty($agendaData['item_prodcalc_fuelle_act'])) {
+                            $paramMedida += (int)($agendaData['fab_med_fuelle'] ?? 0);
+                        }
+                        $corteM2 = 0.0;
+                        $stmtEq = $this->erpPdo->prepare(
+                            "SELECT * FROM equipo_params
+                             WHERE param_equipo_id = :eq_id
+                               AND param_medida >= :medida
+                             ORDER BY param_medida ASC
+                             LIMIT 1"
+                        );
+                        $stmtEq->execute([
+                            ':eq_id' => (int)($agendaData['ag_equipo_id'] ?? 0),
+                            ':medida' => $paramMedida,
+                        ]);
+                        $equipoParams = $stmtEq->fetch(PDO::FETCH_ASSOC) ?: null;
+                        if (is_array($equipoParams)) {
+                            $polType = (string)($agendaData['req_solic_devprints_poltype'] ?? '');
+                            if ($polType === 'pol284' && isset($equipoParams['param_poly28'])) {
+                                $corteM2 = (float)$equipoParams['param_poly28'];
+                            } elseif ($polType === 'pol170' && isset($equipoParams['param_poly17'])) {
+                                $corteM2 = (float)$equipoParams['param_poly17'];
+                            } else {
+                                $corteM2 = (float)($equipoParams['param_corte'] ?? 0);
+                            }
+                        }
+                        if ($corteM2 > 0.0) {
+                            $amount = (float)round($metrosLineales / $corteM2);
+                        }
+                    }
+                }
+            } catch (Throwable) {
+            }
+        }
 
         if ($refId !== null && $refId > 0) {
             $eventId = $refId;
