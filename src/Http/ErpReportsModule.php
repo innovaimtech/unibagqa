@@ -4262,18 +4262,38 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
                 <input type="hidden" name="redirect_url" value="' . h($_SERVER['REQUEST_URI'] ?? '/reports/machine-production') . '">
 
                 <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:14px 18px;">
-                    <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;color:#1d4ed8;margin-bottom:10px;display:flex;align-items:center;gap:6px">
-                        <span>🎯</span> Evento de Producción a Corregir
+                    <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;color:#1d4ed8;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between">
+                        <span style="display:flex;align-items:center;gap:6px"><span>🎯</span> Bitácora Completa de Eventos Registrados en esta OT</span>
+                        <span id="events-count-badge" style="background:#dbeafe;color:#1e40af;font-size:11px;padding:2px 8px;border-radius:999px;font-weight:800">0 eventos</span>
                     </div>
-                    <div style="display:grid;grid-template-columns:minmax(260px,1fr) auto;gap:12px;align-items:end;">
+                    <div style="display:grid;grid-template-columns:minmax(260px,1fr) auto;gap:12px;align-items:end;margin-bottom:12px">
                         <div>
-                            <label style="display:block;font-size:11.5px;font-weight:700;color:#334155;margin-bottom:4px">Selecciona el evento específico</label>
+                            <label style="display:block;font-size:11.5px;font-weight:700;color:#334155;margin-bottom:4px">Selecciona el evento a editar o anular</label>
                             <select id="edit_event_selector" style="width:100%;padding:8px 10px;border:1px solid #93c5fd;border-radius:6px;font-size:13px;background:#fff">
                                 <option value="">Usar resumen consolidado de la OT</option>
                             </select>
-                            <div id="edit-event-help" style="margin-top:6px;font-size:11px;color:#475569">Si hubo duplicidad, aquí puedes decidir exactamente qué evento modificar o anular.</div>
+                            <div id="edit-event-help" style="margin-top:6px;font-size:11px;color:#475569">Si hubo duplicidad o un evento erróneo, puedes seleccionarlo arriba o en la tabla inferior para anularlo o corregirlo.</div>
                         </div>
-                        <button type="button" id="btn-delete-selected-event" style="padding:9px 14px;border:none;background:#dc2626;color:#fff;border-radius:8px;font-size:12px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(220,38,38,.22)">🗑️ Anular evento</button>
+                        <button type="button" id="btn-delete-selected-event" style="padding:9px 14px;border:none;background:#dc2626;color:#fff;border-radius:8px;font-size:12px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 4px 12px rgba(220,38,38,.22)">🗑️ Anular evento seleccionado</button>
+                    </div>
+
+                    <!-- Tabla Interactiva de Auditoría de Eventos -->
+                    <div style="max-height:220px;overflow-y:auto;border:1px solid #cbd5e1;border-radius:8px;background:#fff">
+                        <table style="width:100%;border-collapse:collapse;font-size:12px;text-align:left">
+                            <thead style="position:sticky;top:0;background:#f1f5f9;border-bottom:1px solid #cbd5e1;font-size:11px;font-weight:800;color:#475569;text-transform:uppercase">
+                                <tr>
+                                    <th style="padding:6px 10px">ID</th>
+                                    <th style="padding:6px 10px">Tipo</th>
+                                    <th style="padding:6px 10px">Hora</th>
+                                    <th style="padding:6px 10px">Producción / Medida</th>
+                                    <th style="padding:6px 10px">Detalle / Auditoría</th>
+                                    <th style="padding:6px 10px;text-align:center">Acción</th>
+                                </tr>
+                            </thead>
+                            <tbody id="events-audit-tbody">
+                                <tr><td colspan="6" style="padding:10px;text-align:center;color:#64748b">Cargando eventos...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
 
@@ -4622,16 +4642,101 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
                     if (selSt) selSt.value = d.status || "2";
                     activeRecord = d;
                     eventIndexMap = {};
+                    var auditTbody = document.getElementById("events-audit-tbody");
+                    var countBadge = document.getElementById("events-count-badge");
                     if (eventSelector) {
                         eventSelector.innerHTML = "<option value=\"\">Usar resumen consolidado de la OT</option>";
                         var prodEvents = Array.isArray(d.production_events) ? d.production_events : [];
-                        prodEvents.forEach(function(ev) {
-                            var opt = document.createElement("option");
-                            opt.value = ev.event_id || "";
-                            opt.textContent = ev.event_label || ("Evento #" + (ev.event_id || ""));
-                            eventSelector.appendChild(opt);
-                            eventIndexMap[String(ev.event_id || "")] = ev;
-                        });
+                        if (countBadge) countBadge.textContent = prodEvents.length + " evento" + (prodEvents.length === 1 ? "" : "s");
+                        if (auditTbody) auditTbody.innerHTML = "";
+
+                        if (prodEvents.length === 0) {
+                            if (auditTbody) {
+                                auditTbody.innerHTML = "<tr><td colspan=\"6\" style=\"padding:12px;text-align:center;color:#64748b\">No se registran eventos individuales desglosados en esta sesión.</td></tr>";
+                            }
+                        } else {
+                            prodEvents.forEach(function(ev) {
+                                var opt = document.createElement("option");
+                                opt.value = ev.event_id || "";
+                                opt.textContent = ev.event_label || ("Evento #" + (ev.event_id || ""));
+                                eventSelector.appendChild(opt);
+                                eventIndexMap[String(ev.event_id || "")] = ev;
+
+                                if (auditTbody) {
+                                    var tr = document.createElement("tr");
+                                    tr.style.borderBottom = "1px solid #f1f5f9";
+                                    tr.style.transition = "background .15s";
+
+                                    var typeBg = "#e2e8f0"; var typeColor = "#334155";
+                                    var evType = (ev.event_type || "prod").toLowerCase();
+                                    if (evType === "prod" || evType === "production" || evType === "prodsericolor") {
+                                        typeBg = "#dcfce7"; typeColor = "#15803d";
+                                    } else if (evType === "materiales") {
+                                        typeBg = "#e0f2fe"; typeColor = "#0369a1";
+                                    } else if (evType === "apertura") {
+                                        typeBg = "#fef3c7"; typeColor = "#b45309";
+                                    } else if (evType === "pause") {
+                                        typeBg = "#ffedd5"; typeColor = "#c2410c";
+                                    } else if (evType === "mantencion") {
+                                        typeBg = "#f3e8ff"; typeColor = "#7e22ce";
+                                    }
+
+                                    var cmtHtml = (ev.comments || "-");
+                                    if (cmtHtml.indexOf("Bobina Semielaborada") !== -1) {
+                                        cmtHtml = "<span style=\"display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:800;background:#ffedd5;color:#c2410c;margin-right:4px\">SEMIELABORADA</span> " + cmtHtml;
+                                    }
+
+                                    var measures = [];
+                                    if (ev.produced_units > 0) measures.push(ev.produced_units.toLocaleString("es-CL") + " un");
+                                    if (ev.produced_kg > 0) measures.push(ev.produced_kg.toLocaleString("es-CL") + " kg");
+                                    if (ev.produced_meters > 0) measures.push(ev.produced_meters.toLocaleString("es-CL") + " m");
+                                    var measStr = measures.length > 0 ? measures.join(" / ") : "-";
+
+                                    tr.innerHTML = "<td style=\"padding:6px 10px;font-weight:700;color:#0f172a\">#" + (ev.event_id || "") + "</td>"
+                                        + "<td style=\"padding:6px 10px\"><span style=\"display:inline-block;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:800;background:" + typeBg + ";color:" + typeColor + "\">" + (evType.toUpperCase()) + "</span></td>"
+                                        + "<td style=\"padding:6px 10px;white-space:nowrap;color:#64748b\">" + (ev.started_at ? ev.started_at.replace("T", " ") : "-") + "</td>"
+                                        + "<td style=\"padding:6px 10px;font-weight:700;color:#0f172a\">" + measStr + "</td>"
+                                        + "<td style=\"padding:6px 10px;color:#334155;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\" title=\"" + (ev.comments || "") + "\">" + cmtHtml + "</td>"
+                                        + "<td style=\"padding:6px 10px;text-align:center;white-space:nowrap\">"
+                                        + "<button type=\"button\" class=\"btn-load-event-in-form\" data-evid=\"" + ev.event_id + "\" style=\"padding:3px 8px;font-size:11px;font-weight:700;background:#00A9A6;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-right:4px\" title=\"Cargar valores en el formulario\">✏️ Cargar</button>"
+                                        + "<button type=\"button\" class=\"btn-del-event-direct\" data-evid=\"" + ev.event_id + "\" style=\"padding:3px 8px;font-size:11px;font-weight:700;background:#ef4444;color:#fff;border:none;border-radius:4px;cursor:pointer\" title=\"Anular este evento\">🗑️</button>"
+                                        + "</td>";
+                                    auditTbody.appendChild(tr);
+                                }
+                            });
+
+                            if (auditTbody) {
+                                auditTbody.querySelectorAll(".btn-load-event-in-form").forEach(function(bLoad) {
+                                    bLoad.addEventListener("click", function() {
+                                        var eId = bLoad.getAttribute("data-evid");
+                                        if (eventSelector && eId) {
+                                            eventSelector.value = eId;
+                                            applySelectedEvent();
+                                            var targetInp = document.getElementById("edit_produced_units");
+                                            if (targetInp) targetInp.focus();
+                                        }
+                                    });
+                                });
+                                auditTbody.querySelectorAll(".btn-del-event-direct").forEach(function(bDel) {
+                                    bDel.addEventListener("click", function() {
+                                        var eId = bDel.getAttribute("data-evid");
+                                        if (eId && eventIndexMap[eId]) {
+                                            var eObj = eventIndexMap[eId];
+                                            openDeleteModal({
+                                                scope: "event",
+                                                otId: activeRecord.ot_id || "",
+                                                otNum: activeRecord.ot_number || "-",
+                                                machine: activeRecord.machine_name || "-",
+                                                worker: activeRecord.operator_name || "-",
+                                                dateStr: eObj.started_at ? eObj.started_at.replace("T", " ") : "-",
+                                                eventId: eId,
+                                                eventLabel: eObj.event_label || ("Evento #" + eId)
+                                            });
+                                        }
+                                    });
+                                });
+                            }
+                        }
                         eventSelector.value = "";
                     }
                     document.getElementById("edit_target_event_id").value = "";

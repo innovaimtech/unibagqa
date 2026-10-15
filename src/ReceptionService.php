@@ -9977,7 +9977,7 @@ SQL;
         ?string $process = null
     ): array {
         $process = strtolower(trim((string)($process ?? 'sellado')));
-        if ($process === '' || $process === 'all') {
+        if ($process === '') {
             $process = 'sellado';
         }
 
@@ -9986,6 +9986,7 @@ SQL;
             'equipo_types' => $this->getEquipoTypesList(),
             'equipos' => [],
             'processes' => [
+                'all' => ['title' => 'Todas las Máquinas', 'count' => 0, 'produced' => 0.0],
                 'sellado' => ['title' => 'Corte y Sellado', 'count' => 0, 'produced' => 0.0],
                 'flexo' => ['title' => 'Flexografía', 'count' => 0, 'produced' => 0.0],
                 'seri' => ['title' => 'Serigrafía', 'count' => 0, 'produced' => 0.0],
@@ -10284,7 +10285,9 @@ SQL;
         $params = $baseParams;
 
         // Filtro por proceso (agrupa todas las máquinas de ese proceso)
-        if ($process !== 'all') {
+        // NOTA: Si el usuario realiza una búsqueda específica por OT/CC ($search !== '') y está en el proceso por defecto 'sellado',
+        // permitimos buscar en todas las máquinas para que Héctor y Javier puedan localizar OTs producidas en Flexo, Pulpo, Seri, etc.
+        if ($process !== 'all' && ($search === '' || $process !== 'sellado')) {
             switch ($process) {
                 case 'flexo':
                     $whereClauses[] = 't7.equipo_type_id = 7';
@@ -10524,6 +10527,7 @@ SQL;
                     SELECT
                         e.id AS event_id,
                         e.evt_prod_worker_otid AS ot_id,
+                        e.evt_type,
                         e.evt_amount AS produced_units,
                         e.prod_bobina_kg AS produced_kg,
                         e.evt_amount_metros_lineales AS produced_meters,
@@ -10549,10 +10553,8 @@ SQL;
                        AND d.evt_status > 0
                     WHERE e.evt_prod_worker_otid IN ($eventPlaceholders)
                       AND e.evt_status > 0
-                      AND LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
-                      AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                     GROUP BY
-                        e.id, e.evt_prod_worker_otid, e.evt_amount, e.prod_bobina_kg,
+                        e.id, e.evt_prod_worker_otid, e.evt_type, e.evt_amount, e.prod_bobina_kg,
                         e.evt_amount_metros_lineales, e.evt_amount_metros_maquina,
                         e.evt_crtdat, e.evt_enddat, e.evt_status, e.evt_idayudante, e.evt_comments
                     ORDER BY e.evt_prod_worker_otid ASC, e.evt_crtdat DESC, e.id DESC
@@ -10567,19 +10569,36 @@ SQL;
                     $eventId = (int)($eventRow['event_id'] ?? 0);
                     $eventStartTs = (int)($eventRow['evt_crtdat'] ?? 0);
                     $eventEndTs = (int)($eventRow['evt_enddat'] ?? 0);
+                    $rawType = strtolower(trim((string)($eventRow['evt_type'] ?? '')));
+                    $typeBadge = strtoupper($rawType !== '' ? $rawType : 'EVENTO');
+                    $eventUnits = (float)($eventRow['produced_units'] ?? 0);
+                    $eventKg = (float)($eventRow['produced_kg'] ?? 0);
+                    $eventMeters = (float)($eventRow['produced_meters'] ?? 0);
+                    $cmt = trim((string)($eventRow['comments'] ?? ''));
+
+                    $valSummary = [];
+                    if ($eventUnits > 0) $valSummary[] = number_format($eventUnits, 0, ',', '.') . ' un';
+                    if ($eventKg > 0) $valSummary[] = number_format($eventKg, 2, ',', '.') . ' kg';
+                    if ($eventMeters > 0) $valSummary[] = number_format($eventMeters, 1, ',', '.') . ' m';
+                    $valSummaryStr = !empty($valSummary) ? implode(' / ', $valSummary) : ($eventUnits == 0 && $eventKg == 0 && $eventMeters == 0 ? '0 un' : '');
+
+                    $label = "[{$typeBadge}] #{$eventId} | "
+                        . ($eventStartTs > 0 ? date('d/m H:i', $eventStartTs) : 'sin fecha')
+                        . ($valSummaryStr !== '' ? (' | ' . $valSummaryStr) : '')
+                        . ($cmt !== '' ? (' | ' . mb_substr($cmt, 0, 45) . (mb_strlen($cmt) > 45 ? '...' : '')) : '');
+
                     $productionEventsByOt[$eventOtId][] = [
                         'event_id' => $eventId,
-                        'event_label' => 'Evento #' . $eventId
-                            . ' | ' . ($eventStartTs > 0 ? date('d/m/Y H:i', $eventStartTs) : 'sin fecha')
-                            . ' | ' . number_format((float)($eventRow['produced_units'] ?? 0), 0, ',', '.') . ' un',
-                        'produced_units' => (float)($eventRow['produced_units'] ?? 0),
-                        'produced_kg' => (float)($eventRow['produced_kg'] ?? 0),
-                        'produced_meters' => (float)($eventRow['produced_meters'] ?? 0),
+                        'event_type' => $rawType,
+                        'event_label' => $label,
+                        'produced_units' => $eventUnits,
+                        'produced_kg' => $eventKg,
+                        'produced_meters' => $eventMeters,
                         'produced_meters_maquina' => (float)($eventRow['produced_meters_maquina'] ?? 0),
                         'started_at' => $eventStartTs > 0 ? date('Y-m-d\TH:i', $eventStartTs) : '',
                         'ended_at' => $eventEndTs > 0 ? date('Y-m-d\TH:i', $eventEndTs) : '',
                         'helper_id' => (int)($eventRow['helper_id'] ?? 0),
-                        'comments' => trim((string)($eventRow['comments'] ?? '')),
+                        'comments' => $cmt,
                         'waste_units' => (float)($eventRow['waste_units'] ?? 0),
                         'waste_kg' => (float)($eventRow['waste_kg'] ?? 0),
                         'waste_setup_units' => (float)($eventRow['waste_setup_units'] ?? 0),
@@ -11062,41 +11081,41 @@ SQL;
 
             $eventStatus = $status === 1 ? 1 : 2;
 
-            // Consolidar eventos de producción duplicados dentro de la misma OT.
-            $stEvt = $this->erpPdo->prepare("
-                SELECT id, evt_comments
-                FROM prod_worker_ot_events
-                WHERE evt_prod_worker_otid = :ot_id
-                  AND LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
-                  AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')
-                  AND evt_status > 0
-                ORDER BY
-                    CASE WHEN evt_enddat > 0 THEN evt_enddat ELSE evt_crtdat END DESC,
-                    id DESC
-            ");
-            $stEvt->execute([':ot_id' => $otId]);
-            $prodEventRows = $stEvt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            // Consolidar o buscar el evento específico seleccionado
             $evtRow = null;
             $duplicateProdEventIds = [];
             if ($targetEventId > 0) {
-                foreach ($prodEventRows as $prodEventRow) {
-                    if ((int)($prodEventRow['id'] ?? 0) === $targetEventId) {
-                        $evtRow = $prodEventRow;
-                        break;
-                    }
-                }
-                if ($evtRow === null) {
-                    throw new RuntimeException('El evento de producción seleccionado ya no existe o no pertenece a esta OT.');
+                $stDirect = $this->erpPdo->prepare("
+                    SELECT id, evt_comments, evt_type
+                    FROM prod_worker_ot_events
+                    WHERE id = :target_id AND evt_prod_worker_otid = :ot_id AND evt_status > 0
+                    LIMIT 1
+                ");
+                $stDirect->execute([':target_id' => $targetEventId, ':ot_id' => $otId]);
+                $evtRow = $stDirect->fetch(PDO::FETCH_ASSOC);
+                if (!$evtRow) {
+                    throw new RuntimeException('El evento seleccionado ya no existe o no pertenece a esta OT.');
                 }
             } else {
+                $stEvt = $this->erpPdo->prepare("
+                    SELECT id, evt_comments
+                    FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
+                      AND evt_status > 0
+                    ORDER BY
+                        CASE WHEN evt_enddat > 0 THEN evt_enddat ELSE evt_crtdat END DESC,
+                        id DESC
+                ");
+                $stEvt->execute([':ot_id' => $otId]);
+                $prodEventRows = $stEvt->fetchAll(PDO::FETCH_ASSOC) ?: [];
                 $evtRow = $prodEventRows[0] ?? null;
-            }
-
-            if ($targetEventId <= 0 && count($prodEventRows) > 1) {
-                $duplicateProdEventIds = array_values(array_filter(array_map(
-                    static fn(array $row): int => (int)($row['id'] ?? 0),
-                    array_slice($prodEventRows, 1)
-                )));
+                if (count($prodEventRows) > 1) {
+                    $duplicateProdEventIds = array_values(array_filter(array_map(
+                        static fn(array $row): int => (int)($row['id'] ?? 0),
+                        array_slice($prodEventRows, 1)
+                    )));
+                }
             }
 
             if ($evtRow) {
@@ -11314,16 +11333,15 @@ SQL;
     public function deleteProductionEvent(int $otId, int $eventId, ?string $userName = null): array
     {
         if ($otId <= 0 || $eventId <= 0) {
-            return ['ok' => false, 'error' => 'Evento de producción no válido.'];
+            return ['ok' => false, 'error' => 'Evento no válido.'];
         }
 
         try {
             $stmtBase = $this->erpPdo->prepare("
-                SELECT id, evt_prod_worker_otid, evt_comments
+                SELECT id, evt_prod_worker_otid, evt_type, evt_comments
                 FROM prod_worker_ot_events
                 WHERE id = :event_id
                   AND evt_prod_worker_otid = :ot_id
-                  AND LOWER(evt_type) IN ('prod', 'production', 'prodsericolor')
                   AND evt_status > 0
                 LIMIT 1
             ");
@@ -11333,7 +11351,7 @@ SQL;
             ]);
             $eventRow = $stmtBase->fetch(PDO::FETCH_ASSOC);
             if (!$eventRow) {
-                return ['ok' => false, 'error' => 'No se encontró el evento de producción seleccionado o ya fue anulado.'];
+                return ['ok' => false, 'error' => 'No se encontró el evento seleccionado o ya fue anulado.'];
             }
 
             $editor = trim((string)($userName ?? 'Usuario'));
@@ -11368,9 +11386,19 @@ SQL;
                 ':ot_id' => $otId,
             ]);
 
+            // Sincronizar agenda si aplica para que las cantidades salgan de la planificación de inmediato
+            $stAg = $this->erpPdo->prepare("SELECT wok_ag_id FROM prod_worker_ot WHERE id = :ot_id");
+            $stAg->execute([':ot_id' => $otId]);
+            $agId = (int)$stAg->fetchColumn();
+            if ($agId > 0 && method_exists($this, 'syncPulpoAgendaStats')) {
+                try {
+                    $this->syncPulpoAgendaStats($agId);
+                } catch (Throwable) {}
+            }
+
             $this->erpPdo->commit();
 
-            return ['ok' => true, 'message' => 'Evento de producción anulado correctamente.'];
+            return ['ok' => true, 'message' => 'Evento #' . $eventId . ' (' . strtoupper((string)($eventRow['evt_type'] ?? 'EVENTO')) . ') anulado correctamente. Cantidades retiradas de la planificación.'];
         } catch (Throwable $e) {
             if ($this->erpPdo->inTransaction()) {
                 $this->erpPdo->rollBack();
