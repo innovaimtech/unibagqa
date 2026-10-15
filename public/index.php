@@ -11466,6 +11466,32 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         return '$ ' . number_format((float)round($amount, 0), 0, ',', '.');
     };
 
+    // Identificar operadores de Corte y Sellado para consistencia entre Hoja 1 y Hoja 2
+    $cysOperatorNamesMap = [];
+    foreach ($rows as $r) {
+        if (!is_array($r)) continue;
+        $name = trim((string)($r['operator_name'] ?? ''));
+        if ($name !== '') {
+            $cysOperatorNamesMap[$name] = true;
+        }
+    }
+    if ($operatorName !== null && $operatorName !== '') {
+        $cysOperatorNamesMap[$operatorName] = true;
+    }
+
+    $cysCodesMap = $service->buildOperatorBonusCodesMap(array_keys($cysOperatorNamesMap));
+    $operatorLabelFromName = static function (string $name) use (&$cysCodesMap, $service, &$cysOperatorNamesMap): string {
+        $name = trim($name);
+        if ($name === '') {
+            return 'SIN';
+        }
+        if (!isset($cysCodesMap[$name])) {
+            $cysOperatorNamesMap[$name] = true;
+            $cysCodesMap = $service->buildOperatorBonusCodesMap(array_keys($cysOperatorNamesMap));
+        }
+        return $cysCodesMap[$name] ?? 'OP';
+    };
+
     $operatorTotals = [];
     $grandUnits = 0.0;
     $grandAmount = 0.0;
@@ -11487,13 +11513,14 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         }
         ksort($rowsByDate, SORT_NATURAL | SORT_FLAG_CASE);
 
-        echo '<div class="section">Operador: ' . h((string)$operatorLabel) . '</div>';
+        $opHeaderCode = $operatorLabelFromName((string)$operatorLabel);
+        echo '<div class="section">Operador: ' . h((string)$operatorLabel) . ' [' . h($opHeaderCode) . ']</div>';
 
         $sumUnits = 0.0;
         $sumAmount = 0.0;
 
         echo '<table class="report"><thead>';
-        echo '<tr class="op-header-row"><th colspan="13" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . '</th></tr>';
+        echo '<tr class="op-header-row"><th colspan="13" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . ' [' . h($opHeaderCode) . ']</th></tr>';
         echo '<tr>';
         echo '<th colspan="13" class="th2">Suma de CANTIDAD</th>';
         echo '</tr>';
@@ -11548,7 +11575,7 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
                 $grandAmount += $rowAmount;
 
                 echo '<tr>';
-                echo '<td>' . h((string)$operatorLabel) . '</td>';
+                echo '<td>' . h($opHeaderCode) . '</td>';
                 echo '<td class="center">' . h($firstRowOfDay ? $dayLabel : '') . '</td>';
                 $firstRowOfDay = false;
                 echo '<td class="center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
@@ -11590,36 +11617,11 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
     echo '<div class="section">Totales por operador</div>';
     echo '<table class="report" style="max-width:620px"><thead><tr><th>Operador</th><th>UNIDADES</th></tr></thead><tbody>';
     foreach ($operatorTotals as $operatorLabel => $u) {
-        echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="right num-int" style="font-weight:800">' . h($formatUnits((float)$u)) . '</td></tr>';
+        $opCode = $operatorLabelFromName((string)$operatorLabel);
+        echo '<tr><td><strong>[' . h($opCode) . ']</strong> ' . h((string)$operatorLabel) . '</td><td class="right num-int" style="font-weight:800">' . h($formatUnits((float)$u)) . '</td></tr>';
     }
     echo '<tr><td style="font-weight:900">TOTAL</td><td class="right num-int" style="font-weight:900">' . h($formatUnits($grandUnits)) . '</td></tr>';
     echo '</tbody></table>';
-
-    $operatorLabelFromName = static function (string $name): string {
-        $name = strtoupper(trim($name));
-        if ($name === '') {
-            return 'SIN';
-        }
-        if (preg_match('/^([A-Z]{2,4})\b/', $name, $m) === 1) {
-            return (string)$m[1];
-        }
-        $parts = preg_split('/\s+/', $name) ?: [];
-        $code = '';
-        foreach ($parts as $p) {
-            $p = trim($p);
-            if ($p === '') {
-                continue;
-            }
-            $code .= mb_substr($p, 0, 1);
-            if (mb_strlen($code) >= 2) {
-                break;
-            }
-        }
-        if ($code === '') {
-            $code = mb_substr($name, 0, 2);
-        }
-        return strtoupper($code);
-    };
 
     $money = static function (float $amount): string {
         if ($amount <= 0) {
@@ -11689,7 +11691,7 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         };
 
         $opChangeCounts = [];
-        $changeRes = $service->listErpCysConfigChangeCountsForBonusPeriod($monthKey, $operatorName);
+        $changeRes = $service->listErpCysConfigChangeCountsForBonusPeriod($period, $operatorName);
         if (is_array($changeRes) && ($changeRes['ok'] ?? false) === true && is_array($changeRes['counts'] ?? null)) {
             foreach ((array)$changeRes['counts'] as $name => $cnt) {
                 $name = trim((string)$name);
@@ -11712,7 +11714,7 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         }
 
         $opPackUnits = [];
-        $packRes = $service->listErpCysPackagingUnitsForBonusPeriod($monthKey, $operatorName);
+        $packRes = $service->listErpCysPackagingUnitsForBonusPeriod($period, $operatorName);
         if (is_array($packRes) && ($packRes['ok'] ?? false) === true && is_array($packRes['units'] ?? null)) {
             foreach ((array)$packRes['units'] as $name => $u) {
                 $name = trim((string)$name);
@@ -11720,10 +11722,13 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
                     continue;
                 }
                 $label = $operatorLabelFromName($name);
-                if (!in_array($label, $opCols, true)) {
-                    continue;
+                if (isset($cysOperatorNamesMap[$name]) || in_array($label, $opCols, true)) {
+                    if (!in_array($label, $opCols, true)) {
+                        $opCols[] = $label;
+                        sort($opCols, SORT_NATURAL | SORT_FLAG_CASE);
+                    }
+                    $opPackUnits[$label] = (float)($opPackUnits[$label] ?? 0.0) + (float)$u;
                 }
-                $opPackUnits[$label] = (float)($opPackUnits[$label] ?? 0.0) + (float)$u;
             }
         }
         $opPackPay = [];
@@ -11737,7 +11742,15 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         echo '<div class="section">Resumen</div>';
         echo '<table class="report"><thead><tr><th style="min-width:240px">Concepto</th>';
         foreach ($opCols as $c) {
-            echo '<th>' . h((string)$c) . '</th>';
+            $fullNameForCode = '';
+            foreach ($cysCodesMap as $fName => $code) {
+                if ($code === $c) {
+                    $fullNameForCode = $fName;
+                    break;
+                }
+            }
+            $titleAttr = $fullNameForCode !== '' ? ' title="' . h($fullNameForCode) . '"' : '';
+            echo '<th' . $titleAttr . '>' . h((string)$c) . '</th>';
         }
         echo '<th>Total</th></tr></thead><tbody>';
 
@@ -11789,7 +11802,15 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         echo '<div class="section">Embalaje</div>';
         echo '<table class="report"><thead><tr><th style="min-width:240px">Concepto</th>';
         foreach ($opCols as $c) {
-            echo '<th>' . h((string)$c) . '</th>';
+            $fullNameForCode = '';
+            foreach ($cysCodesMap as $fName => $code) {
+                if ($code === $c) {
+                    $fullNameForCode = $fName;
+                    break;
+                }
+            }
+            $titleAttr = $fullNameForCode !== '' ? ' title="' . h($fullNameForCode) . '"' : '';
+            echo '<th' . $titleAttr . '>' . h((string)$c) . '</th>';
         }
         echo '<th>Total</th></tr></thead><tbody>';
 
@@ -11911,13 +11932,14 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
             }
             ksort($rowsByDate, SORT_NATURAL | SORT_FLAG_CASE);
 
-            echo '<div class="section">Operador: ' . h((string)$operatorLabel) . '</div>';
+            $packHeaderCode = $operatorLabelFromName((string)$operatorLabel);
+            echo '<div class="section">Operador: ' . h((string)$operatorLabel) . ' [' . h($packHeaderCode) . ']</div>';
 
             $sumUnits = 0.0;
             $sumAmount = 0.0;
 
             echo '<table class="report"><thead>';
-            echo '<tr class="op-header-row"><th colspan="13" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . '</th></tr>';
+            echo '<tr class="op-header-row"><th colspan="13" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . ' [' . h($packHeaderCode) . ']</th></tr>';
             echo '<tr>';
             echo '<th colspan="13" class="th2">Suma de CANTIDAD EMBALADA</th>';
             echo '</tr>';
@@ -11969,7 +11991,7 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
                     $packGrandAmount += $rowAmount;
 
                     echo '<tr>';
-                    echo '<td>' . h((string)$operatorLabel) . '</td>';
+                    echo '<td>' . h($packHeaderCode) . '</td>';
                     echo '<td class="center">' . h($firstRowOfDay ? $dayLabel : '') . '</td>';
                     $firstRowOfDay = false;
                     echo '<td class="center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
@@ -12016,7 +12038,8 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         foreach ($packOperatorTotals as $operatorLabel => $tot) {
             $u = (float)($tot['units'] ?? 0.0);
             $amt = (float)($tot['amount'] ?? 0.0);
-            echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="right num-int" style="font-weight:800">' . h($formatUnits($u)) . '</td><td class="right" style="font-weight:800">' . h($moneyRow($amt)) . '</td></tr>';
+            $packRowCode = $operatorLabelFromName((string)$operatorLabel);
+            echo '<tr><td><strong>[' . h($packRowCode) . ']</strong> ' . h((string)$operatorLabel) . '</td><td class="right num-int" style="font-weight:800">' . h($formatUnits($u)) . '</td><td class="right" style="font-weight:800">' . h($moneyRow($amt)) . '</td></tr>';
         }
         echo '<tr><td style="font-weight:900">TOTAL</td><td class="right num-int" style="font-weight:900">' . h($formatUnits($packGrandUnits)) . '</td><td class="right" style="font-weight:900">' . h($moneyRow($packGrandAmount)) . '</td></tr>';
         echo '</tbody></table>';
@@ -12375,9 +12398,10 @@ if ($path === '/bonificaciones/seri/export-xls' && $method === 'GET') {
     }
 
     foreach ($grouped as $operatorLabel => $operatorRows) {
-        echo '<div class="section">Operador: ' . h((string)$operatorLabel) . '</div>';
+        $seriHeaderCode = $service->getOperatorBonusCode((string)$operatorLabel, array_keys($grouped));
+        echo '<div class="section">Operador: ' . h((string)$operatorLabel) . ' [' . h($seriHeaderCode) . ']</div>';
         echo '<table class="report"><thead>';
-        echo '<tr class="op-header-row"><th colspan="15" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . '</th></tr>';
+        echo '<tr class="op-header-row"><th colspan="15" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . ' [' . h($seriHeaderCode) . ']</th></tr>';
         echo '<tr>';
         echo '<th colspan="12"></th>';
         echo '<th colspan="2" class="th2">Valores · Operador</th>';
@@ -12470,7 +12494,8 @@ if ($path === '/bonificaciones/seri/export-xls' && $method === 'GET') {
         $u = (float)($tot['units'] ?? 0);
         $c = (float)($tot['counter'] ?? 0);
         $b = (float)($tot['bonus'] ?? 0);
-        echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="num-int" style="font-weight:800">' . ($u > 0 ? (string)(int)round($u) : '') . '</td><td class="num-int" style="font-weight:800">' . ($c > 0 ? (string)(int)round($c) : '') . '</td><td class="right" style="font-weight:800">' . h($money($b)) . '</td></tr>';
+        $seriRowCode = $service->getOperatorBonusCode((string)$operatorLabel, array_keys($operatorTotals));
+        echo '<tr><td><strong>[' . h($seriRowCode) . ']</strong> ' . h((string)$operatorLabel) . '</td><td class="num-int" style="font-weight:800">' . ($u > 0 ? (string)(int)round($u) : '') . '</td><td class="num-int" style="font-weight:800">' . ($c > 0 ? (string)(int)round($c) : '') . '</td><td class="right" style="font-weight:800">' . h($money($b)) . '</td></tr>';
     }
     echo '<tr><td style="font-weight:900">TOTAL</td><td class="num-int" style="font-weight:900">' . ($grandUnits > 0 ? (string)(int)round($grandUnits) : '') . '</td><td class="num-int" style="font-weight:900">' . ($grandCounter > 0 ? (string)(int)round($grandCounter) : '') . '</td><td class="right" style="font-weight:900">' . h($money($grandBonus)) . '</td></tr>';
     echo '</tbody></table>';
@@ -12729,9 +12754,10 @@ if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
         }
         $usedBaseBonusByOt = [];
 
-        echo '<div class="section">Operador: ' . h((string)$operatorLabel) . '</div>';
+        $flexoHeaderCode = $service->getOperatorBonusCode((string)$operatorLabel, array_keys($grouped));
+        echo '<div class="section">Operador: ' . h((string)$operatorLabel) . ' [' . h($flexoHeaderCode) . ']</div>';
         echo '<table class="report"><thead>';
-        echo '<tr class="op-header-row"><th colspan="20" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . '</th></tr>';
+        echo '<tr class="op-header-row"><th colspan="20" style="background:#0f172a;color:#ffffff;font-size:13px;font-weight:900;text-align:left;padding:8px 10px;">OPERADOR: ' . h((string)$operatorLabel) . ' [' . h($flexoHeaderCode) . ']</th></tr>';
         echo '<tr>';
         echo '<th>OPERADOR</th>';
         echo '<th>N°<br>IMPRESORA</th>';
@@ -12862,7 +12888,8 @@ if ($path === '/bonificaciones/flexo/export-xls' && $method === 'GET') {
         $baseLabel = $baseClp > 0 ? ('$ ' . number_format($baseClp, 0, ',', '.')) : '$ -';
         $coachLabel = $coachClp > 0 ? ('$ ' . number_format($coachClp, 0, ',', '.')) : '$ -';
         $totalLabel = $totalClp > 0 ? ('$ ' . number_format($totalClp, 0, ',', '.')) : '$ -';
-        echo '<tr><td>' . h((string)$operatorLabel) . '</td><td class="right">' . h($baseLabel) . '</td><td class="right">' . h($coachLabel) . '</td><td class="right" style="font-weight:800">' . h($totalLabel) . '</td></tr>';
+        $flexoRowCode = $service->getOperatorBonusCode((string)$operatorLabel, $allTotalNames);
+        echo '<tr><td><strong>[' . h($flexoRowCode) . ']</strong> ' . h((string)$operatorLabel) . '</td><td class="right">' . h($baseLabel) . '</td><td class="right">' . h($coachLabel) . '</td><td class="right" style="font-weight:800">' . h($totalLabel) . '</td></tr>';
     }
     $sumBaseLabel = $sumBaseAll > 0 ? ('$ ' . number_format($sumBaseAll, 0, ',', '.')) : '$ -';
     $sumCoachLabel = $sumCoachAll > 0 ? ('$ ' . number_format($sumCoachAll, 0, ',', '.')) : '$ -';

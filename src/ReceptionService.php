@@ -91,6 +91,9 @@ final class ReceptionService
 
     private array $erpEquipotypeIdsByFeatureCache = [];
 
+    /** @var array<string, array{fname: string, lname: string}>|null */
+    private ?array $workersByNormNameCache = null;
+
     /** @var array<string, array<string, bool>> */
     private array $erpColumnExistsCache = [];
 
@@ -18715,6 +18718,177 @@ SQL;
     }
 
     /**
+     * Limpia y normaliza una inicial eliminando tildes y caracteres especiales.
+     */
+    private function cleanBonusInitial(string $str): string
+    {
+        $str = mb_strtoupper(trim($str));
+        if ($str === '') {
+            return '';
+        }
+        $ch = mb_substr($str, 0, 1);
+        $map = [
+            'Á' => 'A', 'À' => 'A', 'Ä' => 'A', 'Â' => 'A', 'Ã' => 'A', 'Å' => 'A',
+            'É' => 'E', 'È' => 'E', 'Ë' => 'E', 'Ê' => 'E',
+            'Í' => 'I', 'Ì' => 'I', 'Ï' => 'I', 'Î' => 'I',
+            'Ó' => 'O', 'Ò' => 'O', 'Ö' => 'O', 'Ô' => 'O', 'Õ' => 'O',
+            'Ú' => 'U', 'Ù' => 'U', 'Ü' => 'U', 'Û' => 'U',
+            'Ñ' => 'N',
+        ];
+        return $map[$ch] ?? $ch;
+    }
+
+    /**
+     * Resuelve las partes (primer nombre, primer apellido, segundo apellido) de un operador.
+     *
+     * @return array{nombre: string, apellido1: string, apellido2: string}
+     */
+    public function resolveOperatorNameParts(string $fullName): array
+    {
+        $fullName = trim($fullName);
+        if ($fullName === '') {
+            return ['nombre' => '', 'apellido1' => '', 'apellido2' => ''];
+        }
+
+        if ($this->workersByNormNameCache === null) {
+            $this->workersByNormNameCache = [];
+            $allWorkers = $this->getAllActiveWorkers();
+            foreach ($allWorkers as $w) {
+                $fname = trim((string)($w['wrk_firstname'] ?? ''));
+                $lname = trim((string)($w['wrk_lastname'] ?? ''));
+                $full = trim($fname . ' ' . $lname);
+                $norm = mb_strtolower((string)preg_replace('/\s+/', ' ', $full));
+                if ($norm !== '') {
+                    $this->workersByNormNameCache[$norm] = ['fname' => $fname, 'lname' => $lname];
+                }
+            }
+        }
+
+        $normInput = mb_strtolower((string)preg_replace('/\s+/', ' ', $fullName));
+        if (isset($this->workersByNormNameCache[$normInput])) {
+            $w = $this->workersByNormNameCache[$normInput];
+            $fnParts = preg_split('/\s+/', $w['fname']) ?: [];
+            $lnParts = preg_split('/\s+/', $w['lname']) ?: [];
+            $pNombre = $fnParts[0] ?? '';
+            $pApellido = $lnParts[0] ?? '';
+            $sApellido = $lnParts[1] ?? '';
+            if (in_array(mb_strtolower($pApellido), ['de', 'del', 'la', 'las', 'los'], true) && isset($lnParts[1])) {
+                $pApellido = $lnParts[1];
+                $sApellido = $lnParts[2] ?? '';
+            }
+            return ['nombre' => $pNombre, 'apellido1' => $pApellido, 'apellido2' => $sApellido];
+        }
+
+        // Fallback: parseo de la cadena por palabras
+        $words = preg_split('/\s+/', $fullName) ?: [];
+        $cnt = count($words);
+        if ($cnt >= 4) {
+            return ['nombre' => $words[0], 'apellido1' => $words[2], 'apellido2' => $words[3]];
+        }
+        if ($cnt === 3) {
+            return ['nombre' => $words[0], 'apellido1' => $words[1], 'apellido2' => $words[2]];
+        }
+        if ($cnt === 2) {
+            return ['nombre' => $words[0], 'apellido1' => $words[1], 'apellido2' => ''];
+        }
+        return ['nombre' => $words[0] ?? '', 'apellido1' => '', 'apellido2' => ''];
+    }
+
+    /**
+     * Resuelve y construye el mapeo de códigos/iniciales de operadores para planillas de bonos.
+     *
+     * Regla oficial:
+     * - Se toma la 1ª letra del primer nombre y la 1ª letra del primer apellido (ej. AS, MQ, HC, WE).
+     * - Si hay dos o más operadores en la nómina con las mismas 2 letras, se toma la 1ª letra del segundo apellido
+     *   (ej. MMS vs MMM, ASG, FGM vs FGT).
+     *
+     * @param list<string>|array<string, mixed> $names Lista o conjunto de nombres de operadores
+     * @return array<string, string> Mapeo [nombre_completo => codigo_bono]
+     */
+    public function buildOperatorBonusCodesMap(array $names): array
+    {
+        $uniqueNames = [];
+        foreach ($names as $k => $v) {
+            $n = is_string($k) && !is_numeric($k) ? trim($k) : trim((string)$v);
+            if ($n !== '') {
+                $uniqueNames[$n] = true;
+            }
+        }
+        if ($uniqueNames === []) {
+            return [];
+        }
+
+        $parsed = [];
+        $baseCounts = [];
+
+        foreach (array_keys($uniqueNames) as $name) {
+            $parts = $this->resolveOperatorNameParts($name);
+            $l1 = $this->cleanBonusInitial($parts['nombre']);
+            $l2 = $this->cleanBonusInitial($parts['apellido1']);
+            $l3 = $this->cleanBonusInitial($parts['apellido2']);
+
+            if ($l1 === '' && $l2 === '') {
+                $base = 'OP';
+            } elseif ($l2 === '') {
+                $base = $this->cleanBonusInitial(mb_substr($parts['nombre'], 0, 1)) . $this->cleanBonusInitial(mb_substr($parts['nombre'], 1, 1));
+                if ($base === '') {
+                    $base = 'OP';
+                }
+            } else {
+                $base = $l1 . $l2;
+            }
+
+            $parsed[$name] = [
+                'base' => $base,
+                'l1' => $l1,
+                'l2' => $l2,
+                'l3' => $l3,
+            ];
+
+            $baseCounts[$base] = ($baseCounts[$base] ?? 0) + 1;
+        }
+
+        $labels = [];
+        $used = [];
+
+        foreach ($parsed as $name => $info) {
+            $base = $info['base'];
+            if (($baseCounts[$base] ?? 1) > 1 && $info['l3'] !== '') {
+                $code = $info['l1'] . $info['l2'] . $info['l3'];
+            } else {
+                $code = $base;
+            }
+
+            if (isset($used[$code])) {
+                $disambig = $info['l3'] !== '' ? $info['l3'] : '2';
+                $code = $info['l1'] . $info['l2'] . $disambig;
+                if (isset($used[$code])) {
+                    $code .= '2';
+                }
+            }
+
+            $used[$code] = true;
+            $labels[$name] = $code;
+        }
+
+        return $labels;
+    }
+
+    /**
+     * Obtiene el código de bono para un operador específico dado un contexto de operadores.
+     */
+    public function getOperatorBonusCode(string $fullName, array $contextNames = []): string
+    {
+        $fullName = trim($fullName);
+        if ($fullName === '') {
+            return 'SIN';
+        }
+        $set = $contextNames !== [] ? array_unique(array_merge($contextNames, [$fullName])) : [$fullName];
+        $map = $this->buildOperatorBonusCodesMap($set);
+        return $map[$fullName] ?? 'OP';
+    }
+
+    /**
      * @return list<string>
      */
     public function listBonusCodes(): array
@@ -19982,9 +20156,9 @@ SELECT
     MAX(pa.ag_amount) AS requested_units,
     MAX(pa.ag_amount) AS requested_units_pa,
     0 AS requested_units_item,
-    MAX(e.produced_units) AS produced_units,
-    MAX(e.produced_linear_meters) AS produced_linear_meters,
-    MAX(e.produced_machine_meters) AS produced_machine_meters,
+    SUM(e.produced_units) AS produced_units,
+    SUM(e.produced_linear_meters) AS produced_linear_meters,
+    SUM(e.produced_machine_meters) AS produced_machine_meters,
     0 AS item_prodcalc_fuelle_act,
     MAX(COALESCE(pwi.win_equipoid, pa.ag_equipo_id, 0)) AS win_equipoid,
     {$defectSelectSqlLegacy}
@@ -19992,9 +20166,9 @@ FROM (
     SELECT
         x.evt_prod_worker_otid,
         x.event_date,
-        MAX(x.sum_units) AS produced_units,
-        MAX(x.sum_linear) AS produced_linear_meters,
-        MAX(x.sum_machine) AS produced_machine_meters
+        SUM(x.sum_units) AS produced_units,
+        SUM(x.sum_linear) AS produced_linear_meters,
+        SUM(x.sum_machine) AS produced_machine_meters
     FROM (
         SELECT
             evt_prod_worker_otid,
@@ -20045,9 +20219,9 @@ SELECT
     MAX(CASE WHEN pa.ag_amount IS NOT NULL AND pa.ag_amount > 0 THEN pa.ag_amount ELSE oi.item_amount END) AS requested_units,
     MAX(pa.ag_amount) AS requested_units_pa,
     MAX(oi.item_amount) AS requested_units_item,
-    MAX(e.produced_units) AS produced_units,
-    MAX(e.produced_linear_meters) AS produced_linear_meters,
-    MAX(e.produced_machine_meters) AS produced_machine_meters,
+    SUM(e.produced_units) AS produced_units,
+    SUM(e.produced_linear_meters) AS produced_linear_meters,
+    SUM(e.produced_machine_meters) AS produced_machine_meters,
     {$defectSelectSqlExtended},
     MAX(c.cust_name) AS client_label,
     MAX(UPPER(cat.cat_prefix)) AS product_type,
@@ -20072,9 +20246,9 @@ FROM (
     SELECT
         x.evt_prod_worker_otid,
         x.event_date,
-        MAX(x.sum_units) AS produced_units,
-        MAX(x.sum_linear) AS produced_linear_meters,
-        MAX(x.sum_machine) AS produced_machine_meters
+        SUM(x.sum_units) AS produced_units,
+        SUM(x.sum_linear) AS produced_linear_meters,
+        SUM(x.sum_machine) AS produced_machine_meters
     FROM (
         SELECT
             evt_prod_worker_otid,
