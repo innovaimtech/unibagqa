@@ -10451,13 +10451,13 @@ SQL;
             SELECT 
                 e.evt_prod_worker_otid,
                 SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
-                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE \'%Bobina Semielaborada%\')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                          THEN e.evt_amount ELSE 0 END) AS produced_units,
                 SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
-                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE \'%Bobina Semielaborada%\')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                          THEN e.evt_amount_metros_lineales ELSE 0 END) AS produced_meters,
                 SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
-                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE \\'%Bobina Semielaborada%\\')
+                          AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
                          THEN e.evt_amount_metros_maquina ELSE 0 END) AS produced_meters_maquina,
                 SUM(CASE WHEN LOWER(e.evt_type) IN ('prod', 'production', 'prodsericolor')
                           AND (e.evt_comments IS NULL OR e.evt_comments NOT LIKE '%Bobina Semielaborada%')
