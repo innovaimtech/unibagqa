@@ -522,7 +522,7 @@ final class ProductionService
                                t1x.fab_print_colordesc_1, t1x.fab_print_colordesc_2, t1x.fab_print_colordesc_3,
                                t1x.fab_print_colordesc_4, t1x.fab_print_colordesc_5, t1x.fab_print_colordesc_6,
                                teq.equipo_name, teqt.type_ant_title, teq.equipo_type_id, teq.equipo_prod_isprinter_flexo, teq.equipo_prod_isprinter_seri,
-                               (SELECT COALESCE(SUM(t_ev.evt_amount), 0) FROM prod_worker_ot t_ot INNER JOIN prod_worker_ot_events t_ev ON t_ev.evt_prod_worker_otid = t_ot.id WHERE t_ot.wok_ag_id = t0.id AND t_ev.evt_type = 'prod' AND t_ev.evt_status > 0 AND (t_ev.evt_comments IS NULL OR t_ev.evt_comments NOT LIKE '%Bobina Semielaborada%')) AS total_produced
+                               (SELECT COALESCE(SUM(t_ev.evt_amount), 0) FROM prod_worker_ot t_ot INNER JOIN prod_worker_ot_events t_ev ON t_ev.evt_prod_worker_otid = t_ot.id WHERE t_ot.wok_ag_id = t0.id AND t_ev.evt_type = 'prod' AND t_ev.evt_status > 0 AND (t_ev.evt_comments IS NULL OR (t_ev.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t_ev.evt_comments NOT LIKE '%ROLL-SE-%'))) AS total_produced
                 FROM prod_agenda t0
                 LEFT OUTER JOIN prod_header t3x ON t0.ag_prdid = t3x.id
                 INNER JOIN orders t1 ON t0.ag_reqid = t1.id
@@ -1464,7 +1464,7 @@ final class ProductionService
                  WHERE evt_prod_worker_otid = :ot_id
                    AND evt_type = 'prod'
                    AND evt_status > 0
-                   AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')"
+                   AND (evt_comments IS NULL OR (evt_comments NOT LIKE '%Bobina Semielaborada%' AND evt_comments NOT LIKE '%ROLL-SE-%'))"
             );
             $stmtTot->execute([':ot_id' => (int)$workerOt['id']]);
             $tRow = $stmtTot->fetch();
@@ -1492,7 +1492,7 @@ final class ProductionService
                  WHERE t2.wok_ag_id = :ag_id
                    AND t3.evt_type = 'prod'
                    AND t3.evt_status > 0
-                   AND (t3.evt_comments IS NULL OR t3.evt_comments NOT LIKE '%Bobina Semielaborada%')"
+                   AND (t3.evt_comments IS NULL OR (t3.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t3.evt_comments NOT LIKE '%ROLL-SE-%'))"
             );
             $stmtAgTot->execute([':ag_id' => $agId]);
             $agRow = $stmtAgTot->fetch();
@@ -1826,7 +1826,7 @@ final class ProductionService
                 AND (
                     LOWER(t1.evt_type) NOT IN ('prod', 'production', 'prodsericolor')
                     OR t1.evt_comments IS NULL
-                    OR t1.evt_comments NOT LIKE '%Bobina Semielaborada%'
+                    OR (t1.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t1.evt_comments NOT LIKE '%ROLL-SE-%')
                 )
                 ORDER BY t1.evt_crtdat DESC, t1.id DESC";
 
@@ -2145,7 +2145,7 @@ final class ProductionService
                             evt_amount_metros_lineales = 0,
                             evt_amount_metros_maquina = 0
                         WHERE evt_prod_worker_otid = :ot_id
-                          AND evt_comments LIKE '%Bobina Semielaborada%'
+                          AND (evt_comments LIKE '%Bobina Semielaborada%' OR evt_comments LIKE '%ROLL-SE-%')
                           AND id != :cur_eid
                     ")->execute([':now' => $now, ':ot_id' => $workerOtId, ':cur_eid' => $eventId]);
                 } catch (Throwable) {}
@@ -3105,6 +3105,25 @@ final class ProductionService
                     $erpComment .= " (" . trim($comments) . ")";
                 }
 
+                // Guardia anti-duplicidad: si ya se cargó esta misma bobina en los últimos 15 segundos para esta OT, no duplicar evento
+                $stmtCheckDupMat = $this->erpPdo->prepare("
+                    SELECT id FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_type = 'materiales'
+                      AND evt_comments LIKE :roll_matcher
+                      AND evt_crtdat >= :since_ts
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stmtCheckDupMat->execute([
+                    ':ot_id' => $workerOtId,
+                    ':roll_matcher' => "%{$rollCode}%",
+                    ':since_ts' => $now - 15,
+                ]);
+                if ($stmtCheckDupMat->fetchColumn()) {
+                    $assignedCount++;
+                    continue;
+                }
+
                 $stmtErp = $this->erpPdo->prepare(
                     "INSERT INTO prod_worker_ot_events
                      (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
@@ -3177,6 +3196,26 @@ final class ProductionService
             $rollCode = $roll['roll_code'] ?? "ID #{$rollId}";
             $currentKg = (float)($roll['weight_kg'] ?? 0);
             $actualEntryKg = $entryWeightKg > 0 ? $entryWeightKg : $currentKg;
+
+            // Guardia anti-duplicidad: si ya se montó esta misma bobina en los últimos 15 segundos para esta OT, evitar duplicidad
+            if ($this->erpPdo !== null) {
+                $stDupMount = $this->erpPdo->prepare("
+                    SELECT id FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_type = 'materiales'
+                      AND evt_comments LIKE :matcher
+                      AND evt_crtdat >= :since_ts
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stDupMount->execute([
+                    ':ot_id' => $workerOtId,
+                    ':matcher' => "%Montaje de Bobina " . ($rollCode ?: "ID #{$rollId}") . "%",
+                    ':since_ts' => $now - 15,
+                ]);
+                if ($stDupMount->fetchColumn()) {
+                    return ['ok' => true, 'roll_code' => $rollCode, 'entry_weight_kg' => $actualEntryKg, 'duplicate_prevented' => true];
+                }
+            }
 
             // Actualizar peso de la bobina en TRZ al peso de ingreso medido
             if ($entryWeightKg > 0) {
@@ -4201,6 +4240,30 @@ final class ProductionService
         }
 
         try {
+            // Guardia anti-duplicidad: si ya se generó una bobina de salida para esta OT con este peso en los últimos 15 segundos
+            $stDupRoll = $this->trzPdo->prepare("
+                SELECT id, roll_code FROM rolls
+                WHERE source_work_order_id = :ot_id
+                  AND weight_kg = :w
+                  AND (:pid IS NULL OR parent_roll_id = :pid)
+                  AND created_at >= DATE_SUB(NOW(), INTERVAL 15 SECOND)
+                ORDER BY id DESC LIMIT 1
+            ");
+            $stDupRoll->execute([
+                ':ot_id' => $workerOtId,
+                ':w' => number_format($weightKg, 3, '.', ''),
+                ':pid' => ($parentRollId !== null && $parentRollId > 0) ? $parentRollId : null,
+            ]);
+            $existingRoll = $stDupRoll->fetch(PDO::FETCH_ASSOC);
+            if ($existingRoll) {
+                return [
+                    'ok' => true,
+                    'child_roll_id' => (int)$existingRoll['id'],
+                    'child_roll_code' => (string)$existingRoll['roll_code'],
+                    'duplicate_prevented' => true,
+                ];
+            }
+
             $normalizedSourceRollIds = [];
             foreach ($sourceRollIds as $sourceRollId) {
                 $sourceRollId = (int)$sourceRollId;
@@ -4679,7 +4742,8 @@ final class ProductionService
                                FROM prod_worker_ot_events e
                               WHERE e.evt_prod_worker_otid = t1.id
                                 AND e.evt_type = 'prod'
-                                AND e.evt_status > 0) AS total_produced_qty,
+                                AND e.evt_status > 0
+                                AND (e.evt_comments IS NULL OR (e.evt_comments NOT LIKE '%Bobina Semielaborada%' AND e.evt_comments NOT LIKE '%ROLL-SE-%'))) AS total_produced_qty,
                             (SELECT COALESCE(SUM(e.prod_bobina_kg), 0)
                                FROM prod_worker_ot_events e
                               WHERE e.evt_prod_worker_otid = t1.id
@@ -4844,7 +4908,8 @@ final class ProductionService
                               FROM prod_worker_ot_events e
                              WHERE e.evt_prod_worker_otid = t1.id
                                AND e.evt_type = 'prod'
-                               AND e.evt_status > 0) AS total_produced_qty,
+                               AND e.evt_status > 0
+                               AND (e.evt_comments IS NULL OR (e.evt_comments NOT LIKE '%Bobina Semielaborada%' AND e.evt_comments NOT LIKE '%ROLL-SE-%'))) AS total_produced_qty,
                            (SELECT COALESCE(SUM(e.prod_bobina_kg), 0)
                               FROM prod_worker_ot_events e
                              WHERE e.evt_prod_worker_otid = t1.id
@@ -4952,7 +5017,8 @@ final class ProductionService
                               FROM prod_worker_ot_events e
                              WHERE e.evt_prod_worker_otid = t1.id
                                AND e.evt_type = 'prod'
-                               AND e.evt_status > 0) AS total_produced_qty,
+                               AND e.evt_status > 0
+                               AND (e.evt_comments IS NULL OR (e.evt_comments NOT LIKE '%Bobina Semielaborada%' AND e.evt_comments NOT LIKE '%ROLL-SE-%')) ) AS total_produced_qty,
                            (SELECT COALESCE(SUM(e.prod_bobina_kg), 0)
                               FROM prod_worker_ot_events e
                              WHERE e.evt_prod_worker_otid = t1.id
@@ -5915,7 +5981,7 @@ final class ProductionService
                         evt_amount_metros_lineales = 0,
                         evt_amount_metros_maquina = 0
                     WHERE evt_prod_worker_otid = :ot_id
-                      AND evt_comments LIKE '%Bobina Semielaborada%'
+                      AND (evt_comments LIKE '%Bobina Semielaborada%' OR evt_comments LIKE '%ROLL-SE-%')
                       AND id != :cur_eid
                     ")->execute([':now' => $now, ':ot_id' => $workerOtId, ':cur_eid' => $lastProdId]);
                 }
@@ -5949,7 +6015,7 @@ final class ProductionService
                         evt_amount_metros_lineales = 0,
                         evt_amount_metros_maquina = 0
                     WHERE evt_prod_worker_otid = :ot_id
-                      AND evt_comments LIKE '%Bobina Semielaborada%'
+                      AND (evt_comments LIKE '%Bobina Semielaborada%' OR evt_comments LIKE '%ROLL-SE-%')
                       AND id != :cur_eid
                     ")->execute([':now' => $now, ':ot_id' => $workerOtId, ':cur_eid' => $lastProdId]);
                 }
@@ -6034,7 +6100,7 @@ final class ProductionService
                        t1x.fab_printtype, t1x.fab_design_imagehash, t1x.fab_design_name, t1x.item_img_hash,
                        t1x.fab_print_colordesc_1, t1x.fab_print_colordesc_2, t1x.fab_print_colordesc_3,
                        t1x.fab_print_colordesc_4, t1x.fab_print_colordesc_5, t1x.fab_print_colordesc_6,
-                       (SELECT COALESCE(SUM(evt_amount), 0) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = t1.id AND evt_type = 'prod' AND evt_status > 0 AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')) AS total_produced
+                       (SELECT COALESCE(SUM(evt_amount), 0) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = t1.id AND evt_type = 'prod' AND evt_status > 0 AND (evt_comments IS NULL OR (evt_comments NOT LIKE '%Bobina Semielaborada%' AND evt_comments NOT LIKE '%ROLL-SE-%'))) AS total_produced
                 FROM prod_worker_ot t1
                 INNER JOIN prod_worker_init t2 ON t1.wok_init_id = t2.id
                 LEFT OUTER JOIN equipo t7 ON t2.win_equipoid = t7.id
@@ -6086,7 +6152,7 @@ final class ProductionService
                        t0.id AS ag_id, t0.ag_amount,
                        t3x.prd_number,
                        t5.req_number, t4.cust_name, t2x.item_title, t2x.item_number_prod,
-                       (SELECT SUM(evt_amount) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = t1.id AND evt_type = 'prod' AND evt_status > 0 AND (evt_comments IS NULL OR evt_comments NOT LIKE '%Bobina Semielaborada%')) AS total_produced
+                       (SELECT SUM(evt_amount) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = t1.id AND evt_type = 'prod' AND evt_status > 0 AND (evt_comments IS NULL OR (evt_comments NOT LIKE '%Bobina Semielaborada%' AND evt_comments NOT LIKE '%ROLL-SE-%'))) AS total_produced
                 FROM prod_worker_ot t1
                 INNER JOIN prod_worker_init t2 ON t1.wok_init_id = t2.id
                 LEFT OUTER JOIN equipo t7 ON t2.win_equipoid = t7.id
@@ -9029,7 +9095,7 @@ final class ProductionService
                     SELECT id, evt_amount, prod_bobina_kg, evt_amount_metros_lineales, evt_comments, evt_crtdat
                     FROM prod_worker_ot_events
                     WHERE evt_prod_worker_otid = :ot_id
-                      AND evt_comments LIKE '%Bobina Semielaborada%'
+                      AND (evt_comments LIKE '%Bobina Semielaborada%' OR evt_comments LIKE '%ROLL-SE-%')
                       AND evt_status > 0
                     ORDER BY id ASC
                 ");
@@ -9817,6 +9883,24 @@ final class ProductionService
                 $evtComment .= " (" . trim($comments) . ")";
             }
 
+            // Guardia anti-duplicidad: si ya se cargó esta misma bobina en los últimos 15 segundos para esta OT
+            $stmtCheckDupCasoA = $this->erpPdo->prepare("
+                SELECT id FROM prod_worker_ot_events
+                WHERE evt_prod_worker_otid = :ot_id
+                  AND evt_type = 'materiales'
+                  AND evt_comments LIKE :roll_matcher
+                  AND evt_crtdat >= :since_ts
+                ORDER BY id DESC LIMIT 1
+            ");
+            $stmtCheckDupCasoA->execute([
+                ':ot_id' => $workerOtId,
+                ':roll_matcher' => "%{$rollCode}%",
+                ':since_ts' => $now - 15,
+            ]);
+            if ($stmtCheckDupCasoA->fetchColumn()) {
+                return ['ok' => true, 'roll_id' => (int)($newRollId ?? 0), 'roll_code' => $rollCode, 'message' => "Bobina {$rollCode} asignada exitosamente a la OT y máquina."];
+            }
+
             $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events
                  (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
@@ -9912,6 +9996,24 @@ final class ProductionService
                 $evtComment = "Carga Bobina Trazable: {$rCode} [{$sku}] ({$wKg} kg) asignada a máquina por {$operatorName}";
                 if (trim($comments) !== '') {
                     $evtComment .= " (" . trim($comments) . ")";
+                }
+
+                // Guardia anti-duplicidad: si ya se cargó esta misma bobina en los últimos 15 segundos para esta OT
+                $stmtCheckDupCasoB = $this->erpPdo->prepare("
+                    SELECT id FROM prod_worker_ot_events
+                    WHERE evt_prod_worker_otid = :ot_id
+                      AND evt_type = 'materiales'
+                      AND evt_comments LIKE :roll_matcher
+                      AND evt_crtdat >= :since_ts
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stmtCheckDupCasoB->execute([
+                    ':ot_id' => $workerOtId,
+                    ':roll_matcher' => "%{$rCode}%",
+                    ':since_ts' => $now - 15,
+                ]);
+                if ($stmtCheckDupCasoB->fetchColumn()) {
+                    return ['ok' => true, 'roll_id' => $trzRollId, 'roll_code' => $rCode, 'message' => "Bobina {$rCode} asignada exitosamente a la máquina y OT."];
                 }
 
                 $this->erpPdo->prepare("

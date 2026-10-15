@@ -2022,6 +2022,48 @@ function renderProdwrkShell(
 </tr>
 </table>
 
+<script>
+(function() {
+    // Protección global contra doble clic y envíos duplicados en formularios de producción
+    document.addEventListener('submit', function(e) {
+        var form = e.target;
+        if (!form || form.tagName !== 'FORM') return;
+
+        if (form.getAttribute('data-submitting') === 'true') {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return false;
+        }
+
+        form.setAttribute('data-submitting', 'true');
+
+        var btns = form.querySelectorAll('button[type="submit"], input[type="submit"]');
+        btns.forEach(function(btn) {
+            btn.setAttribute('data-original-html', btn.innerHTML || btn.value);
+            if (btn.tagName === 'BUTTON') {
+                btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Procesando...';
+            } else {
+                btn.value = 'Procesando...';
+            }
+            btn.style.opacity = '0.65';
+            btn.style.pointerEvents = 'none';
+        });
+
+        setTimeout(function() {
+            form.removeAttribute('data-submitting');
+            btns.forEach(function(btn) {
+                var orig = btn.getAttribute('data-original-html');
+                if (orig) {
+                    if (btn.tagName === 'BUTTON') btn.innerHTML = orig;
+                    else btn.value = orig;
+                }
+                btn.style.opacity = '';
+                btn.style.pointerEvents = '';
+            });
+        }, 8000);
+    }, true);
+})();
+</script>
 </body>
 </html>
 <?php
