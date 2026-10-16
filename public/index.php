@@ -15739,6 +15739,12 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     echo '</div>';
 
     echo '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+    $bridgeStatus = method_exists($activePrinter, 'checkBridgeStatus') ? $activePrinter->checkBridgeStatus() : ['online' => true];
+    if ($bridgeStatus['online']) {
+        echo '<span style="background:#059669;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px" title="El script print_bridge.ps1 está escuchando en puerto 8767">🟢 Puente Térmico Activo</span>';
+    } else {
+        echo '<span style="background:#b91c1c;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px" title="Inicia iniciar_proyecto.bat para conectar la impresora térmica">🔴 Puente 8767 Desconectado</span>';
+    }
     if (!empty($existingRolls)) {
         echo '<a class="btn btn-primary" href="/import-containers/' . $containerId . '/print-labels?all=1" target="_blank" title="Abrir todas las etiquetas para imprimir por lote o navegador">🖨️ Imprimir Todas (' . count($existingRolls) . ')</a>';
     }
@@ -15768,7 +15774,24 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
         echo '<div class="alert alert-ok"><span>✅</span> <div>' . h($genMsg) . '</div></div>';
     }
     if ($printErr !== '') {
-        echo '<div class="alert alert-err"><span>⚠️</span> <div>Aviso de impresión: ' . h($printErr) . '</div></div>';
+        $isConnErr = str_contains($printErr, '8767') || str_contains($printErr, 'Connection refused');
+        echo '<div class="alert alert-err" style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">';
+        echo '<div style="display:flex;align-items:flex-start;gap:10px">';
+        echo '<span style="font-size:20px">⚠️</span>';
+        echo '<div>';
+        echo '<div style="font-weight:800">Aviso de impresión térmica:</div>';
+        echo '<div style="font-size:12.5px;margin-top:2px">' . h($printErr) . '</div>';
+        if ($isConnErr) {
+            echo '<div style="font-size:12px;margin-top:6px;color:#991b1b">💡 <strong>Solución:</strong> Para imprimir directo en térmica sin ventana de diálogo, asegúrate de haber ejecutado <code>iniciar_proyecto.bat</code> y que la ventana de <em>Unibag Print Bridge (Puerto 8767)</em> permanezca abierta.</div>';
+        }
+        echo '</div>';
+        echo '</div>';
+        if (!empty($existingRolls)) {
+            echo '<div style="align-self:center">';
+            echo '<a class="btn btn-outline" style="background:#fff;border-color:#cbd5e1;padding:6px 12px;font-size:12px;font-weight:800" href="/import-containers/' . $containerId . '/print-labels?all=1" target="_blank">🖨️ Imprimir en Navegador</a>';
+            echo '</div>';
+        }
+        echo '</div>';
     }
 
     // Disposición: Vista Previa Diseño Flexo + Panel de Líneas

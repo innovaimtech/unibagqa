@@ -78,6 +78,36 @@ final class PrintService
         return $mode !== '' && $mode !== 'none' && $mode !== 'off';
     }
 
+    public function checkBridgeStatus(): array
+    {
+        if (!$this->isEnabled()) {
+            return ['online' => false, 'message' => 'Impresión térmica deshabilitada'];
+        }
+        if (!function_exists('curl_init')) {
+            return ['online' => false, 'message' => 'cURL no disponible en PHP'];
+        }
+        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
+        $healthUrl = preg_replace('#/print$#i', '/health', $url);
+        if ($healthUrl === $url) {
+            $healthUrl = 'http://127.0.0.1:8767/health';
+        }
+        $ch = curl_init($healthUrl);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_IPRESOLVE => defined('CURL_IPRESOLVE_V4') ? CURL_IPRESOLVE_V4 : 1,
+            CURLOPT_CONNECTTIMEOUT_MS => 400,
+            CURLOPT_TIMEOUT_MS => 600,
+        ]);
+        $res = curl_exec($ch);
+        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($res !== false && $httpCode === 200) {
+            return ['online' => true, 'message' => 'Puente conectado (puerto 8767)'];
+        }
+        return ['online' => false, 'message' => 'Puente desconectado (puerto 8767)'];
+    }
+
     public function printRollLabel(array $roll): array
     {
         $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
