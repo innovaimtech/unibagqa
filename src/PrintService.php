@@ -406,8 +406,9 @@ final class PrintService
         $warehouseCode = $this->z((string)($roll['warehouse_code'] ?? '-'));
         $warehouseName = $this->z((string)($roll['warehouse_name'] ?? ''));
 
+        $noWeight = !empty($roll['no_weight']) || (isset($roll['weight_str']) && trim((string)$roll['weight_str']) === '-');
         $weightKg = round((float)($roll['weight_kg'] ?? 0), 2);
-        $weightStr = $weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID';
+        $weightStr = $noWeight ? '-' : ($weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID');
 
         $metersVal = (float)($roll['meters'] ?? 0);
         $metersStr = $metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' m' : '-';
@@ -534,8 +535,9 @@ final class PrintService
         $product = $this->t((string)($roll['sku_description'] ?? '-'));
         $arrivalDate = $this->t($this->resolveRollDate($roll));
         $warehouseCode = $this->t((string)($roll['warehouse_code'] ?? '-'));
+        $noWeight = !empty($roll['no_weight']) || (isset($roll['weight_str']) && trim((string)$roll['weight_str']) === '-');
         $weightKg = round((float)($roll['weight_kg'] ?? 0), 2);
-        $weightStr = $weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID';
+        $weightStr = $noWeight ? '-' : ($weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID');
         $metersVal = (float)($roll['meters'] ?? 0);
         $metersStr = $metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' m' : '-';
         $widthMm = (float)($roll['width_mm'] ?? 0);
@@ -594,8 +596,9 @@ final class PrintService
         $product = strtoupper($this->t((string)($roll['sku_description'] ?? '-')));
         $arrivalDate = strtoupper($this->t($this->resolveRollDate($roll)));
         $warehouseCode = strtoupper($this->t((string)($roll['warehouse_code'] ?? '-')));
+        $noWeight = !empty($roll['no_weight']) || (isset($roll['weight_str']) && trim((string)$roll['weight_str']) === '-');
         $weightKg = round((float)($roll['weight_kg'] ?? 0), 2);
-        $weightStr = strtoupper($this->t($weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID'));
+        $weightStr = $noWeight ? '-' : strtoupper($this->t($weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID'));
         $metersVal = (float)($roll['meters'] ?? 0);
         $metersStr = strtoupper($this->t($metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' M' : '-'));
         $widthMm = (float)($roll['width_mm'] ?? 0);

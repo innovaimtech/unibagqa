@@ -614,3 +614,71 @@ function unibagCanUserPerformModifications(): bool
     return false;
 }
 
+/**
+ * Determina si el usuario autenticado es Javier (Javier Perozo) o cuenta con autorización de Javier.
+ */
+function unibagIsUserJavier(): bool
+{
+    $userId = (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0);
+    $login = strtoupper(trim((string)(
+        $_SESSION['user_login'] 
+        ?? $_SESSION['auth_username'] 
+        ?? $_SESSION['user_name'] 
+        ?? ''
+    )));
+    $email = strtolower(trim((string)($_SESSION['user_mail'] ?? '')));
+    $displayName = strtoupper(trim((string)(
+        $_SESSION['auth_display_name'] 
+        ?? $_SESSION['operator_name'] 
+        ?? ''
+    )));
+    $firstName = strtoupper(trim((string)($_SESSION['user_firstname'] ?? $_SESSION['wrk_firstname'] ?? '')));
+    $lastName = strtoupper(trim((string)($_SESSION['user_lastname'] ?? $_SESSION['wrk_lastname'] ?? '')));
+    $fullName = trim($firstName . ' ' . $lastName);
+    $rut = trim((string)($_SESSION['user_rut'] ?? ''));
+
+    // 1. Verificación por ID de usuario ERP (4129 = Javier Perozo)
+    if ($userId === 4129) {
+        return true;
+    }
+
+    // 2. Verificación por Login
+    if ($login === 'JAVIER' || str_starts_with($login, 'JAVIER')) {
+        return true;
+    }
+
+    // 3. Verificación por Email oficial
+    if ($email === 'javier.perozo@erp-unibag.cl') {
+        return true;
+    }
+
+    // 4. Verificación por RUT oficial
+    if ($rut === '27.343.502-6') {
+        return true;
+    }
+
+    // 5. Verificación por Display Name o Nombre Completo
+    if (str_starts_with($displayName, 'JAVIER') || str_contains($fullName, 'JAVIER')) {
+        return true;
+    }
+
+    // 6. Respaldo directo en BD si hay user_id
+    if ($userId > 0) {
+        try {
+            $erp = Db::erpPdo();
+            $stmt = $erp->prepare("SELECT user_login, user_firstname FROM user WHERE id = :id LIMIT 1");
+            $stmt->execute([':id' => $userId]);
+            $u = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($u) {
+                $dbLogin = strtoupper(trim((string)($u['user_login'] ?? '')));
+                $dbFirst = strtoupper(trim((string)($u['user_firstname'] ?? '')));
+                if ($dbLogin === 'JAVIER' || str_starts_with($dbFirst, 'JAVIER')) {
+                    return true;
+                }
+            }
+        } catch (Throwable) {}
+    }
+
+    return false;
+}
+

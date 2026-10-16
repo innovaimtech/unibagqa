@@ -828,6 +828,12 @@ function handleProductionRoutes(
         requireCsrf();
         $agId = (int)($_REQUEST['agid'] ?? 0);
         $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
+        if ($workerOtId <= 0 && $agId > 0) {
+            $openOt = $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
+            if ($openOt !== null) {
+                $workerOtId = (int)$openOt['id'];
+            }
+        }
         $pauseId = (int)($_REQUEST['evt_pause_id'] ?? 0);
         $comments = trim((string)($_REQUEST['evt_comments'] ?? ''));
         $submode = trim((string)($_REQUEST['submode'] ?? ''));
@@ -2436,6 +2442,17 @@ function renderProductionOperatorConsole(
     if ($mode === 'production' && $refId <= 0 && $openProdId > 0) {
         $refId = $openProdId;
     }
+
+    // Detectar evento de pausa abierto
+    $openPauseEvent = null;
+    foreach ($events as $ev) {
+        if ($ev['evt_type'] === 'pause' && (int)($ev['evt_enddat'] ?? 0) === 0) {
+            $openPauseEvent = $ev;
+            break;
+        }
+    }
+    $openPauseId = $openPauseEvent !== null ? (int)$openPauseEvent['id'] : 0;
+
     $printedRollsSummary = ($workerOtId > 0 && $isFlexo) ? $prodService->getPrintedRollsSummary($workerOtId) : [];
 
     // Helper format (reproduce printPrice de Unibag eliminando ceros innecesarios a la derecha)
@@ -3580,36 +3597,33 @@ function renderProductionOperatorConsole(
 
         <!-- Tarjeta 3: Botones auxiliares de autocontrol.form.php -->
         <?php
-        $autoHidePauseShortcut = ($isSeri || $isSeriPulpo);
         $autoMaterialsLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
         $autoHasTintasShortcut = $isFlexo;
         ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">
         <tr>
-            <td width="<?=$autoHasTintasShortcut ? ($autoHidePauseShortcut ? '34%' : '25%') : ($autoHidePauseShortcut ? '50%' : '33%')?>" style="padding-right:3px">
+            <td width="<?=$autoHasTintasShortcut ? '25%' : '33%'?>" style="padding-right:3px">
                 <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#293865;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales&fromautocontrol=1'">
                     <i class="fa fa-fw <?= $isRebobinadora ? 'fa-dolly' : 'fa-cubes' ?>"></i> <?=$autoMaterialsLabel?>
                 </div>
             </td>
             <?php if ($autoHasTintasShortcut): ?>
-                <td width="<?=$autoHidePauseShortcut ? '33%' : '25%'?>" style="padding:0 3px">
+                <td width="25%" style="padding:0 3px">
                     <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#1D4ED8;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas&fromautocontrol=1'">
                         <i class="fa fa-fw fa-tint"></i> Tintas
                     </div>
                 </td>
             <?php endif; ?>
-            <td width="<?=$autoHasTintasShortcut ? ($autoHidePauseShortcut ? '33%' : '25%') : ($autoHidePauseShortcut ? '50%' : '34%')?>" style="padding:0 3px">
+            <td width="<?=$autoHasTintasShortcut ? '25%' : '33%'?>" style="padding:0 3px">
                 <div class="btnred" style="width:100%;box-sizing:border-box;background-color:#D64141;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion&fromautocontrol=1'">
                     <i class="fa fa-fw fa-wrench"></i> Mantención
                 </div>
             </td>
-            <?php if (!$autoHidePauseShortcut): ?>
-                <td width="<?=$autoHasTintasShortcut ? '25%' : '33%'?>" style="padding-left:3px">
-                    <div class="btngrey" style="width:100%;box-sizing:border-box;background-color:#7F7F7F;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&fromautocontrol=1'">
-                        <i class="fa fa-fw fa-coffee"></i> Pausa
-                    </div>
-                </td>
-            <?php endif; ?>
+            <td width="<?=$autoHasTintasShortcut ? '25%' : '34%'?>" style="padding-left:3px">
+                <div class="btngrey" style="width:100%;box-sizing:border-box;background-color:#7F7F7F;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&fromautocontrol=1'">
+                    <i class="fa fa-fw fa-coffee"></i> Pausa
+                </div>
+            </td>
         </tr>
         </table>
         <?php
@@ -7260,7 +7274,7 @@ function renderProductionOperatorConsole(
                 }
             }
         }
-        $selectedPauseId = $refEvent ? (int)($refEvent['evt_pause_id'] ?? 0) : 1; // 1 = Colación por defecto
+        $selectedPauseId = $refEvent ? (int)($refEvent['evt_pause_id'] ?? 0) : (int)($_GET['pause_id'] ?? 0);
         $pauseComments = $refEvent ? (string)($refEvent['evt_comments'] ?? '') : '';
         $isPauseEnded = $refEvent && !empty($refEvent['evt_enddat']) && (int)$refEvent['evt_enddat'] > 0;
         ?>
@@ -7286,10 +7300,10 @@ function renderProductionOperatorConsole(
                 <tr>
                     <td class="tdleft">Motivo de Pausa</td>
                     <td class="tdnrm">
-                        <select name="evt_pause_id" class="inptxt" style="width:250px" required>
+                        <select name="evt_pause_id" class="inptxt" style="width:350px" required>
                             <option value="">Seleccione motivo...</option>
                             <?php foreach ($pauses as $p): ?>
-                                <option value="<?=$p['id']?>" <?=((int)$p['id'] === $selectedPauseId ? 'selected' : '')?>><?=htmlspecialchars((string)$p['pause_name'])?></option>
+                                <option value="<?=$p['id']?>" <?=((int)$p['id'] === $selectedPauseId ? 'selected' : '')?>><?=htmlspecialchars((string)$p['pause_name'])?><?=!empty($p['pause_code']) ? ' (Código ' . htmlspecialchars((string)$p['pause_code']) . ')' : ''?></option>
                             <?php endforeach; ?>
                         </select>
                     </td>
@@ -7302,15 +7316,15 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">&nbsp;</td>
                     <td class="tdnrm">
                         <?php if ($refId <= 0): ?>
-                            <button type="submit" class="btngrey" style="font-size:14px;padding:8px 20px" onclick="document.getElementById('pause_submode').value='start'">
-                                <i class="fa fa-fw fa-pause"></i> Iniciar Pausa
+                            <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer" onclick="document.getElementById('pause_submode').value='start'">
+                                <i class="fa fa-fw fa-play"></i> Iniciar Pausa
                             </button>
                         <?php elseif (!$isPauseEnded): ?>
-                            <button type="submit" class="btngreen" style="font-size:14px;padding:8px 20px" onclick="document.getElementById('pause_submode').value='end'">
-                                <i class="fa fa-fw fa-play"></i> Terminar Pausa
+                            <button type="submit" class="btnorange" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer" onclick="document.getElementById('pause_submode').value='end'">
+                                <i class="fa fa-fw fa-stop"></i> Terminar Pausa
                             </button>
                         <?php else: ?>
-                            <button type="submit" class="btngreen" style="font-size:14px;padding:8px 20px">
+                            <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer">
                                 <i class="fa fa-fw fa-save"></i> Guardar Cambios
                             </button>
                         <?php endif; ?>
@@ -10602,7 +10616,6 @@ function renderProductionOperatorConsole(
         <!-- ============================================================== -->
         <?php
         $isBarExpanded = ($hasAlis || $isRebobinadora);
-        $hidePauseShortcut = ($isSeri || $isSeriPulpo);
         $actionBtnBaseStyle = 'border-radius:8px;padding:10px 14px;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;min-height:42px;box-shadow:0 1px 3px rgba(15,23,42,0.16);cursor:pointer';
         $actionBtnBlockStyle = $actionBtnBaseStyle . ($isBarExpanded ? '' : 'width:100%;box-sizing:border-box;text-align:center;display:flex;');
         $materialsActionLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
@@ -10671,7 +10684,13 @@ function renderProductionOperatorConsole(
                 </div>
             </td>
 
-            <?php if (!$hidePauseShortcut): ?>
+            <?php if ($openPauseId > 0): ?>
+                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:25%'?>">
+                    <div class="btnorange" style="<?=$actionBtnBlockStyle?>;background-color:#E1A500" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&refid=<?=$openPauseId?>'">
+                        <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar Pausa&nbsp;</nobr>
+                    </div>
+                </td>
+            <?php else: ?>
                 <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:25%'?>">
                     <div class="btngrey" style="<?=$actionBtnBlockStyle?>;background-color:#7F7F7F" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause'">
                         <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Pausa&nbsp;</nobr>

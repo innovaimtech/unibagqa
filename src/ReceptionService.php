@@ -169,6 +169,16 @@ final class ReceptionService
         }
     }
 
+    public function getPdo(): PDO
+    {
+        return $this->pdo;
+    }
+
+    public function getErpPdo(): PDO
+    {
+        return $this->erpPdo;
+    }
+
     /**
      * Asegura que exista el esquema base de TRZ antes de aplicar migraciones incrementales.
      *
@@ -2036,6 +2046,7 @@ SQL;
                     COALESCE(SUM(weight_kg), 0) AS received_weight_kg
              FROM rolls
              WHERE import_container_item_id IN ($placeholders)
+               AND (reception_mode IS NULL OR reception_mode != 'WAREHOUSE_STOCK')
              GROUP BY import_container_item_id"
         );
         $stmt->execute($containerItemIds);
@@ -2064,13 +2075,38 @@ SQL;
                 $cItemId = (int)$erpRow['container_item_id'];
                 $erpAmount = (float)$erpRow['erp_amount'];
                 if ($erpAmount > 0) {
-                    if (!isset($summary[$cItemId])) {
-                        $summary[$cItemId] = [
-                            'received_rolls' => (int)round($erpAmount),
-                            'received_qty' => $erpAmount,
-                            'received_weight_kg' => 0.0,
-                        ];
-                    }
+                    $existingRolls = (int)($summary[$cItemId]['received_rolls'] ?? 0);
+                    $existingQty = (float)($summary[$cItemId]['received_qty'] ?? 0.0);
+                    $existingWeight = (float)($summary[$cItemId]['received_weight_kg'] ?? 0.0);
+                    $summary[$cItemId] = [
+                        'received_rolls' => max($existingRolls, (int)round($erpAmount)),
+                        'received_qty' => max($existingQty, $erpAmount),
+                        'received_weight_kg' => $existingWeight,
+                    ];
+                }
+            }
+
+            // Si el contenedor está cerrado en ERP (sord_status = 4), asegurar que al menos reporte lo ordenado como recibido
+            $cntStatusStmt = $this->erpPdo->prepare(
+                "SELECT sci.id AS container_item_id, sci.sord_amount
+                 FROM supplier_contenedor_items sci
+                 JOIN supplier_contenedor sc ON sc.id = sci.sord_id
+                 WHERE sci.id IN ($placeholders)
+                   AND sc.sord_status = 4"
+            );
+            $cntStatusStmt->execute($containerItemIds);
+            foreach ($cntStatusStmt->fetchAll() as $csRow) {
+                $cItemId = (int)$csRow['container_item_id'];
+                $ordAmount = (float)$csRow['sord_amount'];
+                if ($ordAmount > 0) {
+                    $existingRolls = (int)($summary[$cItemId]['received_rolls'] ?? 0);
+                    $existingQty = (float)($summary[$cItemId]['received_qty'] ?? 0.0);
+                    $existingWeight = (float)($summary[$cItemId]['received_weight_kg'] ?? 0.0);
+                    $summary[$cItemId] = [
+                        'received_rolls' => max($existingRolls, (int)round($ordAmount)),
+                        'received_qty' => max($existingQty, $ordAmount),
+                        'received_weight_kg' => $existingWeight,
+                    ];
                 }
             }
         } catch (\Throwable) {

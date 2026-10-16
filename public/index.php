@@ -1541,12 +1541,12 @@ function code39Svg(string $data, int $height = 70, int $narrow = 2, int $wide = 
     }
     $totalW = $x + 10;
 
-    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" role="img" aria-label="código de barras">' . implode('', $bars) . '</svg>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" shape-rendering="crispEdges" role="img" aria-label="código de barras">' . implode('', $bars) . '</svg>';
 }
 
 /**
  * Genera un código de barras en formato Code 128 (Juego B) en SVG.
- * Alta densidad, ideal para impresoras térmicas de 203 DPI (Barpos Z220T).
+ * Alta densidad, ideal para impresoras térmicas de 203 DPI (Barpos Z220T) y escaneo rápido con pistolas ópticas.
  */
 function code128Svg(string $text, int $height = 42, float $moduleWidth = 1.35): string
 {
@@ -1586,7 +1586,8 @@ function code128Svg(string $text, int $height = 42, float $moduleWidth = 1.35): 
     $chars[] = 106; // Stop Code
 
     $bars = [];
-    $x = 8.0;
+    $quietZone = max(16.0, round($moduleWidth * 10, 1));
+    $x = $quietZone;
     foreach ($chars as $code) {
         $pat = $patterns[$code] ?? '';
         if ($pat === '') {
@@ -1602,9 +1603,9 @@ function code128Svg(string $text, int $height = 42, float $moduleWidth = 1.35): 
             $isBar = !$isBar;
         }
     }
-    $totalW = (int)ceil($x + 8.0);
+    $totalW = (int)ceil($x + $quietZone);
 
-    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" role="img" aria-label="' . htmlspecialchars($text, ENT_QUOTES, 'UTF-8') . '">' . implode('', $bars) . '</svg>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" shape-rendering="crispEdges" role="img" aria-label="' . htmlspecialchars($text, ENT_QUOTES, 'UTF-8') . '">' . implode('', $bars) . '</svg>';
 }
 
 /**
@@ -14421,6 +14422,7 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
           <p>Cargamento internacional · OCs: ' . h((string)($container['po_codes'] ?: '-')) . ' · BL: ' . h((string)($container['bill_of_lading'] ?: '-')) . '</p>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
+          ' . ((unibagIsUserJavier() || unibagCanUserPerformModifications()) ? '<a class="btn" style="background:#0f766e;border-color:#0f766e;color:#fff;font-weight:700;display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:8px" href="/import-containers/' . $containerId . '/no-weight-labels" target="_blank" title="Imprimir etiquetas sin peso con datos del contenedor (Exclusivo Javier)"><span>🏷️</span> Etiquetas Sin Peso</a>' : '') . '
           ' . $archiveBtn . '
           <a class="rec-btn-clear" href="' . h($backUrl) . '">
             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
@@ -14462,12 +14464,15 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
         $body .= '<td>' . $received . '</td>';
         $body .= '<td>' . $pending . '</td>';
         $testLabelBtn = '<a class="btn secondary" style="padding:4px 9px;font-size:11.5px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;display:inline-flex;align-items:center;gap:4px" href="/reception/test-label?type=import&line=' . (int)$ln['import_container_item_id'] . '" target="_blank" title="Ver diseño 10x7 e imprimir prueba física sin recepcionar">🏷️ Probar Etiqueta</a>';
+        $noWeightLineBtn = (unibagIsUserJavier() || unibagCanUserPerformModifications())
+            ? '<a class="btn secondary" style="padding:4px 9px;font-size:11.5px;color:#0f766e;border-color:#99f6e4;background:#f0fdfa;display:inline-flex;align-items:center;gap:4px" href="/import-containers/' . $containerId . '/no-weight-labels?line=' . (int)$ln['import_container_item_id'] . '" target="_blank" title="Imprimir etiquetas sin peso para esta línea">🏷️ Sin Peso</a>'
+            : '';
         if ((string)$container['status'] === 'COMPLETE') {
-            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<span class="rec-badge rec-badge-complete">Finalizada</span></div></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . $noWeightLineBtn . '<span class="rec-badge rec-badge-complete">Finalizada</span></div></td>';
         } elseif ($lineSummary['pending'] <= 0) {
-            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<span class="rec-badge rec-badge-complete">Completa</span></div></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . $noWeightLineBtn . '<span class="rec-badge rec-badge-complete">Completa</span></div></td>';
         } else {
-            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . '<a class="btn" style="padding:5px 12px;font-size:12px" href="/import-containers/' . $containerId . '/receive?line=' . (int)$ln['import_container_item_id'] . '">Recepcionar</a></div></td>';
+            $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:6px;justify-content:flex-end;align-items:center">' . $testLabelBtn . $noWeightLineBtn . '<a class="btn" style="padding:5px 12px;font-size:12px" href="/import-containers/' . $containerId . '/receive?line=' . (int)$ln['import_container_item_id'] . '">Recepcionar</a></div></td>';
         }
         $body .= '</tr>';
     }
@@ -14482,9 +14487,11 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
     if ($cntRollsCount > 0) {
         $body .= '<div class="rec-table-card" style="margin-top:16px"><div style="padding:14px 18px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
         $body .= '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
-        $body .= '<div style="font-weight:800;font-size:15px;color:#0f172a">📦 Bobinas Recepcionadas en este Cargamento</div>';
+        $body .= '<div style="font-weight:800;font-size:15px;color:#0f172a">📦 Bobinas con Trazabilidad Registradas en este Cargamento</div>';
         $body .= '<span id="cnt_rolls_badge_count" style="font-size:11.5px;font-weight:800;background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:12px">' . $cntRollsCount . ' bobinas</span>';
-        $body .= '<span id="cnt_rolls_badge_weight" style="font-size:11.5px;font-weight:800;background:#f0fdf4;color:#16a34a;padding:2px 8px;border-radius:12px">' . number_format($cntRollsWeight, 2, ',', '.') . ' Kg</span>';
+        if ($cntRollsWeight > 0) {
+            $body .= '<span id="cnt_rolls_badge_weight" style="font-size:11.5px;font-weight:800;background:#f0fdf4;color:#16a34a;padding:2px 8px;border-radius:12px">' . number_format($cntRollsWeight, 2, ',', '.') . ' Kg</span>';
+        }
         $body .= '</div>';
         $body .= '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
         $body .= '<input id="cnt_rolls_search" type="text" placeholder="🔍 Filtrar bobina, trazabilidad, SKU..." style="height:32px;padding:0 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;width:240px" oninput="filterCntRolls(this.value)">';
@@ -14494,7 +14501,7 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
         $body .= '</div></div>';
         $body .= '<div class="rec-table-wrap" style="max-height:550px;overflow-y:auto">';
         $body .= '<table id="cnt_rolls_table" class="rec-table" style="font-size:12.5px"><thead><tr style="position:sticky;top:0;background:#f8fafc;z-index:2">';
-        $body .= '<th style="width:40px;text-align:center">N°</th><th>Código Bobina</th><th>Cód. Trazabilidad</th><th>SKU / Artículo</th><th>Bodega</th><th style="text-align:right">Peso Real (Kg)</th><th style="text-align:center">Especificación</th><th>Fecha / Hora</th><th>Operador</th><th style="text-align:right">Acciones</th>';
+        $body .= '<th style="width:40px;text-align:center">N°</th><th>Código Bobina</th><th>Cód. Trazabilidad</th><th>SKU / Artículo</th><th>Bodega</th><th style="text-align:right">Peso Real</th><th style="text-align:center">Especificación</th><th>Fecha / Hora</th><th>Operador</th><th style="text-align:right">Acciones</th>';
         $body .= '</tr></thead><tbody id="cnt_rolls_tbody">';
         $cIdx = 0;
         foreach ($cntRolls as $cr) {
@@ -14503,6 +14510,7 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
             $crCode = (string)($cr['roll_code'] ?? '');
             $crTrz = (string)($cr['traceability_code'] ?? $crCode);
             $crWeight = (float)($cr['weight_kg'] ?? 0);
+            $crMode = (string)($cr['reception_mode'] ?? '');
             $crSku = (string)($cr['sku_code'] ?? '');
             $crDesc = (string)($cr['sku_description'] ?? '');
             $crWh = trim((string)($cr['warehouse_name'] ?? '')) ?: (string)($cr['warehouse_code'] ?? '-');
@@ -14514,18 +14522,24 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
             $crSpec = ($crWidth > 0 || $crMic > 0 || $crMet > 0) ? ($crWidth . 'mm × ' . $crMic . 'µm × ' . number_format($crMet, 0, ',', '.') . 'm') : '-';
             $crFilter = mb_strtolower($crCode . ' ' . $crTrz . ' ' . $crSku . ' ' . $crDesc . ' ' . $crWh . ' ' . $crOp);
 
+            $modeTag = $crMode === 'WAREHOUSE_STOCK' ? '<span style="font-size:10px;background:#f0fdfa;color:#0f766e;border:1px solid #99f6e4;padding:1px 5px;border-radius:4px;font-weight:700;margin-left:4px">Bodega</span>' : '';
+            $weightCellHtml = ($crMode === 'WAREHOUSE_STOCK' || $crWeight <= 0) ? '<span style="color:#64748b;font-weight:700">-</span>' : ('<strong>' . number_format($crWeight, 3, ',', '.') . ' Kg</strong>');
+
             $body .= '<tr class="cnt-roll-row" data-text="' . h($crFilter) . '" data-weight="' . number_format($crWeight, 3, '.', '') . '">';
             $body .= '<td style="text-align:center;color:#64748b">' . $cIdx . '</td>';
-            $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-weight:700">' . h($crCode) . '</span></td>';
+            $body .= '<td><span class="rec-code-link" style="font-family:monospace;font-weight:700">' . h($crCode) . '</span>' . $modeTag . '</td>';
             $body .= '<td><a href="/stock/traceability?q=' . rawurlencode($crTrz) . '" target="_blank" style="font-family:monospace;font-weight:700;color:#0f766e;text-decoration:none;background:#f0fdfa;border:1px solid #ccfbf1;padding:2px 6px;border-radius:4px" title="Ver árbol de trazabilidad 360°">' . h($crTrz) . ' 🔍</a></td>';
             $body .= '<td><div style="font-weight:700">' . h($crSku) . '</div><div style="font-size:11px;color:#64748b;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' . h($crDesc) . '</div></td>';
             $body .= '<td><span class="wh-badge" style="font-size:11px;padding:2px 7px;font-weight:600">' . h($crWh) . '</span></td>';
-            $body .= '<td style="text-align:right"><strong>' . number_format($crWeight, 3, ',', '.') . ' Kg</strong></td>';
+            $body .= '<td style="text-align:right">' . $weightCellHtml . '</td>';
             $body .= '<td style="text-align:center;color:#64748b;font-size:11.5px">' . h($crSpec) . '</td>';
             $body .= '<td style="color:#64748b;font-size:12px">' . h($crDate) . '</td>';
             $body .= '<td style="color:#64748b;font-size:11.5px">' . ($crOp !== '' ? ('👤 ' . h($crOp)) : '-') . '</td>';
             $body .= '<td style="text-align:right;white-space:nowrap"><div style="display:flex;gap:4px;justify-content:flex-end">';
             $body .= '<a class="btn" style="padding:3px 8px;font-size:11px;background:#0284c7;border-color:#0284c7;color:#fff" href="/rolls/' . $crId . '/label?auto_print=1" target="_blank" title="Imprimir etiqueta">🖨️ 10x7</a>';
+            if (unibagIsUserJavier() || unibagCanUserPerformModifications()) {
+                $body .= '<a class="btn secondary" style="padding:3px 7px;font-size:11px;color:#0f766e;border-color:#99f6e4;background:#f0fdfa;font-weight:700" href="/rolls/' . $crId . '/label?no_weight=1&server_print=1" target="_blank" title="Imprimir etiqueta sin peso directa en impresora térmica automática (sin navegador)">⚡ Sin Peso Térmica</a>';
+            }
             if ($printer->isEnabled()) {
                 $body .= '<a class="btn secondary" style="padding:3px 6px;font-size:11px" href="/rolls/' . $crId . '/label?server_print=1" target="_blank" title="Térmico">⚡</a>';
             }
@@ -14558,6 +14572,949 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
     $body .= '</div>';
 
     render('Contenedor ' . $cCode, $body);
+    exit;
+}
+
+if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 1) {
+    $containerId = (int)$m[1];
+    if (!unibagIsUserJavier() && !unibagCanUserPerformModifications()) {
+        http_response_code(403);
+        render('Acceso Restringido', '<div class="card" style="padding:24px;border-left:5px solid #ef4444;background:#fff;border-radius:12px;max-width:640px;margin:30px auto"><h2 style="margin-top:0;color:#991b1b;display:flex;align-items:center;gap:8px"><span>⛔</span> Acceso Restringido</h2><p style="color:#475569;font-size:14px;line-height:1.5">La generación e impresión de etiquetas sin peso con código de trazabilidad para contenedores está reservada y autorizada exclusivamente para <strong>Javier Perozo</strong>.</p><div style="margin-top:16px"><a class="btn secondary" href="/import-containers/' . $containerId . '">Volver al Contenedor</a></div></div>');
+        exit;
+    }
+
+    $container = $service->getImportContainer($containerId);
+    if ($container === null) {
+        http_response_code(404);
+        render('No encontrado', '<div class="card">No existe el contenedor.</div>');
+        exit;
+    }
+
+    $cCode = trim((string)$container['container_code']);
+    $cTitle = $cCode !== '' ? ('Contenedor ' . $cCode) : ('Cargamento #' . $containerId);
+    $allLines = $service->listImportContainerLines($containerId);
+    $filterLineId = isset($_REQUEST['line']) ? (int)$_REQUEST['line'] : 0;
+    $printerProfile = unibagNormalizePrinterProfile((string)($_REQUEST['printer_profile'] ?? 'default'));
+    $activePrinter = $printer->withProfile($printerProfile);
+    $configuredPrinterName = $activePrinter->getConfiguredPrinterName();
+    $configuredPrintLang = strtoupper($activePrinter->getConfiguredPrintLanguage());
+    $isPrinterEnabled = $activePrinter->isEnabled();
+
+    $trzPdo = $trzPdo instanceof PDO ? $trzPdo : (method_exists($service, 'getPdo') ? $service->getPdo() : Db::trzPdo());
+    $service->ensureTraceabilityWarehouseEntriesTable();
+
+    // Consultar bobinas ya registradas con trazabilidad para este contenedor
+    $stmtExisting = $trzPdo->prepare("
+        SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name, w.code AS warehouse_code
+        FROM rolls r
+        LEFT JOIN skus s ON s.id = r.sku_id
+        LEFT JOIN warehouses w ON w.id = r.warehouse_id
+        WHERE r.import_container_id = :cid
+        ORDER BY r.id ASC
+    ");
+    $stmtExisting->execute([':cid' => $containerId]);
+    $existingRolls = $stmtExisting->fetchAll(PDO::FETCH_ASSOC);
+
+    $existingRollsByLine = [];
+    foreach ($existingRolls as $er) {
+        $lItemId = (int)($er['import_container_item_id'] ?? 0);
+        $existingRollsByLine[$lItemId][] = $er;
+    }
+
+    $action = (string)($_POST['action'] ?? $_GET['action'] ?? '');
+
+    // =========================================================================
+    // ACCIÓN: GENERAR CÓDIGOS DE TRAZABILIDAD CORTOS E IMPRIMIR EN TÉRMICA
+    // (SIN TOCAR STOCK DE BODEGA EN ERP NI RE-RECEPCIONAR CONTENEDOR)
+    // =========================================================================
+    if ($action === 'generate_and_print' || $action === 'print_labels') {
+        if ($method === 'POST') {
+            requireCsrf();
+        }
+        $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
+        $reqQty = max(1, min(500, (int)($_REQUEST['qty'] ?? 1)));
+        $whCode = trim((string)($_REQUEST['warehouse_code'] ?? '100')) ?: '100';
+        $userPrefix = strtoupper(trim((string)($_REQUEST['code_prefix'] ?? '')));
+        if ($userPrefix === '') {
+            $userPrefix = 'RB-' . $containerId . '-';
+        } elseif (!str_ends_with($userPrefix, '-')) {
+            $userPrefix .= '-';
+        }
+
+        $linesToProcess = [];
+        if ($targetLineId > 0) {
+            foreach ($allLines as $l) {
+                if ((int)$l['import_container_item_id'] === $targetLineId) {
+                    $linesToProcess[] = $l;
+                    break;
+                }
+            }
+        } else {
+            $linesToProcess = $allLines;
+        }
+
+        // Calcular siguiente número correlativo para este contenedor y prefijo
+        $stmtMax = $trzPdo->prepare("SELECT roll_code FROM rolls WHERE roll_code LIKE :pref ORDER BY id DESC LIMIT 100");
+        $stmtMax->execute([':pref' => $userPrefix . '%']);
+        $existingCodes = $stmtMax->fetchAll(PDO::FETCH_COLUMN);
+        $maxSeq = 0;
+        foreach ($existingCodes as $ec) {
+            if (preg_match('/' . preg_quote($userPrefix, '/') . '(\d+)$/', (string)$ec, $mSeq)) {
+                $n = (int)$mSeq[1];
+                if ($n > $maxSeq) $maxSeq = $n;
+            }
+        }
+
+        // Resolver id de bodega en TRZ
+        $stmtWh = $trzPdo->prepare('SELECT id FROM warehouses WHERE code = :c LIMIT 1');
+        $stmtWh->execute([':c' => $whCode]);
+        $whId = (int)$stmtWh->fetchColumn();
+        if (!$whId) {
+            $stmtWh2 = $trzPdo->prepare('SELECT id FROM warehouses WHERE id = :c LIMIT 1');
+            $stmtWh2->execute([':c' => (int)$whCode]);
+            $whId = (int)$stmtWh2->fetchColumn();
+        }
+        if (!$whId) $whId = 1;
+
+        $createdRolls = [];
+        $printErrors = [];
+        $printedCount = 0;
+
+        foreach ($linesToProcess as $ln) {
+            $lineItemId = (int)($ln['import_container_item_id'] ?? 0);
+            $alreadyCount = isset($existingRollsByLine[$lineItemId]) ? count($existingRollsByLine[$lineItemId]) : 0;
+            $totalOrdered = max(1, (int)($ln['received_rolls'] ?? $ln['ordered_rolls'] ?? 1));
+
+            // Si es por línea específica se usa la cantidad solicitada; si es global se generan las faltantes
+            $lineCopies = ($targetLineId > 0) ? $reqQty : max(1, $totalOrdered - $alreadyCount);
+            if ($lineCopies <= 0) {
+                continue;
+            }
+
+            $skuCode = trim((string)($ln['sku_code'] ?? '-'));
+            $skuDesc = trim((string)($ln['sku_description'] ?? '-'));
+            $poCode = trim((string)($ln['po_code'] ?? '-'));
+            $suppName = trim((string)($ln['supplier_name'] ?? '-'));
+            $metersVal = (float)($ln['meters'] ?? 0);
+            $widthVal = (float)($ln['width_mm'] ?? 0);
+            $gramsVal = (float)($ln['grams'] ?? $ln['microns'] ?? 0);
+            $colorVal = trim((string)($ln['color'] ?? '')) ?: '-';
+            $rawDate = trim((string)($container['eta_plant'] ?? $container['created_at'] ?? date('Y-m-d')));
+
+            // Resolver o registrar sku_id en tabla skus de TRZ
+            $skuId = 1;
+            if ($skuCode !== '' && $skuCode !== '-') {
+                $stmtSku = $trzPdo->prepare('SELECT id FROM skus WHERE code = :c LIMIT 1');
+                $stmtSku->execute([':c' => $skuCode]);
+                $foundSkuId = (int)$stmtSku->fetchColumn();
+                if ($foundSkuId > 0) {
+                    $skuId = $foundSkuId;
+                } else {
+                    $stmtInsSku = $trzPdo->prepare('INSERT INTO skus (code, description, is_active, created_at) VALUES (:c, :d, 1, NOW())');
+                    $stmtInsSku->execute([':c' => $skuCode, ':d' => $skuDesc !== '' ? $skuDesc : $skuCode]);
+                    $skuId = (int)$trzPdo->lastInsertId();
+                }
+            }
+
+            for ($i = 1; $i <= $lineCopies; $i++) {
+                $maxSeq++;
+                // Código de trazabilidad corto y limpio: ej. RB-287-001
+                $rollCode = $userPrefix . str_pad((string)$maxSeq, 3, '0', STR_PAD_LEFT);
+
+                // 1. Insertar en tabla rolls de trazabilidad (status = RECEIVED, sin tocar inventario ERP)
+                $stmtRoll = $trzPdo->prepare('
+                    INSERT INTO rolls (
+                        roll_code, sku_id, warehouse_id, weight_kg, received_qty,
+                        reception_mode, microns, width_mm, color, meters, status,
+                        purchase_order_id, purchase_order_line_id, import_container_id, import_container_item_id,
+                        supplier_id, process_stage, created_at
+                    ) VALUES (
+                        :code, :skuid, :whid, 0.0, 1,
+                        "WAREHOUSE_STOCK", :microns, :width_mm, :color, :meters, "RECEIVED",
+                        :po_id, :po_line_id, :container_id, :container_item_id,
+                        :supplier_id, "RAW", NOW()
+                    )
+                ');
+                $stmtRoll->execute([
+                    ':code' => $rollCode,
+                    ':skuid' => $skuId,
+                    ':whid' => $whId,
+                    ':microns' => $gramsVal > 0 ? (int)round($gramsVal) : null,
+                    ':width_mm' => $widthVal > 0 ? (int)round($widthVal) : null,
+                    ':color' => $colorVal !== '-' ? $colorVal : null,
+                    ':meters' => $metersVal > 0 ? $metersVal : null,
+                    ':po_id' => !empty($ln['purchase_order_id']) ? (int)$ln['purchase_order_id'] : null,
+                    ':po_line_id' => !empty($ln['id']) ? (int)$ln['id'] : null,
+                    ':container_id' => $containerId,
+                    ':container_item_id' => $lineItemId,
+                    ':supplier_id' => !empty($ln['supplier_id']) ? (int)$ln['supplier_id'] : null,
+                ]);
+                $rollId = (int)$trzPdo->lastInsertId();
+
+                // 2. Registrar movimiento en movements
+                $stmtMov = $trzPdo->prepare('
+                    INSERT INTO movements (entity_type, entity_id, movement_type, to_warehouse_id, payload, created_at)
+                    VALUES ("ROLL", :eid, "RECEIPT", :towh, :payload, NOW())
+                ');
+                $movPayload = json_encode([
+                    'traceability_code' => $rollCode,
+                    'entity_type' => 'ROLL',
+                    'entity_id' => $rollId,
+                    'item_code' => $skuCode,
+                    'item_description' => $skuDesc,
+                    'quantity' => 1.0,
+                    'unit' => 'BOB',
+                    'warehouse_code' => $whCode,
+                    'container_code' => $cCode,
+                    'container_id' => $containerId,
+                    'package_number' => $maxSeq,
+                    'total_packages' => $lineCopies,
+                    'operator' => 'Javier Perozo',
+                    'comments' => 'Trazabilidad de bobina asignada en bodega para contenedor ' . $cCode . ' (sin duplicar stock ERP)',
+                ], JSON_UNESCAPED_UNICODE);
+                $stmtMov->execute([
+                    ':eid' => $rollId,
+                    ':towh' => $whId,
+                    ':payload' => $movPayload,
+                ]);
+
+                // 3. Registrar entrada en traceability_warehouse_entries (para consulta como ingreso con trazabilidad)
+                $stmtEntry = $trzPdo->prepare('
+                    INSERT INTO traceability_warehouse_entries (
+                        traceability_code, entity_type, entity_id, warehouse_id, warehouse_name,
+                        item_code, item_description, quantity, unit_name, package_number, total_packages,
+                        weight_kg, width_mm, microns, meters, order_ref, operator_name, comments, status, created_at
+                    ) VALUES (
+                        :code, "ROLL", :eid, :whid, :whname,
+                        :sku, :desc, 1.0, "BOB", :pkgnum, :totpkg,
+                        NULL, :wmm, :mic, :met, :ord, :op, :comm, "IN_WAREHOUSE", NOW()
+                    )
+                ');
+                $stmtEntry->execute([
+                    ':code' => $rollCode,
+                    ':eid' => $rollId,
+                    ':whid' => $whId,
+                    ':whname' => 'Bodega ' . $whCode,
+                    ':sku' => $skuCode,
+                    ':desc' => $skuDesc,
+                    ':pkgnum' => $maxSeq,
+                    ':totpkg' => $lineCopies,
+                    ':wmm' => $widthVal > 0 ? (int)round($widthVal) : null,
+                    ':mic' => $gramsVal > 0 ? (int)round($gramsVal) : null,
+                    ':met' => $metersVal > 0 ? $metersVal : null,
+                    ':ord' => $poCode !== '-' ? ('OC: ' . $poCode) : ('CONT: ' . $cCode),
+                    ':op' => 'Javier Perozo',
+                    ':comm' => 'Contenedor ' . $cCode . ' - Trazabilidad de bobina en bodega',
+                ]);
+
+                // 4. Imprimir etiqueta térmica en formato Flexo 100x70 con el código de trazabilidad corto
+                $mockRoll = [
+                    'id' => $rollId,
+                    'roll_code' => $rollCode,
+                    'sku_code' => $skuCode,
+                    'sku_description' => $skuDesc,
+                    'warehouse_code' => $whCode,
+                    'weight_kg' => 0.0,
+                    'no_weight' => true,
+                    'weight_str' => '-',
+                    'meters' => $metersVal,
+                    'width_mm' => $widthVal,
+                    'grams' => $gramsVal,
+                    'microns' => $gramsVal,
+                    'color' => $colorVal,
+                    'po_code' => $poCode,
+                    'container_code' => $cCode,
+                    'supplier_name' => $suppName,
+                    'arrival_date' => $rawDate,
+                    'process_stage' => 'RAW',
+                ];
+
+                if ($isPrinterEnabled) {
+                    $pRes = $activePrinter->printRollLabel($mockRoll);
+                    if (($pRes['ok'] ?? false) === true) {
+                        $printedCount++;
+                    } else {
+                        $printErrors[] = $pRes['error'] ?? 'Error desconocido';
+                    }
+                }
+
+                $createdRolls[] = $rollCode;
+            }
+        }
+
+        $redParams = ['created' => count($createdRolls), 'printed' => $printedCount];
+        if (!empty($createdRolls)) {
+            $redParams['code_range'] = $createdRolls[0] . (count($createdRolls) > 1 ? (' al ' . end($createdRolls)) : '');
+        }
+        if ($targetLineId > 0) {
+            $redParams['line'] = $targetLineId;
+        }
+        if (!empty($printErrors)) {
+            $redParams['print_err'] = implode('; ', array_slice(array_unique($printErrors), 0, 3));
+        }
+        header('Location: /import-containers/' . $containerId . '/no-weight-labels?' . http_build_query($redParams));
+        exit;
+    }
+
+    // =========================================================================
+    // ACCIÓN: REIMPRIMIR ETIQUETA DE BOBINA YA EXISTENTE
+    // =========================================================================
+    if ($action === 'reprint_roll') {
+        if ($method === 'POST') {
+            requireCsrf();
+        }
+        $rollId = (int)($_REQUEST['roll_id'] ?? 0);
+        $roll = $service->getRoll($rollId);
+        if ($roll !== null) {
+            $roll['no_weight'] = true;
+            $roll['weight_str'] = '-';
+            if ($isPrinterEnabled) {
+                $pRes = $activePrinter->printRollLabel($roll);
+                if (($pRes['ok'] ?? false) === true) {
+                    header('Location: /import-containers/' . $containerId . '/no-weight-labels?msg=' . urlencode('Etiqueta ' . $roll['roll_code'] . ' reimpresa exitosamente.'));
+                    exit;
+                } else {
+                    header('Location: /import-containers/' . $containerId . '/no-weight-labels?print_err=' . urlencode($pRes['error'] ?? 'Error al reimprimir.'));
+                    exit;
+                }
+            } else {
+                header('Location: /import-containers/' . $containerId . '/no-weight-labels?print_err=' . urlencode('Impresora térmica deshabilitada.'));
+                exit;
+            }
+        }
+        header('Location: /import-containers/' . $containerId . '/no-weight-labels');
+        exit;
+    }
+
+    // =========================================================================
+    // ACCIÓN: REIMPRIMIR TODAS LAS BOBINAS REGISTRADAS DEL CONTENEDOR
+    // =========================================================================
+    if ($action === 'reprint_all') {
+        if ($method === 'POST') {
+            requireCsrf();
+        }
+        $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
+        $reprintList = [];
+        foreach ($existingRolls as $er) {
+            if ($targetLineId > 0 && (int)($er['import_container_item_id'] ?? 0) !== $targetLineId) {
+                continue;
+            }
+            $reprintList[] = $er;
+        }
+
+        $reprintedCount = 0;
+        $printErrors = [];
+        foreach ($reprintList as $er) {
+            $roll = $service->getRoll((int)$er['id']);
+            if ($roll !== null) {
+                $roll['no_weight'] = true;
+                $roll['weight_str'] = '-';
+                if ($isPrinterEnabled) {
+                    $pRes = $activePrinter->printRollLabel($roll);
+                    if (($pRes['ok'] ?? false) === true) {
+                        $reprintedCount++;
+                    } else {
+                        $printErrors[] = $pRes['error'] ?? 'Error';
+                    }
+                }
+            }
+        }
+
+        $redParams = ['msg' => 'Se reimprimieron ' . $reprintedCount . ' etiqueta(s) térmica(s).'];
+        if (!empty($printErrors)) {
+            $redParams['print_err'] = implode('; ', array_slice(array_unique($printErrors), 0, 3));
+        }
+        header('Location: /import-containers/' . $containerId . '/no-weight-labels?' . http_build_query($redParams));
+        exit;
+    }
+
+    // =========================================================================
+    // ACCIÓN: ELIMINAR / LIBERAR TRAZABILIDAD DE UNA BOBINA ESPECÍFICA
+    // =========================================================================
+    if ($action === 'delete_roll') {
+        if ($method === 'POST') {
+            requireCsrf();
+        }
+        $rollId = (int)($_REQUEST['roll_id'] ?? 0);
+        $delRollCode = trim((string)($_REQUEST['roll_code'] ?? ''));
+        if ($rollId > 0 || $delRollCode !== '') {
+            $stmtDelRoll = $trzPdo->prepare('DELETE FROM rolls WHERE id = :id OR roll_code = :c');
+            $stmtDelRoll->execute([':id' => $rollId, ':c' => $delRollCode]);
+            $stmtDelMov = $trzPdo->prepare('DELETE FROM movements WHERE entity_type = "ROLL" AND (entity_id = :id OR payload LIKE :c)');
+            $stmtDelMov->execute([':id' => $rollId, ':c' => '%' . $delRollCode . '%']);
+            $stmtDelTrz = $trzPdo->prepare('DELETE FROM traceability_warehouse_entries WHERE entity_type = "ROLL" AND (entity_id = :id OR traceability_code = :c)');
+            $stmtDelTrz->execute([':id' => $rollId, ':c' => $delRollCode]);
+            header('Location: /import-containers/' . $containerId . '/no-weight-labels?msg=' . urlencode('Bobina ' . $delRollCode . ' eliminada de trazabilidad correctamente.'));
+            exit;
+        }
+        header('Location: /import-containers/' . $containerId . '/no-weight-labels');
+        exit;
+    }
+
+    // =========================================================================
+    // ACCIÓN: VER PANTALLA COMPLETA DE ETIQUETA EN FORMATO FLEXO (100x70 MM)
+    // =========================================================================
+    $previewLineId = isset($_GET['preview_line_id']) ? (int)$_GET['preview_line_id'] : ($filterLineId > 0 ? $filterLineId : (!empty($allLines) ? (int)$allLines[0]['import_container_item_id'] : 0));
+    if ($previewLineId > 0 && isset($_GET['full_preview']) && (string)$_GET['full_preview'] === '1') {
+        $targetLn = null;
+        foreach ($allLines as $ln) {
+            if ((int)$ln['import_container_item_id'] === $previewLineId) {
+                $targetLn = $ln;
+                break;
+            }
+        }
+        if ($targetLn !== null) {
+            $skuCode = trim((string)($targetLn['sku_code'] ?? '-'));
+            $skuDesc = trim((string)($targetLn['sku_description'] ?? '-'));
+            $poCode = trim((string)($targetLn['po_code'] ?? '-'));
+            $suppName = trim((string)($targetLn['supplier_name'] ?? '-'));
+            $metersVal = (float)($targetLn['meters'] ?? 0);
+            $metersStr = $metersVal > 0 ? (number_format($metersVal, 0, ',', '.') . ' m') : '-';
+            $widthVal = (float)($targetLn['width_mm'] ?? 0);
+            $gramsVal = (float)($targetLn['grams'] ?? $targetLn['microns'] ?? 0);
+            $specsStr = '';
+            if ($widthVal > 0) $specsStr .= round($widthVal) . ' mm';
+            if ($gramsVal > 0) $specsStr .= ($specsStr !== '' ? ' · ' : '') . round($gramsVal) . ' g';
+            if ($specsStr === '') $specsStr = '-';
+            $colorVal = trim((string)($targetLn['color'] ?? '')) ?: '-';
+            $rawDate = trim((string)($container['eta_plant'] ?? $container['created_at'] ?? date('Y-m-d')));
+            $arrivalDate = formatLabelDate($rawDate);
+            $whCode = trim((string)($_GET['wh'] ?? '100')) ?: '100';
+
+            // Si hay bobinas registradas para esta línea mostrar el primer código, sino código modelo corto
+            $sampleCode = !empty($existingRollsByLine[$previewLineId]) ? (string)$existingRollsByLine[$previewLineId][0]['roll_code'] : ('RB-' . $containerId . '-001');
+
+            renderReceptionThermalLabel([
+                'sku_code' => $skuCode,
+                'sku_description' => $skuDesc,
+                'arrival_date' => $arrivalDate,
+                'warehouse_code' => $whCode,
+                'warehouse_name' => 'Bodega ' . $whCode,
+                'weight_str' => '-',
+                'meters_str' => $metersStr,
+                'specs_str' => $specsStr,
+                'color' => $colorVal,
+                'po_code' => $poCode,
+                'container_code' => $cCode,
+                'supplier_name' => $suppName,
+                'barcode_value' => $sampleCode,
+                'stage_badge' => 'MATERIA PRIMA',
+                'footer_text' => 'CONTENEDOR ' . $cCode . ' · CONTROL DE CALIDAD UNIBAG',
+                'is_sample' => false,
+                'auto_print' => false,
+                'print_language' => strtolower($configuredPrintLang),
+                'printer_name' => $configuredPrinterName,
+                'server_print_allowed' => $isPrinterEnabled,
+                'server_print_url' => '',
+                'server_print_result' => null,
+                'download_zpl_url' => '',
+                'title' => 'Etiqueta Flexo Sin Peso - ' . $sampleCode,
+            ]);
+            exit;
+        }
+    }
+
+    // Parámetros y notificaciones de vista
+    $createdCount = isset($_GET['created']) ? (int)$_GET['created'] : 0;
+    $printedMsg = isset($_GET['printed']) ? (int)$_GET['printed'] : 0;
+    $codeRange = trim((string)($_GET['code_range'] ?? ''));
+    $genMsg = trim((string)($_GET['msg'] ?? ''));
+    $printErr = trim((string)($_GET['print_err'] ?? ''));
+
+    // Seleccionar línea para la vista previa
+    $previewLine = null;
+    if ($previewLineId > 0) {
+        foreach ($allLines as $ln) {
+            if ((int)$ln['import_container_item_id'] === $previewLineId) {
+                $previewLine = $ln;
+                break;
+            }
+        }
+    }
+    if ($previewLine === null && !empty($allLines)) {
+        $previewLine = $allLines[0];
+        $previewLineId = (int)$previewLine['import_container_item_id'];
+    }
+
+    $defaultShortPrefix = 'RB-' . $containerId . '-';
+
+    echo '<!doctype html><html lang="es"><head><meta charset="utf-8">';
+    echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
+    echo '<title>Trazabilidad e Impresión de Bobinas Sin Peso (Flexo 100×70) - ' . h($cTitle) . '</title>';
+    echo '<style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 0;
+        background: #f1f5f9;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        color: #0f172a;
+        -webkit-font-smoothing: antialiased;
+      }
+      .toolbar {
+        background: #0f172a;
+        color: #fff;
+        padding: 12px 24px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.25);
+        position: sticky;
+        top: 0;
+        z-index: 50;
+      }
+      .btn {
+        border-radius: 8px;
+        padding: 8px 16px;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid transparent;
+        transition: all 0.15s ease;
+      }
+      .btn-primary { background: #00A9A6; color: #fff; border-color: #00A9A6; }
+      .btn-primary:hover { background: #008f8c; }
+      .btn-dark { background: #1e293b; color: #fff; border-color: #334155; }
+      .btn-dark:hover { background: #334155; }
+      .btn-success { background: #059669; color: #fff; border-color: #059669; }
+      .btn-success:hover { background: #047857; }
+      .btn-outline { background: #fff; color: #0f172a; border-color: #cbd5e1; }
+      .btn-outline:hover { background: #f8fafc; }
+      .btn-danger-sm { background: #fff; color: #dc2626; border-color: #fecaca; padding: 4px 8px; font-size: 11px; }
+      .btn-danger-sm:hover { background: #fef2f2; border-color: #f87171; }
+      .btn-reprint-sm { background: #f0fdf4; color: #166534; border-color: #bbf7d0; padding: 4px 9px; font-size: 11px; }
+      .btn-reprint-sm:hover { background: #dcfce7; }
+      .container-layout {
+        max-width: 1440px;
+        margin: 20px auto;
+        padding: 0 20px 40px 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+      }
+      .alert {
+        padding: 14px 20px;
+        border-radius: 10px;
+        font-size: 13.5px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .alert-ok { background: #ecfdf5; border: 1.5px solid #a7f3d0; color: #065f46; }
+      .alert-err { background: #fef2f2; border: 1.5px solid #fecaca; color: #991b1b; }
+      .alert-info { background: #eff6ff; border: 1.5px solid #bfdbfe; color: #1e40af; }
+
+      /* Tarjeta de Etiqueta Térmica 100x70 mm (Diseño idéntico a Flexo) */
+      .thermal-preview-container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 16px;
+        background: #e2e8f0;
+        border-radius: 8px;
+        border: 1px dashed #94a3b8;
+      }
+      .label-card {
+        background: #fff;
+        border: 1.5pt solid #000;
+        border-radius: 3px;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        box-sizing: border-box;
+        overflow: hidden;
+        width: 100mm;
+        height: 70mm;
+        max-width: 100mm;
+        max-height: 70mm;
+        padding: 1.8mm 2.5mm;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+        color: #000;
+      }
+      .header-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1.2pt solid #000;
+        padding-bottom: 0.6mm;
+        line-height: 1;
+      }
+      .brand-title { font-size: 12pt; font-weight: 900; letter-spacing: 0.4px; }
+      .sub-title { font-size: 6pt; font-weight: 800; letter-spacing: 0.3px; text-transform: uppercase; margin-top: 1px; }
+      .header-meta { text-align: right; line-height: 1.15; }
+      .wh-badge { background: #000; color: #fff; font-weight: 900; font-size: 7.5pt; padding: 1px 5px; border-radius: 2px; display: inline-block; letter-spacing: 0.3px; }
+      .date-str { font-size: 6.2pt; font-weight: 800; margin-top: 1px; }
+      .sku-box { border-bottom: 1pt solid #000; padding-bottom: 0.6mm; margin-top: 0.4mm; }
+      .sku-header { display: flex; justify-content: space-between; align-items: baseline; }
+      .sku-label { font-size: 7pt; font-weight: 800; text-transform: uppercase; }
+      .sku-val { font-size: 14pt; font-weight: 900; letter-spacing: 0.5px; }
+      .stage-tag { font-size: 6.5pt; font-weight: 800; border: 0.8pt solid #000; padding: 1px 4px; border-radius: 2px; text-transform: uppercase; }
+      .sku-desc { font-size: 7.2pt; font-weight: 700; line-height: 1.15; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .grid-specs { display: grid; grid-template-columns: 1.35fr 1fr 1.25fr 0.95fr; gap: 1.5mm; border-bottom: 1pt solid #000; padding: 0.6mm 0; margin-top: 0.2mm; }
+      .spec-col { border-right: 0.8pt solid #bbb; padding-right: 1mm; }
+      .spec-col:last-child { border-right: none; padding-right: 0; }
+      .spec-k { font-size: 5.5pt; font-weight: 800; text-transform: uppercase; color: #222; line-height: 1; }
+      .spec-v { font-size: 8pt; font-weight: 900; line-height: 1.1; margin-top: 1px; }
+      .spec-v-lg { font-size: 10.5pt; font-weight: 900; }
+      .trace-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 0.8pt solid #000; padding: 0.6mm 0; font-size: 6.5pt; font-weight: 700; line-height: 1.1; }
+      .trace-item { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .barcode-section { text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding-top: 0.4mm; }
+      .barcode-svg-wrap { width: 95%; max-width: 90mm; height: 36px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+      .barcode-svg-wrap svg { max-width: 100%; height: 100%; shape-rendering: crispEdges; }
+      .code-text { font-family: "Consolas", "Courier New", monospace; font-size: 9.5pt; font-weight: 900; letter-spacing: 1.5px; line-height: 1.1; margin-top: 1px; }
+      .footer-text { font-size: 5pt; font-weight: 800; color: #222; letter-spacing: 0.2px; margin-top: 1px; }
+
+      .table-card {
+        background: #fff;
+        border-radius: 12px;
+        border: 1px solid #cbd5e1;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+        overflow: hidden;
+      }
+      .lines-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+      .lines-table th {
+        background: #f8fafc;
+        padding: 10px 14px;
+        text-align: left;
+        font-weight: 700;
+        color: #475569;
+        border-bottom: 1px solid #e2e8f0;
+      }
+      .lines-table td {
+        padding: 10px 14px;
+        border-bottom: 1px solid #f1f5f9;
+        vertical-align: middle;
+      }
+      .lines-table tr:hover td {
+        background: #f8fafc;
+      }
+      .badge-code {
+        font-family: "Consolas", monospace;
+        font-weight: 800;
+        background: #f0fdfa;
+        color: #0f766e;
+        border: 1px solid #99f6e4;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 12px;
+      }
+    </style></head><body>';
+
+    // Toolbar superior
+    echo '<div class="toolbar">';
+    echo '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">';
+    echo '<a class="btn btn-dark" href="/import-containers/' . $containerId . '">⬅️ Volver al Contenedor</a>';
+    echo '<div>';
+    echo '<div style="font-weight:900;font-size:16px;color:#fff">📦 Trazabilidad de Bobinas en Bodega · Formato Flexo 100×70 mm</div>';
+    echo '<div style="font-size:12px;color:#94a3b8">' . h($cTitle) . ' · Exclusivo: <strong>Javier Perozo</strong> · ' . count($existingRolls) . ' bobina(s) registradas</div>';
+    echo '</div>';
+    echo '</div>';
+
+    echo '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+    $headerPrinterName = $configuredPrinterName !== '' ? $configuredPrinterName : 'Impresora Térmica';
+    echo '<div style="background:rgba(255,255,255,0.1);padding:6px 12px;border-radius:8px;font-size:12px;color:#e2e8f0;display:flex;align-items:center;gap:6px">';
+    echo '<span>🖨️ Impresora Térmica:</span> <strong style="color:#38bdf8">' . h($headerPrinterName) . '</strong>';
+    echo '<span style="background:#0284c7;color:#fff;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:800">' . h($configuredPrintLang) . '</span>';
+    echo '</div>';
+    echo '</div>';
+    echo '</div>';
+
+    echo '<div class="container-layout">';
+
+    // Banner explicativo de trazabilidad pura sin duplicar stock
+    echo '<div class="alert alert-info">';
+    echo '<span style="font-size:22px">🛡️</span>';
+    echo '<div>';
+    echo '<div style="font-weight:800;font-size:14px">Asignación de Trazabilidad en Bodega (Sin Duplicar Stock ERP)</div>';
+    echo '<div style="font-size:12.5px;margin-top:2px;color:#1e3a8a;line-height:1.4">Genera los códigos de trazabilidad cortos para las bobinas que ya se encuentran dentro de bodega y envía las etiquetas directamente a la impresora térmica. <strong>No re-recepciona el contenedor en ERP ni carga doble stock en las bodegas.</strong></div>';
+    echo '</div>';
+    echo '</div>';
+
+    // Notificaciones de éxito o error
+    if ($createdCount > 0) {
+        echo '<div class="alert alert-ok"><span>✅</span> <div><strong>¡Trazabilidad Generada Exitosamente!</strong> Se crearon <strong>' . $createdCount . ' bobina(s)</strong> con códigos cortos (' . h($codeRange) . ') y se enviaron <strong>' . $printedMsg . ' etiqueta(s)</strong> a la impresora <u>' . h($headerPrinterName) . '</u>. El stock en ERP se mantuvo intacto sin duplicidades.</div></div>';
+    } elseif ($genMsg !== '') {
+        echo '<div class="alert alert-ok"><span>✅</span> <div>' . h($genMsg) . '</div></div>';
+    }
+    if ($printErr !== '') {
+        echo '<div class="alert alert-err"><span>⚠️</span> <div>Aviso de impresión: ' . h($printErr) . '</div></div>';
+    }
+
+    // Disposición: Vista Previa Diseño Flexo + Panel de Líneas
+    if (is_array($previewLine)) {
+        $pvItemId = (int)$previewLine['import_container_item_id'];
+        $pvSku = trim((string)($previewLine['sku_code'] ?? '-'));
+        $pvDesc = trim((string)($previewLine['sku_description'] ?? '-'));
+        $pvPo = trim((string)($previewLine['po_code'] ?? '-'));
+        $pvSupp = trim((string)($previewLine['supplier_name'] ?? '-'));
+        $pvRawDate = trim((string)($container['eta_plant'] ?? $container['created_at'] ?? date('Y-m-d')));
+        $pvDate = formatLabelDate($pvRawDate);
+        $pvMeters = (float)($previewLine['meters'] ?? 0);
+        $pvMetersStr = $pvMeters > 0 ? (number_format($pvMeters, 0, ',', '.') . ' m') : '-';
+        $pvWidth = (float)($previewLine['width_mm'] ?? 0);
+        $pvGrams = (float)($previewLine['grams'] ?? $previewLine['microns'] ?? 0);
+        $pvSpecs = '';
+        if ($pvWidth > 0) $pvSpecs .= round($pvWidth) . ' mm';
+        if ($pvGrams > 0) $pvSpecs .= ($pvSpecs !== '' ? ' · ' : '') . round($pvGrams) . ' g';
+        if ($pvSpecs === '') $pvSpecs = '-';
+        $pvColor = trim((string)($previewLine['color'] ?? '')) ?: '-';
+
+        // Código de muestra para la vista previa
+        $pvSampleCode = !empty($existingRollsByLine[$pvItemId]) ? (string)$existingRollsByLine[$pvItemId][0]['roll_code'] : ($defaultShortPrefix . '001');
+
+        $pvSvg = code128Svg($pvSampleCode, 36, 1.35);
+        if ($pvSvg === '') {
+            $pvSvg = code39Svg($pvSampleCode, 36, 1.15, 3);
+        }
+
+        echo '<div style="display:grid;grid-template-columns:minmax(390px, 420px) 1fr;gap:20px;align-items:start">';
+
+        // Columna Izquierda: Vista Previa Formato Flexo 100x70 mm con Código Corto
+        echo '<div class="table-card" style="padding:20px">';
+        echo '<div style="font-weight:900;font-size:15px;color:#0f172a;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between">';
+        echo '<span>👁️ Vista Previa Etiqueta Flexo</span>';
+        echo '<span style="font-size:11px;background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:4px;font-weight:800">100 × 70 mm</span>';
+        echo '</div>';
+        echo '<div style="font-size:12px;color:#64748b;margin-bottom:14px">Código de trazabilidad corto: <strong class="badge-code">' . h($pvSampleCode) . '</strong></div>';
+
+        echo '<div class="thermal-preview-container">';
+        echo '<div class="label-card">';
+
+        // 1. Cabecera
+        echo '<div class="header-row">';
+        echo '<div><div class="brand-title">UNIBAG</div><div class="sub-title">RECEPCIÓN MATERIA PRIMA</div></div>';
+        echo '<div class="header-meta"><div class="wh-badge">BOD: 100</div><div class="date-str">FECHA: ' . h($pvDate) . '</div></div>';
+        echo '</div>';
+
+        // 2. SKU y Descripción
+        echo '<div class="sku-box">';
+        echo '<div class="sku-header"><div><span class="sku-label">SKU: </span><span class="sku-val">' . h($pvSku) . '</span></div><div class="stage-tag">MATERIA PRIMA</div></div>';
+        echo '<div class="sku-desc" title="' . h($pvDesc) . '">' . h($pvDesc) . '</div>';
+        echo '</div>';
+
+        // 3. Cuadrícula (PESO REAL: -)
+        echo '<div class="grid-specs">';
+        echo '<div class="spec-col"><div class="spec-k">Peso Real</div><div class="spec-v spec-v-lg">-</div></div>';
+        echo '<div class="spec-col"><div class="spec-k">Metros</div><div class="spec-v">' . h($pvMetersStr) . '</div></div>';
+        echo '<div class="spec-col"><div class="spec-k">Ancho / Gr</div><div class="spec-v">' . h($pvSpecs) . '</div></div>';
+        echo '<div class="spec-col"><div class="spec-k">Color</div><div class="spec-v">' . h($pvColor) . '</div></div>';
+        echo '</div>';
+
+        // 4. Trazabilidad con datos de contenedor y OC
+        echo '<div class="trace-row">';
+        echo '<div class="trace-item"><span>OC: </span><b>' . h($pvPo) . '</b></div>';
+        echo '<div class="trace-item"><span>CONT: </span><b>' . h($cCode) . '</b></div>';
+        echo '<div class="trace-item" style="max-width:40%"><span>PROV: </span><b>' . h($pvSupp) . '</b></div>';
+        echo '</div>';
+
+        // 5. Código de barras con el CÓDIGO CORTO de trazabilidad
+        echo '<div class="barcode-section">';
+        if ($pvSvg !== '') {
+            echo '<div class="barcode-svg-wrap">' . $pvSvg . '</div>';
+        }
+        echo '<div class="code-text">' . h($pvSampleCode) . '</div>';
+        echo '<div class="footer-text">CONTENEDOR ' . h($cCode) . ' · CONTROL DE CALIDAD UNIBAG</div>';
+        echo '</div>';
+
+        echo '</div>'; // .label-card
+        echo '</div>'; // .thermal-preview-container
+
+        echo '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">';
+        echo '<a class="btn btn-outline" style="flex:1;justify-content:center" href="/import-containers/' . $containerId . '/no-weight-labels?preview_line_id=' . $pvItemId . '&full_preview=1" target="_blank" title="Ver pantalla completa de etiqueta Flexo">📄 Ver Pantalla Completa</a>';
+        echo '</div>';
+        echo '</div>';
+
+        // Columna Derecha: Líneas del Contenedor con Generación de Trazabilidad
+        echo '<div class="table-card">';
+        echo '<div style="padding:16px 20px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
+        echo '<div>';
+        echo '<div style="font-weight:900;font-size:15px;color:#0f172a">📋 Artículos en el Contenedor (' . count($allLines) . ' líneas)</div>';
+        echo '<div style="font-size:12px;color:#64748b">Genera trazabilidad con código corto (ej. <b class="badge-code">' . h($defaultShortPrefix) . '001</b>) e imprime directo en la térmica.</div>';
+        echo '</div>';
+
+        // Botón global: generar trazabilidad para todas las bobinas pendientes del contenedor
+        $totalRollsInContainer = 0;
+        $totalRegisteredRolls = count($existingRolls);
+        foreach ($allLines as $ln) {
+            $totalRollsInContainer += max(1, (int)($ln['received_rolls'] ?? $ln['ordered_rolls'] ?? 1));
+        }
+        $pendingToRegister = max(0, $totalRollsInContainer - $totalRegisteredRolls);
+
+        echo '<div style="display:flex;gap:8px;align-items:center">';
+        if ($totalRegisteredRolls > 0) {
+            echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0">';
+            echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+            echo '<input type="hidden" name="action" value="reprint_all">';
+            echo '<button type="submit" class="btn btn-outline" style="font-weight:800;font-size:12px;color:#0f766e;border-color:#99f6e4" title="Reimprimir todas las etiquetas registradas en este contenedor">';
+            echo '🖨️ Reimprimir Todas (' . $totalRegisteredRolls . ')';
+            echo '</button>';
+            echo '</form>';
+        }
+
+        if ($pendingToRegister > 0) {
+            echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0" onsubmit="return confirm(\'¿Generar trazabilidad para las ' . $pendingToRegister . ' bobinas pendientes e imprimirlas en la térmica?\')">';
+            echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+            echo '<input type="hidden" name="action" value="generate_and_print">';
+            echo '<input type="hidden" name="target_line_id" value="0">';
+            echo '<input type="hidden" name="code_prefix" value="' . h($defaultShortPrefix) . '">';
+            echo '<button type="submit" class="btn btn-success" style="font-weight:800;font-size:12px">';
+            echo '⚡ Generar ' . $pendingToRegister . ' Pendientes';
+            echo '</button>';
+            echo '</form>';
+        }
+        echo '</div>';
+        echo '</div>';
+
+        echo '<div style="overflow-x:auto">';
+        echo '<table class="lines-table"><thead><tr>';
+        echo '<th>Artículo / SKU</th><th>OC / Proveedor</th><th>Especificación</th><th style="text-align:center">Trazabilidad</th><th style="width:310px;text-align:right">Acciones</th>';
+        echo '</tr></thead><tbody>';
+        foreach ($allLines as $ln) {
+            $lnId = (int)$ln['import_container_item_id'];
+            $lnSku = trim((string)($ln['sku_code'] ?? '-'));
+            $lnDesc = trim((string)($ln['sku_description'] ?? '-'));
+            $lnPo = trim((string)($ln['po_code'] ?? '-'));
+            $lnSupp = trim((string)($ln['supplier_name'] ?? '-'));
+            $lnMeters = (float)($ln['meters'] ?? 0);
+            $lnWidth = (float)($ln['width_mm'] ?? 0);
+            $lnMic = (float)($ln['grams'] ?? $ln['microns'] ?? 0);
+            $lnSpecs = ($lnWidth > 0 ? (round($lnWidth) . 'mm') : '') . ($lnMic > 0 ? (' ' . round($lnMic) . 'g') : '') . ($lnMeters > 0 ? (' ' . round($lnMeters) . 'm') : '');
+            if ($lnSpecs === '') $lnSpecs = '-';
+            $lnColor = trim((string)($ln['color'] ?? '')) ?: '-';
+            $lnTotalRolls = max(1, (int)($ln['received_rolls'] ?? $ln['ordered_rolls'] ?? 1));
+
+            $lnRegisteredCount = isset($existingRollsByLine[$lnId]) ? count($existingRollsByLine[$lnId]) : 0;
+            $lnPending = max(0, $lnTotalRolls - $lnRegisteredCount);
+            $isCurPreview = ($lnId === $pvItemId);
+
+            echo '<tr' . ($isCurPreview ? ' style="background:#f0fdfa"' : '') . '>';
+            echo '<td>';
+            echo '<div style="font-weight:800;color:#0f766e;font-size:13.5px">' . h($lnSku) . '</div>';
+            echo '<div style="font-size:11.5px;color:#64748b;max-width:260px;line-height:1.2;margin-top:2px">' . h($lnDesc) . '</div>';
+            echo '</td>';
+            echo '<td>';
+            echo '<div style="font-weight:700;font-size:12px">OC: ' . h($lnPo) . '</div>';
+            echo '<div style="font-size:11px;color:#64748b">' . h($lnSupp) . '</div>';
+            echo '</td>';
+            echo '<td style="font-size:12px">';
+            echo '<div>' . h($lnSpecs) . '</div>';
+            echo '<div style="color:#64748b;font-size:11px">Color: ' . h($lnColor) . '</div>';
+            echo '</td>';
+            echo '<td style="text-align:center">';
+            if ($lnRegisteredCount > 0) {
+                echo '<span style="background:#ecfdf5;color:#065f46;font-weight:800;padding:3px 8px;border-radius:12px;font-size:11.5px;border:1px solid #a7f3d0">' . $lnRegisteredCount . ' / ' . $lnTotalRolls . ' bobinas</span>';
+            } else {
+                echo '<span style="background:#f8fafc;color:#64748b;font-weight:800;padding:3px 8px;border-radius:12px;font-size:11.5px;border:1px solid #e2e8f0">0 / ' . $lnTotalRolls . ' bobinas</span>';
+            }
+            echo '</td>';
+            echo '<td style="text-align:right">';
+            echo '<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px">';
+
+            // Formulario para generar nuevas bobinas con trazabilidad corta
+            echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="display:flex;align-items:center;gap:4px;margin:0">';
+            echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+            echo '<input type="hidden" name="action" value="generate_and_print">';
+            echo '<input type="hidden" name="target_line_id" value="' . $lnId . '">';
+            echo '<input type="hidden" name="code_prefix" value="' . h($defaultShortPrefix) . '">';
+            echo '<input type="number" name="qty" min="1" max="500" value="' . ($lnPending > 0 ? $lnPending : $lnTotalRolls) . '" style="width:58px;height:32px;text-align:center;font-weight:700;border:1px solid #cbd5e1;border-radius:6px;font-size:12px" title="Cantidad de bobinas a generar">';
+            echo '<button type="submit" class="btn btn-primary" style="padding:6px 10px;font-size:12px;font-weight:800" title="Generar códigos cortos e imprimir en térmica">⚡ Generar</button>';
+            echo '</form>';
+
+            // Si ya tiene bobinas registradas, botón para reimprimir
+            if ($lnRegisteredCount > 0) {
+                echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0">';
+                echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+                echo '<input type="hidden" name="action" value="reprint_all">';
+                echo '<input type="hidden" name="target_line_id" value="' . $lnId . '">';
+                echo '<button type="submit" class="btn btn-reprint-sm" title="Reimprimir etiquetas de esta línea">🖨️</button>';
+                echo '</form>';
+            }
+
+            echo '<a class="btn btn-outline" href="/import-containers/' . $containerId . '/no-weight-labels?preview_line_id=' . $lnId . '" style="padding:6px 9px;font-size:12px" title="Ver diseño en vista previa">👁️</a>';
+            echo '</div>';
+            echo '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table></div></div>';
+        echo '</div>'; // grid layout
+
+        // Sección Inferior: Listado de Bobinas con Trazabilidad Asignada
+        if (!empty($existingRolls)) {
+            echo '<div class="table-card" style="margin-top:10px">';
+            echo '<div style="padding:16px 20px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
+            echo '<div>';
+            echo '<div style="font-weight:900;font-size:15px;color:#0f172a">🏷️ Bobinas con Trazabilidad Asignada (' . count($existingRolls) . ' bobinas en bodega)</div>';
+            echo '<div style="font-size:12px;color:#64748b">Estas bobinas están listas para ser escaneadas y consumidas en producción/flexografía con su código corto.</div>';
+            echo '</div>';
+            echo '<div style="font-size:12px;color:#0f766e;font-weight:700">Prefijo utilizado: <span class="badge-code">' . h($defaultShortPrefix) . 'XXX</span></div>';
+            echo '</div>';
+
+            echo '<div style="overflow-x:auto;max-height:380px">';
+            echo '<table class="lines-table"><thead><tr>';
+            echo '<th>ID</th><th>Código Trazabilidad Corto</th><th>SKU / Producto</th><th>Bodega</th><th>Estado</th><th>Fecha Registro</th><th style="text-align:right">Acciones</th>';
+            echo '</tr></thead><tbody>';
+            foreach ($existingRolls as $rRow) {
+                $rId = (int)$rRow['id'];
+                $rCode = (string)$rRow['roll_code'];
+                $rSku = (string)($rRow['sku_code'] ?? '-');
+                $rDesc = (string)($rRow['sku_desc'] ?? '-');
+                $rWh = (string)($rRow['warehouse_name'] ?? 'Bodega MP');
+                $rDate = (string)$rRow['created_at'];
+
+                echo '<tr>';
+                echo '<td style="color:#64748b;font-weight:700;font-size:11px">#' . $rId . '</td>';
+                echo '<td><strong class="badge-code">' . h($rCode) . '</strong></td>';
+                echo '<td><div style="font-weight:800;color:#0f172a">' . h($rSku) . '</div><div style="font-size:11px;color:#64748b">' . h($rDesc) . '</div></td>';
+                echo '<td style="font-size:12px">' . h($rWh) . '</td>';
+                echo '<td><span style="background:#ecfdf5;color:#065f46;font-size:11px;font-weight:800;padding:2px 8px;border-radius:6px">RECEPCIONADO</span></td>';
+                echo '<td style="font-size:11.5px;color:#64748b">' . h($rDate) . '</td>';
+                echo '<td style="text-align:right">';
+                echo '<div style="display:flex;align-items:center;justify-content:flex-end;gap:6px">';
+                // Reimprimir directa a térmica
+                echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0">';
+                echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+                echo '<input type="hidden" name="action" value="reprint_roll">';
+                echo '<input type="hidden" name="roll_id" value="' . $rId . '">';
+                echo '<button type="submit" class="btn btn-reprint-sm" title="Reimprimir etiqueta a la impresora térmica">🖨️ Reimprimir</button>';
+                echo '</form>';
+                // Ver pantalla completa
+                echo '<a class="btn btn-outline" style="padding:4px 8px;font-size:11px" href="/rolls/' . $rId . '/label?no_weight=1" target="_blank" title="Ver etiqueta térmica">👁️</a>';
+                // Eliminar trazabilidad (si fue error)
+                echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0" onsubmit="return confirm(\'¿Eliminar la trazabilidad de la bobina ' . h($rCode) . '?\')">';
+                echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+                echo '<input type="hidden" name="action" value="delete_roll">';
+                echo '<input type="hidden" name="roll_id" value="' . $rId . '">';
+                echo '<input type="hidden" name="roll_code" value="' . h($rCode) . '">';
+                echo '<button type="submit" class="btn btn-danger-sm" title="Eliminar registro de trazabilidad">🗑️</button>';
+                echo '</form>';
+                echo '</div>';
+                echo '</td>';
+                echo '</tr>';
+            }
+            echo '</tbody></table></div></div>';
+        }
+    } else {
+        echo '<div style="text-align:center;padding:50px 20px;background:#fff;border-radius:12px;border:1px solid #e2e8f0">';
+        echo '<div style="font-size:42px;margin-bottom:12px">📦</div>';
+        echo '<div style="font-size:17px;font-weight:900;color:#0f172a">Este cargamento no registra líneas de artículos</div>';
+        echo '<div style="margin-top:14px"><a class="btn btn-primary" href="/import-containers/' . $containerId . '">Volver al Contenedor</a></div>';
+        echo '</div>';
+    }
+
+    echo '</div>'; // .container-layout
+    echo '</body></html>';
     exit;
 }
 
@@ -23172,10 +24129,10 @@ function renderReceptionThermalLabel(array $data): void
     $configuredPrinterName = trim((string)($data['printer_name'] ?? ''));
     $title = (string)($data['title'] ?? ('Etiqueta 10x7 - ' . $barcodeValue));
 
-    // Código de barras vectorial Code 128 nítido y compacto de 28px de alto para 100% garantía de 1 etiqueta
-    $barcodeSvg = code128Svg($barcodeValue, 28, 1.25);
+    // Código de barras vectorial Code 128 nítido y de 36px de alto optimizado para lectura instantánea con pistolas ópticas
+    $barcodeSvg = code128Svg($barcodeValue, 36, 1.35);
     if ($barcodeSvg === '') {
-        $barcodeSvg = code39Svg($barcodeValue, 28, 1.05, 3);
+        $barcodeSvg = code39Svg($barcodeValue, 36, 1.15, 3);
     }
 
     echo '<!doctype html><html lang="es"><head><meta charset="utf-8">';
@@ -23506,7 +24463,7 @@ function renderReceptionThermalLabel(array $data): void
       .barcode-svg-wrap {
         width: 95%;
         max-width: 90mm;
-        height: 28px;
+        height: 36px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -23515,6 +24472,7 @@ function renderReceptionThermalLabel(array $data): void
       .barcode-svg-wrap svg {
         max-width: 100%;
         height: 100%;
+        shape-rendering: crispEdges;
       }
       .code-text {
         font-family: "Consolas", "Courier New", monospace;
@@ -23882,6 +24840,12 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
         exit;
     }
 
+    $noWeight = (isset($_GET['no_weight']) && (string)$_GET['no_weight'] === '1');
+    if ($noWeight) {
+        $roll['no_weight'] = true;
+        $roll['weight_str'] = '-';
+    }
+
     $printLanguage = $activePrinter->getConfiguredPrintLanguage();
     $printExtension = in_array($printLanguage, ['tspl', 'epl', 'zpl'], true) ? $printLanguage : 'zpl';
     if (isset($_GET['zpl']) && (string)$_GET['zpl'] === '1') {
@@ -23923,7 +24887,7 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     $warehouseName = trim((string)($roll['warehouse_name'] ?? ''));
 
     $weightKg = round((float)($roll['weight_kg'] ?? 0), 2);
-    $weightStr = $weightKg > 0 ? number_format($weightKg, 2, ',', '.') . ' Kg' : '1 Unid.';
+    $weightStr = $noWeight ? '-' : ($weightKg > 0 ? number_format($weightKg, 2, ',', '.') . ' Kg' : '1 Unid.');
 
     $metersVal = (float)($roll['meters'] ?? 0);
     $metersStr = $metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' m' : '-';
@@ -23969,10 +24933,10 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
         'print_language' => $printLanguage,
         'printer_name' => $activePrinter->getConfiguredPrinterName(),
         'server_print_allowed' => $activePrinter->isEnabled(),
-        'server_print_url' => '/rolls/' . (int)$id . '/label?server_print=1' . $printerProfileQuery,
+        'server_print_url' => '/rolls/' . (int)$id . '/label?server_print=1' . ($noWeight ? '&no_weight=1' : '') . $printerProfileQuery,
         'server_print_result' => $serverPrintResult,
-        'download_zpl_url' => '/rolls/' . (int)$id . '/label?download_zpl=1' . $printerProfileQuery,
-        'raw_zpl_url' => '/rolls/' . (int)$id . '/label?zpl=1' . $printerProfileQuery,
+        'download_zpl_url' => '/rolls/' . (int)$id . '/label?download_zpl=1' . ($noWeight ? '&no_weight=1' : '') . $printerProfileQuery,
+        'raw_zpl_url' => '/rolls/' . (int)$id . '/label?zpl=1' . ($noWeight ? '&no_weight=1' : '') . $printerProfileQuery,
         'title' => 'Etiqueta 10x7 - ' . $barcodeValue,
     ]);
     exit;
