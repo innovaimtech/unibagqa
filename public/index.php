@@ -14628,6 +14628,403 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
         $existingRollsByLine[$lItemId][] = $er;
     }
 
+    // =========================================================================
+    // VISTA: IMPRESIÓN POR LOTE / NAVEGADOR DE ETIQUETAS (FLEXO 100×70 MM)
+    // =========================================================================
+    $isBatchPrintView = str_ends_with($path, '/print-labels') || (isset($_GET['print_batch']) && (string)$_GET['print_batch'] === '1');
+    if ($isBatchPrintView) {
+        $filterRollIds = [];
+        if (!empty($_GET['roll_ids'])) {
+            $parts = explode(',', (string)$_GET['roll_ids']);
+            foreach ($parts as $p) {
+                $pid = (int)trim($p);
+                if ($pid > 0) $filterRollIds[] = $pid;
+            }
+        }
+        $filterLineId = isset($_GET['line_id']) ? (int)$_GET['line_id'] : 0;
+        $printAll = isset($_GET['all']) && (string)$_GET['all'] === '1';
+
+        $rollsToPrint = [];
+        foreach ($existingRolls as $er) {
+            $rId = (int)$er['id'];
+            $lId = (int)($er['import_container_item_id'] ?? 0);
+            if (!empty($filterRollIds)) {
+                if (in_array($rId, $filterRollIds, true)) {
+                    $rollsToPrint[] = $er;
+                }
+            } elseif ($filterLineId > 0) {
+                if ($lId === $filterLineId) {
+                    $rollsToPrint[] = $er;
+                }
+            } else {
+                $rollsToPrint[] = $er;
+            }
+        }
+
+        if (empty($rollsToPrint) && !empty($filterRollIds)) {
+            $inR = implode(',', array_fill(0, count($filterRollIds), '?'));
+            $stmtR = $trzPdo->prepare("
+                SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name, w.code AS warehouse_code
+                FROM rolls r
+                LEFT JOIN skus s ON s.id = r.sku_id
+                LEFT JOIN warehouses w ON w.id = r.warehouse_id
+                WHERE r.id IN ($inR)
+                ORDER BY r.id ASC
+            ");
+            $stmtR->execute($filterRollIds);
+            $rollsToPrint = $stmtR->fetchAll(PDO::FETCH_ASSOC);
+        }
+
+        $linesById = [];
+        foreach ($allLines as $aln) {
+            $linesById[(int)$aln['import_container_item_id']] = $aln;
+        }
+
+        $autoPrint = isset($_GET['auto_print']) && (string)$_GET['auto_print'] === '1';
+        $totalLabels = count($rollsToPrint);
+        $rawDate = trim((string)($container['eta_plant'] ?? $container['created_at'] ?? date('Y-m-d')));
+        $arrivalDate = formatLabelDate($rawDate);
+        $whCode = trim((string)($_GET['wh'] ?? '100')) ?: '100';
+
+        echo '<!doctype html><html lang="es"><head><meta charset="utf-8">';
+        echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
+        echo '<title>Imprimir Etiquetas de Trazabilidad 100x70mm - ' . h($cTitle) . '</title>';
+        echo '<style id="page_rule">
+          @page {
+            size: 100mm 70mm;
+            margin: 0 !important;
+          }
+        </style>';
+        echo '<style>
+          * { box-sizing: border-box; }
+          html, body {
+            margin: 0;
+            padding: 0;
+            background: #f1f5f9;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            color: #000;
+            -webkit-font-smoothing: antialiased;
+          }
+          .no-print-toolbar {
+            background: #0f172a;
+            color: #fff;
+            padding: 12px 24px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.25);
+          }
+          .btn-print {
+            background: #00A9A6;
+            color: #fff;
+            font-weight: 900;
+            font-size: 14px;
+            border: none;
+            border-radius: 8px;
+            padding: 9px 22px;
+            cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0,169,166,0.4);
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.15s ease;
+          }
+          .btn-print:hover { background: #008f8c; }
+          .btn-back {
+            background: #334155;
+            color: #fff;
+            text-decoration: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+          }
+          .btn-back:hover { background: #475569; }
+          .labels-container {
+            padding: 24px 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+          }
+          .label-card {
+            background: #fff;
+            border: 1.5pt solid #000;
+            border-radius: 3px;
+            width: 100mm;
+            height: 70mm;
+            max-width: 100mm;
+            max-height: 70mm;
+            padding: 1.8mm 2.5mm;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            position: relative;
+            overflow: hidden;
+          }
+          .header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            border-bottom: 1.5pt solid #000;
+            padding-bottom: 0.6mm;
+          }
+          .brand-title {
+            font-size: 11pt;
+            font-weight: 900;
+            letter-spacing: 0.5px;
+            line-height: 1;
+          }
+          .sub-title {
+            font-size: 5pt;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+            margin-top: 1px;
+            color: #333;
+          }
+          .header-meta {
+            text-align: right;
+            display: flex;
+            align-items: center;
+            gap: 2mm;
+          }
+          .wh-badge {
+            background: #000;
+            color: #fff;
+            font-size: 6.5pt;
+            font-weight: 900;
+            padding: 0.5mm 1.5mm;
+            border-radius: 2px;
+          }
+          .date-str {
+            font-size: 6pt;
+            font-weight: 800;
+          }
+          .sku-box {
+            border-bottom: 1pt solid #000;
+            padding: 0.6mm 0;
+          }
+          .sku-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+          }
+          .sku-label { font-size: 6.5pt; font-weight: 800; color: #444; }
+          .sku-val { font-size: 11pt; font-weight: 900; letter-spacing: 0.3px; }
+          .stage-tag {
+            font-size: 5.5pt;
+            font-weight: 900;
+            background: #eee;
+            border: 0.6pt solid #000;
+            padding: 0.3mm 1mm;
+            border-radius: 2px;
+          }
+          .sku-desc {
+            font-size: 6pt;
+            font-weight: 700;
+            line-height: 1.15;
+            margin-top: 0.4mm;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+          }
+          .grid-specs {
+            display: grid;
+            grid-template-columns: 1.3fr 1fr 1fr 1fr;
+            border-bottom: 1pt solid #000;
+            padding: 0.6mm 0;
+            margin-top: 0.2mm;
+          }
+          .spec-col { border-right: 0.8pt solid #bbb; padding-right: 1mm; }
+          .spec-col:last-child { border-right: none; padding-right: 0; }
+          .spec-k { font-size: 5.5pt; font-weight: 800; text-transform: uppercase; color: #222; line-height: 1; }
+          .spec-v { font-size: 8pt; font-weight: 900; line-height: 1.1; margin-top: 1px; }
+          .spec-v-lg { font-size: 10.5pt; font-weight: 900; }
+          .trace-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 0.8pt solid #000;
+            padding: 0.6mm 0;
+            font-size: 6.5pt;
+            font-weight: 700;
+            line-height: 1.1;
+          }
+          .trace-item { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .barcode-section {
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding-top: 0.4mm;
+          }
+          .barcode-svg-wrap {
+            width: 95%;
+            max-width: 90mm;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+          }
+          .code-text {
+            font-family: "Consolas", monospace;
+            font-size: 8pt;
+            font-weight: 900;
+            letter-spacing: 1px;
+            margin-top: 0.5mm;
+          }
+          .footer-text {
+            font-size: 5pt;
+            font-weight: 700;
+            color: #444;
+            letter-spacing: 0.3px;
+            margin-top: 0.2mm;
+          }
+
+          @media print {
+            body, html {
+              margin: 0 !important;
+              padding: 0 !important;
+              background: #fff !important;
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+            .no-print, .no-print-toolbar {
+              display: none !important;
+            }
+            .labels-container {
+              padding: 0 !important;
+              margin: 0 !important;
+              display: block !important;
+            }
+            .label-card {
+              width: 100mm !important;
+              height: 70mm !important;
+              max-width: 100mm !important;
+              max-height: 70mm !important;
+              margin: 0 !important;
+              box-shadow: none !important;
+              border: 1.5pt solid #000 !important;
+              page-break-after: always !important;
+              break-after: page !important;
+              page-break-inside: avoid !important;
+              break-inside: avoid !important;
+            }
+            .label-card:last-child {
+              page-break-after: avoid !important;
+              break-after: avoid !important;
+            }
+          }
+        </style></head><body>';
+
+        echo '<div class="no-print-toolbar">';
+        echo '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">';
+        echo '<a class="btn-back" href="/import-containers/' . $containerId . '/no-weight-labels">⬅️ Volver al Contenedor</a>';
+        echo '<div>';
+        echo '<div style="font-weight:900;font-size:15px;color:#fff">🖨️ Impresión de Etiquetas Térmicas (' . $totalLabels . ' bobina' . ($totalLabels === 1 ? '' : 's') . ')</div>';
+        echo '<div style="font-size:12px;color:#94a3b8">Formato Flexo 100 × 70 mm · ' . h($cTitle) . '</div>';
+        echo '</div>';
+        echo '</div>';
+        echo '<div style="display:flex;align-items:center;gap:10px">';
+        echo '<button type="button" class="btn-print" onclick="window.print()">🖨️ Imprimir Todas (' . $totalLabels . ')</button>';
+        echo '</div>';
+        echo '</div>';
+
+        if (empty($rollsToPrint)) {
+            echo '<div style="text-align:center;padding:60px 20px;color:#64748b">';
+            echo '<div style="font-size:36px;margin-bottom:8px">⚠️</div>';
+            echo '<div style="font-weight:800;font-size:16px;color:#0f172a">No se encontraron bobinas registradas para imprimir</div>';
+            echo '<div style="margin-top:12px"><a class="btn-back" href="/import-containers/' . $containerId . '/no-weight-labels">Volver a Generar Etiquetas</a></div>';
+            echo '</div>';
+        } else {
+            echo '<div class="labels-container">';
+            foreach ($rollsToPrint as $roll) {
+                $skuCode = trim((string)($roll['sku_code'] ?? '-'));
+                $skuDesc = trim((string)($roll['sku_desc'] ?? $roll['sku_description'] ?? '-'));
+                $lData = $linesById[(int)($roll['import_container_item_id'] ?? 0)] ?? [];
+                $poCode = trim((string)($lData['po_code'] ?? '-'));
+                $suppName = trim((string)($lData['supplier_name'] ?? '-'));
+                $metersVal = (float)($roll['meters'] ?? $lData['meters'] ?? 0);
+                $metersStr = $metersVal > 0 ? (number_format($metersVal, 0, ',', '.') . ' m') : '-';
+                $widthVal = (float)($roll['width_mm'] ?? $lData['width_mm'] ?? 0);
+                $gramsVal = (float)($roll['microns'] ?? $lData['grams'] ?? $lData['microns'] ?? 0);
+                $specsStr = '';
+                if ($widthVal > 0) $specsStr .= round($widthVal) . ' mm';
+                if ($gramsVal > 0) $specsStr .= ($specsStr !== '' ? ' · ' : '') . round($gramsVal) . ' g';
+                if ($specsStr === '') $specsStr = '-';
+                $colorVal = trim((string)($roll['color'] ?? $lData['color'] ?? '-')) ?: '-';
+                $rollCode = (string)$roll['roll_code'];
+                $barcodeSvg = code128Svg($rollCode, 36, 1.35);
+                if ($barcodeSvg === '') $barcodeSvg = code39Svg($rollCode, 36, 1.15, 3);
+
+                echo '<div class="label-card">';
+                // 1. Cabecera
+                echo '<div class="header-row">';
+                echo '<div><div class="brand-title">UNIBAG</div><div class="sub-title">RECEPCIÓN MATERIA PRIMA</div></div>';
+                echo '<div class="header-meta"><div class="wh-badge">BOD: ' . h($whCode) . '</div><div class="date-str">FECHA: ' . h($arrivalDate) . '</div></div>';
+                echo '</div>';
+
+                // 2. SKU y Descripción
+                echo '<div class="sku-box">';
+                echo '<div class="sku-header"><div><span class="sku-label">SKU: </span><span class="sku-val">' . h($skuCode) . '</span></div><div class="stage-tag">MATERIA PRIMA</div></div>';
+                echo '<div class="sku-desc" title="' . h($skuDesc) . '">' . h($skuDesc) . '</div>';
+                echo '</div>';
+
+                // 3. Cuadrícula (PESO REAL: -)
+                echo '<div class="grid-specs">';
+                echo '<div class="spec-col"><div class="spec-k">Peso Real</div><div class="spec-v spec-v-lg">-</div></div>';
+                echo '<div class="spec-col"><div class="spec-k">Metros</div><div class="spec-v">' . h($metersStr) . '</div></div>';
+                echo '<div class="spec-col"><div class="spec-k">Ancho / Gr</div><div class="spec-v">' . h($specsStr) . '</div></div>';
+                echo '<div class="spec-col"><div class="spec-k">Color</div><div class="spec-v">' . h($colorVal) . '</div></div>';
+                echo '</div>';
+
+                // 4. Trazabilidad
+                echo '<div class="trace-row">';
+                echo '<div class="trace-item"><span>OC: </span><b>' . h($poCode) . '</b></div>';
+                echo '<div class="trace-item"><span>CONT: </span><b>' . h($cCode ?: ('#' . $containerId)) . '</b></div>';
+                echo '<div class="trace-item" style="max-width:40%"><span>PROV: </span><b>' . h($suppName) . '</b></div>';
+                echo '</div>';
+
+                // 5. Código de barras con código corto
+                echo '<div class="barcode-section">';
+                if ($barcodeSvg !== '') {
+                    echo '<div class="barcode-svg-wrap">' . $barcodeSvg . '</div>';
+                }
+                echo '<div class="code-text">' . h($rollCode) . '</div>';
+                echo '<div class="footer-text">CONTENEDOR ' . h($cCode ?: ('#' . $containerId)) . ' · CONTROL DE CALIDAD UNIBAG</div>';
+                echo '</div>';
+
+                echo '</div>'; // .label-card
+            }
+            echo '</div>'; // .labels-container
+        }
+
+        if ($autoPrint && !empty($rollsToPrint)) {
+            echo '<script>
+              window.addEventListener("load", function() {
+                setTimeout(function() {
+                  try { window.focus(); } catch (e) {}
+                  try { window.print(); } catch (e) {}
+                }, 400);
+              });
+            </script>';
+        }
+        echo '</body></html>';
+        exit;
+    }
+
     $action = (string)($_POST['action'] ?? $_GET['action'] ?? '');
 
     // =========================================================================
