@@ -469,6 +469,18 @@ function handleProductionRoutes(
 
         // Caso 1: Inicio de Tiraje de Producción (arranque de máquina)
         if ($actionType === 'start' || $submode === 'start' || ($eventId <= 0 && $submode !== 'end' && empty($_REQUEST['prod_amount']))) {
+            $alisCheck = $prodService->getWorkOrderAlistamientoStatus($workerOtId);
+            $machineInit = $prodService->getActiveMachineByWorker($workerId, $plantaId);
+            $equipoTypeId = (int)($machineInit['equipo_type_id'] ?? 0);
+            $isRebob = ($equipoTypeId === 12)
+                || stripos((string)($machineInit['type_ant_title'] ?? ''), 'rebobin') !== false
+                || stripos((string)($machineInit['equipo_name'] ?? ''), 'rebob') !== false;
+
+            if (!$isRebob && empty($alisCheck['has_alis'])) {
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error=' . rawurlencode('No puede iniciar producción sin haber terminado el alistamiento de la máquina.'));
+                return true;
+            }
+
             $mtype = trim((string)($_REQUEST['evt_metrotype'] ?? ''));
             $res = $prodService->recordEventProduction(
                 $workerOtId,
@@ -6245,7 +6257,7 @@ function renderProductionOperatorConsole(
     <!-- DESPACHO DE SUBFORMULARIOS SEGÚN MODE (editxid.php 4594-4609)  -->
     <!-- ============================================================== -->
 
-    <?php if (!$hasApertura && !$isSeriPulpo && !$isRebobinadora && empty($mode)): ?>
+    <?php if (!$hasApertura && !$isRebobinadora && empty($mode)): ?>
         <!-- ============================================================== -->
         <!-- FORMULARIO DIRECTO DE ALISTAMIENTO (editxid.php 5657 - 5780)   -->
         <!-- Se muestra obligatoriamente antes de iniciar la OT             -->
@@ -6341,6 +6353,10 @@ function renderProductionOperatorConsole(
         }
         $isEvtOpen = ($currentRefEvt !== null && (int)($currentRefEvt['evt_enddat'] ?? 0) === 0);
         $isStarting = ($openProdEvent === null && ($refId <= 0 || ($_GET['action'] ?? '') === 'start') && ($_GET['submode'] ?? '') !== 'end');
+        if ($isStarting && !$hasAlis && !$isRebobinadora) {
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error=' . rawurlencode('Debe iniciar y terminar el alistamiento antes de iniciar la producción.'));
+            return;
+        }
         $prodServiceInstance = new ProductionService(Db::erpPdo(), Db::trzPdo());
         $defectUnits = ($refId > 0) ? $prodServiceInstance->getEventDefectUnits($refId) : [];
         $mermaMap = [];
@@ -10570,13 +10586,13 @@ function renderProductionOperatorConsole(
 
     <?php endif; ?>
 
-    <?php if ($mode === '' && !$showSupervisorApproval && ($hasApertura || $hasAlis || $isSeri || $isRebobinadora)): ?>
+    <?php if ($mode === '' && !$showSupervisorApproval && ($hasApertura || $hasAlis || $isRebobinadora)): ?>
         <!-- ============================================================== -->
         <!-- BARRA DE BOTONES DE ACCIÓN (editxid.php líneas 4647 - 4780)    -->
         <!-- Visible en Alistamiento, en Producción y en Pulpo/Serigrafía    -->
         <!-- ============================================================== -->
         <?php
-        $isBarExpanded = ($hasAlis || $isSeri || $isRebobinadora);
+        $isBarExpanded = ($hasAlis || $isRebobinadora);
         $hidePauseShortcut = ($isSeri || $isSeriPulpo);
         $actionBtnBaseStyle = 'border-radius:8px;padding:10px 14px;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;min-height:42px;box-shadow:0 1px 3px rgba(15,23,42,0.16);cursor:pointer';
         $actionBtnBlockStyle = $actionBtnBaseStyle . ($isBarExpanded ? '' : 'width:100%;box-sizing:border-box;text-align:center;display:flex;');
@@ -10587,36 +10603,34 @@ function renderProductionOperatorConsole(
             <?php if (!$hasAlis && $hasApertura && !$isRebobinadora): ?>
                 <td style="padding-right:4px">
                     <div class="btnorange" style="<?=$actionBtnBaseStyle?>;background:#E1A500" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1'">
-                        <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar&nbsp;</nobr>
+                        <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar Alistamiento&nbsp;</nobr>
                     </div>
                 </td>
             <?php endif; ?>
-            <?php if ($hasAlis || $isSeri || $isRebobinadora): ?>
-                <?php if ($isRebobinadora): ?>
+            <?php if ($isRebobinadora): ?>
+                <td style="padding-right:4px">
+                    <div class="btngreen" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=reboprod'">
+                        <nobr><i class="fa fa-fw fa-cogs" style="color:white;"></i> Rebobinado&nbsp;</nobr>
+                    </div>
+                </td>
+            <?php elseif ($openProdId > 0): ?>
+                <td style="padding-right:4px">
+                    <div class="btnorange" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$openProdId?>&submode=end'">
+                        <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> Finalizar&nbsp;</nobr>
+                    </div>
+                </td>
+            <?php elseif ($hasAlis): ?>
+                <td style="padding-right:4px">
+                    <div class="btngreen" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&action=start'">
+                        <nobr><i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar&nbsp;</nobr>
+                    </div>
+                </td>
+                <?php if ($isSelladora): ?>
                     <td style="padding-right:4px">
-                        <div class="btngreen" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=reboprod'">
-                            <nobr><i class="fa fa-fw fa-cogs" style="color:white;"></i> Rebobinado&nbsp;</nobr>
+                        <div class="btngrey" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=embalaje'">
+                            <nobr><i class="fa fa-fw fa-box" style="color:white;"></i> Embalaje&nbsp;</nobr>
                         </div>
                     </td>
-                <?php else: ?>
-                    <td style="padding-right:4px">
-                        <?php if ($openProdId > 0): ?>
-                            <div class="btnorange" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$openProdId?>&submode=end'">
-                                <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> Finalizar&nbsp;</nobr>
-                            </div>
-                        <?php else: ?>
-                            <div class="btngreen" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&action=start'">
-                                <nobr><i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar&nbsp;</nobr>
-                            </div>
-                        <?php endif; ?>
-                    </td>
-                    <?php if ($isSelladora): ?>
-                        <td style="padding-right:4px">
-                            <div class="btngrey" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=embalaje'">
-                                <nobr><i class="fa fa-fw fa-box" style="color:white;"></i> Embalaje&nbsp;</nobr>
-                            </div>
-                        </td>
-                    <?php endif; ?>
                 <?php endif; ?>
             <?php endif; ?>
 
