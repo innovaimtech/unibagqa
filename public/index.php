@@ -14603,6 +14603,13 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
     $trzPdo = $trzPdo instanceof PDO ? $trzPdo : (method_exists($service, 'getPdo') ? $service->getPdo() : Db::trzPdo());
     $service->ensureTraceabilityWarehouseEntriesTable();
 
+    // Asegurar que no existan restricciones foráneas obsoletas que bloqueen los IDs de OC/Proveedor del ERP
+    foreach (['fk_rolls_po_id', 'fk_rolls_pol_id', 'fk_rolls_supplier_id'] as $fkName) {
+        try {
+            @$trzPdo->exec("ALTER TABLE rolls DROP FOREIGN KEY `{$fkName}`");
+        } catch (Throwable) {}
+    }
+
     // Consultar bobinas ya registradas con trazabilidad para este contenedor
     $stmtExisting = $trzPdo->prepare("
         SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name, w.code AS warehouse_code
@@ -14754,20 +14761,56 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
                             :supplier_id, "RAW", NOW()
                         )
                     ');
-                    $stmtRoll->execute([
-                        ':code' => $rollCode,
-                        ':skuid' => $skuId,
-                        ':whid' => $whId,
-                        ':microns' => $gramsVal > 0 ? (int)round($gramsVal) : null,
-                        ':width_mm' => $widthVal > 0 ? (int)round($widthVal) : null,
-                        ':color' => $colorVal !== '-' ? $colorVal : null,
-                        ':meters' => $metersVal > 0 ? $metersVal : null,
-                        ':po_id' => !empty($ln['purchase_order_id']) ? (int)$ln['purchase_order_id'] : null,
-                        ':po_line_id' => !empty($ln['id']) ? (int)$ln['id'] : null,
-                        ':container_id' => $containerId,
-                        ':container_item_id' => $lineItemId,
-                        ':supplier_id' => !empty($ln['supplier_id']) ? (int)$ln['supplier_id'] : null,
-                    ]);
+                    $targetPoId = !empty($ln['purchase_order_id']) ? (int)$ln['purchase_order_id'] : null;
+                    $targetPoLineId = !empty($ln['id']) ? (int)$ln['id'] : null;
+                    $targetSupplierId = !empty($ln['supplier_id']) ? (int)$ln['supplier_id'] : null;
+
+                    try {
+                        $stmtRoll->execute([
+                            ':code' => $rollCode,
+                            ':skuid' => $skuId,
+                            ':whid' => $whId,
+                            ':microns' => $gramsVal > 0 ? (int)round($gramsVal) : null,
+                            ':width_mm' => $widthVal > 0 ? (int)round($widthVal) : null,
+                            ':color' => $colorVal !== '-' ? $colorVal : null,
+                            ':meters' => $metersVal > 0 ? $metersVal : null,
+                            ':po_id' => $targetPoId,
+                            ':po_line_id' => $targetPoLineId,
+                            ':container_id' => $containerId,
+                            ':container_item_id' => $lineItemId,
+                            ':supplier_id' => $targetSupplierId,
+                        ]);
+                    } catch (PDOException $eRoll) {
+                        // Si falla por restricción de clave foránea residual (ej. fk_rolls_po_id, 1452), reintentar sin po_id/supplier_id
+                        if ((int)$eRoll->getCode() === 23000 || str_contains($eRoll->getMessage(), '1452') || str_contains($eRoll->getMessage(), 'fk_rolls_po_id')) {
+                            $stmtRollFallback = $trzPdo->prepare('
+                                INSERT INTO rolls (
+                                    roll_code, sku_id, warehouse_id, weight_kg, received_qty,
+                                    reception_mode, microns, width_mm, color, meters, status,
+                                    purchase_order_id, purchase_order_line_id, import_container_id, import_container_item_id,
+                                    supplier_id, process_stage, created_at
+                                ) VALUES (
+                                    :code, :skuid, :whid, 0.0, 1,
+                                    "WAREHOUSE_STOCK", :microns, :width_mm, :color, :meters, "RECEIVED",
+                                    NULL, NULL, :container_id, :container_item_id,
+                                    NULL, "RAW", NOW()
+                                )
+                            ');
+                            $stmtRollFallback->execute([
+                                ':code' => $rollCode,
+                                ':skuid' => $skuId,
+                                ':whid' => $whId,
+                                ':microns' => $gramsVal > 0 ? (int)round($gramsVal) : null,
+                                ':width_mm' => $widthVal > 0 ? (int)round($widthVal) : null,
+                                ':color' => $colorVal !== '-' ? $colorVal : null,
+                                ':meters' => $metersVal > 0 ? $metersVal : null,
+                                ':container_id' => $containerId,
+                                ':container_item_id' => $lineItemId,
+                            ]);
+                        } else {
+                            throw $eRoll;
+                        }
+                    }
                     $rollId = (int)$trzPdo->lastInsertId();
 
                     // 2. Registrar movimiento en movements

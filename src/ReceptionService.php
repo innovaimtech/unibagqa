@@ -292,6 +292,12 @@ final class ReceptionService
         if (!$this->columnExists('rolls', 'supplier_id')) {
             $this->pdo->exec("ALTER TABLE rolls ADD COLUMN supplier_id BIGINT UNSIGNED NULL AFTER import_container_item_id");
         }
+        // Desactivar o eliminar restricciones foráneas obsoletas que bloquean los IDs de OC/Proveedor del ERP
+        foreach (['fk_rolls_po_id', 'fk_rolls_pol_id', 'fk_rolls_supplier_id'] as $fkName) {
+            try {
+                @$this->pdo->exec("ALTER TABLE rolls DROP FOREIGN KEY `{$fkName}`");
+            } catch (Throwable) {}
+        }
         if (!$this->columnExists('rolls', 'current_work_order_id')) {
             $this->pdo->exec("ALTER TABLE rolls ADD COLUMN current_work_order_id BIGINT UNSIGNED NULL AFTER supplier_id");
         }
