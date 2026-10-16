@@ -15088,6 +15088,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
             if (!$whId) $whId = 1;
 
             $createdRolls = [];
+            $createdRollIds = [];
             $printErrors = [];
             $printedCount = 0;
             $consecutivePrintErrors = 0;
@@ -15308,6 +15309,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
                     }
 
                     $createdRolls[] = $rollCode;
+                    $createdRollIds[] = $rollId;
                 }
 
                 if ($targetLineId <= 0 && $remainingGlobalBatch <= 0) {
@@ -15315,9 +15317,17 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
                 }
             }
 
+            // Si la impresora térmica directa en servidor no está habilitada o no imprimió (ej. VPS remota),
+            // abrir directamente la pantalla de lote de impresión del navegador para el lote recién creado
+            if ($printedCount === 0 && !empty($createdRollIds)) {
+                header('Location: /import-containers/' . $containerId . '/print-labels?roll_ids=' . implode(',', $createdRollIds) . '&auto_print=1');
+                exit;
+            }
+
             $redParams = ['created' => count($createdRolls), 'printed' => $printedCount];
             if (!empty($createdRolls)) {
                 $redParams['code_range'] = $createdRolls[0] . (count($createdRolls) > 1 ? (' al ' . end($createdRolls)) : '');
+                $redParams['new_roll_ids'] = implode(',', $createdRollIds);
             }
             if ($targetLineId > 0) {
                 $redParams['line'] = $targetLineId;
@@ -15351,14 +15361,11 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
                 if (($pRes['ok'] ?? false) === true) {
                     header('Location: /import-containers/' . $containerId . '/no-weight-labels?msg=' . urlencode('Etiqueta ' . $roll['roll_code'] . ' reimpresa exitosamente.'));
                     exit;
-                } else {
-                    header('Location: /import-containers/' . $containerId . '/no-weight-labels?print_err=' . urlencode($pRes['error'] ?? 'Error al reimprimir.'));
-                    exit;
                 }
-            } else {
-                header('Location: /import-containers/' . $containerId . '/no-weight-labels?print_err=' . urlencode('Impresora térmica deshabilitada.'));
-                exit;
             }
+            // En VPS o si falló la impresora directa, abrir etiqueta en navegador con auto-print
+            header('Location: /rolls/' . $rollId . '/label?no_weight=1&auto_print=1');
+            exit;
         }
         header('Location: /import-containers/' . $containerId . '/no-weight-labels');
         exit;
@@ -15371,12 +15378,18 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
         if ($method === 'POST') {
             requireCsrf();
         }
+        $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
+        if (!$isPrinterEnabled) {
+            // En VPS o sin impresora directa en servidor: redirigir directamente al lote de impresión del navegador
+            $redUrl = '/import-containers/' . $containerId . '/print-labels?' . ($targetLineId > 0 ? ('line_id=' . $targetLineId) : 'all=1') . '&auto_print=1';
+            header('Location: ' . $redUrl);
+            exit;
+        }
         try {
             @ini_set('max_execution_time', '180');
             if (function_exists('set_time_limit')) {
                 @set_time_limit(180);
             }
-            $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
             $reprintList = [];
             foreach ($existingRolls as $er) {
                 if ($targetLineId > 0 && (int)($er['import_container_item_id'] ?? 0) !== $targetLineId) {
@@ -15726,6 +15739,9 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     echo '</div>';
 
     echo '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+    if (!empty($existingRolls)) {
+        echo '<a class="btn btn-primary" href="/import-containers/' . $containerId . '/print-labels?all=1" target="_blank" title="Abrir todas las etiquetas para imprimir por lote o navegador">🖨️ Imprimir Todas (' . count($existingRolls) . ')</a>';
+    }
     $headerPrinterName = $configuredPrinterName !== '' ? $configuredPrinterName : 'Impresora Térmica';
     echo '<div style="background:rgba(255,255,255,0.1);padding:6px 12px;border-radius:8px;font-size:12px;color:#e2e8f0;display:flex;align-items:center;gap:6px">';
     echo '<span>🖨️ Impresora Térmica:</span> <strong style="color:#38bdf8">' . h($headerPrinterName) . '</strong>';
@@ -15940,11 +15956,12 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
 
             // Si ya tiene bobinas registradas, botón para reimprimir
             if ($lnRegisteredCount > 0) {
+                echo '<a class="btn btn-reprint-sm" href="/import-containers/' . $containerId . '/print-labels?line_id=' . $lnId . '" target="_blank" title="Imprimir lote de esta línea en navegador">🖨️ Lote (' . $lnRegisteredCount . ')</a>';
                 echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0">';
                 echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
                 echo '<input type="hidden" name="action" value="reprint_all">';
                 echo '<input type="hidden" name="target_line_id" value="' . $lnId . '">';
-                echo '<button type="submit" class="btn btn-reprint-sm" title="Reimprimir etiquetas de esta línea">🖨️</button>';
+                echo '<button type="submit" class="btn btn-reprint-sm" title="Reimprimir etiquetas de esta línea en térmica">⚡ Térmica</button>';
                 echo '</form>';
             }
 
@@ -15993,10 +16010,10 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
                 echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
                 echo '<input type="hidden" name="action" value="reprint_roll">';
                 echo '<input type="hidden" name="roll_id" value="' . $rId . '">';
-                echo '<button type="submit" class="btn btn-reprint-sm" title="Reimprimir etiqueta a la impresora térmica">🖨️ Reimprimir</button>';
+                echo '<button type="submit" class="btn btn-reprint-sm" title="Reimprimir etiqueta a la impresora térmica">⚡ Térmica</button>';
                 echo '</form>';
-                // Ver pantalla completa
-                echo '<a class="btn btn-outline" style="padding:4px 8px;font-size:11px" href="/rolls/' . $rId . '/label?no_weight=1" target="_blank" title="Ver etiqueta térmica">👁️</a>';
+                // Ver / Imprimir en navegador
+                echo '<a class="btn btn-outline" style="padding:4px 8px;font-size:11px" href="/rolls/' . $rId . '/label?no_weight=1" target="_blank" title="Ver / Imprimir etiqueta en navegador">🖨️ Ver / Imprimir</a>';
                 // Eliminar trazabilidad (si fue error)
                 echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0" onsubmit="return confirm(\'¿Eliminar la trazabilidad de la bobina ' . h($rCode) . '?\')">';
                 echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
