@@ -14575,7 +14575,7 @@ if (preg_match('#^/import-containers/(\\d+)$#', $path, $m) === 1 && $method === 
     exit;
 }
 
-if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 1) {
+if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#', $path, $m) === 1) {
     $containerId = (int)$m[1];
     if (!unibagIsUserJavier() && !unibagCanUserPerformModifications()) {
         http_response_code(403);
