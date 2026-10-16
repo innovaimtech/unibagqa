@@ -461,6 +461,12 @@ function handleProductionRoutes(
         requireCsrf();
         $agId = (int)($_REQUEST['agid'] ?? 0);
         $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
+        if ($workerOtId <= 0 && $agId > 0) {
+            $openOt = $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
+            if ($openOt !== null) {
+                $workerOtId = (int)$openOt['id'];
+            }
+        }
         $submode = trim((string)($_REQUEST['submode'] ?? ''));
         $actionType = trim((string)($_REQUEST['action_type'] ?? ''));
         $eventId = (int)($_REQUEST['refid'] ?? 0);
@@ -470,7 +476,11 @@ function handleProductionRoutes(
         // Caso 1: Inicio de Tiraje de Producción (arranque de máquina)
         if ($actionType === 'start' || $submode === 'start' || ($eventId <= 0 && $submode !== 'end' && empty($_REQUEST['prod_amount']))) {
             $alisCheck = $prodService->getWorkOrderAlistamientoStatus($workerOtId);
-            $machineInit = $prodService->getActiveMachineByWorker($workerId, $plantaId);
+            $machineInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
+            if ($machineInit === null && $agId > 0) {
+                $ctx = $prodService->getWorkOrderOperatingContext($agId, $workerId, $plantaId);
+                $machineInit = $ctx['machine_init'] ?? null;
+            }
             $equipoTypeId = (int)($machineInit['equipo_type_id'] ?? 0);
             $isRebob = ($equipoTypeId === 12)
                 || stripos((string)($machineInit['type_ant_title'] ?? ''), 'rebobin') !== false
@@ -1848,8 +1858,7 @@ function renderProdwrkShell(
     <meta charset="utf-8">
     <title><?=htmlspecialchars($title)?> - Producción Operador</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link href="/assets/fontawesome/css/all.min.css" rel="stylesheet" type="text/css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="/css/fontawesome/css/all.min.css" rel="stylesheet" type="text/css">
     <style>
         body {
             font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
