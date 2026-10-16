@@ -375,7 +375,7 @@ final class PrintService
         return $this->buildRollCommand($roll);
     }
 
-    private function buildRollCommand(array $roll): string
+    public function buildRollCommand(array $roll): string
     {
         $language = $this->getPrintLanguage();
         if ($language === 'tspl') {

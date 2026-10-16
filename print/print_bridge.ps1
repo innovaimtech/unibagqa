@@ -91,6 +91,17 @@ try {
     $req = $ctx.Request
     $res = $ctx.Response
 
+    # Habilitar CORS para permitir peticiones desde la web (ej. VPS 149.50.140.21 o localhost)
+    $res.AddHeader('Access-Control-Allow-Origin', '*')
+    $res.AddHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    $res.AddHeader('Access-Control-Allow-Headers', 'Content-Type, Accept')
+
+    if ($req.HttpMethod -eq 'OPTIONS') {
+      $res.StatusCode = 200
+      $res.OutputStream.Close()
+      continue
+    }
+
     $path = $req.Url.AbsolutePath
     if ($path -eq '/' -or $path -eq '/health') {
       $res.StatusCode = 200

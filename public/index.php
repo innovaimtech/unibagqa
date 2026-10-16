@@ -14597,8 +14597,11 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     $printerProfile = unibagNormalizePrinterProfile((string)($_REQUEST['printer_profile'] ?? 'default'));
     $activePrinter = $printer->withProfile($printerProfile);
     $configuredPrinterName = $activePrinter->getConfiguredPrinterName();
-    $configuredPrintLang = strtoupper($activePrinter->getConfiguredPrintLanguage());
-    $isPrinterEnabled = $activePrinter->isEnabled();
+    $hostHeader = strtolower(explode(':', $_SERVER['HTTP_HOST'] ?? '')[0]);
+    $isLocalHost = in_array($hostHeader, ['localhost', '127.0.0.1'], true);
+    // En la VPS en la nube (ej. 149.50.140.21), el servidor Linux remoto no puede hacer cURL local
+    // a una impresora USB física conectada a la PC del usuario.
+    $isPrinterEnabled = $activePrinter->isEnabled() && $isLocalHost;
 
     $trzPdo = $trzPdo instanceof PDO ? $trzPdo : (method_exists($service, 'getPdo') ? $service->getPdo() : Db::trzPdo());
     $service->ensureTraceabilityWarehouseEntriesTable();
@@ -15345,6 +15348,32 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     }
 
     // =========================================================================
+    // ACCIÓN: OBTENER COMANDO NATIVO EPL/ZPL DE BOBINA PARA IMPRESIÓN CLIENTE
+    // =========================================================================
+    if ($action === 'raw_roll_command') {
+        $rollId = (int)($_REQUEST['roll_id'] ?? 0);
+        $roll = $service->getRoll($rollId);
+        if ($roll === null) {
+            header('Content-Type: application/json');
+            echo json_encode(['ok' => false, 'error' => 'Bobina no encontrada']);
+            exit;
+        }
+        $roll['no_weight'] = true;
+        $roll['weight_str'] = '-';
+        $cmd = $activePrinter->buildRollCommand($roll);
+        header('Content-Type: application/json');
+        echo json_encode([
+            'ok' => true,
+            'roll_id' => $rollId,
+            'roll_code' => $roll['roll_code'],
+            'printer' => $configuredPrinterName,
+            'language' => strtolower($activePrinter->getConfiguredPrintLanguage()),
+            'command' => $cmd
+        ]);
+        exit;
+    }
+
+    // =========================================================================
     // ACCIÓN: REIMPRIMIR ETIQUETA DE BOBINA YA EXISTENTE
     // =========================================================================
     if ($action === 'reprint_roll') {
@@ -16060,6 +16089,22 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     }
 
     echo '</div>'; // .container-layout
+    echo '<script>
+    (function() {
+      const badge = document.getElementById("bridge-status-badge");
+      if (!badge) return;
+      fetch("http://127.0.0.1:8767/health", { method: "GET", mode: "cors", cache: "no-store" })
+        .then(r => r.json())
+        .then(data => {
+          if (data && (data.ok || data.status === "running")) {
+            badge.style.background = "#059669";
+            badge.innerHTML = "🟢 Puente Térmico Activo (PC Local)";
+            badge.title = "Puente local conectado en puerto 8767. Listo para imprimir en impresora térmica.";
+          }
+        })
+        .catch(() => {});
+    })();
+    </script>';
     echo '</body></html>';
     exit;
 }
