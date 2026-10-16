@@ -15767,13 +15767,8 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     echo '</div>';
     echo '</div>';
 
-    echo '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
-    $bridgeStatus = method_exists($activePrinter, 'checkBridgeStatus') ? $activePrinter->checkBridgeStatus() : ['online' => true];
-    if ($bridgeStatus['online']) {
-        echo '<span style="background:#059669;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px" title="El script print_bridge.ps1 está escuchando en puerto 8767">🟢 Puente Térmico Activo</span>';
-    } else {
-        echo '<span style="background:#b91c1c;color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px" title="Inicia iniciar_proyecto.bat para conectar la impresora térmica">🔴 Puente 8767 Desconectado</span>';
-    }
+    $bridgeStatus = method_exists($activePrinter, 'checkBridgeStatus') ? $activePrinter->checkBridgeStatus() : ['online' => false];
+    echo '<span id="bridge-status-badge" style="background:' . ($bridgeStatus['online'] ? '#059669' : '#b91c1c') . ';color:#fff;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px" title="' . ($bridgeStatus['online'] ? 'El script print_bridge.ps1 está escuchando en puerto 8767' : 'Inicia iniciar_impresora.bat en tu PC para conectar la impresora térmica local') . '">' . ($bridgeStatus['online'] ? '🟢 Puente Térmico Activo' : '🔴 Puente 8767 Desconectado') . '</span>';
     if (!empty($existingRolls)) {
         echo '<a class="btn btn-primary" href="/import-containers/' . $containerId . '/print-labels?all=1" target="_blank" title="Abrir todas las etiquetas para imprimir por lote o navegador">🖨️ Imprimir Todas (' . count($existingRolls) . ')</a>';
     }
