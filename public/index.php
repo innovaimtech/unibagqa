@@ -14631,229 +14631,267 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
         if ($method === 'POST') {
             requireCsrf();
         }
-        $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
-        $reqQty = max(1, min(500, (int)($_REQUEST['qty'] ?? 1)));
-        $whCode = trim((string)($_REQUEST['warehouse_code'] ?? '100')) ?: '100';
-        $userPrefix = strtoupper(trim((string)($_REQUEST['code_prefix'] ?? '')));
-        if ($userPrefix === '') {
-            $userPrefix = 'RB-' . $containerId . '-';
-        } elseif (!str_ends_with($userPrefix, '-')) {
-            $userPrefix .= '-';
-        }
+        try {
+            @ini_set('max_execution_time', '180');
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(180);
+            }
 
-        $linesToProcess = [];
-        if ($targetLineId > 0) {
-            foreach ($allLines as $l) {
-                if ((int)$l['import_container_item_id'] === $targetLineId) {
-                    $linesToProcess[] = $l;
-                    break;
+            $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
+            // Máximo seguro por petición: 100 bobinas por lote para evitar bloqueos
+            $reqQty = max(1, min(100, (int)($_REQUEST['qty'] ?? 1)));
+            $whCode = trim((string)($_REQUEST['warehouse_code'] ?? '100')) ?: '100';
+            $userPrefix = strtoupper(trim((string)($_REQUEST['code_prefix'] ?? '')));
+            if ($userPrefix === '') {
+                $userPrefix = 'RB-' . $containerId . '-';
+            } elseif (!str_ends_with($userPrefix, '-')) {
+                $userPrefix .= '-';
+            }
+
+            $linesToProcess = [];
+            if ($targetLineId > 0) {
+                foreach ($allLines as $l) {
+                    if ((int)$l['import_container_item_id'] === $targetLineId) {
+                        $linesToProcess[] = $l;
+                        break;
+                    }
+                }
+            } else {
+                $linesToProcess = $allLines;
+            }
+
+            // Calcular siguiente número correlativo para este contenedor y prefijo
+            $stmtMax = $trzPdo->prepare("SELECT roll_code FROM rolls WHERE roll_code LIKE :pref ORDER BY id DESC LIMIT 100");
+            $stmtMax->execute([':pref' => $userPrefix . '%']);
+            $existingCodes = $stmtMax->fetchAll(PDO::FETCH_COLUMN);
+            $maxSeq = 0;
+            foreach ($existingCodes as $ec) {
+                if (preg_match('/' . preg_quote($userPrefix, '/') . '(\d+)$/', (string)$ec, $mSeq)) {
+                    $n = (int)$mSeq[1];
+                    if ($n > $maxSeq) $maxSeq = $n;
                 }
             }
-        } else {
-            $linesToProcess = $allLines;
-        }
 
-        // Calcular siguiente número correlativo para este contenedor y prefijo
-        $stmtMax = $trzPdo->prepare("SELECT roll_code FROM rolls WHERE roll_code LIKE :pref ORDER BY id DESC LIMIT 100");
-        $stmtMax->execute([':pref' => $userPrefix . '%']);
-        $existingCodes = $stmtMax->fetchAll(PDO::FETCH_COLUMN);
-        $maxSeq = 0;
-        foreach ($existingCodes as $ec) {
-            if (preg_match('/' . preg_quote($userPrefix, '/') . '(\d+)$/', (string)$ec, $mSeq)) {
-                $n = (int)$mSeq[1];
-                if ($n > $maxSeq) $maxSeq = $n;
+            // Resolver id de bodega en TRZ
+            $stmtWh = $trzPdo->prepare('SELECT id FROM warehouses WHERE code = :c LIMIT 1');
+            $stmtWh->execute([':c' => $whCode]);
+            $whId = (int)$stmtWh->fetchColumn();
+            if (!$whId) {
+                $stmtWh2 = $trzPdo->prepare('SELECT id FROM warehouses WHERE id = :c LIMIT 1');
+                $stmtWh2->execute([':c' => (int)$whCode]);
+                $whId = (int)$stmtWh2->fetchColumn();
             }
-        }
+            if (!$whId) $whId = 1;
 
-        // Resolver id de bodega en TRZ
-        $stmtWh = $trzPdo->prepare('SELECT id FROM warehouses WHERE code = :c LIMIT 1');
-        $stmtWh->execute([':c' => $whCode]);
-        $whId = (int)$stmtWh->fetchColumn();
-        if (!$whId) {
-            $stmtWh2 = $trzPdo->prepare('SELECT id FROM warehouses WHERE id = :c LIMIT 1');
-            $stmtWh2->execute([':c' => (int)$whCode]);
-            $whId = (int)$stmtWh2->fetchColumn();
-        }
-        if (!$whId) $whId = 1;
+            $createdRolls = [];
+            $printErrors = [];
+            $printedCount = 0;
+            $consecutivePrintErrors = 0;
+            $remainingGlobalBatch = ($targetLineId > 0) ? $reqQty : min(50, $reqQty);
 
-        $createdRolls = [];
-        $printErrors = [];
-        $printedCount = 0;
+            foreach ($linesToProcess as $ln) {
+                $lineItemId = (int)($ln['import_container_item_id'] ?? 0);
+                $alreadyCount = isset($existingRollsByLine[$lineItemId]) ? count($existingRollsByLine[$lineItemId]) : 0;
+                $totalOrdered = max(1, (int)($ln['received_rolls'] ?? $ln['ordered_rolls'] ?? 1));
 
-        foreach ($linesToProcess as $ln) {
-            $lineItemId = (int)($ln['import_container_item_id'] ?? 0);
-            $alreadyCount = isset($existingRollsByLine[$lineItemId]) ? count($existingRollsByLine[$lineItemId]) : 0;
-            $totalOrdered = max(1, (int)($ln['received_rolls'] ?? $ln['ordered_rolls'] ?? 1));
-
-            // Si es por línea específica se usa la cantidad solicitada; si es global se generan las faltantes
-            $lineCopies = ($targetLineId > 0) ? $reqQty : max(1, $totalOrdered - $alreadyCount);
-            if ($lineCopies <= 0) {
-                continue;
-            }
-
-            $skuCode = trim((string)($ln['sku_code'] ?? '-'));
-            $skuDesc = trim((string)($ln['sku_description'] ?? '-'));
-            $poCode = trim((string)($ln['po_code'] ?? '-'));
-            $suppName = trim((string)($ln['supplier_name'] ?? '-'));
-            $metersVal = (float)($ln['meters'] ?? 0);
-            $widthVal = (float)($ln['width_mm'] ?? 0);
-            $gramsVal = (float)($ln['grams'] ?? $ln['microns'] ?? 0);
-            $colorVal = trim((string)($ln['color'] ?? '')) ?: '-';
-            $rawDate = trim((string)($container['eta_plant'] ?? $container['created_at'] ?? date('Y-m-d')));
-
-            // Resolver o registrar sku_id en tabla skus de TRZ
-            $skuId = 1;
-            if ($skuCode !== '' && $skuCode !== '-') {
-                $stmtSku = $trzPdo->prepare('SELECT id FROM skus WHERE code = :c LIMIT 1');
-                $stmtSku->execute([':c' => $skuCode]);
-                $foundSkuId = (int)$stmtSku->fetchColumn();
-                if ($foundSkuId > 0) {
-                    $skuId = $foundSkuId;
+                // Si es por línea específica se usa reqQty; si es global se limita a un lote seguro
+                if ($targetLineId > 0) {
+                    $lineCopies = $reqQty;
                 } else {
-                    $stmtInsSku = $trzPdo->prepare('INSERT INTO skus (code, description, is_active, created_at) VALUES (:c, :d, 1, NOW())');
-                    $stmtInsSku->execute([':c' => $skuCode, ':d' => $skuDesc !== '' ? $skuDesc : $skuCode]);
-                    $skuId = (int)$trzPdo->lastInsertId();
+                    $pendingLine = max(0, $totalOrdered - $alreadyCount);
+                    if ($pendingLine <= 0) {
+                        continue;
+                    }
+                    $lineCopies = min($remainingGlobalBatch, min(20, $pendingLine));
+                    $remainingGlobalBatch -= $lineCopies;
                 }
-            }
 
-            for ($i = 1; $i <= $lineCopies; $i++) {
-                $maxSeq++;
-                // Código de trazabilidad corto y limpio: ej. RB-287-001
-                $rollCode = $userPrefix . str_pad((string)$maxSeq, 3, '0', STR_PAD_LEFT);
+                if ($lineCopies <= 0) {
+                    continue;
+                }
 
-                // 1. Insertar en tabla rolls de trazabilidad (status = RECEIVED, sin tocar inventario ERP)
-                $stmtRoll = $trzPdo->prepare('
-                    INSERT INTO rolls (
-                        roll_code, sku_id, warehouse_id, weight_kg, received_qty,
-                        reception_mode, microns, width_mm, color, meters, status,
-                        purchase_order_id, purchase_order_line_id, import_container_id, import_container_item_id,
-                        supplier_id, process_stage, created_at
-                    ) VALUES (
-                        :code, :skuid, :whid, 0.0, 1,
-                        "WAREHOUSE_STOCK", :microns, :width_mm, :color, :meters, "RECEIVED",
-                        :po_id, :po_line_id, :container_id, :container_item_id,
-                        :supplier_id, "RAW", NOW()
-                    )
-                ');
-                $stmtRoll->execute([
-                    ':code' => $rollCode,
-                    ':skuid' => $skuId,
-                    ':whid' => $whId,
-                    ':microns' => $gramsVal > 0 ? (int)round($gramsVal) : null,
-                    ':width_mm' => $widthVal > 0 ? (int)round($widthVal) : null,
-                    ':color' => $colorVal !== '-' ? $colorVal : null,
-                    ':meters' => $metersVal > 0 ? $metersVal : null,
-                    ':po_id' => !empty($ln['purchase_order_id']) ? (int)$ln['purchase_order_id'] : null,
-                    ':po_line_id' => !empty($ln['id']) ? (int)$ln['id'] : null,
-                    ':container_id' => $containerId,
-                    ':container_item_id' => $lineItemId,
-                    ':supplier_id' => !empty($ln['supplier_id']) ? (int)$ln['supplier_id'] : null,
-                ]);
-                $rollId = (int)$trzPdo->lastInsertId();
+                $skuCode = trim((string)($ln['sku_code'] ?? '-'));
+                $skuDesc = trim((string)($ln['sku_description'] ?? '-'));
+                $poCode = trim((string)($ln['po_code'] ?? '-'));
+                $suppName = trim((string)($ln['supplier_name'] ?? '-'));
+                $metersVal = (float)($ln['meters'] ?? 0);
+                $widthVal = (float)($ln['width_mm'] ?? 0);
+                $gramsVal = (float)($ln['grams'] ?? $ln['microns'] ?? 0);
+                $colorVal = trim((string)($ln['color'] ?? '')) ?: '-';
+                $rawDate = trim((string)($container['eta_plant'] ?? $container['created_at'] ?? date('Y-m-d')));
 
-                // 2. Registrar movimiento en movements
-                $stmtMov = $trzPdo->prepare('
-                    INSERT INTO movements (entity_type, entity_id, movement_type, to_warehouse_id, payload, created_at)
-                    VALUES ("ROLL", :eid, "RECEIPT", :towh, :payload, NOW())
-                ');
-                $movPayload = json_encode([
-                    'traceability_code' => $rollCode,
-                    'entity_type' => 'ROLL',
-                    'entity_id' => $rollId,
-                    'item_code' => $skuCode,
-                    'item_description' => $skuDesc,
-                    'quantity' => 1.0,
-                    'unit' => 'BOB',
-                    'warehouse_code' => $whCode,
-                    'container_code' => $cCode,
-                    'container_id' => $containerId,
-                    'package_number' => $maxSeq,
-                    'total_packages' => $lineCopies,
-                    'operator' => 'Javier Perozo',
-                    'comments' => 'Trazabilidad de bobina asignada en bodega para contenedor ' . $cCode . ' (sin duplicar stock ERP)',
-                ], JSON_UNESCAPED_UNICODE);
-                $stmtMov->execute([
-                    ':eid' => $rollId,
-                    ':towh' => $whId,
-                    ':payload' => $movPayload,
-                ]);
-
-                // 3. Registrar entrada en traceability_warehouse_entries (para consulta como ingreso con trazabilidad)
-                $stmtEntry = $trzPdo->prepare('
-                    INSERT INTO traceability_warehouse_entries (
-                        traceability_code, entity_type, entity_id, warehouse_id, warehouse_name,
-                        item_code, item_description, quantity, unit_name, package_number, total_packages,
-                        weight_kg, width_mm, microns, meters, order_ref, operator_name, comments, status, created_at
-                    ) VALUES (
-                        :code, "ROLL", :eid, :whid, :whname,
-                        :sku, :desc, 1.0, "BOB", :pkgnum, :totpkg,
-                        NULL, :wmm, :mic, :met, :ord, :op, :comm, "IN_WAREHOUSE", NOW()
-                    )
-                ');
-                $stmtEntry->execute([
-                    ':code' => $rollCode,
-                    ':eid' => $rollId,
-                    ':whid' => $whId,
-                    ':whname' => 'Bodega ' . $whCode,
-                    ':sku' => $skuCode,
-                    ':desc' => $skuDesc,
-                    ':pkgnum' => $maxSeq,
-                    ':totpkg' => $lineCopies,
-                    ':wmm' => $widthVal > 0 ? (int)round($widthVal) : null,
-                    ':mic' => $gramsVal > 0 ? (int)round($gramsVal) : null,
-                    ':met' => $metersVal > 0 ? $metersVal : null,
-                    ':ord' => $poCode !== '-' ? ('OC: ' . $poCode) : ('CONT: ' . $cCode),
-                    ':op' => 'Javier Perozo',
-                    ':comm' => 'Contenedor ' . $cCode . ' - Trazabilidad de bobina en bodega',
-                ]);
-
-                // 4. Imprimir etiqueta térmica en formato Flexo 100x70 con el código de trazabilidad corto
-                $mockRoll = [
-                    'id' => $rollId,
-                    'roll_code' => $rollCode,
-                    'sku_code' => $skuCode,
-                    'sku_description' => $skuDesc,
-                    'warehouse_code' => $whCode,
-                    'weight_kg' => 0.0,
-                    'no_weight' => true,
-                    'weight_str' => '-',
-                    'meters' => $metersVal,
-                    'width_mm' => $widthVal,
-                    'grams' => $gramsVal,
-                    'microns' => $gramsVal,
-                    'color' => $colorVal,
-                    'po_code' => $poCode,
-                    'container_code' => $cCode,
-                    'supplier_name' => $suppName,
-                    'arrival_date' => $rawDate,
-                    'process_stage' => 'RAW',
-                ];
-
-                if ($isPrinterEnabled) {
-                    $pRes = $activePrinter->printRollLabel($mockRoll);
-                    if (($pRes['ok'] ?? false) === true) {
-                        $printedCount++;
+                // Resolver o registrar sku_id en tabla skus de TRZ
+                $skuId = 1;
+                if ($skuCode !== '' && $skuCode !== '-') {
+                    $stmtSku = $trzPdo->prepare('SELECT id FROM skus WHERE code = :c LIMIT 1');
+                    $stmtSku->execute([':c' => $skuCode]);
+                    $foundSkuId = (int)$stmtSku->fetchColumn();
+                    if ($foundSkuId > 0) {
+                        $skuId = $foundSkuId;
                     } else {
-                        $printErrors[] = $pRes['error'] ?? 'Error desconocido';
+                        $stmtInsSku = $trzPdo->prepare('INSERT INTO skus (code, description, is_active, created_at) VALUES (:c, :d, 1, NOW())');
+                        $stmtInsSku->execute([':c' => $skuCode, ':d' => $skuDesc !== '' ? $skuDesc : $skuCode]);
+                        $skuId = (int)$trzPdo->lastInsertId();
                     }
                 }
 
-                $createdRolls[] = $rollCode;
-            }
-        }
+                for ($i = 1; $i <= $lineCopies; $i++) {
+                    $maxSeq++;
+                    // Código de trazabilidad corto y limpio: ej. RB-281-001
+                    $rollCode = $userPrefix . str_pad((string)$maxSeq, 3, '0', STR_PAD_LEFT);
 
-        $redParams = ['created' => count($createdRolls), 'printed' => $printedCount];
-        if (!empty($createdRolls)) {
-            $redParams['code_range'] = $createdRolls[0] . (count($createdRolls) > 1 ? (' al ' . end($createdRolls)) : '');
+                    // 1. Insertar en tabla rolls de trazabilidad (status = RECEIVED, sin tocar inventario ERP)
+                    $stmtRoll = $trzPdo->prepare('
+                        INSERT INTO rolls (
+                            roll_code, sku_id, warehouse_id, weight_kg, received_qty,
+                            reception_mode, microns, width_mm, color, meters, status,
+                            purchase_order_id, purchase_order_line_id, import_container_id, import_container_item_id,
+                            supplier_id, process_stage, created_at
+                        ) VALUES (
+                            :code, :skuid, :whid, 0.0, 1,
+                            "WAREHOUSE_STOCK", :microns, :width_mm, :color, :meters, "RECEIVED",
+                            :po_id, :po_line_id, :container_id, :container_item_id,
+                            :supplier_id, "RAW", NOW()
+                        )
+                    ');
+                    $stmtRoll->execute([
+                        ':code' => $rollCode,
+                        ':skuid' => $skuId,
+                        ':whid' => $whId,
+                        ':microns' => $gramsVal > 0 ? (int)round($gramsVal) : null,
+                        ':width_mm' => $widthVal > 0 ? (int)round($widthVal) : null,
+                        ':color' => $colorVal !== '-' ? $colorVal : null,
+                        ':meters' => $metersVal > 0 ? $metersVal : null,
+                        ':po_id' => !empty($ln['purchase_order_id']) ? (int)$ln['purchase_order_id'] : null,
+                        ':po_line_id' => !empty($ln['id']) ? (int)$ln['id'] : null,
+                        ':container_id' => $containerId,
+                        ':container_item_id' => $lineItemId,
+                        ':supplier_id' => !empty($ln['supplier_id']) ? (int)$ln['supplier_id'] : null,
+                    ]);
+                    $rollId = (int)$trzPdo->lastInsertId();
+
+                    // 2. Registrar movimiento en movements
+                    $stmtMov = $trzPdo->prepare('
+                        INSERT INTO movements (entity_type, entity_id, movement_type, to_warehouse_id, payload, created_at)
+                        VALUES ("ROLL", :eid, "RECEIPT", :towh, :payload, NOW())
+                    ');
+                    $movPayload = json_encode([
+                        'traceability_code' => $rollCode,
+                        'entity_type' => 'ROLL',
+                        'entity_id' => $rollId,
+                        'item_code' => $skuCode,
+                        'item_description' => $skuDesc,
+                        'quantity' => 1.0,
+                        'unit' => 'BOB',
+                        'warehouse_code' => $whCode,
+                        'container_code' => $cCode,
+                        'container_id' => $containerId,
+                        'package_number' => $maxSeq,
+                        'total_packages' => $lineCopies,
+                        'operator' => 'Javier Perozo',
+                        'comments' => 'Trazabilidad de bobina asignada en bodega para contenedor ' . ($cCode ?: ('#' . $containerId)) . ' (sin duplicar stock ERP)',
+                    ], JSON_UNESCAPED_UNICODE);
+                    $stmtMov->execute([
+                        ':eid' => $rollId,
+                        ':towh' => $whId,
+                        ':payload' => $movPayload,
+                    ]);
+
+                    // 3. Registrar entrada en traceability_warehouse_entries (tolerante a fallos)
+                    try {
+                        $stmtEntry = $trzPdo->prepare('
+                            INSERT INTO traceability_warehouse_entries (
+                                traceability_code, entity_type, entity_id, warehouse_id, warehouse_name,
+                                item_code, item_description, quantity, unit_name, package_number, total_packages,
+                                weight_kg, width_mm, microns, meters, order_ref, operator_name, comments, status, created_at
+                            ) VALUES (
+                                :code, "ROLL", :eid, :whid, :whname,
+                                :sku, :desc, 1.0, "BOB", :pkgnum, :totpkg,
+                                NULL, :wmm, :mic, :met, :ord, :op, :comm, "IN_WAREHOUSE", NOW()
+                            )
+                        ');
+                        $stmtEntry->execute([
+                            ':code' => $rollCode,
+                            ':eid' => $rollId,
+                            ':whid' => $whId,
+                            ':whname' => 'Bodega ' . $whCode,
+                            ':sku' => $skuCode,
+                            ':desc' => $skuDesc,
+                            ':pkgnum' => $maxSeq,
+                            ':totpkg' => $lineCopies,
+                            ':wmm' => $widthVal > 0 ? (int)round($widthVal) : null,
+                            ':mic' => $gramsVal > 0 ? (int)round($gramsVal) : null,
+                            ':met' => $metersVal > 0 ? $metersVal : null,
+                            ':ord' => $poCode !== '-' ? ('OC: ' . $poCode) : ('CONT: ' . ($cCode ?: ('#' . $containerId))),
+                            ':op' => 'Javier Perozo',
+                            ':comm' => 'Contenedor ' . ($cCode ?: ('#' . $containerId)) . ' - Trazabilidad de bobina en bodega',
+                        ]);
+                    } catch (Throwable $eEntry) {
+                        error_log('traceability_warehouse_entries insert notice: ' . $eEntry->getMessage());
+                    }
+
+                    // 4. Imprimir etiqueta térmica en formato Flexo 100x70 con el código de trazabilidad corto
+                    $mockRoll = [
+                        'id' => $rollId,
+                        'roll_code' => $rollCode,
+                        'sku_code' => $skuCode,
+                        'sku_description' => $skuDesc,
+                        'warehouse_code' => $whCode,
+                        'weight_kg' => 0.0,
+                        'no_weight' => true,
+                        'weight_str' => '-',
+                        'meters' => $metersVal,
+                        'width_mm' => $widthVal,
+                        'grams' => $gramsVal,
+                        'microns' => $gramsVal,
+                        'color' => $colorVal,
+                        'po_code' => $poCode,
+                        'container_code' => $cCode ?: ('#' . $containerId),
+                        'supplier_name' => $suppName,
+                        'arrival_date' => $rawDate,
+                        'process_stage' => 'RAW',
+                    ];
+
+                    if ($isPrinterEnabled && $consecutivePrintErrors < 3) {
+                        try {
+                            $pRes = $activePrinter->printRollLabel($mockRoll);
+                            if (($pRes['ok'] ?? false) === true) {
+                                $printedCount++;
+                            } else {
+                                $consecutivePrintErrors++;
+                                $printErrors[] = $pRes['error'] ?? 'Error desconocido';
+                            }
+                        } catch (Throwable $pe) {
+                            $consecutivePrintErrors++;
+                            $printErrors[] = 'Impresora: ' . $pe->getMessage();
+                        }
+                    }
+
+                    $createdRolls[] = $rollCode;
+                }
+
+                if ($targetLineId <= 0 && $remainingGlobalBatch <= 0) {
+                    break;
+                }
+            }
+
+            $redParams = ['created' => count($createdRolls), 'printed' => $printedCount];
+            if (!empty($createdRolls)) {
+                $redParams['code_range'] = $createdRolls[0] . (count($createdRolls) > 1 ? (' al ' . end($createdRolls)) : '');
+            }
+            if ($targetLineId > 0) {
+                $redParams['line'] = $targetLineId;
+            }
+            if (!empty($printErrors)) {
+                $redParams['print_err'] = implode('; ', array_slice(array_unique($printErrors), 0, 3));
+            }
+            header('Location: /import-containers/' . $containerId . '/no-weight-labels?' . http_build_query($redParams));
+            exit;
+        } catch (Throwable $e) {
+            error_log('Error en generate_and_print no-weight-labels: ' . $e->getMessage() . ' en ' . $e->getFile() . ':' . $e->getLine());
+            header('Location: /import-containers/' . $containerId . '/no-weight-labels?print_err=' . urlencode('Error al generar: ' . $e->getMessage()));
+            exit;
         }
-        if ($targetLineId > 0) {
-            $redParams['line'] = $targetLineId;
-        }
-        if (!empty($printErrors)) {
-            $redParams['print_err'] = implode('; ', array_slice(array_unique($printErrors), 0, 3));
-        }
-        header('Location: /import-containers/' . $containerId . '/no-weight-labels?' . http_build_query($redParams));
-        exit;
     }
 
     // =========================================================================
@@ -14893,39 +14931,55 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
         if ($method === 'POST') {
             requireCsrf();
         }
-        $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
-        $reprintList = [];
-        foreach ($existingRolls as $er) {
-            if ($targetLineId > 0 && (int)($er['import_container_item_id'] ?? 0) !== $targetLineId) {
-                continue;
+        try {
+            @ini_set('max_execution_time', '180');
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(180);
             }
-            $reprintList[] = $er;
-        }
+            $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
+            $reprintList = [];
+            foreach ($existingRolls as $er) {
+                if ($targetLineId > 0 && (int)($er['import_container_item_id'] ?? 0) !== $targetLineId) {
+                    continue;
+                }
+                $reprintList[] = $er;
+            }
 
-        $reprintedCount = 0;
-        $printErrors = [];
-        foreach ($reprintList as $er) {
-            $roll = $service->getRoll((int)$er['id']);
-            if ($roll !== null) {
-                $roll['no_weight'] = true;
-                $roll['weight_str'] = '-';
-                if ($isPrinterEnabled) {
-                    $pRes = $activePrinter->printRollLabel($roll);
-                    if (($pRes['ok'] ?? false) === true) {
-                        $reprintedCount++;
-                    } else {
-                        $printErrors[] = $pRes['error'] ?? 'Error';
+            $reprintedCount = 0;
+            $printErrors = [];
+            $consecutivePrintErrors = 0;
+            foreach ($reprintList as $er) {
+                if ($isPrinterEnabled && $consecutivePrintErrors < 3) {
+                    $roll = $service->getRoll((int)$er['id']);
+                    if ($roll !== null) {
+                        $roll['no_weight'] = true;
+                        $roll['weight_str'] = '-';
+                        try {
+                            $pRes = $activePrinter->printRollLabel($roll);
+                            if (($pRes['ok'] ?? false) === true) {
+                                $reprintedCount++;
+                            } else {
+                                $consecutivePrintErrors++;
+                                $printErrors[] = $pRes['error'] ?? 'Error';
+                            }
+                        } catch (Throwable $pe) {
+                            $consecutivePrintErrors++;
+                            $printErrors[] = 'Impresora: ' . $pe->getMessage();
+                        }
                     }
                 }
             }
-        }
 
-        $redParams = ['msg' => 'Se reimprimieron ' . $reprintedCount . ' etiqueta(s) térmica(s).'];
-        if (!empty($printErrors)) {
-            $redParams['print_err'] = implode('; ', array_slice(array_unique($printErrors), 0, 3));
+            $redParams = ['msg' => 'Se reimprimieron ' . $reprintedCount . ' etiqueta(s) térmica(s).'];
+            if (!empty($printErrors)) {
+                $redParams['print_err'] = implode('; ', array_slice(array_unique($printErrors), 0, 3));
+            }
+            header('Location: /import-containers/' . $containerId . '/no-weight-labels?' . http_build_query($redParams));
+            exit;
+        } catch (Throwable $e) {
+            header('Location: /import-containers/' . $containerId . '/no-weight-labels?print_err=' . urlencode('Error al reimprimir: ' . $e->getMessage()));
+            exit;
         }
-        header('Location: /import-containers/' . $containerId . '/no-weight-labels?' . http_build_query($redParams));
-        exit;
     }
 
     // =========================================================================
@@ -14935,20 +14989,29 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
         if ($method === 'POST') {
             requireCsrf();
         }
-        $rollId = (int)($_REQUEST['roll_id'] ?? 0);
-        $delRollCode = trim((string)($_REQUEST['roll_code'] ?? ''));
-        if ($rollId > 0 || $delRollCode !== '') {
-            $stmtDelRoll = $trzPdo->prepare('DELETE FROM rolls WHERE id = :id OR roll_code = :c');
-            $stmtDelRoll->execute([':id' => $rollId, ':c' => $delRollCode]);
-            $stmtDelMov = $trzPdo->prepare('DELETE FROM movements WHERE entity_type = "ROLL" AND (entity_id = :id OR payload LIKE :c)');
-            $stmtDelMov->execute([':id' => $rollId, ':c' => '%' . $delRollCode . '%']);
-            $stmtDelTrz = $trzPdo->prepare('DELETE FROM traceability_warehouse_entries WHERE entity_type = "ROLL" AND (entity_id = :id OR traceability_code = :c)');
-            $stmtDelTrz->execute([':id' => $rollId, ':c' => $delRollCode]);
-            header('Location: /import-containers/' . $containerId . '/no-weight-labels?msg=' . urlencode('Bobina ' . $delRollCode . ' eliminada de trazabilidad correctamente.'));
+        try {
+            $rollId = (int)($_REQUEST['roll_id'] ?? 0);
+            $delRollCode = trim((string)($_REQUEST['roll_code'] ?? ''));
+            if ($rollId > 0 || $delRollCode !== '') {
+                $stmtDelRoll = $trzPdo->prepare('DELETE FROM rolls WHERE id = :id OR roll_code = :c');
+                $stmtDelRoll->execute([':id' => $rollId, ':c' => $delRollCode]);
+                try {
+                    $stmtDelMov = $trzPdo->prepare('DELETE FROM movements WHERE entity_type = "ROLL" AND (entity_id = :id OR payload LIKE :c)');
+                    $stmtDelMov->execute([':id' => $rollId, ':c' => '%' . $delRollCode . '%']);
+                } catch (Throwable) {}
+                try {
+                    $stmtDelTrz = $trzPdo->prepare('DELETE FROM traceability_warehouse_entries WHERE entity_type = "ROLL" AND (entity_id = :id OR traceability_code = :c)');
+                    $stmtDelTrz->execute([':id' => $rollId, ':c' => $delRollCode]);
+                } catch (Throwable) {}
+                header('Location: /import-containers/' . $containerId . '/no-weight-labels?msg=' . urlencode('Bobina ' . $delRollCode . ' eliminada de trazabilidad correctamente.'));
+                exit;
+            }
+            header('Location: /import-containers/' . $containerId . '/no-weight-labels');
+            exit;
+        } catch (Throwable $e) {
+            header('Location: /import-containers/' . $containerId . '/no-weight-labels?print_err=' . urlencode('Error al eliminar: ' . $e->getMessage()));
             exit;
         }
-        header('Location: /import-containers/' . $containerId . '/no-weight-labels');
-        exit;
     }
 
     // =========================================================================
@@ -15344,13 +15407,14 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
         echo '<div style="font-size:12px;color:#64748b">Genera trazabilidad con código corto (ej. <b class="badge-code">' . h($defaultShortPrefix) . '001</b>) e imprime directo en la térmica.</div>';
         echo '</div>';
 
-        // Botón global: generar trazabilidad para todas las bobinas pendientes del contenedor
+        // Botón global: generar trazabilidad para bobinas pendientes del contenedor en lote seguro
         $totalRollsInContainer = 0;
         $totalRegisteredRolls = count($existingRolls);
         foreach ($allLines as $ln) {
             $totalRollsInContainer += max(1, (int)($ln['received_rolls'] ?? $ln['ordered_rolls'] ?? 1));
         }
         $pendingToRegister = max(0, $totalRollsInContainer - $totalRegisteredRolls);
+        $batchToRegister = min(50, $pendingToRegister);
 
         echo '<div style="display:flex;gap:8px;align-items:center">';
         if ($totalRegisteredRolls > 0) {
@@ -15364,13 +15428,14 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
         }
 
         if ($pendingToRegister > 0) {
-            echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0" onsubmit="return confirm(\'¿Generar trazabilidad para las ' . $pendingToRegister . ' bobinas pendientes e imprimirlas en la térmica?\')">';
+            echo '<form method="post" action="/import-containers/' . $containerId . '/no-weight-labels" style="margin:0" onsubmit="return confirm(\'¿Generar trazabilidad para un lote de ' . $batchToRegister . ' bobina(s) pendiente(s) e imprimirlas en la térmica?\')">';
             echo '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
             echo '<input type="hidden" name="action" value="generate_and_print">';
             echo '<input type="hidden" name="target_line_id" value="0">';
             echo '<input type="hidden" name="code_prefix" value="' . h($defaultShortPrefix) . '">';
+            echo '<input type="hidden" name="qty" value="' . $batchToRegister . '">';
             echo '<button type="submit" class="btn btn-success" style="font-weight:800;font-size:12px">';
-            echo '⚡ Generar ' . $pendingToRegister . ' Pendientes';
+            echo '⚡ Generar Lote Pendiente (' . $batchToRegister . ($pendingToRegister > $batchToRegister ? (' de ' . $pendingToRegister) : '') . ')';
             echo '</button>';
             echo '</form>';
         }
@@ -15397,6 +15462,7 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
 
             $lnRegisteredCount = isset($existingRollsByLine[$lnId]) ? count($existingRollsByLine[$lnId]) : 0;
             $lnPending = max(0, $lnTotalRolls - $lnRegisteredCount);
+            $defaultQtyVal = ($lnPending > 0 && $lnPending <= 50) ? $lnPending : 1;
             $isCurPreview = ($lnId === $pvItemId);
 
             echo '<tr' . ($isCurPreview ? ' style="background:#f0fdfa"' : '') . '>';
@@ -15428,7 +15494,7 @@ if (preg_match('#^/import-containers/(\\d+)/no-weight-labels$#', $path, $m) === 
             echo '<input type="hidden" name="action" value="generate_and_print">';
             echo '<input type="hidden" name="target_line_id" value="' . $lnId . '">';
             echo '<input type="hidden" name="code_prefix" value="' . h($defaultShortPrefix) . '">';
-            echo '<input type="number" name="qty" min="1" max="500" value="' . ($lnPending > 0 ? $lnPending : $lnTotalRolls) . '" style="width:58px;height:32px;text-align:center;font-weight:700;border:1px solid #cbd5e1;border-radius:6px;font-size:12px" title="Cantidad de bobinas a generar">';
+            echo '<input type="number" name="qty" min="1" max="100" value="' . $defaultQtyVal . '" style="width:58px;height:32px;text-align:center;font-weight:700;border:1px solid #cbd5e1;border-radius:6px;font-size:12px" title="Cantidad de bobinas a generar (máx 100 por lote)">';
             echo '<button type="submit" class="btn btn-primary" style="padding:6px 10px;font-size:12px;font-weight:800" title="Generar códigos cortos e imprimir en térmica">⚡ Generar</button>';
             echo '</form>';
 

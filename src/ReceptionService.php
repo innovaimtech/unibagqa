@@ -23131,13 +23131,25 @@ SQL;
                     INDEX idx_created (created_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             ");
-            // Asegurar columnas de número de bulto y total de bultos
+            // Asegurar columnas y enum por si la tabla ya existía previamente en la base de datos
+            $colsToAdd = [
+                'entity_id' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN entity_id BIGINT UNSIGNED NULL AFTER entity_type",
+                'package_number' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN package_number INT UNSIGNED NULL DEFAULT 1 AFTER box_count",
+                'total_packages' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN total_packages INT UNSIGNED NULL DEFAULT 1 AFTER package_number",
+                'width_mm' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN width_mm INT UNSIGNED NULL AFTER weight_kg",
+                'microns' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN microns INT UNSIGNED NULL AFTER width_mm",
+                'meters' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN meters DECIMAL(12, 2) NULL AFTER microns",
+                'order_ref' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN order_ref VARCHAR(80) NULL AFTER location_ref",
+            ];
+            foreach ($colsToAdd as $col => $sql) {
+                if (!$this->columnExists('traceability_warehouse_entries', $col)) {
+                    try { @$this->pdo->exec($sql); } catch (Throwable) {}
+                }
+            }
             try {
-                @$this->pdo->exec("ALTER TABLE traceability_warehouse_entries ADD COLUMN package_number INT UNSIGNED NULL DEFAULT 1 AFTER box_count");
+                @$this->pdo->exec("ALTER TABLE traceability_warehouse_entries MODIFY COLUMN entity_type ENUM('PALLET', 'BOX', 'ROLL', 'PRODUCT') NOT NULL DEFAULT 'PRODUCT'");
             } catch (Throwable) {}
-            try {
-                @$this->pdo->exec("ALTER TABLE traceability_warehouse_entries ADD COLUMN total_packages INT UNSIGNED NULL DEFAULT 1 AFTER package_number");
-            } catch (Throwable) {}
+
             // Asegurar que pallets y boxes permitan ingresos directos de bodega sin bobina origen
             @$this->pdo->exec("ALTER TABLE pallets MODIFY source_roll_id BIGINT UNSIGNED NULL DEFAULT NULL");
             @$this->pdo->exec("ALTER TABLE pallets MODIFY destination_mode VARCHAR(20) NOT NULL DEFAULT 'BODEGA'");
