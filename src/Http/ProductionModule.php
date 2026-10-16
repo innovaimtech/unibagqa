@@ -390,17 +390,56 @@ function handleProductionRoutes(
         return true;
     }
 
-    // Guardar parámetros específicos (ej: bastidor pulpo)
+    // Guardar parámetros específicos (ej: bastidor pulpo / serigrafía)
     if (isset($_REQUEST['mode']) && $_REQUEST['mode'] === 'setspecparams') {
         $agId = (int)($_REQUEST['agid'] ?? 0);
+        if ($agId <= 0) {
+            $activeOt = $prodService->getOpenWorkerOt($workerId, $plantaId);
+            if ($activeOt !== null && (int)$activeOt['wok_ag_id'] > 0) {
+                $agId = (int)$activeOt['wok_ag_id'];
+            }
+        }
         $bastidorAmt = (int)($_REQUEST['bastidoramt'] ?? 0);
         $reqId = (int)($_REQUEST['req_id'] ?? 0);
+        if ($reqId <= 0 && $agId > 0) {
+            $agenda = $prodService->getAgendaById($agId);
+            $reqId = (int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0);
+        }
         if ($reqId > 0 && $bastidorAmt > 0) {
             $erpPdo = Db::erpPdo();
             $stmt = $erpPdo->prepare("UPDATE orders SET req_operador_bastidoramt = :amt WHERE id = :id");
             $stmt->execute([':amt' => $bastidorAmt, ':id' => $reqId]);
         }
-        redirectResponse('/production/work-orders/operate?agid=' . $agId . '&saved_params=1');
+
+        $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+               || (isset($_REQUEST['ajax']) && (int)$_REQUEST['ajax'] === 1)
+               || (isset($_SERVER['HTTP_ACCEPT']) && str_contains($_SERVER['HTTP_ACCEPT'], 'application/json'));
+
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode([
+                'ok' => true,
+                'bastidoramt' => $bastidorAmt,
+                'req_id' => $reqId,
+                'agid' => $agId,
+                'message' => 'Imágenes en bastidor guardadas exitosamente.'
+            ], JSON_UNESCAPED_UNICODE);
+            return true;
+        }
+
+        // Fallback tradicional (no-AJAX): preservar exactamente la vista actual (ej: si estaba en finalizar orden mode=terminarot)
+        $returnUrl = trim((string)($_REQUEST['return_to'] ?? ''));
+        if ($returnUrl === '' && !empty($_SERVER['HTTP_REFERER'])) {
+            $refPath = (string)parse_url($_SERVER['HTTP_REFERER'], PHP_URL_PATH);
+            if (str_contains($refPath, '/production/work-orders/operate')) {
+                $returnUrl = $_SERVER['HTTP_REFERER'];
+            }
+        }
+        if ($returnUrl === '') {
+            $origMode = trim((string)($_REQUEST['orig_mode'] ?? ''));
+            $returnUrl = '/production/work-orders/operate?agid=' . $agId . ($origMode !== '' ? '&mode=' . urlencode($origMode) : '') . '&saved_params=1';
+        }
+        redirectResponse($returnUrl);
         return true;
     }
 
@@ -502,6 +541,13 @@ function handleProductionRoutes(
         }
         if (!empty($seriCounterValues)) {
             $seriDevPrints = max(1, (int)($_REQUEST['seri_bastidor_multiplier'] ?? $_REQUEST['seri_devprints_multiplier'] ?? ($agenda['req_operador_bastidoramt'] ?? 1)));
+            $bastidorMultiplier = (int)($_REQUEST['seri_bastidor_multiplier'] ?? 0);
+            $reqId = (int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0);
+            if ($reqId > 0 && $bastidorMultiplier > 0 && $bastidorMultiplier !== (int)($agenda['req_operador_bastidoramt'] ?? 0)) {
+                $erpPdo = Db::erpPdo();
+                $stmt = $erpPdo->prepare("UPDATE orders SET req_operador_bastidoramt = :amt WHERE id = :id");
+                $stmt->execute([':amt' => $bastidorMultiplier, ':id' => $reqId]);
+            }
             $seriColorIndexes = array_keys($seriCounterValues);
             sort($seriColorIndexes);
             $seriPrevCounters = array_fill_keys($seriColorIndexes, 0.0);
@@ -2024,10 +2070,126 @@ function renderProdwrkShell(
 
 <script>
 (function() {
+    window.handleBastidorSubmit = function(e, form) {
+        if (e) {
+            if (typeof e.preventDefault === 'function') e.preventDefault();
+            if (typeof e.stopPropagation === 'function') e.stopPropagation();
+        }
+        if (!form) return false;
+
+        var select = form.querySelector('select[name="bastidoramt"]');
+        var btn = form.querySelector('.js-bastidor-btn') || form.querySelector('button[type="submit"], input[type="submit"]');
+        var feedback = form.querySelector('.js-bastidor-feedback');
+        var val = select ? select.value : '';
+
+        if (!val) {
+            if (feedback) {
+                feedback.style.display = 'inline-flex';
+                feedback.style.color = '#DC2626';
+                feedback.innerHTML = '<i class="fa fa-exclamation-triangle"></i> Seleccione un valor';
+            }
+            return false;
+        }
+
+        var originalHtml = btn ? (btn.innerHTML || btn.value) : '';
+        if (btn) {
+            btn.disabled = true;
+            if (btn.tagName === 'BUTTON') {
+                btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Guardando...';
+            } else {
+                btn.value = 'Guardando...';
+            }
+            btn.style.opacity = '0.7';
+        }
+        if (feedback) {
+            feedback.style.display = 'none';
+            feedback.innerHTML = '';
+        }
+
+        var agid = (form.querySelector('input[name="agid"]') || {}).value || '';
+        var reqId = (form.querySelector('input[name="req_id"]') || {}).value || '';
+        var url = '/production/work-orders/operate?mode=setspecparams&ajax=1&agid=' + encodeURIComponent(agid) + '&req_id=' + encodeURIComponent(reqId) + '&bastidoramt=' + encodeURIComponent(val);
+
+        fetch(url, {
+            method: 'GET',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+            }
+        })
+        .then(function(res) {
+            return res.json();
+        })
+        .then(function(data) {
+            if (btn) {
+                btn.disabled = false;
+                btn.style.opacity = '';
+                if (btn.tagName === 'BUTTON') {
+                    btn.innerHTML = '<i class="fa fa-check"></i> Guardado';
+                } else {
+                    btn.value = '✓ Guardado';
+                }
+                btn.style.backgroundColor = '#059669';
+                setTimeout(function() {
+                    if (btn.tagName === 'BUTTON') {
+                        btn.innerHTML = originalHtml || '<i class="fa fa-save"></i> Guardar';
+                    } else {
+                        btn.value = originalHtml || 'Guardar';
+                    }
+                    btn.style.backgroundColor = '';
+                }, 2500);
+            }
+            if (feedback) {
+                feedback.style.display = 'inline-flex';
+                feedback.style.color = '#166534';
+                feedback.innerHTML = '<i class="fa fa-check-circle"></i> ' + (data.message || 'Guardado correctamente');
+                setTimeout(function() {
+                    feedback.style.display = 'none';
+                }, 4000);
+            }
+
+            // Sincronizar todos los selects de bastidor en la pantalla
+            document.querySelectorAll('.js-bastidor-select').forEach(function(s) {
+                if (s) s.value = val;
+            });
+
+            // Si estamos en la pantalla de finalizar orden con multiplicador activo en el formulario, sincronizarlo y recalcular
+            var formMultiplier = document.getElementById('idx_seri_bastidor_multiplier');
+            if (formMultiplier) {
+                formMultiplier.value = val;
+                if (typeof calcSeriUnitsFromCounters === 'function') {
+                    calcSeriUnitsFromCounters();
+                }
+            }
+        })
+        .catch(function(err) {
+            if (btn) {
+                btn.disabled = false;
+                btn.style.opacity = '';
+                if (btn.tagName === 'BUTTON') {
+                    btn.innerHTML = originalHtml || '<i class="fa fa-save"></i> Guardar';
+                } else {
+                    btn.value = originalHtml || 'Guardar';
+                }
+            }
+            if (feedback) {
+                feedback.style.display = 'inline-flex';
+                feedback.style.color = '#DC2626';
+                feedback.innerHTML = '<i class="fa fa-exclamation-circle"></i> Error al guardar';
+            }
+        });
+
+        return false;
+    };
+
     // Protección global contra doble clic y envíos duplicados en formularios de producción
     document.addEventListener('submit', function(e) {
         var form = e.target;
         if (!form || form.tagName !== 'FORM') return;
+
+        if (form.classList.contains('js-bastidor-form')) {
+            return;
+        }
 
         if (form.getAttribute('data-submitting') === 'true') {
             e.preventDefault();
@@ -2834,17 +2996,21 @@ function renderProductionOperatorConsole(
                     <tr>
                         <td class="tdleft" colspan="2">Cantidad de imágenes impresas en bastidor</td>
                         <td class="tdnrm" colspan="2">
-                            <form method="get" action="/production/work-orders/operate" style="margin:0;display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                            <form method="get" action="/production/work-orders/operate" class="js-bastidor-form" onsubmit="return handleBastidorSubmit(event, this);" style="margin:0;display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
                                 <input type="hidden" name="agid" value="<?=$agId?>">
                                 <input type="hidden" name="mode" value="setspecparams">
                                 <input type="hidden" name="req_id" value="<?=(int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0)?>">
-                                <select class="inptxt" name="bastidoramt" style="width:120px">
+                                <input type="hidden" name="return_to" value="<?=htmlspecialchars($_SERVER['REQUEST_URI'] ?? '')?>">
+                                <select class="inptxt js-bastidor-select" id="idx_bastidor_amt" name="bastidoramt" style="width:120px;font-weight:bold" onchange="var fm = document.getElementById('idx_seri_bastidor_multiplier'); if (fm) { fm.value = this.value; if (typeof calcSeriUnitsFromCounters === 'function') calcSeriUnitsFromCounters(); }">
                                     <option value="">Seleccione</option>
                                     <?php for ($zzz = 1; $zzz <= 5; $zzz++): ?>
                                         <option value="<?=$zzz?>" <?=((int)($agenda['req_operador_bastidoramt'] ?? 1) === $zzz) ? 'selected' : ''?>><?=$zzz?></option>
                                     <?php endfor; ?>
                                 </select>
-                                <input type="submit" class="btngreen" value="Guardar" style="padding:5px 12px;border:none">
+                                <button type="submit" class="btngreen js-bastidor-btn" style="padding:5px 12px;border:none;cursor:pointer;font-weight:bold;display:inline-flex;align-items:center;gap:5px">
+                                    <i class="fa fa-save"></i> <span>Guardar</span>
+                                </button>
+                                <span class="js-bastidor-feedback" style="display:none;font-size:12px;font-weight:bold;align-items:center;gap:4px"></span>
                             </form>
                         </td>
                     </tr>
@@ -4936,16 +5102,20 @@ function renderProductionOperatorConsole(
                 <tr>
                     <td class="tdleft">Imágenes impresas en bastidor</td>
                     <td class="tdnrm" colspan="3">
-                        <form method="get" action="/production/work-orders/operate" style="margin:0;display:inline-flex;align-items:center;gap:10px">
+                        <form method="get" action="/production/work-orders/operate" class="js-bastidor-form" onsubmit="return handleBastidorSubmit(event, this);" style="margin:0;display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
                             <input type="hidden" name="agid" value="<?=$selectedAgId?>">
                             <input type="hidden" name="mode" value="setspecparams">
                             <input type="hidden" name="req_id" value="<?=(int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0)?>">
-                            <select class="inptxt" name="bastidoramt" style="width:120px">
+                            <input type="hidden" name="return_to" value="<?=htmlspecialchars($_SERVER['REQUEST_URI'] ?? '')?>">
+                            <select class="inptxt js-bastidor-select" id="idx_bastidor_amt_top" name="bastidoramt" style="width:120px;font-weight:bold" onchange="var fm = document.getElementById('idx_seri_bastidor_multiplier'); if (fm) { fm.value = this.value; if (typeof calcSeriUnitsFromCounters === 'function') calcSeriUnitsFromCounters(); }">
                                 <?php for ($zzz = 1; $zzz <= 5; $zzz++): ?>
                                     <option value="<?=$zzz?>" <?=((int)($agenda['req_operador_bastidoramt'] ?? 1) === $zzz) ? 'selected' : ''?>><?=$zzz?></option>
                                 <?php endfor; ?>
                             </select>
-                            <input type="submit" class="btngreen" value="Guardar" style="padding:5px 12px;border:none">
+                            <button type="submit" class="btngreen js-bastidor-btn" style="padding:5px 12px;border:none;cursor:pointer;font-weight:bold;display:inline-flex;align-items:center;gap:5px">
+                                <i class="fa fa-save"></i> <span>Guardar</span>
+                            </button>
+                            <span class="js-bastidor-feedback" style="display:none;font-size:12px;font-weight:bold;align-items:center;gap:4px"></span>
                         </form>
                     </td>
                 </tr>
@@ -5355,17 +5525,21 @@ function renderProductionOperatorConsole(
                 <tr>
                     <td class="tdleft" colspan="2">Cantidad de imágenes impresas en bastidor</td>
                     <td class="tdnrm" colspan="2">
-                        <form method="get" action="/production/work-orders/operate" style="margin:0;display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                        <form method="get" action="/production/work-orders/operate" class="js-bastidor-form" onsubmit="return handleBastidorSubmit(event, this);" style="margin:0;display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
                             <input type="hidden" name="agid" value="<?=$agId?>">
                             <input type="hidden" name="mode" value="setspecparams">
                             <input type="hidden" name="req_id" value="<?=(int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0)?>">
-                            <select class="inptxt" name="bastidoramt" style="width:120px">
+                            <input type="hidden" name="return_to" value="<?=htmlspecialchars($_SERVER['REQUEST_URI'] ?? '')?>">
+                            <select class="inptxt js-bastidor-select" id="idx_bastidor_amt_fab" name="bastidoramt" style="width:120px;font-weight:bold" onchange="var fm = document.getElementById('idx_seri_bastidor_multiplier'); if (fm) { fm.value = this.value; if (typeof calcSeriUnitsFromCounters === 'function') calcSeriUnitsFromCounters(); }">
                                 <option value="">Seleccione</option>
                                 <?php for ($zzz = 1; $zzz <= 5; $zzz++): ?>
                                     <option value="<?=$zzz?>" <?=((int)($agenda['req_operador_bastidoramt'] ?? 1) === $zzz) ? 'selected' : ''?>><?=$zzz?></option>
                                 <?php endfor; ?>
                             </select>
-                            <input type="submit" class="btngreen" value="Guardar" style="padding:5px 12px;border:none">
+                            <button type="submit" class="btngreen js-bastidor-btn" style="padding:5px 12px;border:none;cursor:pointer;font-weight:bold;display:inline-flex;align-items:center;gap:5px">
+                                <i class="fa fa-save"></i> <span>Guardar</span>
+                            </button>
+                            <span class="js-bastidor-feedback" style="display:none;font-size:12px;font-weight:bold;align-items:center;gap:4px"></span>
                         </form>
                     </td>
                 </tr>
@@ -7838,16 +8012,6 @@ function renderProductionOperatorConsole(
                                         <button type="button" class="btnblue" style="font-size:12px;padding:7px 12px;cursor:pointer;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openRollOutputModal(<?= (int)$ar['id'] ?>, <?= htmlspecialchars(json_encode($ar['roll_code'] ?? ('#' . $ar['id']))) ?>, <?= (float)$entryKg ?>)">
                                             <i class="fa fa-sign-out-alt"></i> Desmontar / salida
                                         </button>
-                                        <form method="post" action="/production/work-orders/materials/mount" style="display:inline" class="js-preserve-material-scroll">
-                                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                                            <input type="hidden" name="agid" value="<?=$agId?>">
-                                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
-                                            <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
-                                            <input type="hidden" name="action_type" value="unmount">
-                                            <button type="submit" class="btngrey" style="font-size:11px;padding:6px 10px;cursor:pointer">
-                                                <i class="fa fa-pause"></i> Desmontar temp.
-                                            </button>
-                                        </form>
                                     <?php else: ?>
                                         <form method="post" action="/production/work-orders/materials/mount" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center" class="js-preserve-material-scroll">
                                             <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
@@ -7861,14 +8025,14 @@ function renderProductionOperatorConsole(
                                             </button>
                                         </form>
                                     <?php endif; ?>
-                                    <form method="post" action="/production/work-orders/materials/mount" style="display:inline" class="js-preserve-material-scroll">
+                                    <form method="post" action="/production/work-orders/materials/mount" style="display:inline" class="js-preserve-material-scroll" onsubmit="return confirm('¿Confirmas devolver la bobina <?=htmlspecialchars($arDisplayCode, ENT_QUOTES)?> a Bodega 3000?');">
                                         <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
                                         <input type="hidden" name="agid" value="<?=$agId?>">
                                         <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
                                         <input type="hidden" name="roll_id" value="<?=$ar['id']?>">
                                         <input type="hidden" name="action_type" value="unassign">
                                         <button type="submit" class="btngrey" style="font-size:11px;padding:6px 10px;cursor:pointer">
-                                            <i class="fa fa-undo"></i> Devolver a 3000
+                                            <i class="fa fa-undo"></i> Devolver a bodega 3000
                                         </button>
                                     </form>
                                 </div>

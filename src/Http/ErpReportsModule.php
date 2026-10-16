@@ -3920,6 +3920,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
     $body .= '<div class="erp-filter-sub">' . $subtitle . '</div>';
     $body .= '</div>';
     $body .= '<div class="erp-filter-actions">';
+    $body .= '<button type="button" id="btn-open-loaded-rolls-modal" class="btn-filter-secondary" style="background:#0f766e;color:#fff;border-color:#0f766e;cursor:pointer;display:inline-flex;align-items:center;gap:6px;font-weight:700" title="Ver bobinas cargadas en máquinas y devolver a Bodega 3000">📦 Bobinas en Máquinas <span id="badge-loaded-rolls-count" style="background:rgba(255,255,255,0.25);padding:1px 8px;border-radius:999px;font-size:11px">...</span></button>';
     if (!empty($rows)) {
         $body .= '<a class="btn-filter-secondary" href="/reports/machine-production/excel?' . h($exportParams) . '">📥 Exportar XLS (' . count($rows) . ' OTs)</a>';
     }
@@ -4218,9 +4219,9 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
             ], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP);
  
             if ($canEdit) {
-                $body .= '<td class="text-center" style="white-space:nowrap"><div style="display:inline-flex;align-items:center;gap:6px"><button type="button" class="btn-edit-prod-trigger" data-prod="' . h((string)$prodRecordJson) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#00A9A6;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)">✏️ Modificar</button><button type="button" class="btn-delete-prod-trigger" data-otid="' . (int)($row['ot_id'] ?? 0) . '" data-otnum="' . h($otNum) . '" data-machine="' . h($machineName) . '" data-worker="' . h($operator) . '" data-date="' . h($startDt) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#ef4444;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)" title="Eliminar registro de producción duplicado">🗑️ Borrar</button></div></td>';
+                $body .= '<td class="text-center" style="white-space:nowrap"><div style="display:inline-flex;align-items:center;gap:6px"><button type="button" class="btn-ot-rolls-trigger" data-otid="' . (int)($row['ot_id'] ?? 0) . '" data-otnum="' . h($otNum) . '" data-machine="' . h($machineName) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#0d9488;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)" title="Ver bobinas cargadas en esta OT y devolver a Bodega 3000">📦 Bobinas</button><button type="button" class="btn-edit-prod-trigger" data-prod="' . h((string)$prodRecordJson) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#00A9A6;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)">✏️ Modificar</button><button type="button" class="btn-delete-prod-trigger" data-otid="' . (int)($row['ot_id'] ?? 0) . '" data-otnum="' . h($otNum) . '" data-machine="' . h($machineName) . '" data-worker="' . h($operator) . '" data-date="' . h($startDt) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#ef4444;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)" title="Eliminar registro de producción duplicado">🗑️ Borrar</button></div></td>';
             } else {
-                $body .= '<td class="text-center"><span class="erp-prod-muted" style="font-size:11.5px;color:#94a3b8" title="Modificaciones y eliminaciones permitidas únicamente para HECTOR y JAVIER">🔒 Bloqueado</span></td>';
+                $body .= '<td class="text-center" style="white-space:nowrap"><div style="display:inline-flex;align-items:center;gap:6px"><button type="button" class="btn-ot-rolls-trigger" data-otid="' . (int)($row['ot_id'] ?? 0) . '" data-otnum="' . h($otNum) . '" data-machine="' . h($machineName) . '" style="display:inline-flex;align-items:center;gap:4px;padding:4px 9px;font-size:11px;font-weight:700;border-radius:6px;background:#0d9488;color:#fff;border:none;cursor:pointer;transition:all .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.1)" title="Ver bobinas cargadas en esta OT y devolver a Bodega 3000">📦 Bobinas</button><span class="erp-prod-muted" style="font-size:11.5px;color:#94a3b8" title="Modificaciones y eliminaciones permitidas únicamente para HECTOR y JAVIER">🔒 Bloqueado</span></div></td>';
             }
             $body .= '</tr>';
         }
@@ -4294,6 +4295,17 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
                                 <tr><td colspan="6" style="padding:10px;text-align:center;color:#64748b">Cargando eventos...</td></tr>
                             </tbody>
                         </table>
+                    </div>
+                </div>
+
+                <!-- Bobinas Asignadas / Cargadas en esta OT -->
+                <div id="ot-rolls-section" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:14px 18px;">
+                    <div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;color:#166534;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+                        <span style="display:flex;align-items:center;gap:6px"><span>📦</span> Bobinas Cargadas / Asignadas en esta OT</span>
+                        <span id="ot-rolls-count-badge" style="background:#dcfce7;color:#15803d;font-size:11px;padding:2px 8px;border-radius:999px;font-weight:800">0 bobinas</span>
+                    </div>
+                    <div id="ot-rolls-container">
+                        <div style="font-size:12px;color:#64748b;font-style:italic">Cargando bobinas asociadas...</div>
                     </div>
                 </div>
 
@@ -4986,6 +4998,398 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
         })();
         </script>';
     }
+
+    // MODAL Y CONTROL DE BOBINAS CARGADAS EN MÁQUINAS (Retorno a Bodega 3000)
+    $csrfVal = csrfToken();
+    $body .= '
+    <!-- Modal para Control y Devolución de Bobinas en Máquinas -->
+    <div id="modal-loaded-rolls" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center;padding:16px;">
+        <div style="background:#fff;width:min(1150px, 98%);max-height:92vh;display:flex;flex-direction:column;border-radius:16px;box-shadow:0 25px 50px -12px rgba(0,0,0,0.3);border:1px solid #cbd5e1;overflow:hidden;">
+            <!-- Header -->
+            <div style="background:#0f766e;color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:center;">
+                <div style="display:flex;align-items:center;gap:12px">
+                    <span style="font-size:24px">📦</span>
+                    <div>
+                        <div style="font-size:18px;font-weight:800;color:#fff;display:flex;align-items:center;gap:10px">
+                            <span>Control de Bobinas Cargadas en Máquinas</span>
+                            <span id="modal-loaded-rolls-badge" style="background:rgba(255,255,255,0.25);padding:2px 10px;border-radius:999px;font-size:12px;font-weight:800">...</span>
+                        </div>
+                        <div style="font-size:12.5px;color:#ccfbf1;margin-top:2px">
+                            Visualiza las bobinas tomadas o montadas en máquinas de producción y devuélvelas a Bodega 3000 si no fueron utilizadas.
+                        </div>
+                    </div>
+                </div>
+                <button type="button" id="btn-close-loaded-rolls-x" style="background:rgba(255,255,255,0.15);border:none;color:#fff;width:32px;height:32px;border-radius:999px;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;transition:background .15s" title="Cerrar">&times;</button>
+            </div>
+
+            <!-- Filter bar inside modal -->
+            <div style="background:#f8fafc;padding:12px 24px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+                <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:240px">
+                    <span style="font-size:14px">🔍</span>
+                    <input type="text" id="filter-loaded-rolls-search" placeholder="Filtrar por máquina, OT, código de bobina o SKU..." style="width:100%;max-width:440px;padding:7px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;outline:none">
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <button type="button" id="btn-refresh-loaded-rolls" style="background:#fff;border:1px solid #cbd5e1;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;color:#334155;cursor:pointer;display:inline-flex;align-items:center;gap:6px">🔄 Actualizar Lista</button>
+                </div>
+            </div>
+
+            <!-- Notification Toast inside modal -->
+            <div id="loaded-rolls-toast" style="display:none;padding:12px 24px;font-size:13px;font-weight:700;border-bottom:1px solid #e2e8f0"></div>
+
+            <!-- Table Container -->
+            <div style="overflow-y:auto;flex:1;padding:0;background:#fff">
+                <table style="width:100%;border-collapse:collapse;font-size:12.5px;text-align:left">
+                    <thead style="position:sticky;top:0;background:#f1f5f9;border-bottom:2px solid #cbd5e1;font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;z-index:2">
+                        <tr>
+                            <th style="padding:10px 14px">Máquina</th>
+                            <th style="padding:10px 14px">OT / CC</th>
+                            <th style="padding:10px 14px">Bobina</th>
+                            <th style="padding:10px 14px">SKU / Insumo</th>
+                            <th style="padding:10px 14px;text-align:right">Peso (Kg)</th>
+                            <th style="padding:10px 14px;text-align:center">Montada</th>
+                            <th style="padding:10px 14px">Operador</th>
+                            <th style="padding:10px 14px;text-align:center">Acción</th>
+                        </tr>
+                    </thead>
+                    <tbody id="loaded-rolls-tbody">
+                        <tr><td colspan="8" style="padding:28px;text-align:center;color:#64748b">Cargando bobinas en máquina...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Footer -->
+            <div style="background:#f8fafc;padding:12px 24px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center">
+                <div id="loaded-rolls-summary-text" style="font-size:12px;color:#64748b">Cargando...</div>
+                <button type="button" id="btn-close-loaded-rolls-footer" style="padding:7px 18px;border:1px solid #cbd5e1;background:#fff;color:#334155;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script para Gestión de Bobinas Cargadas y Devolución a Bodega 3000 -->
+    <script>
+    (function() {
+        var csrfToken = ' . json_encode($csrfVal) . ';
+        var loadedRollsModal = document.getElementById("modal-loaded-rolls");
+        var rollsTbody = document.getElementById("loaded-rolls-tbody");
+        var rollsBadge = document.getElementById("badge-loaded-rolls-count");
+        var modalBadge = document.getElementById("modal-loaded-rolls-badge");
+        var summaryText = document.getElementById("loaded-rolls-summary-text");
+        var searchInput = document.getElementById("filter-loaded-rolls-search");
+        var toast = document.getElementById("loaded-rolls-toast");
+        var currentRollsData = [];
+        var currentFilteredOtId = null;
+
+        function showToast(msg, isError) {
+            if (!toast) return;
+            toast.style.display = "block";
+            toast.style.background = isError ? "#fee2e2" : "#dcfce7";
+            toast.style.color = isError ? "#991b1b" : "#166534";
+            toast.style.borderBottom = isError ? "1px solid #fca5a5" : "1px solid #86efac";
+            toast.innerHTML = (isError ? "⚠️ " : "✅ ") + msg;
+            setTimeout(function() {
+                toast.style.display = "none";
+            }, 6000);
+        }
+
+        function escapeHtml(text) {
+            if (!text) return "";
+            return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/\'/g, "&#039;");
+        }
+
+        function renderRollsTable(rolls) {
+            if (!rollsTbody) return;
+            rollsTbody.innerHTML = "";
+            if (!rolls || rolls.length === 0) {
+                rollsTbody.innerHTML = \'<tr><td colspan="8" style="padding:36px 16px;text-align:center;color:#64748b;font-size:13px">\' +
+                    \'<div style="font-size:32px;margin-bottom:8px">🎉</div>\' +
+                    \'<strong>No hay bobinas cargadas en máquinas</strong>\' +
+                    \'<div style="font-size:11.5px;color:#94a3b8;margin-top:4px">Todas las bobinas se encuentran en bodega o fueron consumidas debidamente.</div>\' +
+                    \'</td></tr>\';
+                if (summaryText) summaryText.textContent = "0 bobinas encontradas";
+                return;
+            }
+
+            var filterVal = searchInput ? searchInput.value.toLowerCase().trim() : "";
+            var visibleCount = 0;
+
+            rolls.forEach(function(r) {
+                var searchHaystack = (
+                    (r.machine_name || "") + " " +
+                    (r.process_name || "") + " " +
+                    (r.ot_number || "") + " " +
+                    (r.cc_number || "") + " " +
+                    (r.roll_code || "") + " " +
+                    (r.sku_code || "") + " " +
+                    (r.sku_description || "") + " " +
+                    (r.operator_name || "")
+                ).toLowerCase();
+
+                if (filterVal !== "" && searchHaystack.indexOf(filterVal) === -1) {
+                    return;
+                }
+                visibleCount++;
+
+                var tr = document.createElement("tr");
+                tr.id = "row-roll-" + r.roll_id;
+                tr.style.borderBottom = "1px solid #e2e8f0";
+                tr.style.transition = "background .15s";
+
+                var mountBadge = r.is_mounted
+                    ? \'<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;background:#dcfce7;color:#15803d"><span style="width:6px;height:6px;border-radius:999px;background:#15803d"></span> Montada</span>\'
+                    : \'<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:700;background:#fef3c7;color:#b45309"><span style="width:6px;height:6px;border-radius:999px;background:#b45309"></span> Tomada</span>\';
+
+                var otLabel = r.ot_number ? (\'<strong>OT \' + escapeHtml(r.ot_number) + \'</strong>\') : \'<span style="color:#94a3b8">-</span>\';
+                if (r.cc_number) otLabel += \'<div style="font-size:11px;color:#64748b">CC: \' + escapeHtml(r.cc_number) + \'</div>\';
+
+                var machineLabel = r.machine_name ? (\'<strong>\' + escapeHtml(r.machine_name) + \'</strong>\') : \'<span style="color:#94a3b8">-</span>\';
+                if (r.process_name) machineLabel += \'<div style="font-size:11px;color:#0d9488">\' + escapeHtml(r.process_name) + \'</div>\';
+
+                var rollLabel = \'<strong style="font-family:monospace;color:#0f766e;font-size:12px">\' + escapeHtml(r.roll_code) + \'</strong>\' +
+                    \'<div style="font-size:10.5px;color:#64748b">ID: #\' + r.roll_id + \'</div>\';
+
+                var skuLabel = \'<strong style="color:#1e293b">\' + escapeHtml(r.sku_code) + \'</strong>\' +
+                    \'<div style="font-size:11px;color:#64748b;max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="\' + escapeHtml(r.sku_description) + \'">\' + escapeHtml(r.sku_description) + \'</div>\';
+
+                var weightStr = (Number(r.weight_kg) || 0).toFixed(2) + \' kg\';
+                var opLabel = r.operator_name ? escapeHtml(r.operator_name) : \'<span style="color:#94a3b8">-</span>\';
+
+                tr.innerHTML =
+                    \'<td style="padding:10px 14px;vertical-align:middle">\' + machineLabel + \'</td>\' +
+                    \'<td style="padding:10px 14px;vertical-align:middle">\' + otLabel + \'</td>\' +
+                    \'<td style="padding:10px 14px;vertical-align:middle">\' + rollLabel + \'</td>\' +
+                    \'<td style="padding:10px 14px;vertical-align:middle">\' + skuLabel + \'</td>\' +
+                    \'<td style="padding:10px 14px;vertical-align:middle;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">\' + weightStr + \'</td>\' +
+                    \'<td style="padding:10px 14px;vertical-align:middle;text-align:center">\' + mountBadge + \'</td>\' +
+                    \'<td style="padding:10px 14px;vertical-align:middle;font-size:12px">\' + opLabel + \'</td>\' +
+                    \'<td style="padding:10px 14px;vertical-align:middle;text-align:center;white-space:nowrap">\' +
+                        \'<button type="button" class="btn-return-roll-action" data-roll-id="\' + r.roll_id + \'" data-roll-code="\' + escapeHtml(r.roll_code) + \'" style="padding:5px 12px;border:none;border-radius:6px;background:#0f766e;color:#fff;font-size:11.5px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:4px;box-shadow:0 1px 2px rgba(0,0,0,.1);transition:all .15s ease">↩️ Devolver a Bodega 3000</button>\' +
+                    \'</td>\';
+
+                rollsTbody.appendChild(tr);
+            });
+
+            if (visibleCount === 0 && rolls.length > 0) {
+                rollsTbody.innerHTML = \'<tr><td colspan="8" style="padding:24px;text-align:center;color:#64748b">\' +
+                    \'No hay bobinas que coincidan con el filtro "<em>\' + escapeHtml(filterVal) + \'</em>".\' +
+                    \'</td></tr>\';
+            }
+
+            if (summaryText) {
+                summaryText.textContent = visibleCount + " bobinas visibles (de " + rolls.length + " en total)";
+            }
+
+            rollsTbody.querySelectorAll(".btn-return-roll-action").forEach(function(btn) {
+                btn.addEventListener("click", function() {
+                    var rId = btn.getAttribute("data-roll-id");
+                    var rCode = btn.getAttribute("data-roll-code");
+                    executeReturnRoll(rId, rCode, btn);
+                });
+            });
+        }
+
+        function fetchLoadedRolls(workerOtId, onDone) {
+            var url = "/reports/machine-production/loaded-rolls";
+            if (workerOtId) {
+                url += "?worker_ot_id=" + encodeURIComponent(workerOtId);
+            }
+            fetch(url, {
+                headers: { "Accept": "application/json" }
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(json) {
+                if (json && json.ok) {
+                    currentRollsData = json.rolls || [];
+                    if (!workerOtId && rollsBadge) {
+                        rollsBadge.textContent = currentRollsData.length;
+                        rollsBadge.style.background = currentRollsData.length > 0 ? "#f59e0b" : "rgba(255,255,255,0.25)";
+                        rollsBadge.style.color = currentRollsData.length > 0 ? "#fff" : "inherit";
+                    }
+                    if (modalBadge) {
+                        modalBadge.textContent = currentRollsData.length + " en máquina";
+                    }
+                    renderRollsTable(currentRollsData);
+                    if (onDone) onDone(currentRollsData);
+                } else {
+                    if (rollsTbody) rollsTbody.innerHTML = \'<tr><td colspan="8" style="padding:20px;text-align:center;color:#b91c1c">Error al consultar bobinas.</td></tr>\';
+                }
+            })
+            .catch(function(err) {
+                console.error("Error fetching rolls:", err);
+                if (rollsTbody) rollsTbody.innerHTML = \'<tr><td colspan="8" style="padding:20px;text-align:center;color:#b91c1c">Error de conexión al cargar bobinas.</td></tr>\';
+            });
+        }
+
+        function executeReturnRoll(rollId, rollCode, btnElement) {
+            if (!confirm("¿Confirmas devolver la bobina " + rollCode + " a Bodega 3000?\\n\\nSe desmontará de la máquina si está montada, se devolverá el stock al ERP y quedará en estado RECEIVED en Bodega 3000.")) {
+                return;
+            }
+
+            var origText = btnElement ? btnElement.innerHTML : "";
+            if (btnElement) {
+                btnElement.disabled = true;
+                btnElement.innerHTML = "⏳ Devolviendo...";
+            }
+
+            var fd = new FormData();
+            fd.append("_csrf", csrfToken);
+            fd.append("roll_id", rollId);
+            fd.append("reason", "Devolución a Bodega 3000 desde Informe de Producción por Máquina");
+
+            fetch("/reports/machine-production/return-roll", {
+                method: "POST",
+                headers: {
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Accept": "application/json"
+                },
+                body: fd
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(result) {
+                if (result && result.ok) {
+                    showToast(result.message || ("Bobina " + rollCode + " devuelta con éxito a Bodega 3000."), false);
+                    var row = document.getElementById("row-roll-" + rollId);
+                    if (row) {
+                        row.style.background = "#dcfce7";
+                        setTimeout(function() {
+                            row.remove();
+                        }, 400);
+                    }
+                    setTimeout(function() {
+                        fetchLoadedRolls(currentFilteredOtId);
+                    }, 500);
+                } else {
+                    if (btnElement) {
+                        btnElement.disabled = false;
+                        btnElement.innerHTML = origText;
+                    }
+                    var err = (result && result.error) ? result.error : "Error al devolver la bobina.";
+                    showToast(err, true);
+                    alert("⚠️ " + err);
+                }
+            })
+            .catch(function(err) {
+                console.error("Error returning roll:", err);
+                if (btnElement) {
+                    btnElement.disabled = false;
+                    btnElement.innerHTML = origText;
+                }
+                showToast("Error de conexión al procesar la devolución.", true);
+                alert("⚠️ Error de conexión al procesar la devolución.");
+            });
+        }
+
+        function openLoadedRollsModal(workerOtId) {
+            currentFilteredOtId = workerOtId || null;
+            if (searchInput) searchInput.value = "";
+            if (loadedRollsModal) loadedRollsModal.style.display = "flex";
+            if (rollsTbody) rollsTbody.innerHTML = \'<tr><td colspan="8" style="padding:24px;text-align:center;color:#64748b">Cargando bobinas...</td></tr>\';
+            fetchLoadedRolls(currentFilteredOtId);
+        }
+
+        function closeLoadedRollsModal() {
+            if (loadedRollsModal) loadedRollsModal.style.display = "none";
+            currentFilteredOtId = null;
+        }
+
+        var openBtn = document.getElementById("btn-open-loaded-rolls-modal");
+        if (openBtn) openBtn.addEventListener("click", function() { openLoadedRollsModal(null); });
+
+        var closeX = document.getElementById("btn-close-loaded-rolls-x");
+        if (closeX) closeX.addEventListener("click", closeLoadedRollsModal);
+
+        var closeFooter = document.getElementById("btn-close-loaded-rolls-footer");
+        if (closeFooter) closeFooter.addEventListener("click", closeLoadedRollsModal);
+
+        var refreshBtn = document.getElementById("btn-refresh-loaded-rolls");
+        if (refreshBtn) refreshBtn.addEventListener("click", function() { fetchLoadedRolls(currentFilteredOtId); });
+
+        if (searchInput) {
+            searchInput.addEventListener("input", function() {
+                renderRollsTable(currentRollsData);
+            });
+        }
+
+        document.querySelectorAll(".btn-ot-rolls-trigger").forEach(function(b) {
+            b.addEventListener("click", function() {
+                var otId = b.getAttribute("data-otid");
+                openLoadedRollsModal(otId);
+            });
+        });
+
+        // Carga de bobinas dinámicas dentro del modal de edición de OT
+        function loadOtRollsIntoEditModal(otId) {
+            var container = document.getElementById("ot-rolls-container");
+            var badge = document.getElementById("ot-rolls-count-badge");
+            if (!container) return;
+            container.innerHTML = \'<div style="font-size:12px;color:#64748b;font-style:italic">Cargando bobinas asociadas...</div>\';
+            if (badge) badge.textContent = "...";
+
+            fetch("/reports/machine-production/loaded-rolls?worker_ot_id=" + encodeURIComponent(otId), {
+                headers: { "Accept": "application/json" }
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(json) {
+                var rolls = (json && json.ok) ? (json.rolls || []) : [];
+                if (badge) badge.textContent = rolls.length + " bobinas";
+                if (rolls.length === 0) {
+                    container.innerHTML = \'<div style="font-size:12px;color:#64748b;font-style:italic">Esta OT no tiene bobinas cargadas o montadas actualmente en la máquina.</div>\';
+                    return;
+                }
+                var h = \'<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:4px">\' +
+                    \'<thead><tr style="border-bottom:1px solid #bbf7d0;color:#166534;font-size:11px;font-weight:700;text-transform:uppercase">\' +
+                    \'<th style="padding:4px 8px;text-align:left">Código</th>\' +
+                    \'<th style="padding:4px 8px;text-align:left">Insumo / SKU</th>\' +
+                    \'<th style="padding:4px 8px;text-align:right">Peso (Kg)</th>\' +
+                    \'<th style="padding:4px 8px;text-align:center">Estado</th>\' +
+                    \'<th style="padding:4px 8px;text-align:center">Acción</th>\' +
+                    \'</tr></thead><tbody>\';
+                rolls.forEach(function(r) {
+                    var mBadge = r.is_mounted
+                        ? \'<span style="background:#dcfce7;color:#15803d;padding:2px 6px;border-radius:4px;font-weight:700">🟢 Montada</span>\'
+                        : \'<span style="background:#fef3c7;color:#b45309;padding:2px 6px;border-radius:4px;font-weight:700">🟡 Tomada</span>\';
+                    h += \'<tr id="edit-modal-roll-\' + r.roll_id + \'" style="border-bottom:1px solid #e2e8f0">\' +
+                        \'<td style="padding:6px 8px;font-family:monospace;font-weight:700;color:#0f766e">\' + escapeHtml(r.roll_code) + \'</td>\' +
+                        \'<td style="padding:6px 8px"><strong>\' + escapeHtml(r.sku_code) + \'</strong> <span style="font-size:11px;color:#64748b">\' + escapeHtml(r.sku_description) + \'</span></td>\' +
+                        \'<td style="padding:6px 8px;text-align:right;font-weight:700">\' + (Number(r.weight_kg) || 0).toFixed(2) + \' kg</td>\' +
+                        \'<td style="padding:6px 8px;text-align:center">\' + mBadge + \'</td>\' +
+                        \'<td style="padding:6px 8px;text-align:center">\' +
+                            \'<button type="button" class="btn-return-roll-from-edit" data-roll-id="\' + r.roll_id + \'" data-roll-code="\' + escapeHtml(r.roll_code) + \'" style="padding:4px 9px;border:none;border-radius:6px;background:#0f766e;color:#fff;font-size:11px;font-weight:700;cursor:pointer">↩️ Devolver a Bodega 3000</button>\' +
+                        \'</td></tr>\';
+                });
+                h += \'</tbody></table>\';
+                container.innerHTML = h;
+
+                container.querySelectorAll(".btn-return-roll-from-edit").forEach(function(b) {
+                    b.addEventListener("click", function() {
+                        var rId = b.getAttribute("data-roll-id");
+                        var rCode = b.getAttribute("data-roll-code");
+                        executeReturnRoll(rId, rCode, b);
+                        setTimeout(function() {
+                            loadOtRollsIntoEditModal(otId);
+                        }, 600);
+                    });
+                });
+            })
+            .catch(function(e) {
+                container.innerHTML = \'<div style="font-size:12px;color:#b91c1c">Error cargando bobinas de la OT.</div>\';
+            });
+        }
+
+        document.querySelectorAll(".btn-edit-prod-trigger").forEach(function(btn) {
+            btn.addEventListener("click", function() {
+                try {
+                    var d = JSON.parse(btn.getAttribute("data-prod"));
+                    if (d && d.ot_id) {
+                        loadOtRollsIntoEditModal(d.ot_id);
+                    }
+                } catch(e) {}
+            });
+        });
+
+        // Carga inicial asíncrona del contador de bobinas en máquina
+        fetchLoadedRolls(null);
+    })();
+    </script>';
 
     render('Informe de Producción por Máquina', $body);
 }
@@ -9018,6 +9422,63 @@ function handleErpReportRoutes(string $path, string $method, ReceptionService $s
 
     if ($path === '/reports/machine-production/excel' && $method === 'GET') {
         unibagOutputMachineProductionExcel($service);
+        return true;
+    }
+
+    // Consulta de bobinas cargadas/en proceso en máquinas (para modal y control en tiempo real)
+    if ($path === '/reports/machine-production/loaded-rolls' && $method === 'GET') {
+        if (!userCanAccessArea('ERP', sessionAreaPermissions())) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'error' => 'No tiene permisos suficientes para ver bobinas de producción.']);
+            return true;
+        }
+        $workerOtId = isset($_GET['worker_ot_id']) && is_numeric($_GET['worker_ot_id']) ? (int)$_GET['worker_ot_id'] : null;
+        $rolls = $service->getLoadedRollsAcrossMachines($workerOtId);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => true, 'count' => count($rolls), 'rolls' => $rolls], JSON_UNESCAPED_UNICODE);
+        return true;
+    }
+
+    // Devolución directa de bobina a Bodega 3000 desde el informe de producción por máquina
+    if ($path === '/reports/machine-production/return-roll' && $method === 'POST') {
+        if (!userCanAccessArea('ERP', sessionAreaPermissions())) {
+            http_response_code(403);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => false, 'error' => 'No tiene permisos suficientes para devolver bobinas a bodega.']);
+            return true;
+        }
+
+        requireCsrf();
+
+        $rollId = isset($_POST['roll_id']) ? (int)$_POST['roll_id'] : 0;
+        $userName = trim((string)($_SESSION['user_name'] ?? $_SESSION['auth_username'] ?? $_SESSION['user_firstname'] ?? 'Supervisor'));
+        $reason = trim((string)($_POST['reason'] ?? 'Devuelta a Bodega 3000 desde Informe de Producción por Máquina'));
+
+        $result = $service->returnRollToBodega3000($rollId, $userName, $reason);
+
+        $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+               || (isset($_SERVER['HTTP_ACCEPT']) && str_contains($_SERVER['HTTP_ACCEPT'], 'application/json'));
+
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            if (($result['ok'] ?? false) !== true) {
+                http_response_code(422);
+            }
+            echo json_encode($result, JSON_UNESCAPED_UNICODE);
+            return true;
+        }
+
+        $redirectUrl = trim((string)($_POST['redirect_url'] ?? '/reports/machine-production'));
+        if ($redirectUrl === '' || !str_starts_with($redirectUrl, '/reports/machine-production')) {
+            $redirectUrl = '/reports/machine-production';
+        }
+        $sep = str_contains($redirectUrl, '?') ? '&' : '?';
+        if (($result['ok'] ?? false) === true) {
+            redirectResponse($redirectUrl . $sep . 'msg=' . rawurlencode((string)($result['message'] ?? 'Bobina devuelta a Bodega 3000.')));
+        } else {
+            redirectResponse($redirectUrl . $sep . 'error=' . rawurlencode((string)($result['error'] ?? 'Error al devolver bobina.')));
+        }
         return true;
     }
 

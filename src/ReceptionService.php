@@ -1898,25 +1898,53 @@ SQL;
 
         try {
             $erpStmt = $this->erpPdo->prepare(
+                "SELECT t3.item_contenedor_supporderposid AS line_id,
+                        COALESCE(SUM(t3.item_amount), 0) AS erp_amount,
+                        COALESCE(SUM(t3.item_cont_kg_received), 0) AS erp_kg
+                 FROM stockchanges ta
+                 INNER JOIN stockchanges_items t3 ON t3.stk_id = ta.id
+                 WHERE ta.stk_status > 1
+                   AND t3.item_contenedor_supporderposid IN ($placeholders)
+                 GROUP BY t3.item_contenedor_supporderposid"
+            );
+            $erpStmt->execute($lineIds);
+            foreach ($erpStmt->fetchAll() as $erpRow) {
+                $lineId = (int)$erpRow['line_id'];
+                $erpAmount = (float)$erpRow['erp_amount'];
+                $erpKg = (float)$erpRow['erp_kg'];
+                if ($erpAmount > 0 || $erpKg > 0) {
+                    if (!isset($summary[$lineId])) {
+                        $summary[$lineId] = [
+                            'received_rolls' => (int)round($erpAmount),
+                            'received_qty' => $erpAmount,
+                            'received_weight_kg' => $erpKg,
+                        ];
+                    } else {
+                        $summary[$lineId]['received_rolls'] = max($summary[$lineId]['received_rolls'], (int)round($erpAmount));
+                        $summary[$lineId]['received_qty'] = max($summary[$lineId]['received_qty'], $erpAmount);
+                        $summary[$lineId]['received_weight_kg'] = max($summary[$lineId]['received_weight_kg'], $erpKg);
+                    }
+                }
+            }
+        } catch (\Throwable) {
+        }
+
+        try {
+            $shippedStmt = $this->erpPdo->prepare(
                 "SELECT id, COALESCE(item_amount_shipped, 0) AS shipped_amount
                  FROM supplier_order_items
                  WHERE id IN ($placeholders)"
             );
-            $erpStmt->execute($lineIds);
-            foreach ($erpStmt->fetchAll() as $erpRow) {
+            $shippedStmt->execute($lineIds);
+            foreach ($shippedStmt->fetchAll() as $erpRow) {
                 $lineId = (int)$erpRow['id'];
                 $shipped = (float)$erpRow['shipped_amount'];
-                if ($shipped > 0) {
-                    if (!isset($summary[$lineId])) {
-                        $summary[$lineId] = [
-                            'received_rolls' => (int)round($shipped),
-                            'received_qty' => $shipped,
-                            'received_weight_kg' => 0.0,
-                        ];
-                    } else {
-                        $summary[$lineId]['received_rolls'] = max($summary[$lineId]['received_rolls'], (int)round($shipped));
-                        $summary[$lineId]['received_qty'] = max($summary[$lineId]['received_qty'], $shipped);
-                    }
+                if ($shipped > 0 && !isset($summary[$lineId])) {
+                    $summary[$lineId] = [
+                        'received_rolls' => (int)round($shipped),
+                        'received_qty' => $shipped,
+                        'received_weight_kg' => 0.0,
+                    ];
                 }
             }
         } catch (\Throwable) {
@@ -4130,6 +4158,15 @@ SQL;
         } catch (Throwable) {
         }
 
+        try {
+            $lines = $this->listImportContainerLines($containerId);
+            $poIds = array_unique(array_filter(array_map(static fn(array $l): int => (int)($l['purchase_order_id'] ?? 0), $lines), static fn(int $id): bool => $id > 0));
+            foreach ($poIds as $poId) {
+                $this->refreshPurchaseOrderStatus($poId);
+            }
+        } catch (Throwable) {
+        }
+
         return ['ok' => true];
     }
 
@@ -4176,6 +4213,8 @@ SQL;
 
         if ((bool)($stats['is_complete'] ?? false)) {
             $this->archiveImportContainer($containerId);
+        } elseif ((bool)($stats['has_progress'] ?? false) || (float)($stats['received_rolls'] ?? 0) > 0) {
+            $this->updateImportContainerReceivedAcrossErps($containerId);
         }
     }
 
@@ -4332,12 +4371,16 @@ SQL;
             );
 
             foreach ($items as $position => $item) {
+                $storehouseId = (int)$item['erp_storehouse_id'];
+                if ($storehouseId <= 0) {
+                    $storehouseId = 5; // Bodega 100 (MP PLA) fallback predeterminado para materia prima en company_shops_storehouses
+                }
                 $insertItem->execute([
                     ':stk_id' => $existingId,
                     ':item_id' => (int)$item['erp_item_id'],
                     ':item_pos' => $position,
                     ':item_amount' => number_format((float)$item['received_rolls'], 10, '.', ''),
-                    ':item_st_id' => (int)$item['erp_storehouse_id'],
+                    ':item_st_id' => $storehouseId,
                     ':container_item_id' => (int)$item['container_item_id'],
                     ':purchase_order_line_id' => (int)$item['purchase_order_line_id'],
                     ':received_weight_kg' => number_format((float)$item['received_weight_kg'], 2, '.', ''),
@@ -4504,6 +4547,34 @@ SQL;
         return $ok;
     }
 
+    private function updateImportContainerReceivedAcrossErps(int $containerId, int $userId = 0): bool
+    {
+        $ok = false;
+        $params = [
+            ':upddat' => time(),
+            ':updusr' => $userId > 0 ? $userId : 1,
+            ':id' => $containerId,
+        ];
+
+        foreach ($this->getErpSyncTargets() as $erpPdo) {
+            try {
+                $stmt = $erpPdo->prepare(
+                    'UPDATE supplier_contenedor
+                     SET sord_status = 3,
+                         sord_upddat = :upddat,
+                         sord_updusr = :updusr
+                     WHERE id = :id AND sord_status < 3'
+                );
+                $result = $stmt->execute($params);
+                $ok = $ok || $result;
+            } catch (Throwable) {
+                continue;
+            }
+        }
+
+        return $ok;
+    }
+
     public function refreshPurchaseOrderStatus(int $purchaseOrderId): void
     {
         $lines = $this->listPurchaseOrderLines($purchaseOrderId);
@@ -4516,18 +4587,27 @@ SQL;
 
         foreach ($lines as $line) {
             $summary = $this->summarizeReceptionLine($line);
-            $shippedValue = $summary['mode'] === 'WEIGHT'
-                ? round((float)$summary['received_value'], 2)
-                : round((float)$summary['received_value'], 2);
-            $updateLine = $this->erpPdo->prepare(
-                'UPDATE supplier_order_items
-                 SET item_amount_shipped = :shipped
-                 WHERE id = :id'
-            );
-            $updateLine->execute([
-                ':shipped' => number_format($shippedValue, 2, '.', ''),
-                ':id' => (int)$line['id'],
-            ]);
+            $orderedRolls = (float)($line['ordered_rolls'] ?? 0);
+            if ($orderedRolls > 0) {
+                $shippedValue = (float)($summary['received_rolls'] > 0 ? $summary['received_rolls'] : ($summary['received_qty'] ?? 0));
+            } else {
+                $shippedValue = (float)($summary['received_value'] ?? 0);
+            }
+
+            foreach ($this->getErpSyncTargets() as $erpPdo) {
+                try {
+                    $updateLine = $erpPdo->prepare(
+                        'UPDATE supplier_order_items
+                         SET item_amount_shipped = :shipped
+                         WHERE id = :id'
+                    );
+                    $updateLine->execute([
+                        ':shipped' => number_format($shippedValue, 2, '.', ''),
+                        ':id' => (int)$line['id'],
+                    ]);
+                } catch (Throwable) {
+                }
+            }
 
             if ($summary['has_progress']) {
                 $hasProgress = true;
@@ -4537,26 +4617,34 @@ SQL;
             }
         }
 
-        $updateOrder = $this->erpPdo->prepare(
-            'UPDATE supplier_order
-             SET sord_order_shipped = :is_complete
-             WHERE id = :id'
-        );
-        $updateOrder->execute([
-            ':is_complete' => $allComplete ? 1 : 0,
-            ':id' => $purchaseOrderId,
-        ]);
-        if ($allComplete) {
-            $updateStatus = $this->erpPdo->prepare(
-                'UPDATE supplier_order
-                 SET sord_status = 4,
-                     sord_upddat = :upddat
-                 WHERE id = :id'
-            );
-            $updateStatus->execute([
-                ':upddat' => time(),
-                ':id' => $purchaseOrderId,
-            ]);
+        $now = time();
+        foreach ($this->getErpSyncTargets() as $erpPdo) {
+            try {
+                if ($allComplete) {
+                    $erpPdo->prepare(
+                        'UPDATE supplier_order
+                         SET sord_order_shipped = 1,
+                             sord_status = 4,
+                             sord_upddat = :upddat
+                         WHERE id = :id'
+                    )->execute([
+                        ':upddat' => $now,
+                        ':id' => $purchaseOrderId,
+                    ]);
+                } elseif ($hasProgress) {
+                    $erpPdo->prepare(
+                        'UPDATE supplier_order
+                         SET sord_order_shipped = 0,
+                             sord_status = CASE WHEN sord_status < 3 THEN 3 ELSE sord_status END,
+                             sord_upddat = :upddat
+                         WHERE id = :id'
+                    )->execute([
+                        ':upddat' => $now,
+                        ':id' => $purchaseOrderId,
+                    ]);
+                }
+            } catch (Throwable) {
+            }
         }
     }
 
@@ -11511,6 +11599,28 @@ SQL;
             }
             return ['ok' => false, 'error' => 'Error al eliminar el registro de producción: ' . $e->getMessage()];
         }
+    }
+
+    /**
+     * Obtiene bobinas cargadas en máquinas delegando a ProductionService.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function getLoadedRollsAcrossMachines(?int $workerOtId = null): array
+    {
+        $prod = new ProductionService($this->erpPdo, $this->pdo);
+        return $prod->getLoadedRollsAcrossMachines($workerOtId);
+    }
+
+    /**
+     * Devuelve una bobina cargada en máquina directamente a Bodega 3000 delegando a ProductionService.
+     *
+     * @return array{ok: bool, roll_code?: string, sku_code?: string, message?: string, error?: string}
+     */
+    public function returnRollToBodega3000(int $rollId, string $operatorName = '', string $reason = ''): array
+    {
+        $prod = new ProductionService($this->erpPdo, $this->pdo);
+        return $prod->returnRollToBodega3000($rollId, $operatorName, $reason);
     }
 
     /**

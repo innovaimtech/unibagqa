@@ -4180,6 +4180,440 @@ final class ProductionService
     }
 
     /**
+     * Obtiene el listado de bobinas cargadas o en proceso en máquinas.
+     * Permite filtrar opcionalmente por una OT específica ($workerOtId).
+     *
+     * @return list<array{
+     *     roll_id: int,
+     *     roll_code: string,
+     *     sku_code: string,
+     *     sku_description: string,
+     *     weight_kg: float,
+     *     status: string,
+     *     worker_ot_id: int,
+     *     ot_number: string,
+     *     cc_number: string,
+     *     item_title: string,
+     *     machine_id: int,
+     *     machine_name: string,
+     *     process_name: string,
+     *     operator_name: string,
+     *     is_mounted: bool,
+     *     created_at: string
+     * }>
+     */
+    public function getLoadedRollsAcrossMachines(?int $workerOtId = null): array
+    {
+        if ($this->trzPdo === null) {
+            return [];
+        }
+
+        try {
+            $sql = "
+                SELECT 
+                    r.id AS roll_id,
+                    r.roll_code,
+                    r.sku_id,
+                    s.code AS sku_code,
+                    s.description AS sku_description,
+                    r.weight_kg,
+                    r.status,
+                    r.current_work_order_id,
+                    r.source_work_order_id,
+                    r.warehouse_id,
+                    w.name AS warehouse_name,
+                    r.reception_mode,
+                    r.created_at
+                FROM rolls r
+                LEFT JOIN skus s ON r.sku_id = s.id
+                LEFT JOIN warehouses w ON r.warehouse_id = w.id
+                WHERE r.status = 'IN_PROCESS'
+                   OR r.current_work_order_id IS NOT NULL
+                ORDER BY r.id DESC
+            ";
+            $stmt = $this->trzPdo->query($sql);
+            $rolls = $stmt ? ($stmt->fetchAll(PDO::FETCH_ASSOC) ?: []) : [];
+
+            $result = [];
+            foreach ($rolls as $roll) {
+                $rollId = (int)$roll['roll_id'];
+                $sourceOtId = (int)($roll['source_work_order_id'] ?? 0);
+                $currOtId = (int)($roll['current_work_order_id'] ?? 0);
+
+                // Obtener último evento en trazabilidad para resolver OT, máquina y operador si no están explícitos
+                $stmtEvt = $this->trzPdo->prepare("
+                    SELECT type, payload, created_at FROM events
+                    WHERE JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stmtEvt->execute([':rid' => (string)$rollId]);
+                $lastEvt = $stmtEvt->fetch(PDO::FETCH_ASSOC) ?: null;
+                $payload = (!empty($lastEvt['payload']) && is_string($lastEvt['payload']))
+                    ? (json_decode($lastEvt['payload'], true) ?: [])
+                    : [];
+
+                $resolvedWorkerOtId = $sourceOtId;
+                if ($resolvedWorkerOtId <= 0 && !empty($payload['worker_ot_id'])) {
+                    $resolvedWorkerOtId = (int)$payload['worker_ot_id'];
+                }
+                if ($resolvedWorkerOtId <= 0 && $currOtId > 0 && $this->erpPdo !== null) {
+                    $chkPwo = $this->erpPdo->prepare("SELECT id FROM prod_worker_ot WHERE id = :id LIMIT 1");
+                    $chkPwo->execute([':id' => $currOtId]);
+                    if ($chkPwo->fetchColumn()) {
+                        $resolvedWorkerOtId = $currOtId;
+                    } else {
+                        $chkWo = $this->trzPdo->prepare("SELECT ot_code FROM work_orders WHERE id = :id LIMIT 1");
+                        $chkWo->execute([':id' => $currOtId]);
+                        $otCode = $chkWo->fetchColumn();
+                        if ($otCode) {
+                            $stmtAg = $this->erpPdo->prepare("
+                                SELECT pwo.id 
+                                FROM prod_worker_ot pwo
+                                JOIN prod_agenda ag ON pwo.wok_ag_id = ag.id
+                                JOIN prod_header ph ON ag.ag_prdid = ph.id
+                                WHERE ph.prd_number = :ot_code
+                                ORDER BY pwo.id DESC LIMIT 1
+                            ");
+                            $stmtAg->execute([':ot_code' => $otCode]);
+                            $foundId = (int)$stmtAg->fetchColumn();
+                            if ($foundId > 0) {
+                                $resolvedWorkerOtId = $foundId;
+                            }
+                        }
+                    }
+                }
+
+                // Si se solicitó filtrar por un workerOtId específico y no coincide, saltar
+                if ($workerOtId !== null && $workerOtId > 0) {
+                    $matchTrzWo = ($currOtId > 0 && $this->resolveTraceabilityWorkOrderId($workerOtId, null, false) === $currOtId);
+                    if ($resolvedWorkerOtId !== $workerOtId && !$matchTrzWo) {
+                        continue;
+                    }
+                }
+
+                // Verificar si la bobina se encuentra montada
+                $stmtM = $this->trzPdo->prepare("
+                    SELECT type, payload, created_at FROM events
+                    WHERE type IN ('ROLL_MOUNTED_ON_MACHINE', 'ROLL_UNMOUNTED_FROM_MACHINE')
+                      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stmtM->execute([':rid' => (string)$rollId]);
+                $mountEvt = $stmtM->fetch(PDO::FETCH_ASSOC);
+                $isMounted = ($mountEvt && ($mountEvt['type'] ?? '') === 'ROLL_MOUNTED_ON_MACHINE');
+
+                $otInfo = [
+                    'ot_number' => '',
+                    'cc_number' => '',
+                    'item_title' => '',
+                    'machine_id' => 0,
+                    'machine_name' => '',
+                    'process_name' => '',
+                    'operator_name' => (string)($payload['operator'] ?? ''),
+                ];
+
+                if ($resolvedWorkerOtId > 0 && $this->erpPdo !== null) {
+                    $stmtOt = $this->erpPdo->prepare("
+                        SELECT pwo.id AS worker_ot_id, ph.prd_number AS ot_number, ord.req_number AS cc_number, i.item_title,
+                               pwi.win_equipoid, eq.equipo_name, eq.equipo_type_id,
+                               CONCAT(COALESCE(w.wrk_firstname, ''), ' ', COALESCE(w.wrk_lastname, '')) AS op_name
+                        FROM prod_worker_ot pwo
+                        LEFT JOIN prod_agenda ag ON pwo.wok_ag_id = ag.id
+                        LEFT JOIN prod_header ph ON ag.ag_prdid = ph.id
+                        LEFT JOIN orders ord ON ag.ag_reqid = ord.id
+                        LEFT JOIN orders_items oi ON ord.id = oi.req_id
+                        LEFT JOIN item i ON oi.item_id = i.id
+                        LEFT JOIN prod_worker_init pwi ON pwo.wok_init_id = pwi.id
+                        LEFT JOIN equipo eq ON pwi.win_equipoid = eq.id
+                        LEFT JOIN workers w ON pwi.win_wrkid = w.id
+                        WHERE pwo.id = :otid
+                        LIMIT 1
+                    ");
+                    $stmtOt->execute([':otid' => $resolvedWorkerOtId]);
+                    $otRow = $stmtOt->fetch(PDO::FETCH_ASSOC);
+                    if ($otRow) {
+                        $otInfo['ot_number'] = (string)($otRow['ot_number'] ?? '');
+                        $otInfo['cc_number'] = (string)($otRow['cc_number'] ?? '');
+                        $otInfo['item_title'] = (string)($otRow['item_title'] ?? '');
+                        $otInfo['machine_id'] = (int)($otRow['win_equipoid'] ?? 0);
+                        $otInfo['machine_name'] = (string)($otRow['equipo_name'] ?? '');
+                        $typeId = (int)($otRow['equipo_type_id'] ?? 0);
+                        $otInfo['process_name'] = match($typeId) {
+                            7 => 'Flexografía',
+                            8 => 'Corte y Sellado',
+                            11 => 'Serigrafía',
+                            22 => 'Pulpo Serigráfico',
+                            15 => 'Embalaje',
+                            12 => 'Rebobinado',
+                            default => 'Producción'
+                        };
+                        if (empty($otInfo['operator_name']) && !empty(trim((string)$otRow['op_name']))) {
+                            $otInfo['operator_name'] = trim((string)$otRow['op_name']);
+                        }
+                    }
+                }
+
+                if (empty($otInfo['machine_name']) && !empty($payload['machine_id']) && $this->erpPdo !== null) {
+                    $stMch = $this->erpPdo->prepare("SELECT equipo_name FROM equipo WHERE id = :mid LIMIT 1");
+                    $stMch->execute([':mid' => $payload['machine_id']]);
+                    $otInfo['machine_name'] = (string)$stMch->fetchColumn();
+                }
+
+                $result[] = [
+                    'roll_id' => $rollId,
+                    'roll_code' => (string)($roll['roll_code'] ?? ''),
+                    'sku_code' => (string)($roll['sku_code'] ?? ''),
+                    'sku_description' => (string)($roll['sku_description'] ?? ''),
+                    'weight_kg' => (float)($roll['weight_kg'] ?? 0),
+                    'status' => (string)($roll['status'] ?? ''),
+                    'worker_ot_id' => $resolvedWorkerOtId,
+                    'ot_number' => $otInfo['ot_number'],
+                    'cc_number' => $otInfo['cc_number'],
+                    'item_title' => $otInfo['item_title'],
+                    'machine_id' => $otInfo['machine_id'],
+                    'machine_name' => $otInfo['machine_name'],
+                    'process_name' => $otInfo['process_name'],
+                    'operator_name' => $otInfo['operator_name'],
+                    'is_mounted' => $isMounted,
+                    'created_at' => (string)($roll['created_at'] ?? ''),
+                ];
+            }
+
+            return $result;
+        } catch (Throwable $e) {
+            error_log('Error in getLoadedRollsAcrossMachines: ' . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * Devuelve una bobina cargada en máquina directamente a Bodega 3000.
+     * Desmonta la bobina si estaba montada, actualiza trazabilidad (estado RECEIVED, sin OT, warehouse_id Bodega 3000),
+     * reintegra el inventario en el ERP en Bodega 3000 (item_shops_storehouses), e inserta los eventos
+     * de auditoría tanto en TRZ (events) como en ERP (prod_worker_ot_events).
+     *
+     * @param int $rollId ID de la bobina en trazabilidad (rolls.id)
+     * @param string $operatorName Nombre del operador o supervisor que realiza la devolución
+     * @param string $reason Motivo de la devolución
+     * @return array{ok: bool, roll_code?: string, sku_code?: string, message?: string, error?: string}
+     */
+    public function returnRollToBodega3000(int $rollId, string $operatorName = '', string $reason = ''): array
+    {
+        if ($rollId <= 0 || $this->trzPdo === null) {
+            return ['ok' => false, 'error' => 'Identificador de bobina no válido.'];
+        }
+
+        try {
+            $now = time();
+            $warehouse3000Id = $this->resolveBodega3000WarehouseId();
+
+            // 1. Obtener datos de la bobina
+            $stmtRoll = $this->trzPdo->prepare("
+                SELECT r.*, s.code AS sku_code, s.description AS sku_description
+                FROM rolls r
+                LEFT JOIN skus s ON r.sku_id = s.id
+                WHERE r.id = :id
+                LIMIT 1
+            ");
+            $stmtRoll->execute([':id' => $rollId]);
+            $roll = $stmtRoll->fetch(PDO::FETCH_ASSOC);
+            if (!$roll) {
+                return ['ok' => false, 'error' => "Bobina #{$rollId} no encontrada en trazabilidad."];
+            }
+
+            $rollCode = trim((string)($roll['roll_code'] ?? ''));
+            $skuCode = trim((string)($roll['sku_code'] ?? ''));
+            $rollWeightKg = (float)($roll['weight_kg'] ?? 0);
+            $currentStatus = strtoupper(trim((string)($roll['status'] ?? '')));
+            $currentOtId = (int)($roll['current_work_order_id'] ?? 0);
+            $sourceOtId = (int)($roll['source_work_order_id'] ?? 0);
+
+            // Si ya está devuelta en Bodega 3000
+            if ($currentStatus === 'RECEIVED' && $currentOtId === 0 && (int)($roll['warehouse_id'] ?? 0) === $warehouse3000Id) {
+                return [
+                    'ok' => true,
+                    'already_returned' => true,
+                    'roll_code' => $rollCode,
+                    'sku_code' => $skuCode,
+                    'message' => "La bobina {$rollCode} ya se encuentra devuelta en Bodega 3000."
+                ];
+            }
+
+            // 2. Resolver worker_ot_id y eventos de montaje
+            $workerOtId = $sourceOtId;
+            $wasMounted = false;
+            $entryWeightKg = $rollWeightKg;
+
+            $stmtLastMovement = $this->trzPdo->prepare("
+                SELECT type, payload
+                FROM events
+                WHERE JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                ORDER BY id DESC
+                LIMIT 5
+            ");
+            $stmtLastMovement->execute([':rid' => (string)$rollId]);
+            $events = $stmtLastMovement->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+            foreach ($events as $evt) {
+                $pData = !empty($evt['payload']) ? json_decode((string)$evt['payload'], true) : [];
+                if ($workerOtId <= 0 && !empty($pData['worker_ot_id'])) {
+                    $workerOtId = (int)$pData['worker_ot_id'];
+                }
+                if ($operatorName === '' && !empty($pData['operator'])) {
+                    $operatorName = (string)$pData['operator'];
+                }
+            }
+
+            // Verificar si el último estado de montaje fue ROLL_MOUNTED_ON_MACHINE
+            $stmtLastMount = $this->trzPdo->prepare("
+                SELECT type, payload
+                FROM events
+                WHERE type IN ('ROLL_MOUNTED_ON_MACHINE', 'ROLL_UNMOUNTED_FROM_MACHINE')
+                  AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                ORDER BY id DESC
+                LIMIT 1
+            ");
+            $stmtLastMount->execute([':rid' => (string)$rollId]);
+            $lastMount = $stmtLastMount->fetch(PDO::FETCH_ASSOC);
+            if ($lastMount) {
+                $wasMounted = ((string)($lastMount['type'] ?? '') === 'ROLL_MOUNTED_ON_MACHINE');
+                $mPayload = json_decode((string)($lastMount['payload'] ?? ''), true);
+                if (!empty($mPayload['entry_weight_kg'])) {
+                    $entryWeightKg = (float)$mPayload['entry_weight_kg'];
+                }
+            }
+
+            if ($operatorName === '') {
+                $operatorName = 'Supervisor / Producción';
+            }
+            if ($reason === '') {
+                $reason = 'Devolución directa a Bodega 3000 desde Informe de Producción por Máquina';
+            }
+
+            $stmtEvent = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
+
+            // 3. Desmontar de la máquina si estaba montada
+            if ($wasMounted) {
+                $stmtEvent->execute([
+                    ':type' => 'ROLL_UNMOUNTED_FROM_MACHINE',
+                    ':payload' => json_encode([
+                        'roll_id' => $rollId,
+                        'roll_code' => $rollCode,
+                        'weight_kg' => $rollWeightKg,
+                        'worker_ot_id' => $workerOtId,
+                        'operator' => $operatorName,
+                        'timestamp' => $now,
+                        'reason' => 'RETURNED_TO_WAREHOUSE_FROM_REPORT',
+                    ], JSON_UNESCAPED_UNICODE),
+                ]);
+            }
+
+            // 4. Actualizar tabla rolls
+            $stmtUpd = $this->trzPdo->prepare("
+                UPDATE rolls
+                SET status = 'RECEIVED',
+                    current_work_order_id = NULL,
+                    warehouse_id = CASE WHEN :wh_id > 0 THEN :wh_id ELSE warehouse_id END
+                WHERE id = :id
+            ");
+            $stmtUpd->execute([
+                ':wh_id' => $warehouse3000Id,
+                ':id' => $rollId,
+            ]);
+
+            // 5. Devolver inventario a Bodega 3000 en ERP
+            if (
+                $skuCode !== ''
+                && strtoupper((string)($roll['reception_mode'] ?? '')) !== 'MANUAL_NO_TRACEABILITY'
+            ) {
+                $this->adjustBodega3000InventoryBySku($skuCode, 1);
+            }
+
+            // 6. Registrar evento ROLL_RETURNED_TO_WAREHOUSE en TRZ
+            $stmtEvent->execute([
+                ':type' => 'ROLL_RETURNED_TO_WAREHOUSE',
+                ':payload' => json_encode([
+                    'roll_id' => $rollId,
+                    'roll_code' => $rollCode,
+                    'sku_code' => $skuCode,
+                    'weight_kg' => $rollWeightKg,
+                    'entry_weight_kg' => $entryWeightKg,
+                    'was_mounted' => $wasMounted,
+                    'warehouse_id' => $warehouse3000Id,
+                    'worker_ot_id' => $workerOtId,
+                    'operator' => $operatorName,
+                    'reason' => $reason,
+                    'timestamp' => $now,
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            // 7. Registrar en prod_worker_ot_events en ERP para auditoría de la OT si corresponde
+            if ($this->erpPdo !== null && $workerOtId > 0) {
+                if ($wasMounted) {
+                    $erpUnmountComment = 'Desmontaje de Bobina '
+                        . ($rollCode !== '' ? $rollCode : ('#' . $rollId))
+                        . ' devuelta a Bodega 3000 (desde Informe Producción)';
+                    if ($entryWeightKg > 0) {
+                        $erpUnmountComment .= ' (Peso ingreso: ' . number_format($entryWeightKg, 2, '.', '') . ' kg)';
+                    }
+                    if (trim($operatorName) !== '') {
+                        $erpUnmountComment .= ' por ' . trim($operatorName);
+                    }
+
+                    $stmtErpUnmount = $this->erpPdo->prepare("
+                        INSERT INTO prod_worker_ot_events
+                        (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                        VALUES
+                        (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
+                    ");
+                    $stmtErpUnmount->execute([
+                        ':ot_id' => $workerOtId,
+                        ':crtdat' => $now,
+                        ':enddat' => $now,
+                        ':comments' => $erpUnmountComment,
+                    ]);
+                }
+
+                $erpReturnComment = 'Bobina '
+                    . ($rollCode !== '' ? $rollCode : ('#' . $rollId))
+                    . ' devuelta a Bodega 3000 desde Informe de Producción';
+                if ($skuCode !== '') {
+                    $erpReturnComment .= ' [' . $skuCode . ']';
+                }
+                if ($rollWeightKg > 0) {
+                    $erpReturnComment .= ' (' . number_format($rollWeightKg, 2, '.', '') . ' kg)';
+                }
+                if (trim($operatorName) !== '') {
+                    $erpReturnComment .= ' por ' . trim($operatorName);
+                }
+
+                $stmtErpReturn = $this->erpPdo->prepare("
+                    INSERT INTO prod_worker_ot_events
+                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                    VALUES
+                    (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                ");
+                $stmtErpReturn->execute([
+                    ':ot_id' => $workerOtId,
+                    ':amt' => $rollWeightKg,
+                    ':crtdat' => $now,
+                    ':enddat' => $now,
+                    ':comments' => $erpReturnComment,
+                ]);
+            }
+
+            return [
+                'ok' => true,
+                'roll_code' => $rollCode,
+                'sku_code' => $skuCode,
+                'message' => "Bobina {$rollCode} devuelta con éxito a Bodega 3000."
+            ];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al devolver bobina a Bodega 3000: ' . $e->getMessage()];
+        }
+    }
+
+    /**
      * Registra el consumo real de una bobina y el eventual retazo que se devuelve a bodega,
      * garantizando la trazabilidad total del insumo.
      */
