@@ -1151,15 +1151,19 @@ function handleProductionRoutes(
             }
             $now = time();
             $erpPdo = Db::erpPdo();
+            $isKg = (stripos($matUnit, 'kg') !== false || stripos($matUnit, 'kilo') !== false || stripos($matType, 'bobina') !== false);
+            $amtBolsas = $isKg ? 0 : $matQty;
+            $bobinaKg = $isKg ? $matQty : 0;
             $stmtErp = $erpPdo->prepare(
                 "INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                  VALUES
-                 (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)"
+                 (:ot_id, :amt, :bobina_kg, :crtdat, :enddat, 2, 'materiales', :comments)"
             );
             $stmtErp->execute([
                 ':ot_id' => $workerOtId,
-                ':amt' => $matQty,
+                ':amt' => $amtBolsas,
+                ':bobina_kg' => $bobinaKg,
                 ':crtdat' => $now,
                 ':enddat' => $now,
                 ':comments' => $desc,
@@ -1817,14 +1821,18 @@ function handleProductionRoutes(
             if ($comments !== '') $desc .= " ({$comments})";
 
             $now = time();
+            $isKg = (stripos($matUnit, 'kg') !== false || stripos($matUnit, 'kilo') !== false || stripos($matType, 'bobina') !== false);
+            $amtBolsas = $isKg ? 0 : $matQty;
+            $bobinaKg = $isKg ? $matQty : 0;
             Db::erpPdo()->prepare("
                 INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                 VALUES
-                 (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                 (:ot_id, :amt, :bobina_kg, :crtdat, :enddat, 2, 'materiales', :comments)
             ")->execute([
                 ':ot_id' => $workerOtId,
-                ':amt' => $matQty,
+                ':amt' => $amtBolsas,
+                ':bobina_kg' => $bobinaKg,
                 ':crtdat' => $now,
                 ':enddat' => $now,
                 ':comments' => $desc,
@@ -10786,6 +10794,12 @@ function renderProductionOperatorConsole(
                         }
                         if ((float)($ev['prod_bobina_kg'] ?? 0) > 0) {
                             $amtStr .= '<br><span style="font-size:11px;color:#15803D;font-weight:bold">' . number_format((float)$ev['prod_bobina_kg'], 2, ',', '.') . ' kg</span>';
+                        }
+                    } elseif ($ev['evt_type'] === 'materiales') {
+                        if ((float)($ev['prod_bobina_kg'] ?? 0) > 0) {
+                            $amtStr = '<span style="font-size:11px;color:#15803D;font-weight:bold">' . number_format((float)$ev['prod_bobina_kg'], 2, ',', '.') . ' kg</span>';
+                        } elseif ((float)($ev['evt_amount'] ?? 0) > 0) {
+                            $amtStr = $fmt($ev['evt_amount'] ?? 0) . ' unid';
                         }
                     } elseif ((float)($ev['evt_amount'] ?? 0) > 0 || (float)($ev['evt_amount_pulpo_frente'] ?? 0) > 0 || (float)($ev['evt_amount_pulpo_dorso'] ?? 0) > 0) {
                         if ($ev['evt_type'] === 'merma') {

@@ -3036,13 +3036,13 @@ final class ProductionService
 
                         $stmtErp = $this->erpPdo->prepare("
                             INSERT INTO prod_worker_ot_events
-                             (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                             (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                             VALUES
-                             (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                             (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
                         ");
                         $stmtErp->execute([
                             ':ot_id' => $workerOtId,
-                            ':amt' => $weightKg,
+                            ':pkg' => $weightKg,
                             ':crtdat' => $now,
                             ':enddat' => $now,
                             ':comments' => $erpComment,
@@ -3174,13 +3174,13 @@ final class ProductionService
 
                 $stmtErp = $this->erpPdo->prepare(
                     "INSERT INTO prod_worker_ot_events
-                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                     (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                      VALUES
-                     (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)"
+                     (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)"
                 );
                 $stmtErp->execute([
                     ':ot_id' => $workerOtId,
-                    ':amt' => $weightKg,
+                    ':pkg' => $weightKg,
                     ':crtdat' => $now,
                     ':enddat' => $now,
                     ':comments' => $erpComment,
@@ -3294,12 +3294,13 @@ final class ProductionService
             }
             $stmtErp = $this->erpPdo->prepare(
                 "INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                  VALUES
-                 (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)"
+                 (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)"
             );
             $stmtErp->execute([
                 ':ot_id' => $workerOtId,
+                ':pkg' => $actualEntryKg,
                 ':crtdat' => $now,
                 ':enddat' => $now,
                 ':comments' => $comm,
@@ -3805,13 +3806,13 @@ final class ProductionService
 
             $stmtErpMat = $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events
-                (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                 VALUES
-                (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
             ");
             $stmtErpMat->execute([
                 ':ot_id' => $workerOtId,
-                ':amt' => $totalNetConsumedKg,
+                ':pkg' => $totalNetConsumedKg,
                 ':crtdat' => $now,
                 ':enddat' => $now,
                 ':comments' => $descMat,
@@ -3984,12 +3985,13 @@ final class ProductionService
 
                 $stmtErp = $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
-                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                    (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                     VALUES
-                    (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
+                    (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
                 ");
                 $stmtErp->execute([
                     ':ot_id' => $workerOtId,
+                    ':pkg' => $entryWeightKg,
                     ':crtdat' => $now,
                     ':enddat' => $now,
                     ':comments' => $evtComment,
@@ -4133,12 +4135,13 @@ final class ProductionService
 
                     $stmtErpUnmount = $this->erpPdo->prepare("
                         INSERT INTO prod_worker_ot_events
-                        (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                        (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                         VALUES
-                        (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
+                        (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
                     ");
                     $stmtErpUnmount->execute([
                         ':ot_id' => $workerOtId,
+                        ':pkg' => $entryWeightKg,
                         ':crtdat' => $now,
                         ':enddat' => $now,
                         ':comments' => $erpUnmountComment,
@@ -4160,13 +4163,13 @@ final class ProductionService
 
                 $stmtErpReturn = $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
-                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                    (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                     VALUES
-                    (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                    (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
                 ");
                 $stmtErpReturn->execute([
                     ':ot_id' => $workerOtId,
-                    ':amt' => $rollWeightKg,
+                    ':pkg' => $rollWeightKg,
                     ':crtdat' => $now,
                     ':enddat' => $now,
                     ':comments' => $erpReturnComment,
@@ -4562,12 +4565,13 @@ final class ProductionService
 
                     $stmtErpUnmount = $this->erpPdo->prepare("
                         INSERT INTO prod_worker_ot_events
-                        (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                        (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                         VALUES
-                        (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
+                        (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
                     ");
                     $stmtErpUnmount->execute([
                         ':ot_id' => $workerOtId,
+                        ':pkg' => $entryWeightKg,
                         ':crtdat' => $now,
                         ':enddat' => $now,
                         ':comments' => $erpUnmountComment,
@@ -4589,13 +4593,13 @@ final class ProductionService
 
                 $stmtErpReturn = $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
-                    (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                    (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                     VALUES
-                    (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                    (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
                 ");
                 $stmtErpReturn->execute([
                     ':ot_id' => $workerOtId,
-                    ':amt' => $rollWeightKg,
+                    ':pkg' => $rollWeightKg,
                     ':crtdat' => $now,
                     ':enddat' => $now,
                     ':comments' => $erpReturnComment,
@@ -4681,13 +4685,13 @@ final class ProductionService
             }
             $stmtErp = $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events
-                (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                 VALUES
-                (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
             ");
             $stmtErp->execute([
                 ':ot_id' => $workerOtId,
-                ':amt' => $consumedKg,
+                ':pkg' => $consumedKg,
                 ':crtdat' => $now,
                 ':enddat' => $now,
                 ':comments' => $desc,
@@ -10184,13 +10188,13 @@ final class ProductionService
             try {
                 $stmtErp = $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
-                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                     (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                     VALUES
-                     (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                     (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
                 ");
                 $stmtErp->execute([
                     ':ot_id' => $workerOtId,
-                    ':amt' => $wKg,
+                    ':pkg' => $wKg,
                     ':crtdat' => $now,
                     ':enddat' => $now,
                     ':comments' => $evtComment,
@@ -10406,12 +10410,12 @@ final class ProductionService
 
             $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events
-                 (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                 (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                 VALUES
-                 (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                 (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
             ")->execute([
                 ':ot_id' => $workerOtId,
-                ':amt' => $wKg,
+                ':pkg' => $wKg,
                 ':crtdat' => $now,
                 ':enddat' => $now,
                 ':comments' => $evtComment,
@@ -10521,12 +10525,12 @@ final class ProductionService
 
                 $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
-                     (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                     (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
                     VALUES
-                     (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                     (:ot_id, 0, :pkg, :crtdat, :enddat, 2, 'materiales', :comments)
                 ")->execute([
                     ':ot_id' => $workerOtId,
-                    ':amt' => $wKg,
+                    ':pkg' => $wKg,
                     ':crtdat' => $now,
                     ':enddat' => $now,
                     ':comments' => $evtComment,
