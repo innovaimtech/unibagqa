@@ -3818,6 +3818,20 @@ final class ProductionService
                 ':comments' => $descMat,
             ]);
 
+            // 3b. Registrar consumo en ERP oficial (stockchanges / stockchanges_items) para el informe oficial de consumo
+            if ($totalNetConsumedKg > 0) {
+                try {
+                    $this->recordStockChangeForRollConsumption(
+                        $workerOtId,
+                        $rollCode,
+                        $skuCode,
+                        $totalNetConsumedKg,
+                        0,
+                        !empty($mergedSourceCodes) ? ('Unida con: ' . implode(', ', $mergedSourceCodes)) : ''
+                    );
+                } catch (Throwable) {}
+            }
+
             // Si se informaron mermas de salida, registrarlas en el evento de merma de la OT
             $mermaEvtId = 0;
             if ($scrapKg > 0) {
@@ -4635,7 +4649,12 @@ final class ProductionService
 
         try {
             $now = time();
-            $stmt = $this->trzPdo->prepare("SELECT * FROM rolls WHERE id = :id LIMIT 1");
+            $stmt = $this->trzPdo->prepare("
+                SELECT r.*, s.code AS sku_code
+                FROM rolls r
+                LEFT JOIN skus s ON r.sku_id = s.id
+                WHERE r.id = :id LIMIT 1
+            ");
             $stmt->execute([':id' => $rollId]);
             $roll = $stmt->fetch(PDO::FETCH_ASSOC);
             if (!$roll) {
@@ -4644,6 +4663,7 @@ final class ProductionService
 
             $originalWeight = (float)($roll['weight_kg'] ?? 0);
             $rollCode = (string)$roll['roll_code'];
+            $skuCode = trim((string)($roll['sku_code'] ?? ''));
 
             $newStatus = ($scrapKg > 0) ? 'RETURNED' : 'CONSUMED';
             $upd = $this->trzPdo->prepare("
@@ -4696,6 +4716,20 @@ final class ProductionService
                 ':enddat' => $now,
                 ':comments' => $desc,
             ]);
+
+            // Consumo en ERP oficial (stockchanges / stockchanges_items) para el informe oficial de consumo
+            if ($consumedKg > 0) {
+                try {
+                    $this->recordStockChangeForRollConsumption(
+                        $workerOtId,
+                        $rollCode,
+                        $skuCode,
+                        $consumedKg,
+                        0,
+                        $comments
+                    );
+                } catch (Throwable) {}
+            }
 
             return ['ok' => true];
         } catch (Throwable $e) {
@@ -8687,39 +8721,114 @@ final class ProductionService
             $stmtOt->execute([':agid' => $agId]);
             $workerOtId = (int)($stmtOt->fetchColumn() ?: 0);
             if ($workerOtId <= 0) {
+                $initId = 0;
+                if ($equipoId > 0) {
+                    $stInit = $this->erpPdo->prepare("SELECT id FROM prod_worker_init WHERE win_equipoid = :eqid ORDER BY id DESC LIMIT 1");
+                    $stInit->execute([':eqid' => $equipoId]);
+                    $initId = (int)($stInit->fetchColumn() ?: 0);
+                }
                 try {
                     $this->erpPdo->prepare("
                         INSERT INTO prod_worker_ot (wok_ag_id, wok_init_id, wok_crtdat, wok_status, wok_idusuario)
-                        VALUES (:agid, 0, :now, 1, :uid)
-                    ")->execute([':agid' => $agId, ':now' => $now, ':uid' => $userId]);
+                        VALUES (:agid, :init_id, :now, 1, :uid)
+                    ")->execute([':agid' => $agId, ':init_id' => $initId, ':now' => $now, ':uid' => $userId]);
                     $workerOtId = (int)$this->erpPdo->lastInsertId();
                 } catch (Throwable) {}
             }
         }
 
         // -------------------------------------------------------------
-        // CASO 1: REBOBINADO SIMPLE -> NO CONSUME LA BOBINA
+        // CASO 1: REBOBINADO SIMPLE -> CONSUME BOBINA MADRE Y GENERA BOBINA REBOBINADA
         // -------------------------------------------------------------
         if ($reboType === 'Rebobinado') {
-            // Registrar únicamente el evento de trabajo de rebobinado en la OT sin descontar la bobina madre
             $mermaKg = (float)str_replace(',', '.', (string)($postData['itemmermakg'] ?? 0));
+            $destUseKg = max(0.0, $useKgAmt - $mermaKg);
+            $destUnits = round($destUseKg / $baseKg, 10);
+
+            // 1. Registrar consumo en ERP oficial (stockchanges / stockchanges_items)
+            $this->recordStockChangeForRollConsumption(
+                $workerOtId,
+                $itemSel['item_number_prod'],
+                $itemSel['item_number_prod'],
+                $useKgAmt,
+                $userId,
+                "Rebobinado (Merma: {$mermaKg} kg)",
+                $agId
+            );
+
+            // 2. Dar de alta la bobina rebobinada resultante (stk_negative = 0, issue 20 = Generado por producción)
+            if ($destUnits > 0) {
+                $stkNumIn = $this->generateNextStockChangeNumber($companyId);
+                $stmtSCIn = $this->erpPdo->prepare("
+                    INSERT INTO stockchanges
+                    (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative,
+                     stk_status, stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash,
+                     sth_fromprodotid, sth_order_id, sth_order_num, sth_planta_id, sth_assign_wrkid, sth_assign_equipoid)
+                    VALUES
+                    (:num, 'Generado por producción', 20, :compid, :shopid, :bdate, 0, 2, :crtdat, :crtusr, :sthid, :agid, :grphash,
+                     :ot_id, :order_id, :order_num, :planta_id, :worker_id, :equipo_id)
+                ");
+                $stmtSCIn->execute([
+                    ':num' => $stkNumIn,
+                    ':compid' => $companyId > 0 ? $companyId : 20010,
+                    ':shopid' => $reqShopId,
+                    ':bdate' => $now,
+                    ':crtdat' => $now,
+                    ':crtusr' => $userId,
+                    ':sthid' => $stkFixedSthId,
+                    ':agid' => $agId,
+                    ':grphash' => $grpHash,
+                    ':ot_id' => $workerOtId,
+                    ':order_id' => $orderId,
+                    ':order_num' => $orderNum,
+                    ':planta_id' => $plantaId,
+                    ':worker_id' => $userId,
+                    ':equipo_id' => $equipoId,
+                ]);
+                $stkIdIn = (int)$this->erpPdo->lastInsertId();
+                if ($stkIdIn > 0) {
+                    $this->erpPdo->prepare("
+                        INSERT INTO stockchanges_items
+                        (stk_id, item_id, item_pos, item_amount, item_type, item_st_id,
+                         item_costprice_brutto, item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes,
+                         item_charges_act, item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                        VALUES
+                        (:stk_id, :itid, 0, :amt, 'item', :sthid, 0, 0, 0, 0, 0, 0, 1, :unitkg)
+                    ")->execute([
+                        ':stk_id' => $stkIdIn,
+                        ':itid' => $selItemId,
+                        ':amt' => $destUnits,
+                        ':sthid' => $stkFixedSthId,
+                        ':unitkg' => round($destUseKg, 2),
+                    ]);
+                    try {
+                        $this->erpPdo->prepare("
+                            UPDATE item_shops_storehouses
+                            SET iss_inventory = iss_inventory + :amt
+                            WHERE item_id = :itid AND st_id = :stid
+                        ")->execute([':amt' => $destUnits, ':itid' => $selItemId, ':stid' => $stkFixedSthId]);
+                    } catch (Throwable) {}
+                }
+            }
+
+            // 3. Registrar eventos en prod_worker_ot_events
             if ($workerOtId > 0) {
                 try {
                     $this->erpPdo->prepare("
                         INSERT INTO prod_worker_ot_events
                         (evt_prod_worker_otid, evt_type, evt_amount, prod_bobina_kg, evt_amount2, evt_crtdat, evt_enddat, evt_status, evt_comments)
                         VALUES
-                        (:ot_id, 'prod', 1, :kg, :waste, :now, :now, 1, :comments)
+                        (:ot_id, 'materiales', 0, :kg, :waste, :now, :now, 2, :comments)
                     ")->execute([
                         ':ot_id' => $workerOtId,
                         ':kg' => $useKgAmt,
                         ':waste' => $mermaKg,
                         ':now' => $now,
-                        ':comments' => "Rebobinado finalizado - Rollo {$itemSel['item_number_prod']} ({$useKgAmt} Kg, Merma: {$mermaKg} Kg) [Sin consumo de stock]",
+                        ':comments' => "Consumo Rebobinado - Rollo {$itemSel['item_number_prod']} ({$useKgAmt} Kg, Merma: {$mermaKg} Kg)",
                     ]);
                 } catch (Throwable) {}
             }
-            return ['ok' => true, 'rebo_type' => 'Rebobinado', 'consumed' => false];
+            return ['ok' => true, 'rebo_type' => 'Rebobinado', 'consumed' => true];
         }
 
         // -------------------------------------------------------------
@@ -9158,6 +9267,203 @@ final class ProductionService
         }
 
         return $destDims > 0 && $destDims <= 15.0;
+    }
+
+    /**
+     * Registra el consumo de material (bobina/insumo) en el ERP oficial (stockchanges y stockchanges_items)
+     * para que quede reflejado en el informe oficial de producción "Consumo de Materiales" (libs/modules/stats/prod/consumo.php).
+     */
+    public function recordStockChangeForRollConsumption(
+        int $workerOtId,
+        string $rollCode,
+        string $skuCode,
+        float $consumedKg,
+        int $userId = 0,
+        string $extraAnnotation = '',
+        int $fallbackAgId = 0
+    ): ?int {
+        if ($consumedKg <= 0) {
+            return null;
+        }
+
+        try {
+            $now = time();
+            $agId = $fallbackAgId;
+            $equipoId = 0;
+            $orderId = 0;
+            $orderNum = '';
+            $companyId = 20010;
+            $shopId = 30010;
+            $stkFixedSthId = 16; // Bodega 3000 Insumos / Materias primas
+
+            // 1. Obtener datos de OT y Agenda
+            if ($workerOtId > 0) {
+                $stOt = $this->erpPdo->prepare("
+                    SELECT ot.id as ot_id, ot.wok_ag_id, ot.wok_init_id,
+                           ag.ag_reqid, ag.ag_equipo_id,
+                           pwi.win_equipoid,
+                           ord.id as order_id, ord.req_number as order_num,
+                           ord.req_company_id, ord.req_shop_id
+                    FROM prod_worker_ot ot
+                    LEFT JOIN prod_agenda ag ON ag.id = ot.wok_ag_id
+                    LEFT JOIN prod_worker_init pwi ON pwi.id = ot.wok_init_id
+                    LEFT JOIN orders ord ON ord.id = ag.ag_reqid
+                    WHERE ot.id = :otid LIMIT 1
+                ");
+                $stOt->execute([':otid' => $workerOtId]);
+                $otRow = $stOt->fetch(PDO::FETCH_ASSOC);
+                if ($otRow) {
+                    $agId = (int)($otRow['wok_ag_id'] ?? $agId);
+                    $equipoId = (int)($otRow['win_equipoid'] ?: ($otRow['ag_equipo_id'] ?? 0));
+                    $orderId = (int)($otRow['order_id'] ?? 0);
+                    $orderNum = (string)($otRow['order_num'] ?? '');
+                    if (!empty($otRow['req_company_id'])) $companyId = (int)$otRow['req_company_id'];
+                    if (!empty($otRow['req_shop_id'])) $shopId = (int)$otRow['req_shop_id'];
+                }
+            }
+
+            if ($agId > 0 && ($orderId <= 0 || $equipoId <= 0)) {
+                $stAg = $this->erpPdo->prepare("
+                    SELECT ag.ag_reqid, ag.ag_equipo_id, ord.id as order_id, ord.req_number as order_num,
+                           ord.req_company_id, ord.req_shop_id
+                    FROM prod_agenda ag
+                    LEFT JOIN orders ord ON ord.id = ag.ag_reqid
+                    WHERE ag.id = :agid LIMIT 1
+                ");
+                $stAg->execute([':agid' => $agId]);
+                $agRow = $stAg->fetch(PDO::FETCH_ASSOC);
+                if ($agRow) {
+                    if ($equipoId <= 0 && !empty($agRow['ag_equipo_id'])) $equipoId = (int)$agRow['ag_equipo_id'];
+                    if ($orderId <= 0 && !empty($agRow['order_id'])) $orderId = (int)$agRow['order_id'];
+                    if ($orderNum === '' && !empty($agRow['order_num'])) $orderNum = (string)$agRow['order_num'];
+                    if (!empty($agRow['req_company_id'])) $companyId = (int)$agRow['req_company_id'];
+                    if (!empty($agRow['req_shop_id'])) $shopId = (int)$agRow['req_shop_id'];
+                }
+            }
+
+            // 2. Resolver item en tabla item del ERP
+            $cleanSku = trim($skuCode);
+            if (preg_match('/(TEL\d+|BTE\d+|BOB\d+)/i', $cleanSku, $m)) {
+                $cleanSku = strtoupper($m[1]);
+            }
+            $stItem = $this->erpPdo->prepare("
+                SELECT id, item_number_prod, item_title, item_reg_kg, item_unit
+                FROM item
+                WHERE item_number_prod = :sku
+                LIMIT 1
+            ");
+            $stItem->execute([':sku' => $cleanSku]);
+            $itemRow = $stItem->fetch(PDO::FETCH_ASSOC);
+            if (!$itemRow && $cleanSku !== '') {
+                $stItemLike = $this->erpPdo->prepare("
+                    SELECT id, item_number_prod, item_title, item_reg_kg, item_unit
+                    FROM item
+                    WHERE item_number_prod LIKE :sku OR item_title LIKE :sku2
+                    ORDER BY id DESC LIMIT 1
+                ");
+                $stItemLike->execute([':sku' => "%{$cleanSku}%", ':sku2' => "%{$cleanSku}%"]);
+                $itemRow = $stItemLike->fetch(PDO::FETCH_ASSOC);
+            }
+            if (!$itemRow && $orderId > 0) {
+                $stItemOrd = $this->erpPdo->prepare("
+                    SELECT i.id, i.item_number_prod, i.item_title, i.item_reg_kg, i.item_unit
+                    FROM orders_items oi
+                    JOIN item i ON i.id = oi.item_id
+                    WHERE oi.req_id = :oid
+                    LIMIT 1
+                ");
+                $stItemOrd->execute([':oid' => $orderId]);
+                $itemRow = $stItemOrd->fetch(PDO::FETCH_ASSOC);
+            }
+
+            if (!$itemRow) {
+                return null;
+            }
+
+            $itemId = (int)$itemRow['id'];
+            $baseKg = (float)($itemRow['item_reg_kg'] ?? 0);
+            if ($baseKg > 1.0) {
+                $amountUnits = round($consumedKg / $baseKg, 10);
+            } else {
+                $amountUnits = round($consumedKg, 4);
+            }
+
+            // 3. Generar número de movimiento
+            $stkNum = $this->generateNextStockChangeNumber($companyId);
+            $annotText = number_format($consumedKg, 2, ',', '.') . " Kilogramos";
+            if ($rollCode !== '') {
+                $annotText .= " ({$rollCode})";
+            }
+            if ($extraAnnotation !== '') {
+                $annotText .= " - {$extraAnnotation}";
+            }
+
+            // 4. Insertar cabecera stockchanges (stk_negative = 1, stk_issueid = 19 Uso material)
+            $stmtSC = $this->erpPdo->prepare("
+                INSERT INTO stockchanges
+                (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative,
+                 stk_status, stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromprodotid, sth_fromrebo_agid,
+                 sth_order_id, sth_order_num, sth_assign_equipoid, sth_assign_wrkid)
+                VALUES
+                (:num, :annot, 19, :compid, :shopid, :bdate, 1,
+                 2, :crtdat, :crtusr, :sthid, :ot_id, :ag_id,
+                 :order_id, :order_num, :equipoid, :wrkid)
+            ");
+            $stmtSC->execute([
+                ':num' => $stkNum,
+                ':annot' => $annotText,
+                ':compid' => $companyId,
+                ':shopid' => $shopId,
+                ':bdate' => $now,
+                ':crtdat' => $now,
+                ':crtusr' => $userId,
+                ':sthid' => $stkFixedSthId,
+                ':ot_id' => $workerOtId,
+                ':ag_id' => $agId,
+                ':order_id' => $orderId,
+                ':order_num' => $orderNum,
+                ':equipoid' => $equipoId,
+                ':wrkid' => $userId,
+            ]);
+            $stkId = (int)$this->erpPdo->lastInsertId();
+
+            if ($stkId > 0) {
+                // 5. Insertar ítem en stockchanges_items
+                $this->erpPdo->prepare("
+                    INSERT INTO stockchanges_items
+                    (stk_id, item_id, item_pos, item_amount, item_type, item_st_id,
+                     item_costprice_brutto, item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes,
+                     item_charges_act, item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
+                    VALUES
+                    (:stk_id, :itid, 0, :amt, 'item', :sthid,
+                     0, 0, 0, 0,
+                     0, 0, 1, :unitkg)
+                ")->execute([
+                    ':stk_id' => $stkId,
+                    ':itid' => $itemId,
+                    ':amt' => $amountUnits,
+                    ':sthid' => $stkFixedSthId,
+                    ':unitkg' => round($consumedKg, 2),
+                ]);
+
+                // 6. Descontar inventario en item_shops_storehouses
+                try {
+                    $this->erpPdo->prepare("
+                        UPDATE item_shops_storehouses
+                        SET iss_inventory = GREATEST(0, iss_inventory - :amt)
+                        WHERE item_id = :itid AND st_id = :stid
+                    ")->execute([
+                        ':amt' => $amountUnits,
+                        ':itid' => $itemId,
+                        ':stid' => $stkFixedSthId,
+                    ]);
+                } catch (Throwable) {}
+            }
+
+            return $stkId;
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**

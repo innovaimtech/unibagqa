@@ -11,7 +11,7 @@ $_sesmodulename         = "prod_consumo";
 $_sesbasefilterstatus   = "0";
 $_sesbaseorderby        = "1";
 $_sesbaseordersort      = "asc";
-$_sortlinks             = Array("Número" => "1", "Artículo/Familia" => "2");
+$_sortlinks             = Array("NÃºmero" => "1", "ArtÃ­culo/Familia" => "2");
 $_SESSION[$_sesmodulename]["sql_company"] = $_SESSION["user_company_id"];
 unset($_SESSION["STATS"][$_sesmodulename]);
 
@@ -153,23 +153,27 @@ if((int)$_SESSION[$_sesmodulename]["sql_shop"])
 $xselstorehouses = $selstorehouses;
 
 $sql = " select t3.item_number_prod, t3.item_title, t5.unit_name, t7.req_number, t8.cust_name, t8.cust_rut,
-                t1.stk_num, t1.stk_bookdate, t10.equipo_name, t2.item_amount, t1.stk_annotation
+                t1.stk_num, t1.stk_bookdate,
+                COALESCE(t10.equipo_name, t10b.equipo_name, t10c.equipo_name) as equipo_name,
+                t2.item_amount, t2.item_reboprod_unitkg, t1.stk_annotation
          from stockchanges t1
          INNER JOIN stockchanges_items t2    ON t1.id = t2.stk_id
          INNER JOIN item t3                  ON t2.item_id = t3.id
-         INNER JOIN prod_worker_ot t4        ON t1.sth_fromprodotid = t4.id
+         LEFT OUTER JOIN prod_worker_ot t4   ON t1.sth_fromprodotid = t4.id
+         LEFT OUTER JOIN prod_agenda t6      ON COALESCE(NULLIF(t4.wok_ag_id, 0), NULLIF(t1.sth_fromrebo_agid, 0)) = t6.id
          LEFT OUTER JOIN item_units t5       ON t3.item_unit = t5.id
-         LEFT OUTER JOIN prod_agenda t6      ON t4.wok_ag_id = t6.id
          LEFT OUTER JOIN orders t7           ON t6.ag_reqid = t7.id
          LEFT OUTER JOIN customer t8         ON t7.req_cust_id = t8.id
          LEFT OUTER JOIN prod_worker_init t9 ON t4.wok_init_id = t9.id
          LEFT OUTER JOIN equipo t10          ON t9.win_equipoid = t10.id
+         LEFT OUTER JOIN equipo t10b         ON t6.ag_equipo_id = t10b.id
+         LEFT OUTER JOIN equipo t10c         ON t1.sth_assign_equipoid = t10c.id
          LEFT OUTER JOIN item_productcats t11 ON t3.id = t11.item_id
          where
          t1.stk_status        = 2 and
          t1.stk_negative      = 1 and
          t1.stk_bookdate      between {$sql_datefrom} and {$sql_dateto} and
-         t1.sth_fromprodotid  > 0 ";
+         (t1.sth_fromprodotid  > 0 or t1.sth_fromrebo_agid > 0) ";
 
 if((int)$_SESSION[$_sesmodulename]["sql_item_id"])
    $sql .= " and t2.item_id = {$_SESSION[$_sesmodulename]["sql_item_id"]} ";
@@ -235,10 +239,10 @@ $items = $CON->select($sql);
          <col width="300">
       </colgroup>
       <tr>
-         <td class="content_tbl_header" colspan="4">Opciones de búsqueda</td>
+         <td class="content_tbl_header" colspan="4">Opciones de bÃºsqueda</td>
       </tr>
       <tr>
-         <td class="content_rowl">Artículo</td>
+         <td class="content_rowl">ArtÃ­culo</td>
          <td class="content_row"><?php printOverviewItemSelect($_sesmodulename) ?></td>
          <td class="content_rowl">Empresa</td>
          <td class="content_row">
@@ -441,7 +445,7 @@ $items = $CON->select($sql);
       <tr>
          <td class="content_rowl">Cliente</td>
          <td class="content_row"><?php printOverviewCustomerSelect($_sesmodulename) ?></td>
-         <td class="content_rowl">Nº CC</td>
+         <td class="content_rowl">NÂº CC</td>
          <td class="content_row">
             <input type="text" class="text" style="width:100%"
             name="sql_number" value="<?=$_SESSION[$_sesmodulename]["sql_number"]?>"
@@ -495,16 +499,16 @@ $items = $CON->select($sql);
       </colgroup>
       <tr>
          <td class="content_tbl_header content_row_os">Material</td>
-         <td class="content_tbl_header content_row_os">Código</td>
+         <td class="content_tbl_header content_row_os">CÃ³digo</td>
          <td class="content_tbl_header content_row_os">Unidad</td>
-         <td class="content_tbl_header content_row_os">N° CC</td>
+         <td class="content_tbl_header content_row_os">NÂ° CC</td>
          <td class="content_tbl_header content_row_os">Cliente</td>
          <td class="content_tbl_header content_row_os">RUT</td>
-         <td class="content_tbl_header content_row_os">Transacción</td>
+         <td class="content_tbl_header content_row_os">TransacciÃ³n</td>
          <td class="content_tbl_header content_row_os">Fecha</td>
-         <td class="content_tbl_header content_row_os">Máquina</td>
+         <td class="content_tbl_header content_row_os">MÃ¡quina</td>
          <td class="content_tbl_header content_row_os">Cantidad</td>
-         <td class="content_tbl_header content_row_os">Descripción</td>
+         <td class="content_tbl_header content_row_os">DescripciÃ³n</td>
       </tr>
       <?php
       //----------------------------------------------------------------------------------
@@ -520,7 +524,12 @@ $items = $CON->select($sql);
             <td class="content_row_os"><?=$items[$x]["stk_num"]?>&nbsp;</td>
             <td class="content_row_os"><?=date("d.m.Y", $items[$x]["stk_bookdate"])?>&nbsp;</td>
             <td class="content_row_os"><?=$items[$x]["equipo_name"]?>&nbsp;</td>
-            <td class="content_row_os"><?=printPrice($items[$x]["item_amount"],10)?></td>
+            <td class="content_row_os">
+               <?=printPrice($items[$x]["item_amount"],4)?>
+               <?php if ((float)($items[$x]["item_reboprod_unitkg"] ?? 0) > 0 && strtoupper(trim((string)$items[$x]["unit_name"])) === 'BOB'): ?>
+                  <br><span style="font-size:11px;color:#15803D;font-weight:bold"><?=number_format((float)$items[$x]["item_reboprod_unitkg"], 2, ',', '.')?> kg</span>
+               <?php endif; ?>
+            </td>
             <td class="content_row_os"><?=$items[$x]["stk_annotation"]?>&nbsp;</td>
          </tr>
          <?php
