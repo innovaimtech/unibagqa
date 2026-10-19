@@ -5921,12 +5921,23 @@ final class ProductionService
 
         $superRows = [];
         try {
+            // Evaluar primero registros de supervisor
             $stmtS = $this->erpPdo->prepare(
                 "SELECT ctr_acid, ctr_res, ctr_ctrusr, ctr_ctrdat FROM prod_worker_ot_autocontrol
-                 WHERE ctr_init_id = :ot_id AND ctr_type IN ('supervisor', 'lider')"
+                 WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor'"
             );
             $stmtS->execute([':ot_id' => $workerOtId]);
             $superRows = $stmtS->fetchAll() ?: [];
+
+            // Si no existen registros de supervisor, consultar registros de líder de área
+            if (empty($superRows)) {
+                $stmtL = $this->erpPdo->prepare(
+                    "SELECT ctr_acid, ctr_res, ctr_ctrusr, ctr_ctrdat FROM prod_worker_ot_autocontrol
+                     WHERE ctr_init_id = :ot_id AND ctr_type = 'lider'"
+                );
+                $stmtL->execute([':ot_id' => $workerOtId]);
+                $superRows = $stmtL->fetchAll() ?: [];
+            }
         } catch (Throwable) {
             $superRows = [];
         }
@@ -5944,7 +5955,7 @@ final class ProductionService
 
         $superPending = ($superInputs > 0 && $hasUnapproved);
         $superApproved = ($superInputs > 0 && !$hasUnapproved);
-        // Si no se han enviado registros al supervisor, o si hay pendientes sin aprobar
+        // Si no se han enviado registros al supervisor/líder, o si hay pendientes sin aprobar
         $gotoAutocontrol = ($superInputs === 0 || $hasUnapproved);
 
         return [
@@ -5987,7 +5998,8 @@ final class ProductionService
             }
 
             // Preparar requerimiento de validación para el supervisor (ctr_res = 0)
-            $delS = $this->erpPdo->prepare("DELETE FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor'");
+            // Limpiar registros previos tanto de supervisor como de líder para evitar estados inconsistentes
+            $delS = $this->erpPdo->prepare("DELETE FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type IN ('supervisor', 'lider')");
             $delS->execute([':ot_id' => $workerOtId]);
 
             $insS = $this->erpPdo->prepare(
@@ -6042,7 +6054,8 @@ final class ProductionService
             }
 
             // Preparar requerimiento para el líder (ctr_res = 0)
-            $delL = $this->erpPdo->prepare("DELETE FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type = 'lider'");
+            // Limpiar registros previos tanto de líder como de supervisor para evitar estados inconsistentes
+            $delL = $this->erpPdo->prepare("DELETE FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type IN ('supervisor', 'lider')");
             $delL->execute([':ot_id' => $workerOtId]);
 
             $insL = $this->erpPdo->prepare(
@@ -6116,10 +6129,11 @@ final class ProductionService
             $superId = (int)$superUser['id'];
             $now = time();
 
+            // Actualizar a aprobado (ctr_res = 1) tanto los registros de 'supervisor' como de 'lider'
             $upd = $this->erpPdo->prepare(
                 "UPDATE prod_worker_ot_autocontrol
                  SET ctr_res = 1, ctr_ctrusr = :super_id, ctr_ctrdat = :now
-                 WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor'"
+                 WHERE ctr_init_id = :ot_id AND ctr_type IN ('supervisor', 'lider')"
             );
             $upd->execute([
                 ':super_id' => $superId,
@@ -6127,7 +6141,14 @@ final class ProductionService
                 ':ot_id' => $workerOtId,
             ]);
 
-            if ($upd->rowCount() === 0 && !empty($selectedAcids)) {
+            // Asegurar que siempre existan registros aprobados de tipo 'supervisor'
+            $checkSup = $this->erpPdo->prepare(
+                "SELECT COUNT(*) FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor'"
+            );
+            $checkSup->execute([':ot_id' => $workerOtId]);
+            $hasSup = (int)$checkSup->fetchColumn() > 0;
+
+            if (!$hasSup && !empty($selectedAcids)) {
                 $ins = $this->erpPdo->prepare(
                     "INSERT INTO prod_worker_ot_autocontrol (ctr_init_id, ctr_type, ctr_acid, ctr_res, ctr_ctrusr, ctr_ctrdat)
                      VALUES (:ot_id, 'supervisor', :acid, 1, :super_id, :now)"

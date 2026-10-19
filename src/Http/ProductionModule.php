@@ -2330,6 +2330,7 @@ function renderProductionOperatorConsole(
         || stripos((string)($machineInit['type_ant_title'] ?? ''), 'rebobin') !== false
         || stripos((string)($machineInit['equipo_name'] ?? ''), 'rebob') !== false;
     $isEmbalaje = (int)($machineInit['type_createstock_act'] ?? 0) === 1;
+    $materialsMachineProcessTitle = $isFlexo ? 'Flexografía' : ($isSeriPulpo ? 'Serigrafía Pulpo' : ($isSeri ? 'Serigrafía' : ($isSelladora ? 'Selladora' : ($isRebobinadora ? 'Rebobinadora' : (!empty($machineInit['equipo_name']) ? (string)$machineInit['equipo_name'] : 'Producción')))));
     $activeStandby = $ctx['active_standby'] ?? null;
 
     $prodService = $ctx['prod_service'] ?? new ProductionService(Db::erpPdo(), Db::trzPdo());
@@ -7894,11 +7895,11 @@ function renderProductionOperatorConsole(
             </div>
         <?php endif; ?>
 
-        <!-- ENCABEZADO Y TABLERO COMPACTO FLEXOGRAFÍA -->
+        <!-- ENCABEZADO Y TABLERO COMPACTO CONTROL DE BOBINAS / MATERIALES -->
         <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:6px;padding:16px 20px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;box-shadow:0 1px 2px rgba(0,0,0,0.04)">
             <div>
                 <div style="font-size:16px;font-weight:bold;color:#1E3A8A;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-link"></i> Control de Bobinas Flexografía &mdash; OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>
+                    <i class="fa fa-link"></i> Control de Bobinas <?=htmlspecialchars($materialsMachineProcessTitle)?> &mdash; OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>
                 </div>
                 <div style="font-size:12.5px;color:#64748B;margin-top:3px">
                     Izquierda: stock compatible en <b>Bodega 3000</b>. Derecha: bobinas que ya están en la máquina o al pie de máquina para seguir operando.
@@ -9824,7 +9825,7 @@ function renderProductionOperatorConsole(
                     <i class="fa fa-tag" style="color:#6366F1"></i> Emisión de Bobina Impresa Semielaborada
                 </div>
                 <div style="font-size:13px;color:#64748B;margin-bottom:18px">
-                    Registre el tiraje de la bobina impresa al salir de Flexografía. Se creará con código <b>ROLL-SE-XXXXX</b>, vinculada genealógicamente a la bobina virgen y lista para rotularse en 100×70 mm.
+                    Registre el tiraje de la bobina impresa al salir de <?=htmlspecialchars($materialsMachineProcessTitle)?>. Se creará con código <b>ROLL-SE-XXXXX</b>, vinculada genealógicamente a la bobina virgen y lista para rotularse en 100×70 mm.
                 </div>
 
                 <form method="post" action="/production/work-orders/rolls/generate-semielaborated" id="form_semielaborado">
@@ -13103,9 +13104,11 @@ function renderProductionTraceabilityScreen(
     // ETAPA 2: FLEXOGRAFÍA (IMPRESIÓN EN MÁQUINA)
     // =========================================================================
     $printedRoll = ($roll && ($roll['process_stage'] ?? '') === 'PRINTED') ? $roll : (($parentRoll && ($parentRoll['process_stage'] ?? '') === 'PRINTED') ? $parentRoll : null);
+    $stage2IsSeri = ($wo !== null && stripos((string)($wo['type_ant_title'] ?? $wo['equipo_name'] ?? ''), 'seri') !== false);
+    $stage2Title = $stage2IsSeri ? 'Serigrafía' : 'Flexografía';
     $body .= '<div class="card" style="margin-bottom:18px;border-radius:8px;overflow:hidden;border:1px solid #cbd5e1;background:#fff">';
     $body .= '<div style="background:#0284c7;color:#fff;padding:12px 18px;font-weight:bold;font-size:15px;display:flex;align-items:center;justify-content:space-between">';
-    $body .= '<div><i class="fa fa-print"></i> ETAPA 2: Flexografía (Tiraje de Impresión)</div>';
+    $body .= '<div><i class="fa fa-print"></i> ETAPA 2: ' . htmlspecialchars($stage2Title) . ' (Tiraje de Impresión)</div>';
     if ($printedRoll) {
         $body .= '<a href="/rolls/' . (int)$printedRoll['id'] . '/label" target="_blank" style="color:#fff;font-size:12px;background:rgba(0,0,0,0.2);padding:4px 10px;border-radius:4px;text-decoration:none"><i class="fa fa-print"></i> Etiqueta Bobina Impresa</a>';
     }
@@ -13133,7 +13136,7 @@ function renderProductionTraceabilityScreen(
         $body .= '</div>';
         $body .= '</div>';
     } else {
-        $body .= '<div style="font-size:13px;color:#94a3b8;font-style:italic">No se registran eventos de flexografía para este código específico.</div>';
+        $body .= '<div style="font-size:13px;color:#94a3b8;font-style:italic">No se registran eventos de ' . strtolower($stage2Title) . ' para este código específico.</div>';
     }
     $body .= '</div>';
     $body .= '</div>';
@@ -13393,7 +13396,7 @@ function renderProductionMaterialsRequestScreen(
     string $plantaName,
     array $unscheduledOrders = []
 ): void {
-    $machineName = (string)($activeInit['equipo_name'] ?? 'MÁQUINA');
+    $machineName = (string)($activeInit['equipo_name'] ?? ($selectedAgenda['equipo_name'] ?? 'MÁQUINA'));
     $allOrders = array_merge($activeOrders, $scheduledOrders);
     // Eliminar duplicados por ag_id
     $uniqueOrders = [];

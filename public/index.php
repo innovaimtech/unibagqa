@@ -14597,6 +14597,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     $printerProfile = unibagNormalizePrinterProfile((string)($_REQUEST['printer_profile'] ?? 'default'));
     $activePrinter = $printer->withProfile($printerProfile);
     $configuredPrinterName = $activePrinter->getConfiguredPrinterName();
+    $configuredPrintLang = strtoupper((string)($activePrinter->getConfiguredPrintLanguage() ?: 'EPL'));
     $hostHeader = strtolower(explode(':', $_SERVER['HTTP_HOST'] ?? '')[0]);
     $isLocalHost = in_array($hostHeader, ['localhost', '127.0.0.1'], true);
     // En la VPS en la nube (ej. 149.50.140.21), el servidor Linux remoto no puede hacer cURL local
@@ -15775,7 +15776,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     $headerPrinterName = $configuredPrinterName !== '' ? $configuredPrinterName : 'Impresora Térmica';
     echo '<div style="background:rgba(255,255,255,0.1);padding:6px 12px;border-radius:8px;font-size:12px;color:#e2e8f0;display:flex;align-items:center;gap:6px">';
     echo '<span>🖨️ Impresora Térmica:</span> <strong style="color:#38bdf8">' . h($headerPrinterName) . '</strong>';
-    echo '<span style="background:#0284c7;color:#fff;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:800">' . h($configuredPrintLang) . '</span>';
+    echo '<span style="background:#0284c7;color:#fff;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:800">' . h($configuredPrintLang ?? 'EPL') . '</span>';
     echo '</div>';
     echo '</div>';
     echo '</div>';
