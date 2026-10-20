@@ -25497,7 +25497,18 @@ if (preg_match('#^/rolls/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     $containerCode = trim((string)($roll['container_code'] ?? '')) ?: '-';
     $supplierName = trim((string)($roll['supplier_name'] ?? '')) ?: '-';
     $stage = strtoupper(trim((string)($roll['process_stage'] ?? 'RAW')));
-    $stageBadge = $stage === 'PRINTED' ? 'IMPRESA' : ($stage === 'CUT' ? 'CORTADA' : 'MATERIA PRIMA');
+    $stageBadge = 'MATERIA PRIMA';
+    if ($stage === 'PRINTED' || str_starts_with($barcodeValue, 'ROLL-SE-')) {
+        $stageBadge = 'IMPRESA';
+    } elseif (str_starts_with($barcodeValue, 'ROLL-EMP-')) {
+        $stageBadge = 'EMPALMADA';
+    } elseif (str_starts_with($barcodeValue, 'ROLL-BOL-')) {
+        $stageBadge = 'CUERPO BOLSA';
+    } elseif (str_starts_with($barcodeValue, 'ROLL-MAN-') || str_starts_with($barcodeValue, 'ROLL-HDL-')) {
+        $stageBadge = 'MANILLAS';
+    } elseif ($stage === 'CUT') {
+        $stageBadge = 'CORTADA';
+    }
 
     renderReceptionThermalLabel([
         'sku_code' => $skuCode,

@@ -23182,6 +23182,78 @@ SQL;
     }
 
     /**
+     * Resuelve el ID primario (PK) de la bodega en la base de datos de trazabilidad (unibag_trazabilidad.warehouses).
+     * Mapea un ID de bodega de ERP (company_shops_storehouses.id) o código (100, 200, 3000) a warehouses.id,
+     * garantizando que las foreign keys (como rolls.warehouse_id y movements.to_warehouse_id) no fallen.
+     */
+    public function resolveLocalWarehouseId(int $storehouseIdOrCode, string $fallbackName = ''): int
+    {
+        if ($storehouseIdOrCode <= 0 && trim($fallbackName) === '') {
+            $stmt = $this->pdo->query('SELECT id FROM warehouses ORDER BY id ASC LIMIT 1');
+            return (int)($stmt->fetchColumn() ?: 1);
+        }
+
+        // 1. Intentar resolver por erp_storehouse_id
+        if ($storehouseIdOrCode > 0) {
+            $stmt = $this->pdo->prepare('SELECT id FROM warehouses WHERE erp_storehouse_id = :erp_id LIMIT 1');
+            $stmt->execute([':erp_id' => $storehouseIdOrCode]);
+            $id = $stmt->fetchColumn();
+            if ($id) {
+                return (int)$id;
+            }
+
+            // 2. Intentar resolver por código directo (ej. 100, 200, 3000)
+            $stmt = $this->pdo->prepare('SELECT id FROM warehouses WHERE code = :code LIMIT 1');
+            $stmt->execute([':code' => $storehouseIdOrCode]);
+            $id = $stmt->fetchColumn();
+            if ($id) {
+                return (int)$id;
+            }
+
+            // 3. Intentar resolver por coincidencia con PK directa si existe
+            $stmt = $this->pdo->prepare('SELECT id FROM warehouses WHERE id = :id LIMIT 1');
+            $stmt->execute([':id' => $storehouseIdOrCode]);
+            $id = $stmt->fetchColumn();
+            if ($id) {
+                return (int)$id;
+            }
+        }
+
+        // 4. Si viene un nombre de bodega (ej. "200 (MP PP)" o "Bodega #11"), buscar o parsear código
+        if ($fallbackName !== '') {
+            if (preg_match('/^\s*(\d{3,4})\b/', $fallbackName, $m)) {
+                $parsedCode = (int)$m[1];
+                $stmt = $this->pdo->prepare('SELECT id FROM warehouses WHERE code = :code LIMIT 1');
+                $stmt->execute([':code' => $parsedCode]);
+                $id = $stmt->fetchColumn();
+                if ($id) {
+                    return (int)$id;
+                }
+            }
+
+            $stmt = $this->pdo->prepare('SELECT id FROM warehouses WHERE name = :name LIMIT 1');
+            $stmt->execute([':name' => $fallbackName]);
+            $id = $stmt->fetchColumn();
+            if ($id) {
+                return (int)$id;
+            }
+        }
+
+        // 5. Si no existe aún y tenemos un código/erpId, intentar registrarla o mapearla
+        if ($storehouseIdOrCode > 0) {
+            $name = $fallbackName !== '' ? $fallbackName : ('Bodega #' . $storehouseIdOrCode);
+            try {
+                return $this->upsertTraceWarehouse($storehouseIdOrCode, $name, $storehouseIdOrCode);
+            } catch (Throwable) {
+                // Ignore fallback creation error
+            }
+        }
+
+        $stmt = $this->pdo->query('SELECT id FROM warehouses ORDER BY id ASC LIMIT 1');
+        return (int)($stmt->fetchColumn() ?: 1);
+    }
+
+    /**
      * Registra el ingreso a bodega de un producto/bulto con código de trazabilidad.
      * Impacta TRZ (pallets/boxes/rolls + movements + traceability_warehouse_entries).
      *
@@ -23299,6 +23371,10 @@ SQL;
             }
         }
 
+        // Resolver la PK de la bodega en la base de datos de trazabilidad (unibag_trazabilidad.warehouses)
+        // para garantizar que las FKs no violen fk_rolls_warehouse_id ni fk_movements_to_wh
+        $localWarehouseId = $this->resolveLocalWarehouseId($warehouseId, $warehouseName);
+
         // Para rollo, resolver o insertar sku_id en tabla skus una sola vez
         $skuId = null;
         if ($entityType === 'ROLL') {
@@ -23344,7 +23420,7 @@ SQL;
                     $stmtPallet->execute([
                         ':code' => $entryCode,
                         ':sku' => $itemCode . ' - ' . $itemDesc,
-                        ':wh' => $warehouseId,
+                        ':wh' => $localWarehouseId,
                         ':boxes' => $boxCount ?: (int)$qty,
                         ':ord' => $orderRef !== '' ? $orderRef : null,
                         ':op' => $operatorName,
@@ -23361,7 +23437,7 @@ SQL;
                         ':code' => $entryCode,
                         ':sku' => $itemCode . ' - ' . $itemDesc,
                         ':qty' => $qty,
-                        ':wh' => $warehouseId,
+                        ':wh' => $localWarehouseId,
                         ':ord' => $orderRef !== '' ? $orderRef : null,
                         ':op' => $operatorName,
                         ':dest' => 'BODEGA',
@@ -23376,7 +23452,7 @@ SQL;
                     $stmtRoll->execute([
                         ':code' => $entryCode,
                         ':skuid' => $skuId,
-                        ':wh' => $warehouseId,
+                        ':wh' => $localWarehouseId,
                         ':wkg' => $weightKg !== null ? $weightKg : 0.0,
                         ':rqty' => $qty,
                         ':wmm' => $widthMm,
@@ -23411,7 +23487,7 @@ SQL;
                     ':etype' => $entityType,
                     ':eid' => $entityId ?: 0,
                     ':mtype' => 'RECEIPT',
-                    ':towh' => $warehouseId,
+                    ':towh' => $localWarehouseId,
                     ':payload' => $movPayload,
                 ]);
 
@@ -23558,13 +23634,22 @@ SQL;
         }
 
         try {
+            $localWhId = $this->resolveLocalWarehouseId($warehouseId);
+            if ($localWhId > 0 && $localWhId !== $warehouseId) {
+                $whClause = '(warehouse_id = :wh OR warehouse_id = :local_wh)';
+                $params = [':wh' => $warehouseId, ':local_wh' => $localWhId];
+            } else {
+                $whClause = 'warehouse_id = :wh';
+                $params = [':wh' => $warehouseId];
+            }
+
             $stmt = $this->pdo->prepare("
                 SELECT item_code, COALESCE(item_id, 0) AS item_id, SUM(quantity) AS tagged_qty
                 FROM traceability_warehouse_entries
-                WHERE warehouse_id = :wh AND status != 'CANCELLED'
+                WHERE {$whClause} AND status != 'CANCELLED'
                 GROUP BY item_code, item_id
             ");
-            $stmt->execute([':wh' => $warehouseId]);
+            $stmt->execute($params);
             $map = [];
             foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
                 $code = strtoupper(trim((string)$r['item_code']));
@@ -23621,8 +23706,15 @@ SQL;
         $where = [];
 
         if ($warehouseId !== null && $warehouseId > 0) {
-            $where[] = 'warehouse_id = :wh';
-            $params[':wh'] = $warehouseId;
+            $localWhId = $this->resolveLocalWarehouseId($warehouseId);
+            if ($localWhId > 0 && $localWhId !== $warehouseId) {
+                $where[] = '(warehouse_id = :wh OR warehouse_id = :local_wh)';
+                $params[':wh'] = $warehouseId;
+                $params[':local_wh'] = $localWhId;
+            } else {
+                $where[] = 'warehouse_id = :wh';
+                $params[':wh'] = $warehouseId;
+            }
         }
 
         if ($search !== null && trim($search) !== '') {
