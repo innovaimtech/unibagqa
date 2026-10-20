@@ -3879,35 +3879,42 @@ function renderProductionOperatorConsole(
         <?php
         $autoMaterialsLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
         $autoHasTintasShortcut = $isFlexo;
+        $autoColWidth = $autoHasTintasShortcut ? '20%' : '25%';
         ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">
         <tr>
-            <td width="<?=$autoHasTintasShortcut ? '25%' : '33%'?>" style="padding-right:3px">
-                <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#293865;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales&fromautocontrol=1'">
+            <td width="<?=$autoColWidth?>" style="padding-right:3px">
+                <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#293865;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800;text-align:center" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales&fromautocontrol=1'">
                     <i class="fa fa-fw <?= $isRebobinadora ? 'fa-dolly' : 'fa-cubes' ?>"></i> <?=$autoMaterialsLabel?>
                 </div>
             </td>
             <?php if ($autoHasTintasShortcut): ?>
-                <td width="25%" style="padding:0 3px">
-                    <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#1D4ED8;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas&fromautocontrol=1'">
+                <td width="<?=$autoColWidth?>" style="padding:0 3px">
+                    <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#1D4ED8;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800;text-align:center" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas&fromautocontrol=1'">
                         <i class="fa fa-fw fa-tint"></i> Tintas
                     </div>
                 </td>
             <?php endif; ?>
-            <td width="<?=$autoHasTintasShortcut ? '25%' : '33%'?>" style="padding:0 3px">
-                <div class="btnred" style="width:100%;box-sizing:border-box;background-color:#D64141;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion&fromautocontrol=1'">
+            <td width="<?=$autoColWidth?>" style="padding:0 3px">
+                <div class="btnred" style="width:100%;box-sizing:border-box;background-color:#D64141;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800;text-align:center" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion&fromautocontrol=1'">
                     <i class="fa fa-fw fa-wrench"></i> Mantención
                 </div>
             </td>
-            <td width="<?=$autoHasTintasShortcut ? '25%' : '34%'?>" style="padding-left:3px">
-                <div class="btngrey" style="width:100%;box-sizing:border-box;background-color:#7F7F7F;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&fromautocontrol=1'">
+            <td width="<?=$autoColWidth?>" style="padding:0 3px">
+                <div class="btngrey" style="width:100%;box-sizing:border-box;background-color:#7F7F7F;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800;text-align:center" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&fromautocontrol=1'">
                     <i class="fa fa-fw fa-coffee"></i> Pausa
+                </div>
+            </td>
+            <td width="<?=$autoColWidth?>" style="padding-left:3px">
+                <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#0284C7;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800;text-align:center" onclick="openLunchModal()" title="Registrar horario de colación">
+                    <i class="fa fa-fw fa-coffee"></i> Colación
                 </div>
             </td>
         </tr>
         </table>
         <?php
         echo renderDesignPreviewModal();
+        renderStandbyAndLunchModals($activeStandby, $machineInit, $currentOperatorName, '/production/work-orders/operate?agid=' . $agId);
         $content = ob_get_clean();
         renderProdwrkShell('Operar OT #' . $agenda['prd_number'], $content, 2, $currentOperatorName, $plantaName);
         return;
@@ -3981,9 +3988,14 @@ function renderProductionOperatorConsole(
                     <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
                     <b>En curso</b>: OT #<?=htmlspecialchars((string)$agenda['prd_number'])?> | Máquina: <b><?=htmlspecialchars((string)($machineInit['equipo_name'] ?? '-'))?></b>
                 </td>
-                <td align="right" width="220">
-                    <div class="btngreen" style="display:inline-block" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=terminarot'">
-                        <i class="fa fa-fw fa-check" style="color:white;"></i> Terminar OT&nbsp;
+                <td align="right" width="360">
+                    <div style="display:inline-flex;align-items:center;gap:8px">
+                        <button type="button" class="btnblue" style="background:#0284C7;padding:7px 14px;cursor:pointer;border:none;border-radius:4px;font-size:13px;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openLunchModal()" title="Registrar horario de colación">
+                            <i class="fa fa-coffee"></i> Colación
+                        </button>
+                        <div class="btngreen" style="display:inline-block" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=terminarot'">
+                            <i class="fa fa-fw fa-check" style="color:white;"></i> Terminar OT&nbsp;
+                        </div>
                     </div>
                 </td>
             </tr>
@@ -7598,6 +7610,9 @@ function renderProductionOperatorConsole(
                         <?php if ($refId <= 0): ?>
                             <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer" onclick="document.getElementById('pause_submode').value='start'">
                                 <i class="fa fa-fw fa-play"></i> Iniciar Pausa
+                            </button>
+                            <button type="button" class="btnblue" style="font-size:14px;padding:10px 20px;border:none;cursor:pointer;background:#0284C7;margin-left:10px" onclick="openLunchModal()" title="Registrar horario oficial de colación">
+                                <i class="fa fa-coffee"></i> Registrar Horario de Colación
                             </button>
                         <?php elseif (!$isPauseEnded): ?>
                             <button type="submit" class="btnorange" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer" onclick="document.getElementById('pause_submode').value='end'">
@@ -11483,6 +11498,7 @@ function renderProductionOperatorConsole(
         <!-- ============================================================== -->
         <?php
         $isBarExpanded = ($hasAlis || $isRebobinadora);
+        $autoBarColWidth = $isFlexo ? '20%' : '25%';
         $actionBtnBaseStyle = 'border-radius:8px;padding:10px 14px;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;min-height:42px;box-shadow:0 1px 3px rgba(15,23,42,0.16);cursor:pointer';
         $actionBtnBlockStyle = $actionBtnBaseStyle . ($isBarExpanded ? '' : 'width:100%;box-sizing:border-box;text-align:center;display:flex;');
         $materialsActionLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
@@ -11523,14 +11539,14 @@ function renderProductionOperatorConsole(
                 <?php endif; ?>
             <?php endif; ?>
 
-            <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding-right:2px;width:25%'?>">
+            <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding-right:2px;width:' . $autoBarColWidth?>">
                 <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#293865" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=materiales'">
                     <nobr><i class="fa fa-fw <?= $isRebobinadora ? 'fa-dolly' : 'fa-cubes' ?>" style="color:white;"></i> <?=$materialsActionLabel?>&nbsp;</nobr>
                 </div>
             </td>
 
             <?php if ($isFlexo): ?>
-                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding-right:2px;width:25%'?>">
+                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:20%'?>">
                     <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#1D4ED8" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas'">
                         <nobr><i class="fa fa-fw fa-tint" style="color:white;"></i> Tintas&nbsp;</nobr>
                     </div>
@@ -11545,46 +11561,32 @@ function renderProductionOperatorConsole(
                 </td>
             <?php endif; ?>
 
-            <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:25%'?>">
+            <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:' . $autoBarColWidth?>">
                 <div class="btnred" style="<?=$actionBtnBlockStyle?>;background-color:#D64141" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=mantencion'">
                     <nobr><i class="fa fa-fw fa-tools" style="color:white;"></i> Mantención&nbsp;</nobr>
                 </div>
             </td>
 
             <?php if ($openPauseId > 0): ?>
-                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:25%'?>">
+                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:' . $autoBarColWidth?>">
                     <div class="btnorange" style="<?=$actionBtnBlockStyle?>;background-color:#E1A500" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause&refid=<?=$openPauseId?>'">
                         <nobr><i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar Pausa&nbsp;</nobr>
                     </div>
                 </td>
             <?php else: ?>
-                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:25%'?>">
+                <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:' . $autoBarColWidth?>">
                     <div class="btngrey" style="<?=$actionBtnBlockStyle?>;background-color:#7F7F7F" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=pause'">
                         <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Pausa&nbsp;</nobr>
                     </div>
                 </td>
             <?php endif; ?>
 
-            <?php if ($isSeri || $isSeriPulpo): ?>
-                <!-- BOTÓN COLACIÓN ESPECÍFICO SERIGRAFÍA Y PULPO -->
-                <td style="padding-right:4px;padding-left:4px">
-                    <div class="btnblue" style="<?=$actionBtnBaseStyle?>;background-color:#0284C7" onclick="openLunchModal()" title="Registrar horario de colación">
-                        <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Colación&nbsp;</nobr>
-                    </div>
-                </td>
-                <!-- BOTÓN SIN PRODUCCIÓN ESPECÍFICO SERIGRAFÍA Y PULPO -->
-                <td style="padding-right:4px;padding-left:4px">
-                    <?php if ($activeStandby !== null): ?>
-                        <div class="btnorange" style="<?=$actionBtnBaseStyle?>;background-color:#EA580C" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
-                            <nobr><i class="fa fa-fw fa-play-circle" style="color:white;"></i> Reanudar&nbsp;</nobr>
-                        </div>
-                    <?php else: ?>
-                        <div class="btnorange" style="<?=$actionBtnBaseStyle?>;background-color:#D97706" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
-                            <nobr><i class="fa fa-fw fa-pause-circle" style="color:white;"></i> Espera&nbsp;</nobr>
-                        </div>
-                    <?php endif; ?>
-                </td>
-            <?php endif; ?>
+            <!-- BOTÓN COLACIÓN DISPONIBLE EN TODAS LAS MÁQUINAS -->
+            <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding-left:2px;width:' . $autoBarColWidth?>">
+                <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#0284C7" onclick="openLunchModal()" title="Registrar horario de colación">
+                    <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Colación&nbsp;</nobr>
+                </div>
+            </td>
 
         </tr>
         </table>
