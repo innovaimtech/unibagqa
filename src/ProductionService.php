@@ -5956,8 +5956,12 @@ final class ProductionService
                 'super_inputs' => 0,
                 'super_pending' => false,
                 'super_approved' => true,
+                'lider_inputs' => 0,
+                'lider_pending' => false,
+                'lider_approved' => false,
                 'worker_responses' => [],
                 'super_responses' => [],
+                'lider_responses' => [],
             ];
         }
 
@@ -5973,8 +5977,12 @@ final class ProductionService
                 'super_inputs' => 0,
                 'super_pending' => false,
                 'super_approved' => true,
+                'lider_inputs' => 0,
+                'lider_pending' => false,
+                'lider_approved' => false,
                 'worker_responses' => [],
                 'super_responses' => [],
+                'lider_responses' => [],
             ];
         }
 
@@ -6001,8 +6009,9 @@ final class ProductionService
         }
 
         $superRows = [];
+        $liderRows = [];
         try {
-            // Evaluar primero registros de supervisor
+            // Registros de supervisor
             $stmtS = $this->erpPdo->prepare(
                 "SELECT ctr_acid, ctr_res, ctr_ctrusr, ctr_ctrdat FROM prod_worker_ot_autocontrol
                  WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor'"
@@ -6010,34 +6019,46 @@ final class ProductionService
             $stmtS->execute([':ot_id' => $workerOtId]);
             $superRows = $stmtS->fetchAll() ?: [];
 
-            // Si no existen registros de supervisor, consultar registros de líder de área
-            if (empty($superRows)) {
-                $stmtL = $this->erpPdo->prepare(
-                    "SELECT ctr_acid, ctr_res, ctr_ctrusr, ctr_ctrdat FROM prod_worker_ot_autocontrol
-                     WHERE ctr_init_id = :ot_id AND ctr_type = 'lider'"
-                );
-                $stmtL->execute([':ot_id' => $workerOtId]);
-                $superRows = $stmtL->fetchAll() ?: [];
-            }
+            // Registros de líder de área
+            $stmtL = $this->erpPdo->prepare(
+                "SELECT ctr_acid, ctr_res, ctr_ctrusr, ctr_ctrdat FROM prod_worker_ot_autocontrol
+                 WHERE ctr_init_id = :ot_id AND ctr_type = 'lider'"
+            );
+            $stmtL->execute([':ot_id' => $workerOtId]);
+            $liderRows = $stmtL->fetchAll() ?: [];
         } catch (Throwable) {
             $superRows = [];
+            $liderRows = [];
         }
 
+        // Evaluar estado del Líder de Área
+        $liderInputs = count($liderRows);
+        $liderResponses = [];
+        $liderHasUnapproved = false;
+        foreach ($liderRows as $lr) {
+            $liderResponses[(int)$lr['ctr_acid']] = (int)$lr['ctr_res'];
+            if ((int)$lr['ctr_res'] === 0) {
+                $liderHasUnapproved = true;
+            }
+        }
+        $liderPending = ($liderInputs > 0 && $liderHasUnapproved);
+        $liderApproved = ($liderInputs > 0 && !$liderHasUnapproved);
+
+        // Evaluar estado del Supervisor
         $superInputs = count($superRows);
         $superResponses = [];
-        $hasUnapproved = false;
-
+        $superHasUnapproved = false;
         foreach ($superRows as $sr) {
             $superResponses[(int)$sr['ctr_acid']] = (int)$sr['ctr_res'];
             if ((int)$sr['ctr_res'] === 0) {
-                $hasUnapproved = true;
+                $superHasUnapproved = true;
             }
         }
+        $superPending = ($superInputs > 0 && $superHasUnapproved);
+        $superApproved = ($superInputs > 0 && !$superHasUnapproved);
 
-        $superPending = ($superInputs > 0 && $hasUnapproved);
-        $superApproved = ($superInputs > 0 && !$hasUnapproved);
-        // Si no se han enviado registros al supervisor/líder, o si hay pendientes sin aprobar
-        $gotoAutocontrol = ($superInputs === 0 || $hasUnapproved);
+        // La OT requiere pantalla de autocontrol/aprobación mientras el supervisor no haya completado la aprobación
+        $gotoAutocontrol = !$superApproved;
 
         return [
             'has_points' => true,
@@ -6047,8 +6068,12 @@ final class ProductionService
             'super_inputs' => $superInputs,
             'super_pending' => $superPending,
             'super_approved' => $superApproved,
+            'lider_inputs' => $liderInputs,
+            'lider_pending' => $liderPending,
+            'lider_approved' => $liderApproved,
             'worker_responses' => $workerResponses,
             'super_responses' => $superResponses,
+            'lider_responses' => $liderResponses,
         ];
     }
 
@@ -6165,6 +6190,101 @@ final class ProductionService
     }
 
     /**
+     * El Líder de Área valida las confirmaciones con su usuario y contraseña.
+     * Al aprobar la revisión, se actualizan los registros de 'lider' y SE HABILITA
+     * automáticamente el requerimiento pendiente para que el SUPERVISOR apruebe la partida.
+     */
+    public function approveAutocontrolLider(int $workerOtId, array $selectedAcids, string $username, string $password): array
+    {
+        if ($workerOtId <= 0) {
+            return ['ok' => false, 'error' => 'ID de OT inválido.'];
+        }
+
+        $username = trim($username);
+        $password = trim($password);
+        if ($username === '' || $password === '') {
+            return ['ok' => false, 'error' => 'Debe ingresar usuario y contraseña del líder de área.'];
+        }
+
+        try {
+            $sql = "SELECT t1.id, t1.user_type
+                    FROM user t1
+                    WHERE t1.user_login = :login
+                      AND t1.user_pass = :pass
+                      AND t1.user_status = 1
+                      AND (
+                          t1.user_type = 1
+                          OR (
+                              SELECT count(*)
+                              FROM user_group t2
+                              WHERE t2.user_id = t1.id
+                                AND t2.group_id IN (1, 10, 11, 31)
+                          ) > 0
+                      )
+                    LIMIT 1";
+
+            $stmt = $this->erpPdo->prepare($sql);
+            $stmt->execute([
+                ':login' => $username,
+                ':pass' => md5($password),
+            ]);
+            $liderUser = $stmt->fetch();
+
+            if (!is_array($liderUser) || (int)$liderUser['id'] <= 0) {
+                return ['ok' => false, 'error' => 'Usuario o contraseña no válido para aprobación de líder de área.'];
+            }
+
+            $liderId = (int)$liderUser['id'];
+            $now = time();
+
+            // 1. Actualizar registros de 'lider' a aprobado (ctr_res = 1)
+            $updL = $this->erpPdo->prepare(
+                "UPDATE prod_worker_ot_autocontrol
+                 SET ctr_res = 1, ctr_ctrusr = :lider_id, ctr_ctrdat = :now
+                 WHERE ctr_init_id = :ot_id AND ctr_type = 'lider'"
+            );
+            $updL->execute([
+                ':lider_id' => $liderId,
+                ':now' => $now,
+                ':ot_id' => $workerOtId,
+            ]);
+
+            // 2. Limpiar registros de 'supervisor' previos para esta OT
+            $delS = $this->erpPdo->prepare(
+                "DELETE FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor'"
+            );
+            $delS->execute([':ot_id' => $workerOtId]);
+
+            // 3. Crear requerimientos pendientes para el SUPERVISOR (ctr_type = 'supervisor', ctr_res = 0)
+            $stmtPts = $this->erpPdo->prepare(
+                "SELECT ctr_acid FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type = 'lider'"
+            );
+            $stmtPts->execute([':ot_id' => $workerOtId]);
+            $acidRows = $stmtPts->fetchAll(PDO::FETCH_COLUMN) ?: [];
+
+            if (empty($acidRows) && !empty($selectedAcids)) {
+                $acidRows = $selectedAcids;
+            }
+
+            $insS = $this->erpPdo->prepare(
+                "INSERT INTO prod_worker_ot_autocontrol (ctr_init_id, ctr_type, ctr_acid, ctr_res, ctr_ctrusr)
+                 VALUES (:ot_id, 'supervisor', :acid, 0, 0)"
+            );
+            foreach ($acidRows as $acid) {
+                $acid = (int)$acid;
+                if ($acid > 0) {
+                    $insS->execute([':ot_id' => $workerOtId, ':acid' => $acid]);
+                }
+            }
+
+            // NOTA: NO se cambia wok_status a 1 aquí, porque falta la aprobación del SUPERVISOR.
+            return ['ok' => true, 'lider_id' => $liderId];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
      * El supervisor valida las confirmaciones con su usuario y contraseña, aprobando la partida.
      */
     public function approveAutocontrolPartida(int $workerOtId, array $selectedAcids, string $username, string $password): array
@@ -6210,11 +6330,11 @@ final class ProductionService
             $superId = (int)$superUser['id'];
             $now = time();
 
-            // Actualizar a aprobado (ctr_res = 1) tanto los registros de 'supervisor' como de 'lider'
+            // Actualizar a aprobado (ctr_res = 1) los registros de 'supervisor'
             $upd = $this->erpPdo->prepare(
                 "UPDATE prod_worker_ot_autocontrol
                  SET ctr_res = 1, ctr_ctrusr = :super_id, ctr_ctrdat = :now
-                 WHERE ctr_init_id = :ot_id AND ctr_type IN ('supervisor', 'lider')"
+                 WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor'"
             );
             $upd->execute([
                 ':super_id' => $superId,
@@ -6224,7 +6344,7 @@ final class ProductionService
 
             // Asegurar que siempre existan registros aprobados de tipo 'supervisor'
             $checkSup = $this->erpPdo->prepare(
-                "SELECT COUNT(*) FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor'"
+                "SELECT COUNT(*) FROM prod_worker_ot_autocontrol WHERE ctr_init_id = :ot_id AND ctr_type = 'supervisor' AND ctr_res = 1"
             );
             $checkSup->execute([':ot_id' => $workerOtId]);
             $hasSup = (int)$checkSup->fetchColumn() > 0;

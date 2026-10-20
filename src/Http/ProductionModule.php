@@ -910,7 +910,7 @@ function handleProductionRoutes(
         return true;
     }
 
-    // Aprobación de Partida por Supervisor (superautoctrlsave / liderautoctrlsave)
+    // Aprobación de Partida por Supervisor o Líder (superautoctrlsave / liderautoctrlsave)
     if (($path === '/production/work-orders/autocontrol/supervisor' || (isset($_REQUEST['mode']) && in_array($_REQUEST['mode'], ['superautoctrlsave', 'liderautoctrlsave'], true))) && $method === 'POST') {
         requireCsrf();
         $agId = (int)($_REQUEST['agid'] ?? 0);
@@ -921,21 +921,47 @@ function handleProductionRoutes(
                 $workerOtId = (int)$openOt['id'];
             }
         }
+        $submode = trim((string)($_REQUEST['submode'] ?? ''));
+        $reqMode = trim((string)($_REQUEST['mode'] ?? ''));
         $supUser = trim((string)($_REQUEST['axx_username'] ?? ''));
         $supPass = trim((string)($_REQUEST['axx_pass'] ?? ''));
 
+        // Distinguir si es aprobación de Líder de Área o de Supervisor de Partida
+        $isLiderSave = ($reqMode === 'liderautoctrlsave' || $submode === 'lidersave');
+
+        if ($isLiderSave) {
+            $selectedPoints = [];
+            if (isset($_POST['liderbaseacids']) && is_array($_POST['liderbaseacids'])) {
+                foreach ($_POST['liderbaseacids'] as $baseacid) {
+                    $baseacid = (int)$baseacid;
+                    if (!empty($_POST['lideracids_' . $baseacid])) {
+                        $selectedPoints[] = $baseacid;
+                    }
+                }
+            } elseif (isset($_POST['superbaseacids']) && is_array($_POST['superbaseacids'])) {
+                foreach ($_POST['superbaseacids'] as $baseacid) {
+                    $baseacid = (int)$baseacid;
+                    if (!empty($_POST['superacids_' . $baseacid])) {
+                        $selectedPoints[] = $baseacid;
+                    }
+                }
+            }
+
+            $res = $prodService->approveAutocontrolLider($workerOtId, $selectedPoints, $supUser, $supPass);
+            if ($res['ok']) {
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&lider_approved=1');
+            } else {
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error=' . rawurlencode((string)($res['error'] ?? 'Usuario no válido para aprobación de líder de área.')));
+            }
+            return true;
+        }
+
+        // Aprobación de Partida por Supervisor
         $selectedPoints = [];
         if (isset($_POST['superbaseacids']) && is_array($_POST['superbaseacids'])) {
             foreach ($_POST['superbaseacids'] as $baseacid) {
                 $baseacid = (int)$baseacid;
                 if (!empty($_POST['superacids_' . $baseacid])) {
-                    $selectedPoints[] = $baseacid;
-                }
-            }
-        } elseif (isset($_POST['liderbaseacids']) && is_array($_POST['liderbaseacids'])) {
-            foreach ($_POST['liderbaseacids'] as $baseacid) {
-                $baseacid = (int)$baseacid;
-                if (!empty($_POST['lideracids_' . $baseacid])) {
                     $selectedPoints[] = $baseacid;
                 }
             }
@@ -2464,6 +2490,11 @@ function renderProductionOperatorConsole(
     $hasAlis = !empty($alisStatus['has_alis']) || isset($_GET['end_alis']) || ($mode === 'autocontrol');
     $superInputs = (int)($autoctrlStatus['super_inputs'] ?? 0);
     $superPending = !empty($autoctrlStatus['super_pending']);
+    $superApproved = !empty($autoctrlStatus['super_approved']);
+    $liderInputs = (int)($autoctrlStatus['lider_inputs'] ?? 0);
+    $liderPending = !empty($autoctrlStatus['lider_pending']);
+    $liderApproved = !empty($autoctrlStatus['lider_approved']);
+
     // Rebobinadora no utiliza autocontrol
     $gotoAutocontrol = (!$isRebobinadora && ($hasAlis || $mode === 'autocontrol') && (!empty($autoctrlStatus['goto_autocontrol']) || $mode === 'autocontrol'));
 
@@ -2485,11 +2516,14 @@ function renderProductionOperatorConsole(
     }
     $printcolors = rtrim($printcolors, ', ');
 
-    // Pantalla de Supervisor (Foto 3): Si se informó al supervisor o líder y está pendiente de aprobación (Rebobinadora no utiliza autocontrol)
-    $showSupervisorApproval = (!$isRebobinadora && ($superPending || ($superInputs > 0 && $gotoAutocontrol)));
+    // Pantalla de Líder de Área: cuando hay pendientes de líder de área y es Flexografía
+    $showLiderApproval = (!$isRebobinadora && ($equipoTypeId === 7 || $isFlexo) && $liderPending);
 
-    // Pantalla de Autocontrol Operador (Foto 2): Cuando el alistamiento terminó y aún no se aprueba la partida
-    $showOperatorAutocontrol = (!$isRebobinadora && ($gotoAutocontrol || $mode === 'autocontrol') && !$showSupervisorApproval);
+    // Pantalla de Supervisor: cuando hay pendientes de supervisor (o inputs de supervisor pendientes de aprobación)
+    $showSupervisorApproval = (!$isRebobinadora && !$showLiderApproval && ($superPending || ($superInputs > 0 && !$superApproved)));
+
+    // Pantalla de Autocontrol Operador: cuando ni líder ni supervisor están pendientes de aprobación y aún no se aprueba
+    $showOperatorAutocontrol = (!$isRebobinadora && ($gotoAutocontrol || $mode === 'autocontrol') && !$showLiderApproval && !$showSupervisorApproval);
 
     // Si la OT requiere autocontrol y no está en un submodo auxiliar (materiales, cargar, mantencion, pause, terminarot),
     // se renderiza EXCLUSIVAMENTE la pantalla de Autocontrol (autocontrol.form.php) tal como en el sistema original de Unibag.
@@ -2790,7 +2824,11 @@ function renderProductionOperatorConsole(
             </div>
         <?php elseif (isset($_GET['lider_notified'])): ?>
             <div style="background:#E8F5E9;color:#2E7D32;padding:12px 18px;border-radius:4px;border:1px solid #A5D6A7;margin-bottom:12px;font-size:13px">
-                <i class="fa fa-check-circle"></i> <b>Se ha informado al Líder de Área.</b>
+                <i class="fa fa-check-circle"></i> <b>Se ha informado al Líder de Área.</b> El líder de área debe revisar y aprobar la lista de autocontrol.
+            </div>
+        <?php elseif (isset($_GET['lider_approved'])): ?>
+            <div style="background:#E8F5E9;color:#2E7D32;padding:12px 18px;border-radius:4px;border:1px solid #A5D6A7;margin-bottom:12px;font-size:13px">
+                <i class="fa fa-check-circle"></i> <b>Revisión del Líder de Área aprobada con éxito.</b> Ahora el Supervisor de Planta debe validar y aprobar la partida para habilitar la producción.
             </div>
         <?php elseif (isset($_GET['error'])): ?>
             <div style="background:#FFEBEE;color:#C62828;padding:12px 18px;border-radius:4px;border:1px solid #EF9A9A;margin-bottom:12px;font-size:13px">
@@ -3417,8 +3455,145 @@ function renderProductionOperatorConsole(
             </div>
         <?php endif; ?>
 
-        <!-- Tarjeta 2: AUTOCONTROL o APROBACIÓN DE PARTIDA -->
-        <?php if ($showSupervisorApproval): ?>
+        <!-- Tarjeta 2: AUTOCONTROL / APROBACIÓN LÍDER DE ÁREA O SUPERVISOR -->
+        <?php if ($showLiderApproval): ?>
+            <!-- APROBACIÓN REVISIÓN POR LÍDER DE ÁREA (autocontrol.form.php) -->
+            <?php
+            $pts = !empty($autoctrlStatus['points']) ? $autoctrlStatus['points'] : $autocontrolPoints;
+            ?>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px">
+            <tr>
+                <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
+                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                    <colgroup>
+                        <col width="25">
+                        <col width="25%">
+                        <col width="25">
+                        <col width="25%">
+                    </colgroup>
+                    <tr>
+                        <td class="tdleft" colspan="4" style="background-color:#FFFF00;border:0px;border-radius:4px;color:black;font-weight:bold;text-align:center" align="center">AUTOCONTROL</td>
+                    </tr>
+                    <tr>
+                    <?php
+                    $px = 0;
+                    foreach ($pts as $p):
+                    ?>
+                        <td class="tdnrm">
+                            <input type="checkbox" value="1" checked disabled>
+                            <?=htmlspecialchars((string)$p['ac_name'])?>
+                        </td>
+                        <?php
+                        $px++;
+                        if ($px >= 4):
+                            $px = 0;
+                            echo '</tr><tr>';
+                        endif;
+                    endforeach;
+                    ?>
+                    </tr>
+                    </table>
+                </td>
+            </tr>
+            </table>
+
+            <form action="/production/work-orders/autocontrol/supervisor" method="post" name="xform_autoctrl_lider" id="xform_autoctrl_lider">
+                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                <input type="hidden" name="agid" value="<?=$agId?>">
+                <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                <input type="hidden" name="mode" value="liderautoctrlsave">
+                <input type="hidden" name="submode" value="lidersave">
+
+                <table border="0" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                    <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
+                        <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                        <colgroup>
+                            <col width="25">
+                            <col width="25%">
+                            <col width="25">
+                            <col width="25%">
+                        </colgroup>
+                        <tr>
+                            <td class="tdleft" colspan="4" style="background-color:#FF5733;border:0px;border-radius:4px;color:white;font-weight:bold;text-align:center" align="center">
+                                APROBACIÓN LÍDER DE ÁREA
+                                <span style="float:left;font-weight:normal">
+                                    <label style="cursor:pointer;color:white">
+                                        <input type="checkbox" name="dummy_lideraprob_markall" id="dummy_lideraprob_markall" value="1"
+                                               onclick="document.querySelectorAll('.lideraprobchk').forEach(c=>c.checked=this.checked); checkLiderAprob();">
+                                        Marcar todos
+                                    </label>
+                                </span>
+                            </td>
+                        </tr>
+                        <tr>
+                        <?php
+                        $px = 0;
+                        foreach ($pts as $p):
+                            $acid = (int)$p['id'];
+                        ?>
+                            <td class="tdnrm">
+                                <input type="hidden" name="liderbaseacids[]" value="<?=$acid?>">
+                                <input type="checkbox" value="1" name="lideracids_<?=$acid?>" class="lideraprobchk clsautocontrolareachks"
+                                       id="lider_acid_<?=$acid?>"
+                                       onclick="checkLiderAprob()">
+                                <label for="lider_acid_<?=$acid?>" style="cursor:pointer"><?=htmlspecialchars((string)$p['ac_name'])?></label>
+                            </td>
+                            <?php
+                            $px++;
+                            if ($px >= 4):
+                                $px = 0;
+                                echo '</tr><tr>';
+                            endif;
+                        endforeach;
+                        ?>
+                        </tr>
+                        </table>
+                    </td>
+                </tr>
+                </table>
+
+                <div style="clear:both;height:12px"></div>
+                <table border="0" width="100%" cellpadding="0" cellspacing="0" id="idx_btnlideraprob" style="display:none">
+                <tr>
+                    <td width="210">
+                        <input type="text" class="inptxt" name="axx_username" id="axx_lider_username" placeholder="Usuario Líder de Área" style="width:200px" autocomplete="off">
+                    </td>
+                    <td width="210">
+                        <input type="password" class="inptxt" name="axx_pass" id="axx_lider_pass" placeholder="Contraseña Líder de Área" style="width:200px" autocomplete="off">
+                    </td>
+                    <td>
+                        <button type="submit" class="btngreen" style="padding:8px 22px;border:none;cursor:pointer;font-size:14px;background-color:#FF5733;color:white">
+                            <i class="fa fa-fw fa-save" style="color:white;"></i> Aprobar Revisión&nbsp;
+                        </button>
+                    </td>
+                </tr>
+                </table>
+            </form>
+
+            <script>
+            function checkLiderAprob() {
+                var canaprob = true;
+                var chks = document.querySelectorAll('.lideraprobchk');
+                if (chks.length === 0) canaprob = false;
+                chks.forEach(function(c) {
+                    if (!c.checked) canaprob = false;
+                });
+                var box = document.getElementById('idx_btnlideraprob');
+                if (box) {
+                    if (canaprob) {
+                        box.style.display = '';
+                        var u = document.getElementById('axx_lider_username');
+                        if (u && !u.value) u.focus();
+                    } else {
+                        box.style.display = 'none';
+                    }
+                }
+            }
+            checkLiderAprob();
+            </script>
+
+        <?php elseif ($showSupervisorApproval): ?>
             <!-- FOTO 3: APROBACIÓN PARTIDA POR SUPERVISOR (autocontrol.form.php) -->
             <?php
             $pts = !empty($autoctrlStatus['points']) ? $autoctrlStatus['points'] : $autocontrolPoints;
@@ -3458,6 +3633,46 @@ function renderProductionOperatorConsole(
                 </td>
             </tr>
             </table>
+
+            <?php if (($equipoTypeId === 7 || $isFlexo) && (!empty($autoctrlStatus['lider_inputs']) || !empty($autoctrlStatus['lider_approved']))): ?>
+            <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px">
+            <tr>
+                <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
+                    <table border="0" width="100%" cellpadding="6" cellspacing="0">
+                    <colgroup>
+                        <col width="25">
+                        <col width="25%">
+                        <col width="25">
+                        <col width="25%">
+                    </colgroup>
+                    <tr>
+                        <td class="tdleft" colspan="4" style="background-color:#FF5733;border:0px;border-radius:4px;color:white;font-weight:bold;text-align:center" align="center">
+                            <i class="fa fa-check"></i> APROBACIÓN LÍDER DE ÁREA (APROBADO)
+                        </td>
+                    </tr>
+                    <tr>
+                    <?php
+                    $px = 0;
+                    foreach ($pts as $p):
+                    ?>
+                        <td class="tdnrm">
+                            <input type="checkbox" value="1" checked disabled>
+                            <?=htmlspecialchars((string)$p['ac_name'])?>
+                        </td>
+                        <?php
+                        $px++;
+                        if ($px >= 4):
+                            $px = 0;
+                            echo '</tr><tr>';
+                        endif;
+                    endforeach;
+                    ?>
+                    </tr>
+                    </table>
+                </td>
+            </tr>
+            </table>
+            <?php endif; ?>
 
             <form action="/production/work-orders/autocontrol/supervisor" method="post" name="xform_autoctrl_super" id="xform_autoctrl_super">
                 <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
