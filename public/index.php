@@ -14594,6 +14594,12 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     $cTitle = $cCode !== '' ? ('Contenedor ' . $cCode) : ('Cargamento #' . $containerId);
     $allLines = $service->listImportContainerLines($containerId);
     $filterLineId = isset($_REQUEST['line']) ? (int)$_REQUEST['line'] : 0;
+    $labelWarehouses = $service->listWarehousesForReception();
+    $labelWarehouseOptions = '<option value="">Seleccionar bodega</option>';
+    foreach ($labelWarehouses as $labelWarehouse) {
+        $labelWarehouseCode = (string)$labelWarehouse['code'];
+        $labelWarehouseOptions .= '<option value="' . (int)$labelWarehouse['id'] . '">' . h($labelWarehouseCode . ' - ' . $labelWarehouse['name']) . '</option>';
+    }
     $printerProfile = unibagNormalizePrinterProfile((string)($_REQUEST['printer_profile'] ?? 'default'));
     $activePrinter = $printer->withProfile($printerProfile);
     $configuredPrinterName = $activePrinter->getConfiguredPrinterName();
@@ -14688,7 +14694,6 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
         $totalLabels = count($rollsToPrint);
         $rawDate = trim((string)($container['eta_plant'] ?? $container['created_at'] ?? date('Y-m-d')));
         $arrivalDate = formatLabelDate($rawDate);
-        $whCode = trim((string)($_GET['wh'] ?? '100')) ?: '100';
 
         echo '<!doctype html><html lang="es"><head><meta charset="utf-8">';
         echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
@@ -14955,6 +14960,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
         } else {
             echo '<div class="labels-container">';
             foreach ($rollsToPrint as $roll) {
+                $whCode = trim((string)($roll['warehouse_code'] ?? '')) ?: '-';
                 $skuCode = trim((string)($roll['sku_code'] ?? '-'));
                 $skuDesc = trim((string)($roll['sku_desc'] ?? $roll['sku_description'] ?? '-'));
                 $lData = $linesById[(int)($roll['import_container_item_id'] ?? 0)] ?? [];
@@ -15048,7 +15054,18 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
             $targetLineId = (int)($_REQUEST['target_line_id'] ?? 0);
             // Máximo seguro por petición: 100 bobinas por lote para evitar bloqueos
             $reqQty = max(1, min(100, (int)($_REQUEST['qty'] ?? 1)));
-            $whCode = trim((string)($_REQUEST['warehouse_code'] ?? '100')) ?: '100';
+            $whId = (int)($_POST['warehouse_id'] ?? 0);
+            $selectedWarehouse = null;
+            foreach ($labelWarehouses as $labelWarehouse) {
+                if ((int)$labelWarehouse['id'] === $whId) {
+                    $selectedWarehouse = $labelWarehouse;
+                    break;
+                }
+            }
+            if ($selectedWarehouse === null) {
+                throw new RuntimeException('Selecciona la bodega para los nuevos codigos de trazabilidad.');
+            }
+            $whCode = (string)$selectedWarehouse['code'];
             $userPrefix = strtoupper(trim((string)($_REQUEST['code_prefix'] ?? '')));
             if ($userPrefix === '') {
                 $userPrefix = 'RB-' . $containerId . '-';
@@ -15079,17 +15096,6 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
                     if ($n > $maxSeq) $maxSeq = $n;
                 }
             }
-
-            // Resolver id de bodega en TRZ
-            $stmtWh = $trzPdo->prepare('SELECT id FROM warehouses WHERE code = :c LIMIT 1');
-            $stmtWh->execute([':c' => $whCode]);
-            $whId = (int)$stmtWh->fetchColumn();
-            if (!$whId) {
-                $stmtWh2 = $trzPdo->prepare('SELECT id FROM warehouses WHERE id = :c LIMIT 1');
-                $stmtWh2->execute([':c' => (int)$whCode]);
-                $whId = (int)$stmtWh2->fetchColumn();
-            }
-            if (!$whId) $whId = 1;
 
             $createdRolls = [];
             $createdRollIds = [];
@@ -15259,7 +15265,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
                             ':code' => $rollCode,
                             ':eid' => $rollId,
                             ':whid' => $whId,
-                            ':whname' => 'Bodega ' . $whCode,
+                            ':whname' => (string)$selectedWarehouse['name'],
                             ':sku' => $skuCode,
                             ':desc' => $skuDesc,
                             ':pkgnum' => $maxSeq,
@@ -15525,7 +15531,8 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
             $colorVal = trim((string)($targetLn['color'] ?? '')) ?: '-';
             $rawDate = trim((string)($container['eta_plant'] ?? $container['created_at'] ?? date('Y-m-d')));
             $arrivalDate = formatLabelDate($rawDate);
-            $whCode = trim((string)($_GET['wh'] ?? '100')) ?: '100';
+            $previewRoll = $existingRollsByLine[$previewLineId][0] ?? [];
+            $whCode = trim((string)($previewRoll['warehouse_code'] ?? '')) ?: 'Por seleccionar';
 
             // Si hay bobinas registradas para esta línea mostrar el primer código, sino código modelo corto
             $sampleCode = !empty($existingRollsByLine[$previewLineId]) ? (string)$existingRollsByLine[$previewLineId][0]['roll_code'] : ('RB-' . $containerId . '-001');
@@ -15840,6 +15847,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
 
         // Código de muestra para la vista previa
         $pvSampleCode = !empty($existingRollsByLine[$pvItemId]) ? (string)$existingRollsByLine[$pvItemId][0]['roll_code'] : ($defaultShortPrefix . '001');
+        $pvWarehouseCode = trim((string)($existingRollsByLine[$pvItemId][0]['warehouse_code'] ?? '')) ?: 'Por seleccionar';
 
         $pvSvg = code128Svg($pvSampleCode, 36, 1.35);
         if ($pvSvg === '') {
@@ -15862,7 +15870,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
         // 1. Cabecera
         echo '<div class="header-row">';
         echo '<div><div class="brand-title">UNIBAG</div><div class="sub-title">RECEPCIÓN MATERIA PRIMA</div></div>';
-        echo '<div class="header-meta"><div class="wh-badge">BOD: 100</div><div class="date-str">FECHA: ' . h($pvDate) . '</div></div>';
+        echo '<div class="header-meta"><div class="wh-badge">BOD: ' . h($pvWarehouseCode) . '</div><div class="date-str">FECHA: ' . h($pvDate) . '</div></div>';
         echo '</div>';
 
         // 2. SKU y Descripción
@@ -15938,6 +15946,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
             echo '<input type="hidden" name="target_line_id" value="0">';
             echo '<input type="hidden" name="code_prefix" value="' . h($defaultShortPrefix) . '">';
             echo '<input type="hidden" name="qty" value="' . $batchToRegister . '">';
+            echo '<select name="warehouse_id" required style="max-width:230px;height:32px" aria-label="Bodega de los nuevos codigos">' . $labelWarehouseOptions . '</select>';
             echo '<button type="submit" class="btn btn-success" style="font-weight:800;font-size:12px">';
             echo '⚡ Generar Lote Pendiente (' . $batchToRegister . ($pendingToRegister > $batchToRegister ? (' de ' . $pendingToRegister) : '') . ')';
             echo '</button>';
@@ -15998,6 +16007,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
             echo '<input type="hidden" name="action" value="generate_and_print">';
             echo '<input type="hidden" name="target_line_id" value="' . $lnId . '">';
             echo '<input type="hidden" name="code_prefix" value="' . h($defaultShortPrefix) . '">';
+            echo '<select name="warehouse_id" required style="max-width:200px;height:32px" aria-label="Bodega de los nuevos codigos">' . $labelWarehouseOptions . '</select>';
             echo '<input type="number" name="qty" min="1" max="100" value="' . $defaultQtyVal . '" style="width:58px;height:32px;text-align:center;font-weight:700;border:1px solid #cbd5e1;border-radius:6px;font-size:12px" title="Cantidad de bobinas a generar (máx 100 por lote)">';
             echo '<button type="submit" class="btn btn-primary" style="padding:6px 10px;font-size:12px;font-weight:800" title="Generar códigos cortos e imprimir en térmica">⚡ Generar</button>';
             echo '</form>';
@@ -16197,7 +16207,18 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         </div>';
     }
 
-    if ($savedRollId > 0) {
+    $body .= renderReceptionBatchNotice();
+    $body .= '<form method="post" action="/import-containers/' . $containerId . '/sync-reception" style="margin-bottom:14px">
+        <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">
+        <input type="hidden" name="line" value="' . $containerItemId . '">
+        <button class="btn secondary" type="submit">Reintentar sincronizacion ERP</button>
+        </form>';
+    if (isset($_GET['sync_error'])) {
+        $body .= '<div class="err">' . h((string)$_GET['sync_error']) . '</div>';
+    } elseif (isset($_GET['synced'])) {
+        $body .= '<div class="card">Recepcion ERP sincronizada. El costeo se completa en el ERP antiguo.</div>';
+    }
+    if ($savedRollId > 0 && empty($_GET['saved_batch'])) {
         $savedRoll = $service->getRoll($savedRollId);
         $savedRollCode = is_array($savedRoll) ? (string)($savedRoll['roll_code'] ?? ('#' . $savedRollId)) : ('#' . $savedRollId);
         $savedRollWeight = is_array($savedRoll) ? number_format((float)($savedRoll['weight_kg'] ?? 0), 3, '.', '') : '0';
@@ -16320,14 +16341,14 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
               </select>
             </div>
             <div style="flex:1;min-width:220px">
-              <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🏭 Bodega de Destino *</label>
+              <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">🏭 Ubicación de recepción (TRZ) *</label>
               <select name="warehouse_id" required' . ($isReceptionLocked ? ' disabled' : '') . ' style="height:38px;border-radius:8px;border:1px solid #cbd5e1;background:#f8fafc;width:100%;font-weight:600">
-                <option value="">Seleccionar bodega</option>';
+                <option value="">Seleccionar ubicación temporal</option>';
     foreach ($warehouses as $w) {
         $whLabel = trim((string)$w['name']) !== '' ? (string)$w['name'] : ('Bodega ' . (string)$w['code']);
         $body .= '<option value="' . (int)$w['id'] . '" data-name="' . h($whLabel) . '">' . h($whLabel) . '</option>';
     }
-    $body .= '</select>
+    $body .= '</select><small style="display:block;color:#64748b;margin-top:4px">La bodega final se decide al ingresar stock en el ERP.</small>
             </div>
             <div id="weight_field_wrapper" style="flex:1;min-width:200px">
               <label id="primary_value_label" style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">⚖️ Peso real (Kg)</label>
@@ -16709,8 +16730,12 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
         function applyModeUI() {
           if (modeSelector) modeSelector.value = getMode();
           weight.step = "0.001";
-          weight.required = true;
-          if (weightFieldWrapper) weightFieldWrapper.style.display = "";
+          weight.required = getMode() === "WEIGHT";
+          weight.disabled = getMode() !== "WEIGHT";
+          qtyInput.step = "1";
+          qtyInput.min = "1";
+          qtyInput.max = "5000";
+          if (weightFieldWrapper) weightFieldWrapper.style.display = getMode() === "WEIGHT" ? "" : "none";
           if (getMode() === "WEIGHT") {
             qty.value = "1";
             qtyInput.value = "1";
@@ -16736,7 +16761,7 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
             if (scaleStatusRow) scaleStatusRow.style.display = "none";
             if (actionButtonsWrapper) actionButtonsWrapper.style.flexBasis = "190px";
             if (scaleStatusSpacer) scaleStatusSpacer.style.flexBasis = "190px";
-            setStatus("Ingresa unidades y peso real para guardar la recepción");
+            setStatus("Ingresa unidades: se genera una etiqueta por unidad, sin peso.");
           }
           syncWeightSaveButton();
         }
@@ -17063,6 +17088,20 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
                   : "Recepción guardada e impresión lista");
               }
             }
+            if (data.sync_error) {
+              stopScale();
+              var syncDialog = document.createElement("dialog");
+              var syncMessage = document.createElement("p");
+              syncMessage.textContent = data.sync_error + " No vuelvas a ingresar este producto. Usa Reintentar sincronizacion ERP.";
+              var syncClose = document.createElement("button");
+              syncClose.textContent = "Cerrar";
+              syncClose.onclick = function () { syncDialog.close(); syncDialog.remove(); };
+              syncDialog.appendChild(syncMessage);
+              syncDialog.appendChild(syncClose);
+              document.body.appendChild(syncDialog);
+              syncDialog.showModal();
+              setStatus("Recepcion guardada; ERP pendiente de sincronizar");
+            }
           } catch (e) {
             alert(e && e.message ? e.message : "Error guardando.");
           } finally {
@@ -17324,17 +17363,11 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
     $result = $service->createRollFromImportContainerLine($containerItemId, $warehouseId, $weight, $currentOperatorName, $receivedQty, $receptionMode);
     if ($result['ok'] === true) {
         $rollId = (int)($result['id'] ?? 0);
-        $printed = '0';
-        if ($rollId > 0 && $printer->isEnabled()) {
-            $roll = $service->getRoll($rollId);
-            if (is_array($roll)) {
-                $p = $printer->printRollLabel($roll);
-                if (($p['ok'] ?? false) === true) {
-                    $printed = '1';
-                }
-            }
-        }
-        header('Location: /import-containers/' . $containerId . '/receive?line=' . $containerItemId . '&saved_roll_id=' . $rollId . '&printed=' . $printed);
+        $batch = saveReceptionLabelBatch($result, $service, $printer);
+        header('Location: /import-containers/' . $containerId . '/receive?' . http_build_query([
+            'line' => $containerItemId, 'saved_roll_id' => $rollId,
+            'saved_batch' => $batch['token'], 'printed' => $batch['printed'],
+        ]));
         exit;
     }
 
@@ -17349,6 +17382,23 @@ if (preg_match('#^/import-containers/(\\d+)/receive$#', $path, $m) === 1 && $met
     $body .= '</ul></div>';
     $body .= '<div class="card"><a class="btn secondary" href="/import-containers/' . $containerId . '">Volver</a></div>';
     render('Recepción importación', $body);
+    exit;
+}
+
+if (preg_match('#^/import-containers/(\d+)/sync-reception$#', $path, $m) === 1 && $method === 'POST') {
+    requireCsrf();
+    $containerId = (int)$m[1];
+    $lineId = (int)($_POST['line'] ?? 0);
+    $line = $service->getImportContainerLine($lineId);
+    if ($line === null || (int)($line['import_container_id'] ?? 0) !== $containerId) {
+        http_response_code(404);
+        render('No encontrado', '<div class="card">No existe la linea de contenedor.</div>');
+        exit;
+    }
+    $result = $service->retryImportContainerReceptionSync($containerId, (int)($_SESSION['user_id'] ?? 0));
+    $query = ['line' => $lineId];
+    $query[$result['ok'] ? 'synced' : 'sync_error'] = $result['ok'] ? '1' : $result['error'];
+    header('Location: /import-containers/' . $containerId . '/receive?' . http_build_query($query));
     exit;
 }
 
@@ -17545,7 +17595,8 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         </div>';
     }
 
-    if ($savedRollId > 0) {
+    $body .= renderReceptionBatchNotice();
+    if ($savedRollId > 0 && empty($_GET['saved_batch'])) {
         $savedRoll = $service->getRoll($savedRollId);
         $savedRollCode = is_array($savedRoll) ? (string)($savedRoll['roll_code'] ?? ('#' . $savedRollId)) : ('#' . $savedRollId);
         $savedRollWeight = is_array($savedRoll) ? number_format((float)($savedRoll['weight_kg'] ?? 0), 3, '.', '') : '0';
@@ -18057,8 +18108,12 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
         function applyModeUI() {
           if (modeSelector) modeSelector.value = getMode();
           weight.step = "0.001";
-          weight.required = true;
-          if (weightFieldWrapper) weightFieldWrapper.style.display = "";
+          weight.required = getMode() === "WEIGHT";
+          weight.disabled = getMode() !== "WEIGHT";
+          qtyInput.step = "1";
+          qtyInput.min = "1";
+          qtyInput.max = "5000";
+          if (weightFieldWrapper) weightFieldWrapper.style.display = getMode() === "WEIGHT" ? "" : "none";
           if (getMode() === "WEIGHT") {
             qty.value = "1";
             qtyInput.value = "1";
@@ -18084,7 +18139,7 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
             if (scaleStatusRow) scaleStatusRow.style.display = "none";
             if (actionButtonsWrapper) actionButtonsWrapper.style.flexBasis = "190px";
             if (scaleStatusSpacer) scaleStatusSpacer.style.flexBasis = "190px";
-            setStatus("Ingresa unidades y peso real para guardar la recepción");
+            setStatus("Ingresa unidades: se genera una etiqueta por unidad, sin peso.");
           }
           syncWeightSaveButton();
         }
@@ -18719,17 +18774,11 @@ if (preg_match('#^/purchase-orders/(\\d+)/receive$#', $path, $m) === 1 && $metho
     $result = $service->createRollFromPurchaseOrderLine($lineId, $warehouseId, $weight, $currentOperatorName, $receivedQty, $receptionMode);
     if ($result['ok'] === true) {
         $rollId = (int)($result['id'] ?? 0);
-        $printed = '0';
-        if ($rollId > 0 && $printer->isEnabled()) {
-            $roll = $service->getRoll($rollId);
-            if (is_array($roll)) {
-                $p = $printer->printRollLabel($roll);
-                if (($p['ok'] ?? false) === true) {
-                    $printed = '1';
-                }
-            }
-        }
-        header('Location: /purchase-orders/' . $poId . '/receive?line=' . $lineId . '&saved_roll_id=' . $rollId . '&printed=' . $printed);
+        $batch = saveReceptionLabelBatch($result, $service, $printer);
+        header('Location: /purchase-orders/' . $poId . '/receive?' . http_build_query([
+            'line' => $lineId, 'saved_roll_id' => $rollId,
+            'saved_batch' => $batch['token'], 'printed' => $batch['printed'],
+        ]));
         exit;
     }
 
@@ -24681,6 +24730,103 @@ if (preg_match('#^/cliches/(\d+)/return$#', $path, $m) === 1 && $method === 'POS
         $query .= '&work_order_id=' . $returnWorkOrderId;
     }
     header('Location: /cliches/' . $clicheId . $query);
+    exit;
+}
+
+function saveReceptionLabelBatch(array $result, ReceptionService $service, PrintService $printer): array
+{
+    $ids = array_values(array_filter(array_map('intval', $result['ids'] ?? [$result['id'] ?? 0])));
+    $token = bin2hex(random_bytes(16));
+    $batch = ['ids' => $ids, 'created_at' => time(), 'sync_error' => $result['sync_error'] ?? '', 'print_error' => '', 'printed' => '0'];
+    // A print failure must never turn a saved receipt into a second receipt.
+    // Un fallo de impresion no debe provocar una segunda recepcion.
+    try {
+        if ($printer->isEnabled()) {
+            $rolls = [];
+            foreach ($ids as $id) {
+                $roll = $service->getRoll($id);
+                if (!is_array($roll)) {
+                    throw new RuntimeException('No se pudo cargar una etiqueta del lote.');
+                }
+                $rolls[] = $roll;
+            }
+            $printResult = $printer->printRollLabels($rolls);
+            $batch['printed'] = ($printResult['ok'] ?? false) ? '1' : '0';
+            $batch['print_error'] = ($printResult['ok'] ?? false) ? '' : (string)($printResult['error'] ?? 'Error de impresion.');
+        }
+    } catch (Throwable $e) {
+        $batch['print_error'] = $e->getMessage();
+    }
+    $_SESSION['reception_label_batches'][$token] = $batch;
+    while (count($_SESSION['reception_label_batches']) > 20) {
+        array_shift($_SESSION['reception_label_batches']);
+    }
+    return ['token' => $token, 'printed' => $batch['printed']];
+}
+
+function renderReceptionBatchNotice(): string
+{
+    $token = (string)($_GET['saved_batch'] ?? '');
+    $batch = $_SESSION['reception_label_batches'][$token] ?? null;
+    if (!is_array($batch)) {
+        return '';
+    }
+    $count = count($batch['ids']);
+    $body = '<div class="card" style="margin-bottom:14px"><strong>Recepcion guardada: ' . $count . ' codigo(s) y ' . $count . ' etiqueta(s).</strong> ';
+    $body .= '<a class="btn" target="_blank" href="/reception/labels/' . h($token) . '?auto_print=1">Imprimir lote 10x7</a>';
+    if ($batch['printed'] === '1') {
+        $body .= '<p>Lote enviado a la impresora.</p>';
+    }
+    foreach (['sync_error', 'print_error'] as $field) {
+        if (!empty($batch[$field])) {
+            $body .= '<p class="err">' . h((string)$batch[$field]) . ' No vuelvas a ingresar estas unidades.</p>';
+        }
+    }
+    if ($batch['printed'] !== '1' && empty($batch['browser_print_opened'])) {
+        $_SESSION['reception_label_batches'][$token]['browser_print_opened'] = true;
+        $body .= '<iframe title="Impresion del lote" src="/reception/labels/' . h($token) . '?auto_print=1" style="position:absolute;width:1px;height:1px;border:0"></iframe>';
+    }
+    return $body . '</div>';
+}
+
+if (preg_match('#^/reception/labels/([a-f0-9]{32})$#', $path, $m) === 1 && $method === 'GET') {
+    $batch = $_SESSION['reception_label_batches'][$m[1]] ?? null;
+    if (!is_array($batch)) {
+        http_response_code(404);
+        render('Lote no encontrado', '<div class="card">El lote no esta disponible en esta sesion. Reimprime desde los productos recibidos.</div>');
+        exit;
+    }
+    $rolls = [];
+    foreach ($batch['ids'] as $id) {
+        $roll = $service->getRoll((int)$id);
+        if (!is_array($roll)) {
+            http_response_code(409);
+            render('Lote modificado', '<div class="card">Un producto del lote fue eliminado. Reimprime desde los productos recibidos.</div>');
+            exit;
+        }
+        $rolls[] = $roll;
+    }
+    echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Etiquetas de recepcion</title><style>
+        @page{size:100mm 70mm;margin:0}*{box-sizing:border-box}body{margin:0;font-family:Arial;color:#000;background:#eee}
+        .toolbar{padding:12px}.label{background:white;width:100mm;height:70mm;padding:3mm;border:1px solid black;overflow:hidden;display:flex;flex-direction:column;justify-content:space-between;margin:8px auto}
+        .sku{font-size:22pt;font-weight:900}.code{font-size:13pt;font-weight:bold}.desc{font-size:11pt}.value{font-size:22pt;font-weight:900}
+        @media print{body{background:white}.toolbar{display:none}.label{margin:0;break-after:page;break-inside:avoid}.label:last-child{break-after:auto}}
+        </style></head><body><div class="toolbar"><strong>' . count($rolls) . ' etiquetas</strong> <button onclick="window.print()">Imprimir lote</button></div>';
+    foreach ($rolls as $roll) {
+        $weight = (float)($roll['weight_kg'] ?? 0);
+        $quantityMode = ($roll['reception_mode'] ?? '') === 'QUANTITY';
+        $value = $quantityMode ? number_format((float)($roll['received_qty'] ?? 1), 0, ',', '.') . ' Unid.' : number_format($weight, 2, ',', '.') . ' Kg';
+        $code = (string)$roll['roll_code'];
+        echo '<section class="label"><div><strong>UNIBAG</strong> | ' . h(str_replace('-', '/', formatLabelDate((string)($roll['arrival_date'] ?? $roll['created_at'])))) . '</div>';
+        echo '<div class="sku">' . h((string)($roll['sku_code'] ?? '')) . '</div><div class="desc">' . h((string)($roll['sku_description'] ?? '')) . '</div>';
+        echo '<div class="value">' . h($value) . '</div><div class="desc">Bodega: ' . h((string)($roll['warehouse_code'] ?? '')) . ' ' . h((string)($roll['warehouse_name'] ?? '')) . '</div>';
+        echo '<div class="desc">OC: ' . h((string)($roll['po_code'] ?? '-')) . ' | Contenedor: ' . h((string)($roll['container_code'] ?? '-')) . '</div>';
+        echo '<div>' . code128Svg($code, 36, 1.35) . '<div class="code">' . h($code) . '</div></div></section>';
+    }
+    if (($_GET['auto_print'] ?? '') === '1') {
+        echo '<script>window.addEventListener("load",function(){window.print();});</script>';
+    }
+    echo '</body></html>';
     exit;
 }
 

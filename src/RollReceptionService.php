@@ -10,6 +10,12 @@ final class RollReceptionService
 
     public function createRoll(array $input): array
     {
+        $input['weight_kg'] = $input['weight_kg'] ?? 0;
+        foreach (['microns', 'width_mm', 'meters'] as $field) {
+            if (isset($input[$field]) && (float)$input[$field] === 0.0) {
+                $input[$field] = null;
+            }
+        }
         $errors = $this->validateCreate($input);
         if ($errors !== []) {
             return ['ok' => false, 'errors' => $errors, 'id' => null];
@@ -30,7 +36,10 @@ final class RollReceptionService
         $operatorName = trim((string)($input['operator_name'] ?? ''));
         $receptionMode = $this->normalizeReceptionMode((string)($input['reception_mode'] ?? 'QUANTITY'));
 
-        $this->pdo->beginTransaction();
+        $ownsTransaction = !$this->pdo->inTransaction();
+        if ($ownsTransaction) {
+            $this->pdo->beginTransaction();
+        }
         try {
 
             $stmt = $this->pdo->prepare(
@@ -74,10 +83,51 @@ final class RollReceptionService
                 'operator_name' => $operatorName,
             ]);
 
-            $this->pdo->commit();
+            if ($ownsTransaction) {
+                $this->pdo->commit();
+            }
             return ['ok' => true, 'errors' => [], 'id' => $rollId];
         } catch (Throwable $e) {
-            $this->pdo->rollBack();
+            if ($ownsTransaction && $this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            throw $e;
+        }
+    }
+
+    public function createUnits(array $input): array
+    {
+        $quantity = (float)($input['received_qty'] ?? 0);
+        if (!is_finite($quantity) || $quantity < 1 || floor($quantity) !== $quantity || $quantity > 5000) {
+            return ['ok' => false, 'errors' => ['received_qty' => 'Ingresa entre 1 y 5000 unidades enteras por recepción.'], 'id' => null];
+        }
+        $input['received_qty'] = 1.0;
+        $input['weight_kg'] = 0.0;
+        $input['reception_mode'] = 'QUANTITY';
+        $ownsTransaction = !$this->pdo->inTransaction();
+        if ($ownsTransaction) {
+            $this->pdo->beginTransaction();
+        }
+        try {
+            $ids = [];
+            for ($i = 0; $i < (int)$quantity; $i++) {
+                $result = $this->createRoll($input);
+                if (!$result['ok']) {
+                    if ($ownsTransaction) {
+                        $this->pdo->rollBack();
+                    }
+                    return $result;
+                }
+                $ids[] = (int)$result['id'];
+            }
+            if ($ownsTransaction) {
+                $this->pdo->commit();
+            }
+            return ['ok' => true, 'errors' => [], 'id' => $ids[0], 'ids' => $ids];
+        } catch (Throwable $e) {
+            if ($ownsTransaction && $this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
             throw $e;
         }
     }

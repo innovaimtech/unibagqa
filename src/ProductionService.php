@@ -9755,6 +9755,11 @@ final class ProductionService
 
             // 2. Dar de alta los rollos de subproductos cortados
             $prodItems = [];
+            $totalScrappedManillasAmt = 0;
+            $totalScrappedManillasKg = 0.0;
+            $scrappedManillasDetails = [];
+            $generalMermaKg = (float)str_replace(',', '.', (string)($postData['itemmermakg'] ?? 0));
+
             foreach ($postData as $reqKey => $val) {
                 if (str_starts_with($reqKey, 'stockplustotalkg_')) {
                     $idx = (int)substr($reqKey, strlen('stockplustotalkg_'));
@@ -9770,6 +9775,26 @@ final class ProductionService
                         continue;
                     }
 
+                    // Manillas a merma seleccionadas por el operador (por bobina sucia o defecto)
+                    $manillasMermaAmt = 0;
+                    if ($destType === 'handle') {
+                        $manillasMermaAmt = max(0, min($reboAmt, (int)($postData["manillas_merma_amt_{$idx}"] ?? 0)));
+                        if ($manillasMermaAmt === 0 && !empty($postData['total_manillas_merma_amt'])) {
+                            $manillasMermaAmt = max(0, min($reboAmt, (int)$postData['total_manillas_merma_amt']));
+                        }
+                    }
+
+                    $unitKg = $reboAmt > 0 ? round($destUseKg / $reboAmt, 2) : 0.0;
+                    $usableAmt = max(0, $reboAmt - $manillasMermaAmt);
+                    $scrappedKg = round($manillasMermaAmt * $unitKg, 2);
+                    $usableKg = round($usableAmt * $unitKg, 2);
+
+                    if ($manillasMermaAmt > 0) {
+                        $totalScrappedManillasAmt += $manillasMermaAmt;
+                        $totalScrappedManillasKg += $scrappedKg;
+                        $scrappedManillasDetails[] = "{$manillasMermaAmt}x Manillas {$destDims}cm ({$scrappedKg} Kg)";
+                    }
+
                     // Si no tiene destItemId, buscar si existe un ítem con ese ancho y color, o crearlo
                     if ($destItemId <= 0) {
                         $destItemId = $this->findOrCreateCutItem($itemSel, $destDims, $destLargo, $userId);
@@ -9783,19 +9808,23 @@ final class ProductionService
                         $destBaseKg = (float)($stmtDI->fetchColumn() ?: 0);
                     }
                     if ($destBaseKg <= 0) {
-                        $destBaseKg = round($destUseKg / $reboAmt, 2);
+                        $destBaseKg = $unitKg > 0 ? $unitKg : 1.0;
                     }
 
-                    $destUnits = round($destUseKg / $destBaseKg, 10);
-                    if ($destUnits <= 0) {
-                        $destUnits = $reboAmt;
+                    $destUnits = round($usableKg / $destBaseKg, 10);
+                    if ($destUnits <= 0 && $usableAmt > 0) {
+                        $destUnits = $usableAmt;
                     }
 
                     $prodItems[] = [
                         'dest_itemid' => $destItemId,
                         'dest_units' => $destUnits,
-                        'item_reboprod_amt' => $reboAmt,
-                        'item_reboprod_unitkg' => round($destUseKg / $reboAmt, 2),
+                        'item_reboprod_amt' => $usableAmt,
+                        'total_cut_amt' => $reboAmt,
+                        'scrapped_amt' => $manillasMermaAmt,
+                        'scrapped_kg' => $scrappedKg,
+                        'usable_kg' => $usableKg,
+                        'item_reboprod_unitkg' => $unitKg,
                         'dest_dims' => $destDims,
                         'dest_largo' => $destLargo,
                         'destino_label' => $destinoLabel,
@@ -9805,7 +9834,9 @@ final class ProductionService
             }
 
             // Insertar cabecera e ítems de entrada (stk_negative = 0, issue 20 = Generado por producción)
-            if (!empty($prodItems)) {
+            // Solo dar de alta los ítems que tengan rollos útiles (usableAmt > 0)
+            $stockableItems = array_filter($prodItems, fn($p) => ($p['item_reboprod_amt'] ?? 0) > 0 && ($p['dest_units'] ?? 0) > 0);
+            if (!empty($stockableItems)) {
                 $stkNumIn = $this->generateNextStockChangeNumber($companyId);
                 $stmtSCIn = $this->erpPdo->prepare("
                     INSERT INTO stockchanges
@@ -9836,7 +9867,7 @@ final class ProductionService
                 $stkIdIn = (int)$this->erpPdo->lastInsertId();
 
                 $pos = 0;
-                foreach ($prodItems as $pRow) {
+                foreach ($stockableItems as $pRow) {
                     $this->erpPdo->prepare("
                         INSERT INTO stockchanges_items
                         (stk_id, item_id, item_pos, item_amount, item_type, item_st_id,
@@ -9874,9 +9905,9 @@ final class ProductionService
             }
 
             // Registrar evento único y claro en la OT para seguimiento y trazabilidad (sin duplicidad de materiales)
+            $totalProcessMermaKg = round($generalMermaKg + $totalScrappedManillasKg, 2);
             if ($workerOtId > 0) {
                 try {
-                    $mermaKg = (float)str_replace(',', '.', (string)($postData['itemmermakg'] ?? 0));
                     $totalCuts = count($prodItems);
 
                     // Resumen detallado y profesional del proceso de corte/rebobinado
@@ -9896,7 +9927,10 @@ final class ProductionService
                         ? "Bobina virgen TEL: {$itemSel['item_number_prod']} ({$useKgAmt} Kg consumidos)"
                         : "Bobina procesada previa: {$itemSel['item_number_prod']} ({$useKgAmt} Kg procesados)";
 
-                    $prodComments = "{$taskName} finalizado: {$originText} -> Obtenidos {$totalProducedRolls} rollos [{$cutsText}], Merma: {$mermaKg} Kg";
+                    $prodComments = "{$taskName} finalizado: {$originText} -> Obtenidos {$totalProducedRolls} rollos útiles [{$cutsText}]. Merma total: {$totalProcessMermaKg} Kg";
+                    if ($totalScrappedManillasAmt > 0) {
+                        $prodComments .= " (incluye {$totalScrappedManillasAmt} manillas descartadas a merma por bobina sucia: {$totalScrappedManillasKg} Kg)";
+                    }
 
                     // Un solo evento de producción ('prod') con estado finalizado y detalle completo
                     $this->erpPdo->prepare("
@@ -9908,7 +9942,7 @@ final class ProductionService
                         ':ot_id' => $workerOtId,
                         ':amt' => $totalProducedRolls > 0 ? $totalProducedRolls : 1,
                         ':kg' => $useKgAmt,
-                        ':merma' => $mermaKg,
+                        ':merma' => $totalProcessMermaKg,
                         ':now' => $now,
                         ':comments' => $prodComments,
                     ]);
@@ -9946,7 +9980,8 @@ final class ProductionService
 
                     // Generar bobinas hijas cortadas (CUT) en TRZ
                     foreach ($prodItems as $pRow) {
-                        $reboAmt = (int)($pRow['item_reboprod_amt'] ?? 1);
+                        $usableAmt = (int)($pRow['item_reboprod_amt'] ?? 0);
+                        $scrappedAmt = (int)($pRow['scrapped_amt'] ?? 0);
                         $unitKg = (float)($pRow['item_reboprod_unitkg'] ?? 0);
                         $widthMm = (int)round(($pRow['dest_dims'] ?? 0) * 10);
                         $meters = (float)($pRow['dest_largo'] ?? 0);
@@ -9974,7 +10009,8 @@ final class ProductionService
                             }
                         } catch (Throwable) {}
 
-                        for ($k = 1; $k <= $reboAmt; $k++) {
+                        // 1. Rollos útiles recibidos en bodega 3000
+                        for ($k = 1; $k <= $usableAmt; $k++) {
                             try {
                                 $stmtMax = $this->trzPdo->query("SELECT MAX(id) FROM rolls");
                                 $nextNum = ((int)$stmtMax->fetchColumn()) + 1;
@@ -10045,6 +10081,48 @@ final class ProductionService
                                 }
                             } catch (Throwable) {}
                         }
+
+                        // 2. Trazabilidad de manillas descartadas a merma (por bobina sucia/defecto)
+                        for ($m = 1; $m <= $scrappedAmt; $m++) {
+                            try {
+                                $stmtMaxM = $this->trzPdo->query("SELECT MAX(id) FROM rolls");
+                                $nextNumM = ((int)$stmtMaxM->fetchColumn()) + 1;
+                                $mermaRollCode = sprintf('ROLL-MAN-MERMA-%05d', $nextNumM);
+
+                                $insRollM = $this->trzPdo->prepare("
+                                    INSERT INTO rolls
+                                    (roll_code, sku_id, warehouse_id, weight_kg, received_qty, width_mm, meters, status, parent_roll_id, source_work_order_id, process_stage)
+                                    VALUES
+                                    (:code, :sku, 1, :weight, 0.000, :width, :meters, 'CONSUMED', :parent, :wo_id, 'CUT')
+                                ");
+                                $insRollM->execute([
+                                    ':code' => $mermaRollCode,
+                                    ':sku' => $skuId,
+                                    ':weight' => number_format($unitKg, 3, '.', ''),
+                                    ':width' => $widthMm > 0 ? $widthMm : null,
+                                    ':meters' => $meters > 0 ? $meters : null,
+                                    ':parent' => $rollIdPost > 0 ? $rollIdPost : null,
+                                    ':wo_id' => $workerOtId > 0 ? $workerOtId : null,
+                                ]);
+                                $mermaRollId = (int)$this->trzPdo->lastInsertId();
+
+                                $stmtEvtScrap = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
+                                $stmtEvtScrap->execute([
+                                    ':type' => 'HANDLE_ROLL_SCRAPPED_MERMA',
+                                    ':payload' => json_encode([
+                                        'roll_id' => $mermaRollId,
+                                        'roll_code' => $mermaRollCode,
+                                        'parent_roll_id' => $rollIdPost,
+                                        'dest_dims' => $pRow['dest_dims'],
+                                        'weight_kg' => $unitKg,
+                                        'reason' => 'BOBINA_SUCIA_MERMA_CORTE',
+                                        'source_work_order_id' => $workerOtId,
+                                        'operator_id' => $userId,
+                                        'timestamp' => $now,
+                                    ], JSON_UNESCAPED_UNICODE),
+                                ]);
+                            } catch (Throwable) {}
+                        }
                     }
 
                     // Las manillas se etiquetan y gestionan bobina por bobina (sin consolidar en pallet)
@@ -10061,6 +10139,9 @@ final class ProductionService
             'created_bag_rolls' => $createdBagRolls,
             'created_handle_rolls' => $createdHandleRolls,
             'handle_pallet' => $createdHandlePallet,
+            'manillas_merma_amt' => $totalScrappedManillasAmt,
+            'manillas_merma_kg' => $totalScrappedManillasKg,
+            'total_merma_kg' => $totalProcessMermaKg ?? $generalMermaKg,
         ];
     }
 
@@ -10087,6 +10168,96 @@ final class ProductionService
         }
 
         return $destDims > 0 && $destDims <= 15.0;
+    }
+
+    /**
+     * Descarta una bobina generada a merma (por sucia, falla de corte o defecto).
+     * Marca el roll en TRZ como CONSUMED / merma, descuenta el inventario de Bodega 3000 si estaba ingresado,
+     * y genera el evento de merma en la OT del ERP y la bitácora TRZ.
+     */
+    public function scrapRollToMerma(int $rollId, int $userId, int $workOrderId, string $reason = 'BOBINA_SUCIA'): array
+    {
+        if ($rollId <= 0) {
+            return ['ok' => false, 'error' => 'ID de bobina inválido'];
+        }
+
+        $stmt = $this->trzPdo->prepare("SELECT r.*, s.code AS sku_code, s.description AS sku_desc FROM rolls r LEFT JOIN skus s ON s.id = r.sku_id WHERE r.id = :id LIMIT 1");
+        $stmt->execute([':id' => $rollId]);
+        $roll = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$roll) {
+            return ['ok' => false, 'error' => 'Bobina no encontrada'];
+        }
+
+        if ($roll['status'] === 'CONSUMED') {
+            return ['ok' => true, 'already_scrapped' => true, 'roll_code' => $roll['roll_code'], 'weight_kg' => (float)$roll['weight_kg']];
+        }
+
+        $weightKg = (float)($roll['weight_kg'] ?? 0);
+        $rollCode = (string)($roll['roll_code'] ?? ('#' . $rollId));
+        $now = date('Y-m-d H:i:s');
+
+        // 1. Actualizar estado en TRZ
+        $upd = $this->trzPdo->prepare("UPDATE rolls SET status = 'CONSUMED' WHERE id = :id");
+        $upd->execute([':id' => $rollId]);
+
+        // 2. Si la bobina estaba en Bodega 3000 (almacén de producción), descontar en ERP si corresponde
+        $erpStorehouseId = 16; // 3000 INSUMOS EN PRODUCCION
+        if ($this->erpPdo && !empty($roll['sku_code']) && $weightKg > 0) {
+            try {
+                $stItem = $this->erpPdo->prepare("SELECT item_id FROM items WHERE item_code = :code LIMIT 1");
+                $stItem->execute([':code' => $roll['sku_code']]);
+                $erpItemId = (int)$stItem->fetchColumn();
+                if ($erpItemId > 0) {
+                    $stDeduct = $this->erpPdo->prepare("UPDATE item_shops_storehouses SET iss_inventory = GREATEST(0, iss_inventory - :amt) WHERE item_id = :item_id AND st_id = :st_id");
+                    $stDeduct->execute([
+                        ':amt' => $weightKg,
+                        ':item_id' => $erpItemId,
+                        ':st_id' => $erpStorehouseId,
+                    ]);
+                }
+            } catch (Throwable) {}
+        }
+
+        // 3. Registrar evento en TRZ
+        try {
+            $stmtEvt = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
+            $stmtEvt->execute([
+                ':type' => 'ROLL_SCRAPPED_MERMA',
+                ':payload' => json_encode([
+                    'roll_id' => $rollId,
+                    'roll_code' => $rollCode,
+                    'weight_kg' => $weightKg,
+                    'reason' => $reason,
+                    'source_work_order_id' => $workOrderId,
+                    'operator_id' => $userId,
+                    'timestamp' => $now,
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+        } catch (Throwable) {}
+
+        // 4. Registrar evento en ERP (prod_worker_ot_events)
+        if ($this->erpPdo && $workOrderId > 0) {
+            try {
+                $reasonText = ($reason === 'BOBINA_SUCIA' || str_contains($reason, 'sucia')) ? 'Bobina sucia / descarte' : 'Merma de corte / defecto';
+                $comment = "Merma de corte: Se descartó bobina {$rollCode} (" . number_format($weightKg, 2, ',', '.') . " Kg) por {$reasonText}. No se emitió etiqueta.";
+                $stEvt = $this->erpPdo->prepare("INSERT INTO prod_worker_ot_events (ot_id, worker_id, event_type, event_date, event_comment) VALUES (:ot_id, :worker_id, 'materiales', :dt, :comment)");
+                $stEvt->execute([
+                    ':ot_id' => $workOrderId,
+                    ':worker_id' => $userId,
+                    ':dt' => $now,
+                    ':comment' => $comment,
+                ]);
+            } catch (Throwable) {}
+        }
+
+        return [
+            'ok' => true,
+            'roll_id' => $rollId,
+            'roll_code' => $rollCode,
+            'weight_kg' => $weightKg,
+            'reason' => $reason,
+        ];
     }
 
     /**

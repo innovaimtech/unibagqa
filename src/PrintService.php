@@ -130,6 +130,38 @@ final class PrintService
         return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage());
     }
 
+    public function printRollLabels(array $rolls): array
+    {
+        $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
+        if ($mode !== 'http') {
+            return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
+        }
+
+        $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
+        $printerName = $this->getConfiguredPrinterName();
+        if ($printerName === '') {
+            return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
+        }
+
+        $copies = (int)($this->env['PRINT_COPIES'] ?? 1);
+        if ($copies <= 0) {
+            $copies = 1;
+        }
+
+        $combinedCommand = '';
+        foreach ($rolls as $roll) {
+            if (!empty($roll)) {
+                $combinedCommand .= $this->buildRollCommand($roll) . "\n";
+            }
+        }
+
+        if (trim($combinedCommand) === '') {
+            return ['ok' => false, 'error' => 'No hay etiquetas para imprimir.'];
+        }
+
+        return $this->sendRaw($combinedCommand, $copies, $printerName, $url, $this->getPrintLanguage());
+    }
+
     public function printWorkOrderBoxLabel(array $workOrder, ?array $finish = null): array
     {
         $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
@@ -330,6 +362,22 @@ final class PrintService
     {
         $value = (int)($this->env['PRINT_EPL_DENSITY'] ?? 14);
         return max(0, min(15, $value));
+    }
+
+    private function getEplSpeed(): int
+    {
+        $value = (int)($this->env['PRINT_EPL_SPEED'] ?? 2);
+        return max(1, min(6, $value));
+    }
+
+    private function buildEplDeviceSettings(): array
+    {
+        // Match the Windows driver without overriding device heat/speed settings.
+        // Igualar al controlador sin imponer calor/velocidad al equipo.
+        if ((string)($this->env['PRINT_EPL_USE_DEVICE_SETTINGS'] ?? '0') === '1') {
+            return ['O', 'JF', 'WN'];
+        }
+        return ['D' . $this->getEplDensity(), 'S' . $this->getEplSpeed()];
     }
 
     private function getZplDarkness(): int
@@ -619,6 +667,9 @@ final class PrintService
 
     private function buildRollEpl(array $roll): string
     {
+        // #region debug-point A:raw-settings
+        @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'hprt-raw-noise', 'runId' => 'post-fix', 'hypothesisId' => 'A', 'location' => 'PrintService::buildRollEpl', 'msg' => '[DEBUG] RAW settings', 'data' => ['settings' => $this->buildEplDeviceSettings(), 'printer' => $this->getConfiguredPrinterName(), 'media' => 'Q560,24']]), 'timeout' => 0.2]]));
+        // #endregion
         $id = (string)($roll['id'] ?? '');
         $rollCode = trim((string)($roll['roll_code'] ?? ''));
         $barcodeValue = strtoupper($this->t($rollCode !== '' ? $rollCode : $id));
@@ -654,7 +705,7 @@ final class PrintService
             'N',
             'q800',
             'Q560,24',
-            'D' . $this->getEplDensity(),
+            ...$this->buildEplDeviceSettings(),
             'LO18,80,776,2',
             'LO18,196,776,1',
             'LO18,272,776,1',
@@ -948,7 +999,7 @@ final class PrintService
             'N',
             'q800',
             'Q560,24',
-            'D' . $this->getEplDensity(),
+            ...$this->buildEplDeviceSettings(),
             'LO20,68,750,2',
             'LO20,136,750,1',
             'LO20,268,750,1',
@@ -987,7 +1038,7 @@ final class PrintService
             'N',
             'q800',
             'Q560,24',
-            'D' . $this->getEplDensity(),
+            ...$this->buildEplDeviceSettings(),
             'LO20,68,750,2',
             'LO20,136,750,1',
             'LO20,286,750,1',
@@ -1045,7 +1096,7 @@ final class PrintService
             'N',
             'q800',
             'Q560,24',
-            'D' . $this->getEplDensity(),
+            ...$this->buildEplDeviceSettings(),
             'LO20,68,750,2',
             'LO20,136,750,1',
             'LO20,296,750,1',

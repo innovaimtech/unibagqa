@@ -111,33 +111,25 @@ function handleApiRoutes(
         }
 
         $rollId = (int)$result['id'];
-        $printed = false;
-        $printError = null;
-        if ($printer->isEnabled()) {
-            // Impresión “best effort”: la creación de la bobina no depende de imprimir.
-            // ---
-            // Best-effort printing: roll creation does not depend on printing.
-            $roll = $service->getRoll($rollId);
-            if (is_array($roll)) {
-                $printResult = $printer->printRollLabel($roll);
-                $printed = ($printResult['ok'] ?? false) === true;
-                $printError = $printed ? null : (string)($printResult['error'] ?? 'No se pudo imprimir.');
-            } else {
-                $printError = 'No se encontró la bobina para imprimir.';
-            }
-        }
-
+        $batch = saveReceptionLabelBatch($result, $service, $printer);
+        $savedBatch = $_SESSION['reception_label_batches'][$batch['token']];
+        $roll = $service->getRoll($rollId);
         $rollCode = is_array($roll) ? (string)($roll['roll_code'] ?? '') : '';
+        $labelUrl = count($savedBatch['ids']) > 1
+            ? '/reception/labels/' . $batch['token']
+            : '/rolls/' . $rollId . '/label';
 
         echo json_encode([
             'ok' => true,
             'id' => $rollId,
+            'ids' => $savedBatch['ids'],
             'roll_code' => $rollCode !== '' ? $rollCode : ('#' . $rollId),
-            'label_url' => '/rolls/' . $rollId . '/label',
-            'print_url' => '/rolls/' . $rollId . '/label?auto_print=1',
+            'label_url' => $labelUrl,
+            'print_url' => $labelUrl . '?auto_print=1',
             'server_print_url' => '/rolls/' . $rollId . '/label?server_print=1',
-            'printed' => $printed,
-            'print_error' => $printError,
+            'printed' => $batch['printed'] === '1',
+            'print_error' => $savedBatch['print_error'],
+            'sync_error' => $result['sync_error'] ?? null,
         ], JSON_UNESCAPED_UNICODE);
         return true;
     }

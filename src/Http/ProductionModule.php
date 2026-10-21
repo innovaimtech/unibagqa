@@ -1327,6 +1327,40 @@ function handleProductionRoutes(
         return true;
     }
 
+    if (($path === '/production/work-orders/rolls/scrap' || $path === '/rolls/scrap') && $method === 'POST') {
+        requireCsrf();
+        $rollId = (int)($_REQUEST['roll_id'] ?? 0);
+        $agId = (int)($_REQUEST['agid'] ?? 0);
+        $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
+        $reason = trim((string)($_REQUEST['reason'] ?? 'BOBINA_SUCIA'));
+        $returnTo = trim((string)($_REQUEST['return_to'] ?? ''));
+
+        if ($workerOtId <= 0 && $agId > 0) {
+            $openOt = $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
+            if ($openOt !== null) {
+                $workerOtId = (int)($openOt['id'] ?? 0);
+            }
+        }
+
+        $res = $prodService->scrapRollToMerma($rollId, $workerId, $workerOtId, $reason);
+
+        $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') || isset($_REQUEST['ajax']);
+        if ($isAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode($res, JSON_UNESCAPED_UNICODE);
+            return true;
+        }
+
+        $dest = $returnTo !== '' ? $returnTo : ('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod');
+        $sep = str_contains($dest, '?') ? '&' : '?';
+        if ($res['ok']) {
+            redirectResponse($dest . $sep . 'scrapped=1&scrapped_code=' . urlencode((string)($res['roll_code'] ?? '')));
+        } else {
+            redirectResponse($dest . $sep . 'error=' . urlencode((string)($res['error'] ?? 'Error al descartar')));
+        }
+        return true;
+    }
+
     // Registro de Desmontaje y Salida de Bobina (Peso Bobina, mermas por tipo, sobrante trazable)
     if ($path === '/production/work-orders/materials/consume' && $method === 'POST') {
         requireCsrf();
@@ -1529,7 +1563,11 @@ function handleProductionRoutes(
                     : (!empty($resRebo['created_rolls'][0]['id']) ? (int)$resRebo['created_rolls'][0]['id'] : (!empty($resRebo['created_roll']['id']) ? (int)$resRebo['created_roll']['id'] : 0));
                 $palletId = !empty($resRebo['handle_pallet']['id']) ? (int)$resRebo['handle_pallet']['id'] : 0;
                 $handleCount = !empty($resRebo['created_handle_rolls']) ? count($resRebo['created_handle_rolls']) : 0;
-                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod&rebo_done=1&is_empalme=' . $isEmpalme . '&is_rebobinado=' . $isRebobinado . '&cuts=' . $cutCount . '&first_cut=' . $firstBagRollId . '&pallet_id=' . $palletId . '&handle_rolls=' . $handleCount);
+                $mMermaAmt = (int)($resRebo['manillas_merma_amt'] ?? 0);
+                $mMermaKg = (float)($resRebo['manillas_merma_kg'] ?? 0);
+                $cutRollIds = array_column($resRebo['created_rolls'] ?? [], 'id');
+                $cutIdsParam = !empty($cutRollIds) ? implode(',', $cutRollIds) : ($firstBagRollId > 0 ? (string)$firstBagRollId : '');
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod&rebo_done=1&is_empalme=' . $isEmpalme . '&is_rebobinado=' . $isRebobinado . '&cuts=' . $cutCount . '&first_cut=' . $firstBagRollId . '&cut_ids=' . urlencode($cutIdsParam) . '&pallet_id=' . $palletId . '&handle_rolls=' . $handleCount . '&merma_manillas=' . $mMermaAmt . '&merma_manillas_kg=' . $mMermaKg);
                 return true;
             }
         }
@@ -2849,7 +2887,11 @@ function renderProductionOperatorConsole(
                 : (!empty($resRebo['created_rolls'][0]['id']) ? (int)$resRebo['created_rolls'][0]['id'] : (!empty($resRebo['created_roll']['id']) ? (int)$resRebo['created_roll']['id'] : 0));
             $palletId = !empty($resRebo['handle_pallet']['id']) ? (int)$resRebo['handle_pallet']['id'] : 0;
             $handleCount = !empty($resRebo['created_handle_rolls']) ? count($resRebo['created_handle_rolls']) : 0;
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod&rebo_done=1&is_empalme=' . $isEmpalme . '&is_rebobinado=' . $isRebobinado . '&cuts=' . $cutCount . '&first_cut=' . $firstCutId . '&pallet_id=' . $palletId . '&handle_rolls=' . $handleCount);
+            $mMermaAmt = (int)($resRebo['manillas_merma_amt'] ?? 0);
+            $mMermaKg = (float)($resRebo['manillas_merma_kg'] ?? 0);
+            $cutRollIds = array_column($resRebo['created_rolls'] ?? [], 'id');
+            $cutIdsParam = !empty($cutRollIds) ? implode(',', $cutRollIds) : ($firstCutId > 0 ? (string)$firstCutId : '');
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=reboprod&rebo_done=1&is_empalme=' . $isEmpalme . '&is_rebobinado=' . $isRebobinado . '&cuts=' . $cutCount . '&first_cut=' . $firstCutId . '&cut_ids=' . urlencode($cutIdsParam) . '&pallet_id=' . $palletId . '&handle_rolls=' . $handleCount . '&merma_manillas=' . $mMermaAmt . '&merma_manillas_kg=' . $mMermaKg);
             return;
         }
 
@@ -9620,6 +9662,9 @@ function renderProductionOperatorConsole(
                         <?php if (!empty($_GET['handle_rolls'])): ?>
                             <span> (Incluye <b><?= (int)$_GET['handle_rolls'] ?></b> bobinas de manillas etiquetadas una por una).</span>
                         <?php endif; ?>
+                        <?php if (!empty($_GET['merma_manillas'])): ?>
+                            <span style="color:#C0392B;font-weight:bold"> (<b><?= (int)$_GET['merma_manillas'] ?></b> manillas cargadas a merma por bobina sucia / descarte: <?=number_format((float)($_GET['merma_manillas_kg'] ?? 0), 2, ',', '.')?> Kg).</span>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
                 <div>
@@ -9818,25 +9863,33 @@ function renderProductionOperatorConsole(
                 return Math.round(num * factor) / factor;
             }
             function recalcEmpalme() {
-                var in1 = parseFloat(($('#ingresokgamt_1').val() || '0').replace(/,/g, "."));
-                var sob1 = parseFloat(($('#sobranteamt_1').val() || '0').replace(/,/g, "."));
-                if (isNaN(in1)) in1 = 0; if (isNaN(sob1)) sob1 = 0;
+                var in1El = document.getElementById('ingresokgamt_1');
+                var sob1El = document.getElementById('sobranteamt_1');
+                var use1El = document.getElementById('useamt_1');
+                var in2El = document.getElementById('ingresokgamt_2');
+                var sob2El = document.getElementById('sobranteamt_2');
+                var use2El = document.getElementById('useamt_2');
+                var mermaEl = document.getElementById('itemmermakg');
+                var outEl = document.getElementById('empalme_output_kg');
+
+                var in1 = in1El ? parseFloat(in1El.value.replace(/,/g, '.')) || 0 : 0;
+                var sob1 = sob1El ? parseFloat(sob1El.value.replace(/,/g, '.')) || 0 : 0;
                 var u1 = Math.max(0, in1 - sob1);
-                $('#useamt_1').val(roundToDecimal(u1, 2).toFixed(2).replace(/\./g, ","));
+                if (use1El) use1El.value = roundToDecimal(u1, 2).toFixed(2).replace(/\./g, ',');
 
-                var in2 = parseFloat(($('#ingresokgamt_2').val() || '0').replace(/,/g, "."));
-                var sob2 = parseFloat(($('#sobranteamt_2').val() || '0').replace(/,/g, "."));
-                if (isNaN(in2)) in2 = 0; if (isNaN(sob2)) sob2 = 0;
+                var in2 = in2El ? parseFloat(in2El.value.replace(/,/g, '.')) || 0 : 0;
+                var sob2 = sob2El ? parseFloat(sob2El.value.replace(/,/g, '.')) || 0 : 0;
                 var u2 = Math.max(0, in2 - sob2);
-                $('#useamt_2').val(roundToDecimal(u2, 2).toFixed(2).replace(/\./g, ","));
+                if (use2El) use2El.value = roundToDecimal(u2, 2).toFixed(2).replace(/\./g, ',');
 
-                var merma = parseFloat(($('#itemmermakg').val() || '0').replace(/,/g, "."));
-                if (isNaN(merma)) merma = 0;
+                var merma = mermaEl ? parseFloat(mermaEl.value.replace(/,/g, '.')) || 0 : 0;
                 var netOut = Math.max(0, (u1 + u2) - merma);
-                $('#empalme_output_kg').text(roundToDecimal(netOut, 2).toFixed(2).replace(/\./g, ",") + ' Kg');
+                if (outEl) outEl.textContent = roundToDecimal(netOut, 2).toFixed(2).replace(/\./g, ',') + ' Kg';
 
-                $('#idx_btn_term').hide(0);
-                $('#idx_btn_save').show(0);
+                var btnTerm = document.getElementById('idx_btn_term');
+                var btnSave = document.getElementById('idx_btn_save');
+                if (btnTerm) btnTerm.style.display = 'none';
+                if (btnSave) btnSave.style.display = 'inline-block';
             }
             </script>
 
@@ -10209,33 +10262,101 @@ function renderProductionOperatorConsole(
             ?>
 
             <script language="Javascript">
-            function recalcUsedAmt(xlineid) {
-                var itemregkg = parseFloat($('#ingresokgamt_' + xlineid).val().replace(/,/g, "."));
-                var sobranteamt = parseFloat($('#sobranteamt_' + xlineid).val().replace(/,/g, "."));
-                if (isNaN(sobranteamt)) sobranteamt = 0;
-                if (isNaN(itemregkg)) itemregkg = 0;
-                var useamt = itemregkg - sobranteamt;
-                if (useamt < 0) useamt = 0;
-                $('#useamt_' + xlineid).val(roundToDecimal(useamt, 2).toFixed(2).replace(/\./g, ","));
-                $('#idx_btn_term').hide(0);
-                $('#idx_btn_save').show(0);
+            window.cutsFormIsDirty = false;
+
+            function markCutsFormModified(origin) {
+                window.cutsFormIsDirty = true;
+                var btnTerm = document.getElementById('idx_btn_term');
+                var btnSave = document.getElementById('idx_btn_save');
+                var warnBox = document.getElementById('idx_update_warning');
+                var statusText = document.getElementById('idx_width_status_text');
+
+                if (btnTerm) {
+                    btnTerm.style.display = 'none';
+                }
+                if (btnSave) {
+                    btnSave.style.display = 'inline-flex';
+                    btnSave.style.backgroundColor = '#D97706';
+                    btnSave.style.color = '#FFFFFF';
+                }
+                if (warnBox) {
+                    warnBox.style.display = 'flex';
+                }
+                if (statusText) {
+                    statusText.style.color = '#D97706';
+                    statusText.innerHTML = '<i class="fa fa-exclamation-triangle"></i> Modificaciones pendientes. Presione <b>"Actualizar y Recalcular Distribución"</b> para validar el corte.';
+                }
             }
+
+            function submitReboRecalculate() {
+                var form = document.getElementById('xform_itemcalc') || document.xform_itemcalc;
+                if (!form) return;
+                if (form.rebocalc) form.rebocalc.value = '1';
+                if (form.rebofinalize) form.rebofinalize.value = '0';
+                form.submit();
+            }
+
+            function recalcUsedAmt(xlineid) {
+                var inEl = document.getElementById('ingresokgamt_' + xlineid);
+                var sobEl = document.getElementById('sobranteamt_' + xlineid);
+                var useEl = document.getElementById('useamt_' + xlineid);
+                if (!inEl || !sobEl || !useEl) return;
+
+                var inVal = parseFloat(inEl.value.replace(/,/g, '.')) || 0;
+                var sobVal = parseFloat(sobEl.value.replace(/,/g, '.')) || 0;
+                var useVal = Math.max(0, inVal - sobVal);
+                useEl.value = roundToDecimal(useVal, 2).toFixed(2).replace(/\./g, ',');
+                markCutsFormModified('useamt_' + xlineid);
+            }
+
             function roundToDecimal(num, decimalPlaces) {
                 const factor = Math.pow(10, decimalPlaces);
                 return Math.round(num * factor) / factor;
             }
-            function recalcTotalWidth() {}
+
+            function recalcTotalWidth() {
+                markCutsFormModified('total_width');
+            }
+
             function updateDestinoRow(idx) {
                 var sel = document.getElementById('rebo_destino_' + idx);
                 var badge = document.getElementById('badge_dest_' + idx);
-                if (!sel || !badge) return;
-                if (sel.value === 'bolsa') {
-                    badge.style.background = '#6C3483';
-                    badge.innerHTML = '<i class="fa fa-shopping-bag"></i> CUERPO BOLSA (ROLL-BOL-)';
-                } else {
-                    badge.style.background = '#1B4F72';
-                    badge.innerHTML = '<i class="fa fa-cut"></i> MANILLAS (ROLL-MAN-)';
+                var mermaWrap = document.getElementById('merma_manillas_wrap_' + idx);
+                var mermaInp = document.getElementById('manillas_merma_amt_' + idx);
+                if (!sel) return;
+                var isHandle = (sel.value === 'manilla');
+                if (badge) {
+                    if (!isHandle) {
+                        badge.style.background = '#6C3483';
+                        badge.innerHTML = '<i class="fa fa-shopping-bag"></i> CUERPO BOLSA (ROLL-BOL-)';
+                    } else {
+                        badge.style.background = '#1B4F72';
+                        badge.innerHTML = '<i class="fa fa-cut"></i> MANILLAS (ROLL-MAN-)';
+                    }
                 }
+                if (mermaWrap) {
+                    mermaWrap.style.display = isHandle ? 'flex' : 'none';
+                }
+                if (mermaInp && !isHandle) {
+                    mermaInp.value = '0';
+                }
+                markCutsFormModified('destino_' + idx);
+            }
+
+            function attachCutsFormListeners() {
+                var form = document.getElementById('xform_itemcalc');
+                if (!form) return;
+                var inputs = form.querySelectorAll('input[type="text"], input[type="number"], select');
+                inputs.forEach(function(el) {
+                    if (el.type === 'hidden' || el.name === 'rebocalc' || el.name === 'rebofinalize') return;
+                    el.addEventListener('input', function() { markCutsFormModified(el.name); });
+                    el.addEventListener('change', function() { markCutsFormModified(el.name); });
+                });
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', attachCutsFormListeners);
+            } else {
+                attachCutsFormListeners();
             }
             </script>
 
@@ -10312,19 +10433,21 @@ function renderProductionOperatorConsole(
                         <colgroup>
                             <col width="110">
                             <col width="110">
-                            <col width="120">
+                            <col width="140">
                         </colgroup>
                         <tr>
                             <td width="110" style="font-weight:bold;color:#2C3E50">Merma Corte:</td>
                             <td width="110">
                                 <input type="text" class="inptxt" name="itemmermakg" id="itemmermakg" style="width:100%;text-align:center"
-                                onkeyup="$('#idx_btn_term').hide(0);$('#idx_btn_save').show(0);"
+                                oninput="markCutsFormModified('itemmermakg');"
                                 value="<?=$itemMermaKg > 0 ? number_format($itemMermaKg, 2, ',', '.') : ''?>"
                                 placeholder="0,00 Kg">
                             </td>
                             <td>
-                                <input type="button" class="btngrey" value="Calcular" style="padding:6px 14px;border:0px;font-size:14px;cursor:pointer"
-                                onclick="document.xform_itemcalc.rebocalc.value='1'; document.xform_itemcalc.rebofinalize.value='0'; document.xform_itemcalc.submit();">
+                                <button type="button" class="btngrey" style="padding:6px 14px;border:0px;font-size:13px;cursor:pointer;border-radius:4px;display:inline-flex;align-items:center;gap:6px"
+                                onclick="submitReboRecalculate();">
+                                    <i class="fa fa-calculator"></i> Calcular
+                                </button>
                             </td>
                         </tr>
                         </table>
@@ -10340,17 +10463,18 @@ function renderProductionOperatorConsole(
 
                         <table border="0" width="100%" cellpadding="6" cellspacing="0">
                         <tr>
-                            <td class="tdheader" width="70" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cant.</td>
-                            <td class="tdheader" width="170" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Tipo</td>
-                            <td class="tdheader" width="170" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Trazabilidad</td>
-                            <td align="center" class="tdheader" width="70" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Material</td>
+                            <td class="tdheader" width="65" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Cant.</td>
+                            <td class="tdheader" width="155" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Tipo</td>
+                            <td class="tdheader" width="165" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Trazabilidad</td>
+                            <td align="center" class="tdheader" width="65" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Material</td>
                             <td align="left" class="tdheader" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Color</td>
-                            <td align="center" class="tdheader" width="60" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">GSM</td>
-                            <td align="center" class="tdheader" width="75" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
-                            <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Total</td>
-                            <td align="center" class="tdheader" width="75" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Unit.</td>
-                            <td align="center" class="tdheader" width="75" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Merma</td>
-                            <td align="center" class="tdheader" width="80" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+                            <td align="center" class="tdheader" width="55" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">GSM</td>
+                            <td align="center" class="tdheader" width="70" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Ancho</td>
+                            <td align="center" class="tdheader" width="75" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Total</td>
+                            <td align="center" class="tdheader" width="70" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Kg/Unit.</td>
+                            <td align="center" class="tdheader" width="85" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD" title="Distribución de merma de acorde al peso del producto">Kg/Merma</td>
+                            <td align="center" class="tdheader" width="115" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD" title="Manillas que se van a merma por bobina sucia o descarte">Merma (Manillas)</td>
+                            <td align="center" class="tdheader" width="75" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
                         </tr>
                         <?php
                         $cutsList = [];
@@ -10403,17 +10527,17 @@ function renderProductionOperatorConsole(
                             ];
                         }
 
-                        $x = 0;
-                        $_TOTAL_WIDTH = 0.0;
                         $rollWidth = (float)($itemsel['item_reg_width'] ?? 100);
                         if ($rollWidth <= 0) $rollWidth = 100.0;
 
-                        foreach ($cutsList as $reboval):
-                            $cReqAmt = isset($_REQUEST["reboamt_{$x}"]) ? (int)$_REQUEST["reboamt_{$x}"] : (int)$reboval['rollo_amt'];
-                            $cReqDims = isset($_REQUEST["rollo_dims_{$x}"]) ? (float)str_replace(',', '.', (string)$_REQUEST["rollo_dims_{$x}"]) : (float)$reboval['rollo_dims'];
-                            $rawDest = mb_strtolower(trim((string)($_REQUEST["rebo_destino_{$x}"] ?? ($reboval['destino'] ?? ''))));
+                        $_TOTAL_WIDTH = 0.0;
+                        $calculatedCuts = [];
 
-                            // Si el operador o la clasificación indica bolsa, es estrictamente CUERPO DE BOLSA
+                        foreach ($cutsList as $idxTemp => $rebovalTemp) {
+                            $cReqAmt = isset($_REQUEST["reboamt_{$idxTemp}"]) ? max(1, (int)$_REQUEST["reboamt_{$idxTemp}"]) : max(1, (int)$rebovalTemp['rollo_amt']);
+                            $cReqDims = isset($_REQUEST["rollo_dims_{$idxTemp}"]) ? (float)str_replace(',', '.', (string)$_REQUEST["rollo_dims_{$idxTemp}"]) : (float)$rebovalTemp['rollo_dims'];
+                            $rawDest = mb_strtolower(trim((string)($_REQUEST["rebo_destino_{$idxTemp}"] ?? ($rebovalTemp['destino'] ?? ''))));
+
                             if ($rawDest === 'bolsa' || $rawDest === '3000' || str_contains($rawDest, 'bolsa')) {
                                 $cDestino = 'bolsa';
                                 $isHandleCut = false;
@@ -10425,16 +10549,70 @@ function renderProductionOperatorConsole(
                                 $cDestino = $isHandleCut ? 'manilla' : 'bolsa';
                             }
 
-                            $_TOTAL_WIDTH += ($cReqAmt * $cReqDims);
+                            $cMermaAmt = 0;
+                            if ($isHandleCut) {
+                                $cMermaAmt = isset($_REQUEST["manillas_merma_amt_{$idxTemp}"]) ? max(0, min($cReqAmt, (int)$_REQUEST["manillas_merma_amt_{$idxTemp}"])) : 0;
+                            }
 
-                            $_LARGO = (float)($itemsel['item_reg_length'] ?? 0)
-                                - (($itemMermaKg * (float)($itemsel['item_reg_length'] ?? 0)) / $baseRegKg)
-                                - (($sobranteKg * (float)($itemsel['item_reg_length'] ?? 0)) / $baseRegKg)
-                                - (($origusediffamt * (float)($itemsel['item_reg_length'] ?? 0)) / $baseRegKg);
+                            $lineWidth = $cReqAmt * $cReqDims;
+                            $_TOTAL_WIDTH += $lineWidth;
 
-                            $_KG = (($cReqDims * ((float)($itemsel['item_reg_kg'] ?? 0) - $sobranteKg - $itemMermaKg - $origusediffamt)) / $rollWidth) * $cReqAmt;
-                            if ($_KG < 0) $_KG = 0;
-                            $unitKg = $cReqAmt > 0 ? ($_KG / $cReqAmt) : 0;
+                            $calculatedCuts[$idxTemp] = [
+                                'amt' => $cReqAmt,
+                                'dims' => $cReqDims,
+                                'destino' => $cDestino,
+                                'is_handle' => $isHandleCut,
+                                'merma_amt' => $cMermaAmt,
+                                'line_width' => $lineWidth,
+                            ];
+                        }
+
+                        $netProductsKg = max(0.0, $useamt - $itemMermaKg);
+                        $baseRegKg = (float)($itemsel['item_reg_kg'] ?? 1);
+                        if ($baseRegKg <= 0) $baseRegKg = 1.0;
+
+                        $_LARGO = (float)($itemsel['item_reg_length'] ?? 0)
+                            - (($itemMermaKg * (float)($itemsel['item_reg_length'] ?? 0)) / $baseRegKg)
+                            - (($sobranteKg * (float)($itemsel['item_reg_length'] ?? 0)) / $baseRegKg)
+                            - (($origusediffamt * (float)($itemsel['item_reg_length'] ?? 0)) / $baseRegKg);
+
+                        $totalScrappedManillasUnits = 0;
+                        $totalScrappedManillasKgSum = 0.0;
+                        $totalUsableRollsCount = 0;
+                        $totalUsableKgSum = 0.0;
+
+                        foreach ($calculatedCuts as $x => $cData):
+                            $cReqAmt = $cData['amt'];
+                            $cReqDims = $cData['dims'];
+                            $cDestino = $cData['destino'];
+                            $isHandleCut = $cData['is_handle'];
+                            $cMermaAmt = $cData['merma_amt'];
+                            $lineWidth = $cData['line_width'];
+
+                            // Proporción de este producto según su peso/ancho respecto a la bobina
+                            $productProportion = $rollWidth > 0 ? ($lineWidth / $rollWidth) : (1.0 / max(1, count($calculatedCuts)));
+
+                            // Kilos netos asignados a esta línea de corte
+                            $_KG = round($netProductsKg * $productProportion, 2);
+                            $unitKg = $cReqAmt > 0 ? round($_KG / $cReqAmt, 2) : 0.0;
+
+                            // Distribución de la Merma General de acorde al peso del producto:
+                            $lineGeneralMermaKg = round($itemMermaKg * $productProportion, 2);
+
+                            // Kilos de manillas descartadas a merma (por bobina sucia):
+                            $lineScrappedManillasKg = round($cMermaAmt * $unitKg, 2);
+
+                            // Merma total correspondiente a esta línea:
+                            $lineTotalMermaKg = round($lineGeneralMermaKg + $lineScrappedManillasKg, 2);
+
+                            // Unidades útiles resultantes que se darán de alta
+                            $usableAmt = max(0, $cReqAmt - $cMermaAmt);
+                            $usableKg = round($usableAmt * $unitKg, 2);
+
+                            $totalScrappedManillasUnits += $cMermaAmt;
+                            $totalScrappedManillasKgSum += $lineScrappedManillasKg;
+                            $totalUsableRollsCount += $usableAmt;
+                            $totalUsableKgSum += $usableKg;
                         ?>
                             <input type="hidden" name="stockplustotalkg_<?=$x?>" value="<?=round($_KG, 2)?>">
                             <input type="hidden" name="stockpluslargo_<?=$x?>" value="<?=round($_LARGO, 2)?>">
@@ -10443,11 +10621,11 @@ function renderProductionOperatorConsole(
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;">
                                     <input type="text" class="inptxt clsreboamt" style="width:100%;text-align:center"
                                     name="reboamt_<?=$x?>" value="<?=$cReqAmt?>"
-                                    onkeyup="$('#idx_btn_term').hide(0);$('#idx_btn_save').show(0);recalcTotalWidth();">
+                                    oninput="markCutsFormModified('reboamt_<?=$x?>');">
                                 </td>
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left">
                                     <select name="rebo_destino_<?=$x?>" id="rebo_destino_<?=$x?>" style="width:100%;font-size:12px;font-weight:bold;padding:5px 8px;border:1px solid #BDC3C7;border-radius:4px;background:#FFFFFF"
-                                            onchange="updateDestinoRow(<?=$x?>);$('#idx_btn_term').hide(0);$('#idx_btn_save').show(0);">
+                                            onchange="updateDestinoRow(<?=$x?>);">
                                         <option value="bolsa" <?=$cDestino === 'bolsa' ? 'selected' : ''?>>📦 Cuerpo de Bolsa</option>
                                         <option value="manilla" <?=$cDestino === 'manilla' ? 'selected' : ''?>>🏷️ Manilla</option>
                                     </select>
@@ -10469,40 +10647,99 @@ function renderProductionOperatorConsole(
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
                                     <input type="text" class="inptxt" id="rollo_dims_<?=$x?>" name="rollo_dims_<?=$x?>"
                                     style="width:100%;text-align:center"
-                                    onkeyup="$('#idx_btn_term').hide(0);$('#idx_btn_save').show(0);recalcTotalWidth();"
+                                    oninput="markCutsFormModified('rollo_dims_<?=$x?>');"
                                     value="<?=number_format($cReqDims, 2, ',', '.')?>">
                                 </td>
-                                <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=number_format($_KG, 2, ',', '.')?></td>
-                                <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=number_format($unitKg, 2, ',', '.')?></td>
-                                <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=number_format($itemMermaKg / max(1, count($cutsList)), 2, ',', '.')?></td>
+                                <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                                    <b><?=number_format($_KG, 2, ',', '.')?></b>
+                                </td>
+                                <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                                    <?=number_format($unitKg, 2, ',', '.')?>
+                                </td>
+                                <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                                    <div style="font-weight:bold;color:#2C3E50"><?=number_format($lineTotalMermaKg, 2, ',', '.')?> Kg</div>
+                                    <div style="font-size:10px;color:#64748B">
+                                        (<?=number_format($productProportion * 100, 1, ',', '.')?>% peso<?= $cMermaAmt > 0 ? " + {$cMermaAmt} descarte" : "" ?>)
+                                    </div>
+                                </td>
+                                <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                                    <?php if ($isHandleCut): ?>
+                                        <div id="merma_manillas_wrap_<?=$x?>" style="display:flex;align-items:center;justify-content:center;gap:4px">
+                                            <input type="number" min="0" max="<?=$cReqAmt?>" step="1"
+                                                   name="manillas_merma_amt_<?=$x?>" id="manillas_merma_amt_<?=$x?>"
+                                                   value="<?=$cMermaAmt?>" class="inptxt"
+                                                   style="width:65px;text-align:center;font-weight:bold;color:<?=$cMermaAmt > 0 ? '#C0392B' : '#333'?>;background:<?=$cMermaAmt > 0 ? '#FDEDEC' : '#FFF'?>;border:1px solid <?=$cMermaAmt > 0 ? '#E6B0AA' : '#CBD5E1'?>;padding:4px;border-radius:4px"
+                                                   placeholder="0" title="Manillas descartadas a merma por bobina sucia"
+                                                   oninput="markCutsFormModified('manillas_merma_<?=$x?>');">
+                                            <span style="font-size:11px;color:#64748B">unid</span>
+                                        </div>
+                                        <?php if ($cMermaAmt > 0): ?>
+                                            <div style="font-size:10.5px;color:#C0392B;font-weight:bold;margin-top:2px">
+                                                <?=number_format($lineScrappedManillasKg, 2, ',', '.')?> Kg descarte
+                                            </div>
+                                        <?php endif; ?>
+                                    <?php else: ?>
+                                        <span style="color:#94A3B8;font-size:13px">&mdash;</span>
+                                        <input type="hidden" name="manillas_merma_amt_<?=$x?>" id="manillas_merma_amt_<?=$x?>" value="0">
+                                    <?php endif; ?>
+                                </td>
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$fmt($_LARGO)?></td>
                             </tr>
-                        <?php
-                            $x++;
-                        endforeach;
-                        ?>
+                        <?php endforeach; ?>
                         </table>
 
-                        <table border="0" cellpadding="6" cellspacing="0" style="margin-top:8px">
-                        <tr>
-                            <td width="100" height="41"></td>
-                            <td width="130">
-                                <?php
-                                $widthMatches = round($_TOTAL_WIDTH, 1) == round((float)($itemsel['item_reg_width'] ?? 0), 1);
-                                ?>
-                                <input type="button" class="btngreen" id="idx_btn_term" value="Finalizar Corte"
-                                style="<?=$widthMatches ? '' : 'display:none;'?>padding:8px 18px;border:0px;font-size:14px;font-weight:bold;cursor:pointer;border-radius:4px"
-                                onclick="openReboFinalizeModal('<?=htmlspecialchars($corteSub === 'manillas' ? 'corte_manillas' : 'corte_bolsa')?>');">
+                        <?php
+                        $totalProcessMermaKg = round($itemMermaKg + $totalScrappedManillasKgSum, 2);
+                        $widthMatches = round($_TOTAL_WIDTH, 1) == round($rollWidth, 1);
+                        ?>
 
-                                <input type="button" class="btngrey" id="idx_btn_save" value="Actualizar Anchos"
-                                style="<?=$widthMatches ? 'display:none;' : ''?>width:100%;padding:6px;border:0px;font-size:14px;cursor:pointer"
-                                onclick="document.xform_itemcalc.rebofinalize.value='0'; document.xform_itemcalc.submit();">
+                        <!-- RESUMEN TOTAL DE CORTE Y DISTRIBUCIÓN DE MERMA -->
+                        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:12px 16px;margin:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+                            <div style="font-size:12.5px;color:#334155;line-height:1.6">
+                                <span><b>Bobina Usada:</b> <?=number_format($useamt, 2, ',', '.')?> Kg</span> |
+                                <span><b>Rollos Útiles:</b> <b style="color:#0E6251"><?=$totalUsableRollsCount?> rollos</b> (<?=number_format($totalUsableKgSum, 2, ',', '.')?> Kg)</span> |
+                                <span><b>Merma General (por peso):</b> <?=number_format($itemMermaKg, 2, ',', '.')?> Kg</span>
+                                <?php if ($totalScrappedManillasUnits > 0): ?>
+                                    | <span style="color:#C0392B;font-weight:bold"><b>Manillas a Merma (Sucia):</b> <?=$totalScrappedManillasUnits?> unid (<?=number_format($totalScrappedManillasKgSum, 2, ',', '.')?> Kg)</span>
+                                <?php endif; ?>
+                                | <span><b>Merma Total Proceso:</b> <b style="color:#C0392B"><?=number_format($totalProcessMermaKg, 2, ',', '.')?> Kg</b></span>
+                            </div>
+                            <div style="font-size:13px;font-weight:bold">
+                                <span>Ancho Sumado: </span>
+                                <b id="idx_total_width" style="color:<?=$widthMatches ? '#0E6251' : '#C0392B'?>"><?=number_format($_TOTAL_WIDTH, 2, ',', '.')?> cm</b>
+                                <span style="font-size:11.5px;color:#64748B">/ <?=number_format($rollWidth, 2, ',', '.')?> cm</span>
+                            </div>
+                        </div>
+
+                        <!-- AVISO DE CAMBIOS PENDIENTES -->
+                        <div id="idx_update_warning" style="display:none;background:#FEF9E7;border:1.5px solid #F39C12;color:#7D6608;padding:10px 14px;border-radius:6px;font-size:13px;font-weight:bold;margin:0 12px 10px 12px;align-items:center;gap:8px">
+                            <i class="fa fa-exclamation-triangle" style="font-size:18px;color:#D68910"></i>
+                            <div>
+                                Ha modificado medidas, cantidades o manillas a merma. Debe hacer clic en <u>"Actualizar y Recalcular Distribución"</u> para revalidar los datos antes de poder finalizar el corte.
+                            </div>
+                        </div>
+
+                        <table border="0" cellpadding="6" cellspacing="0" style="margin:8px 12px 16px 12px;width:calc(100% - 24px)">
+                        <tr>
+                            <td width="330">
+                                <button type="button" class="btngreen" id="idx_btn_term"
+                                        style="<?=$widthMatches ? 'display:inline-flex;' : 'display:none;'?>padding:9px 24px;border:0px;font-size:14.5px;font-weight:bold;cursor:pointer;border-radius:5px;align-items:center;gap:8px;box-shadow:0 1px 3px rgba(0,0,0,0.12)"
+                                        onclick="openReboFinalizeModal('<?=htmlspecialchars($corteSub === 'manillas' ? 'corte_manillas' : 'corte_bolsa')?>');">
+                                    <i class="fa fa-check-circle"></i> Finalizar Corte
+                                </button>
+
+                                <button type="button" class="btngrey" id="idx_btn_save"
+                                        style="<?=$widthMatches ? 'display:none;' : 'display:inline-flex;'?>padding:9px 22px;border:0px;font-size:14px;font-weight:bold;cursor:pointer;border-radius:5px;align-items:center;gap:8px;background:#D97706;color:#FFFFFF"
+                                        onclick="submitReboRecalculate();">
+                                    <i class="fa fa-sync-alt"></i> Actualizar y Recalcular Distribución
+                                </button>
                             </td>
-                            <td width="380" style="color:<?=$widthMatches ? 'green' : 'red'?>;font-size:12px;font-weight:bold">
-                                <?=$widthMatches ? '✓ Ancho distribuido coincide exactamente con el ancho de bobina (' . $fmt($itemsel['item_reg_width']) . ' cm)' : '⚠ El ancho total sumado debe ser igual al ancho de la bobina entrante (' . $fmt($itemsel['item_reg_width']) . ' cm)'?>
-                            </td>
-                            <td width="110" class="tdnrm" style="border-left:1px solid #DDDDDD;border-right:1px solid #DDDDDD;" align="center">
-                                <b id="idx_total_width"><?=number_format($_TOTAL_WIDTH, 2, ',', '.')?> cm</b>
+                            <td style="font-size:12.5px;font-weight:bold" id="idx_width_status_text">
+                                <?php if ($widthMatches): ?>
+                                    <span style="color:#0E6251"><i class="fa fa-check-circle"></i> Ancho distribuido coincide exactamente con el ancho de bobina (<?=$fmt($rollWidth)?> cm). Listo para finalizar.</span>
+                                <?php else: ?>
+                                    <span style="color:#C0392B"><i class="fa fa-exclamation-circle"></i> El ancho total sumado (<?=number_format($_TOTAL_WIDTH, 2, ',', '.')?> cm) debe ser igual al ancho de la bobina entrante (<?=$fmt($rollWidth)?> cm). Presione "Actualizar y Recalcular Distribución".</span>
+                                <?php endif; ?>
                             </td>
                         </tr>
                         </table>
@@ -10554,6 +10791,16 @@ function renderProductionOperatorConsole(
         (function () {
             var reboFinalizeKind = '';
             window.openReboFinalizeModal = function (kind) {
+                if (window.cutsFormIsDirty) {
+                    alert('Ha modificado medidas, cantidades o merma en el corte.\n\nDebe presionar primero el botón "Actualizar y Recalcular Distribución" para calcular y validar los datos antes de finalizar el corte.');
+                    var btnSave = document.getElementById('idx_btn_save');
+                    if (btnSave) {
+                        btnSave.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        btnSave.focus();
+                    }
+                    return;
+                }
+
                 reboFinalizeKind = kind || 'corte';
                 var message = document.getElementById('rebo_finalize_modal_message');
                 if (message) {
@@ -10562,9 +10809,23 @@ function renderProductionOperatorConsole(
                     } else if (reboFinalizeKind === 'rebobinado') {
                         message.innerHTML = '<b>Se registrará la bobina rebobinada</b> con su peso final y observaciones de rebobinado.<br><br><i>Nota: Esta operación no altera el informe oficial de materiales ni genera consumos en Bodega 3000.</i><br><br>¿Desea confirmar el rebobinado ahora?';
                     } else if (reboFinalizeKind === 'corte_manillas') {
-                        message.innerHTML = '<b>Se consumirá 1 bobina madre TEL en Bodega 3000</b> (registrada en el informe oficial de materiales) y <b>se darán de alta las bobinas individuales de manillas en Bodega 3000</b> con su código <b>ROLL-MAN-XXXXX</b> y etiqueta para cada rollo.<br><br>¿Desea finalizar el corte de manillas ahora?';
+                        var msg = '<b>Se consumirá 1 bobina madre TEL en Bodega 3000</b> (registrada en el informe oficial de materiales) y <b>se darán de alta las bobinas individuales de manillas útiles en Bodega 3000</b> con su código <b>ROLL-MAN-XXXXX</b> y etiqueta para cada rollo.';
+                        <?php if ($totalScrappedManillasUnits > 0): ?>
+                            msg += '<br><div style="background:#FDEDEC;border:1px solid #E6B0AA;color:#922B21;padding:8px 12px;border-radius:4px;font-weight:bold;margin-top:10px">'
+                                + '<i class="fa fa-exclamation-triangle"></i> Se registrarán <b><?=$totalScrappedManillasUnits?> manillas a merma</b> por bobina sucia (<?=number_format($totalScrappedManillasKgSum, 2, ',', '.')?> Kg).'
+                                + '</div>';
+                        <?php endif; ?>
+                        msg += '<br>¿Desea finalizar el corte de manillas ahora?';
+                        message.innerHTML = msg;
                     } else if (reboFinalizeKind === 'corte_bolsa') {
-                        message.innerHTML = '<b>Se registrará el corte de la bobina madre</b> y <b>quedarán en Bodega 3000</b> las bobinas hijas (ROLL-BOL- / ROLL-MAN-) con sus códigos y etiquetas individuales.<br><br><i>Nota: No genera duplicidad en el informe oficial de materiales ya que fue consumida en Flexo/Seri.</i><br><br>¿Desea finalizar el corte ahora?';
+                        var msg = '<b>Se registrará el fraccionamiento de la bobina madre</b> y <b>quedarán en Bodega 3000</b> las bobinas hijas útiles (ROLL-BOL- / ROLL-MAN-) con sus códigos y etiquetas individuales.<br><br><i>Nota: No genera duplicidad en el informe oficial de materiales ya que fue consumida en Flexo/Seri.</i>';
+                        <?php if ($totalScrappedManillasUnits > 0): ?>
+                            msg += '<br><div style="background:#FDEDEC;border:1px solid #E6B0AA;color:#922B21;padding:8px 12px;border-radius:4px;font-weight:bold;margin-top:10px">'
+                                + '<i class="fa fa-exclamation-triangle"></i> Se registrarán <b><?=$totalScrappedManillasUnits?> manillas a merma</b> por bobina sucia (<?=number_format($totalScrappedManillasKgSum, 2, ',', '.')?> Kg).'
+                                + '</div>';
+                        <?php endif; ?>
+                        msg += '<br>¿Desea finalizar el corte ahora?';
+                        message.innerHTML = msg;
                     } else {
                         message.innerHTML = 'Se registrará el proceso en el sistema. ¿Desea continuar?';
                     }
@@ -10581,6 +10842,10 @@ function renderProductionOperatorConsole(
                 }
             };
             window.submitReboFinalize = function () {
+                if (window.cutsFormIsDirty) {
+                    alert('Ha modificado medidas o cantidades. Debe presionar "Actualizar y Recalcular Distribución" antes de finalizar.');
+                    return;
+                }
                 if (!document.xform_itemcalc) return;
                 document.xform_itemcalc.rebofinalize.value = '1';
                 document.xform_itemcalc.submit();
@@ -12403,6 +12668,89 @@ function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, 
         </div>
     </div>
 
+    <!-- MODAL 2: INICIAR EVENTO SIN PRODUCCIÓN / ESPERA -->
+    <div id="modal_standby_start" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:8px;max-width:500px;width:92%;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,0.3)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;border-bottom:1px solid #e2e8f0;padding-bottom:10px">
+                <div style="font-size:17px;font-weight:bold;color:#D97706;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-pause-circle"></i> Informar Máquina Sin Producción / Espera
+                </div>
+                <button type="button" onclick="closeStandbyStartModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b">&times;</button>
+            </div>
+            <form method="post" action="/production/machines/standby">
+                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                <input type="hidden" name="action" value="start">
+                <?php if ($redirectTo !== ''): ?>
+                    <input type="hidden" name="redirect_to" value="<?=htmlspecialchars($redirectTo)?>">
+                <?php endif; ?>
+
+                <div style="margin-bottom:12px">
+                    <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Motivo / Causa de Espera o Parada *</label>
+                    <select name="reason" class="inptxt" style="width:100%" required>
+                        <option value="Espera de Orden de Trabajo (OT)">Espera de Orden de Trabajo (OT)</option>
+                        <option value="Sin Producción">Sin Producción</option>
+                        <option value="Falta de Material / Insumos / Sustratos">Falta de Material / Insumos / Sustratos</option>
+                        <option value="Mantención Mecánica / Falla de Máquina">Mantención Mecánica / Falla de Máquina</option>
+                        <option value="Limpieza y Preparación de Máquina">Limpieza y Preparación de Máquina</option>
+                        <option value="Falta de Operador / Relevo">Falta de Operador / Relevo</option>
+                        <option value="Corte de Energía / Suministro">Corte de Energía / Suministro</option>
+                        <option value="Otro Motivo">Otro Motivo</option>
+                    </select>
+                </div>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Hora Inicio *</label>
+                    <input type="time" name="start_time" class="inptxt" style="width:160px" value="<?=date('H:i')?>" required>
+                </div>
+                <div style="margin-bottom:18px">
+                    <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Observaciones / Detalles</label>
+                    <textarea name="comments" class="inptxt" style="width:100%;height:65px" placeholder="Indicar detalles del por qué la máquina no tiene producción..." required></textarea>
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:10px">
+                    <button type="button" class="btngrey" style="padding:8px 16px" onclick="closeStandbyStartModal()">Cancelar</button>
+                    <button type="submit" class="btnorange" style="background:#D97706;padding:8px 20px;border:none;font-weight:bold;cursor:pointer"><i class="fa fa-play"></i> Iniciar Sin Producción</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL 3: FINALIZAR EVENTO SIN PRODUCCIÓN -->
+    <?php if ($activeStandby !== null): ?>
+    <div id="modal_standby_end" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;align-items:center;justify-content:center">
+        <div style="background:#fff;border-radius:8px;max-width:460px;width:92%;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,0.3)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;border-bottom:1px solid #e2e8f0;padding-bottom:10px">
+                <div style="font-size:17px;font-weight:bold;color:#EA580C;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-play-circle"></i> Finalizar Sin Producción / Espera
+                </div>
+                <button type="button" onclick="closeStandbyEndModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b">&times;</button>
+            </div>
+            <form method="post" action="/production/machines/standby">
+                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                <input type="hidden" name="action" value="end">
+                <input type="hidden" name="standby_id" value="<?=(int)$activeStandby['id']?>">
+                <?php if ($redirectTo !== ''): ?>
+                    <input type="hidden" name="redirect_to" value="<?=htmlspecialchars($redirectTo)?>">
+                <?php endif; ?>
+
+                <div style="margin-bottom:12px;background:#fff7ed;padding:10px 14px;border-radius:5px;border:1px solid #fed7aa;font-size:13px;color:#9a3412">
+                    <b>Motivo:</b> <?=htmlspecialchars((string)$activeStandby['reason'])?><br>
+                    <b>Iniciado:</b> <?=htmlspecialchars((string)$activeStandby['start_time'])?> hrs
+                    <?php if (!empty($activeStandby['comments'])): ?>
+                        <br><b>Detalle:</b> <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i>
+                    <?php endif; ?>
+                </div>
+                <div style="margin-bottom:18px">
+                    <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Hora Término *</label>
+                    <input type="time" name="end_time" class="inptxt" style="width:160px" value="<?=date('H:i')?>" required>
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:10px">
+                    <button type="button" class="btngrey" style="padding:8px 16px" onclick="closeStandbyEndModal()">Cancelar</button>
+                    <button type="submit" class="btnorange" style="background:#EA580C;padding:8px 20px;border:none;font-weight:bold;cursor:pointer"><i class="fa fa-check"></i> Finalizar y Reanudar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <script>
     function openLunchModal() {
         var m = document.getElementById('modal_lunch');
@@ -12412,10 +12760,22 @@ function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, 
         var m = document.getElementById('modal_lunch');
         if (m) m.style.display = 'none';
     }
-    function openStandbyStartModal() {}
-    function closeStandbyStartModal() {}
-    function openStandbyEndModal() {}
-    function closeStandbyEndModal() {}
+    function openStandbyStartModal() {
+        var m = document.getElementById('modal_standby_start');
+        if (m) m.style.display = 'flex';
+    }
+    function closeStandbyStartModal() {
+        var m = document.getElementById('modal_standby_start');
+        if (m) m.style.display = 'none';
+    }
+    function openStandbyEndModal() {
+        var m = document.getElementById('modal_standby_end');
+        if (m) m.style.display = 'flex';
+    }
+    function closeStandbyEndModal() {
+        var m = document.getElementById('modal_standby_end');
+        if (m) m.style.display = 'none';
+    }
     </script>
 <?php
 }
@@ -12465,6 +12825,28 @@ function renderProductionMachinesScreen(array $machines, ?array $activeInit, str
         ?>
     <?php endif; ?>
 
+    <?php if ($activeStandby !== null): ?>
+        <div style="background:#FFF7ED;border:1.5px solid #F97316;border-radius:6px;padding:12px 18px;margin-bottom:15px;color:#9A3412;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+            <div style="display:flex;align-items:center;gap:12px">
+                <i class="fa fa-pause-circle" style="font-size:26px;color:#EA580C"></i>
+                <div>
+                    <div style="font-weight:bold;font-size:14.5px;text-transform:uppercase;color:#C2410C">
+                        MÁQUINA EN ESPERA / SIN PRODUCCIÓN: <?=htmlspecialchars((string)$activeStandby['reason'])?>
+                    </div>
+                    <div style="font-size:12.5px;color:#9A3412;margin-top:2px">
+                        Iniciado a las <b><?=htmlspecialchars((string)$activeStandby['start_time'])?> hrs</b> por <b><?=htmlspecialchars((string)$activeStandby['operator_name'])?></b>
+                        <?php if (!empty($activeStandby['comments'])): ?>
+                            &bull; <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="btnorange" style="background:#EA580C;padding:8px 18px;font-size:13px;font-weight:bold;cursor:pointer;border:none;border-radius:4px" onclick="openStandbyEndModal()">
+                <i class="fa fa-play"></i> Finalizar Espera / Reanudar
+            </button>
+        </div>
+    <?php endif; ?>
+
     <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
     <tr>
         <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
@@ -12479,23 +12861,34 @@ function renderProductionMachinesScreen(array $machines, ?array $activeInit, str
                         <span style="background:#E8F0EF;color:#115452;padding:6px 12px;border-radius:4px;font-weight:bold">
                             <i class="fa fa-check-circle" style="color:#00A85A"></i> Máquina Activa: <?=htmlspecialchars((string)$activeInit['equipo_name'])?>
                         </span>
-                        <a href="/production/work-orders/new" class="btngreen" style="padding:6px 12px;text-decoration:none"><i class="fa fa-play"></i> Ir a OTs</a>
+                        <a href="/production/work-orders/new" class="btngreen" style="padding:6px 12px;text-decoration:none;border-radius:4px"><i class="fa fa-play"></i> Ir a OTs</a>
                         
                         <!-- BOTÓN: REGISTRAR COLACIÓN EN TIEMPO REAL -->
                         <?php if (!empty($activeLunch)): ?>
-                            <button type="button" class="btnorange" style="background:#D97706;padding:6px 12px;cursor:pointer;border:none;font-weight:bold" onclick="openLunchModal()" title="Colación activa">
+                            <button type="button" class="btnorange" style="background:#D97706;padding:6px 12px;cursor:pointer;border:none;font-weight:bold;border-radius:4px" onclick="openLunchModal()" title="Colación activa">
                                 <i class="fa fa-coffee"></i> EN COLACIÓN (desde <?=date('H:i', strtotime($activeLunch['start_time']))?>) &mdash; Terminar
                             </button>
                         <?php else: ?>
-                            <button type="button" class="btnblue" style="background:#0284C7;padding:6px 12px;cursor:pointer;border:none" onclick="openLunchModal()" title="Ingresar horario de colación en tiempo real">
+                            <button type="button" class="btnblue" style="background:#0284C7;padding:6px 12px;cursor:pointer;border:none;border-radius:4px" onclick="openLunchModal()" title="Ingresar horario de colación en tiempo real">
                                 <i class="fa fa-coffee"></i> Colación
+                            </button>
+                        <?php endif; ?>
+
+                        <!-- BOTÓN: ESPERA / SIN PRODUCCIÓN -->
+                        <?php if ($activeStandby !== null): ?>
+                            <button type="button" class="btnorange" style="background:#EA580C;padding:6px 14px;cursor:pointer;border:none;font-weight:bold;border-radius:4px;display:inline-flex;align-items:center;gap:6px" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
+                                <i class="fa fa-play-circle"></i> Finalizar Espera
+                            </button>
+                        <?php else: ?>
+                            <button type="button" class="btnorange" style="background:#D97706;padding:6px 14px;cursor:pointer;border:none;font-weight:bold;border-radius:4px;display:inline-flex;align-items:center;gap:6px" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
+                                <i class="fa fa-pause-circle"></i> Espera / Sin Producción
                             </button>
                         <?php endif; ?>
 
                         <!-- BOTÓN 3: CERRAR TURNO -->
                         <form method="post" action="/production/machines/end" style="margin:0;display:inline-block">
                             <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                            <button type="submit" class="btnred" style="padding:6px 12px" onclick="return confirm('¿Seguro que deseas cerrar turno en esta máquina?')">Cerrar turno</button>
+                            <button type="submit" class="btnred" style="padding:6px 12px;border-radius:4px" onclick="return confirm('¿Seguro que deseas cerrar turno en esta máquina?')">Cerrar turno</button>
                         </form>
                     </div>
                 <?php endif; ?>
@@ -12535,7 +12928,13 @@ function renderProductionMachinesScreen(array $machines, ?array $activeInit, str
                 </td>
                 <td class="tdnrm" align="center">
                     <?php if ($isThisActive): ?>
-                        <span class="btngreen" style="padding:6px 12px;cursor:default"><i class="fa fa-check"></i> Activa</span>
+                        <?php if ($activeStandby !== null): ?>
+                            <button type="button" class="btnorange" style="background:#EA580C;padding:6px 14px;cursor:pointer;border:none;font-weight:bold;border-radius:4px;font-size:12px" onclick="openStandbyEndModal()" title="Máquina sin producción. Clic para finalizar espera y volver a producción">
+                                <i class="fa fa-pause-circle"></i> En Espera (Finalizar)
+                            </button>
+                        <?php else: ?>
+                            <span class="btngreen" style="padding:6px 12px;cursor:default"><i class="fa fa-check"></i> Activa</span>
+                        <?php endif; ?>
                     <?php else: ?>
                         <form method="post" action="/production/machines/init" style="margin:0">
                             <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
@@ -12661,6 +13060,29 @@ function renderProductionNewWorkOrderScreen(
     <!-- CABECERA PRINCIPAL Y ACCIONES RÁPIDAS                          -->
     <!-- ============================================================== -->
     <div style="font-size:20px;margin-bottom:10px"><b>Ordenes de trabajo</b></div>
+
+    <?php if ($activeStandby !== null): ?>
+        <div style="background:#FFF7ED;border:1.5px solid #F97316;border-radius:6px;padding:12px 18px;margin-bottom:12px;color:#9A3412;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+            <div style="display:flex;align-items:center;gap:12px">
+                <i class="fa fa-pause-circle" style="font-size:24px;color:#EA580C"></i>
+                <div>
+                    <div style="font-weight:bold;font-size:14px;text-transform:uppercase;color:#C2410C">
+                        MÁQUINA EN ESPERA / SIN PRODUCCIÓN: <?=htmlspecialchars((string)$activeStandby['reason'])?>
+                    </div>
+                    <div style="font-size:12px;color:#9A3412;margin-top:2px">
+                        Iniciado a las <b><?=htmlspecialchars((string)$activeStandby['start_time'])?> hrs</b> por <b><?=htmlspecialchars((string)$activeStandby['operator_name'])?></b>
+                        <?php if (!empty($activeStandby['comments'])): ?>
+                            &bull; <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="btnorange" style="background:#EA580C;padding:7px 16px;font-size:12.5px;font-weight:bold;cursor:pointer;border:none;border-radius:4px" onclick="openStandbyEndModal()">
+                <i class="fa fa-play"></i> Finalizar Espera / Reanudar
+            </button>
+        </div>
+    <?php endif; ?>
+
     <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:12px">
     <tr>
         <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
@@ -12691,6 +13113,17 @@ function renderProductionNewWorkOrderScreen(
                     <?php else: ?>
                         <button type="button" class="btnblue" style="background:#0284C7;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px" onclick="openLunchModal()" title="Registrar horario de colación en tiempo real">
                             <i class="fa fa-coffee"></i> Colación
+                        </button>
+                    <?php endif; ?>
+
+                    <!-- BOTÓN: ESPERA / SIN PRODUCCIÓN -->
+                    <?php if ($activeStandby !== null): ?>
+                        <button type="button" class="btnorange" style="background:#EA580C;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
+                            <i class="fa fa-play-circle"></i> Finalizar Espera
+                        </button>
+                    <?php else: ?>
+                        <button type="button" class="btnorange" style="background:#D97706;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
+                            <i class="fa fa-pause-circle"></i> Espera / Sin Prod.
                         </button>
                     <?php endif; ?>
                 </div>

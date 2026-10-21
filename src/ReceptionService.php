@@ -67,6 +67,7 @@ final class ReceptionService
     private bool $erpWarehousesSynced = false;
     private bool $erpProductionPlanSynced = false;
     private ?PDO $legacyErpPdo = null;
+    private ?string $legacyErpConnectionError = null;
 
     /** @var array<int, array<string, mixed>> */
     private array $erpItemsCache = [];
@@ -128,8 +129,9 @@ final class ReceptionService
                 if ($legacyPdo instanceof PDO) {
                     $this->legacyErpPdo = $legacyPdo;
                 }
-            } catch (Throwable) {
+            } catch (Throwable $e) {
                 $this->legacyErpPdo = null;
+                $this->legacyErpConnectionError = $e->getMessage();
             }
         }
         $this->inventoryCountService = new InventoryCountService($this->pdo, $this->erpPdo);
@@ -2017,6 +2019,7 @@ SQL;
             "SELECT import_container_item_id, reception_mode
              FROM rolls
              WHERE import_container_item_id IN ($placeholders)
+               AND (reception_mode IS NULL OR reception_mode != 'WAREHOUSE_STOCK')
              ORDER BY id DESC"
         );
         $stmt->execute($containerItemIds);
@@ -2072,6 +2075,10 @@ SQL;
                         COALESCE(SUM(t3.item_amount), 0) AS erp_amount
                  FROM stockchanges ta
                  INNER JOIN stockchanges_items t3 ON t3.stk_id = ta.id
+                 INNER JOIN supplier_contenedor_items sci ON sci.id = t3.item_contenedor_refid
+                     AND sci.sord_id = ta.sth_supporder_contenedorid
+                     AND sci.sord_pos_id = t3.item_contenedor_supporderposid
+                 INNER JOIN supplier_order_items soi ON soi.id = sci.sord_pos_id AND soi.item_id = t3.item_id
                  WHERE ta.stk_status > 1
                    AND t3.item_contenedor_refid IN ($placeholders)
                  GROUP BY t3.item_contenedor_refid"
@@ -2081,40 +2088,19 @@ SQL;
                 $cItemId = (int)$erpRow['container_item_id'];
                 $erpAmount = (float)$erpRow['erp_amount'];
                 if ($erpAmount > 0) {
-                    $existingRolls = (int)($summary[$cItemId]['received_rolls'] ?? 0);
-                    $existingQty = (float)($summary[$cItemId]['received_qty'] ?? 0.0);
                     $existingWeight = (float)($summary[$cItemId]['received_weight_kg'] ?? 0.0);
+                    // Confirmed ERP receipt is authoritative, not the largest local value.
+                    // La recepcion ERP confirmada prevalece sobre cantidades locales mayores.
                     $summary[$cItemId] = [
-                        'received_rolls' => max($existingRolls, (int)round($erpAmount)),
-                        'received_qty' => max($existingQty, $erpAmount),
+                        'received_rolls' => (int)round($erpAmount),
+                        'received_qty' => $erpAmount,
                         'received_weight_kg' => $existingWeight,
                     ];
                 }
             }
 
-            // Si el contenedor está cerrado en ERP (sord_status = 4), asegurar que al menos reporte lo ordenado como recibido
-            $cntStatusStmt = $this->erpPdo->prepare(
-                "SELECT sci.id AS container_item_id, sci.sord_amount
-                 FROM supplier_contenedor_items sci
-                 JOIN supplier_contenedor sc ON sc.id = sci.sord_id
-                 WHERE sci.id IN ($placeholders)
-                   AND sc.sord_status = 4"
-            );
-            $cntStatusStmt->execute($containerItemIds);
-            foreach ($cntStatusStmt->fetchAll() as $csRow) {
-                $cItemId = (int)$csRow['container_item_id'];
-                $ordAmount = (float)$csRow['sord_amount'];
-                if ($ordAmount > 0) {
-                    $existingRolls = (int)($summary[$cItemId]['received_rolls'] ?? 0);
-                    $existingQty = (float)($summary[$cItemId]['received_qty'] ?? 0.0);
-                    $existingWeight = (float)($summary[$cItemId]['received_weight_kg'] ?? 0.0);
-                    $summary[$cItemId] = [
-                        'received_rolls' => max($existingRolls, (int)round($ordAmount)),
-                        'received_qty' => max($existingQty, $ordAmount),
-                        'received_weight_kg' => $existingWeight,
-                    ];
-                }
-            }
+            // Archived does not mean received: only actual receipt records count.
+            // Archivado no equivale a recibido: contar solo recepciones reales.
         } catch (\Throwable) {
         }
 
@@ -2166,7 +2152,7 @@ SQL;
             'supplier_country_name' => trim((string)($line['supplier_country_name'] ?? '')),
         ];
 
-        $row['reception_mode'] = $this->inferReceptionModeFromErpLine($line);
+        $row['reception_mode'] = $this->inferReceptionModeFromErpLine($row + $line);
         $row['supplier_type'] = $this->classifySupplierType((string)$row['supplier_country_name']);
         return $row;
     }
@@ -2693,7 +2679,7 @@ SQL;
             $where[] = 'sc.sord_status IN (2, 3)';
             $where[] = 'sc.sord_crtdat >= 1704067200';
         } elseif ($statusFilter === 'complete') {
-            $where[] = '(sc.sord_status = 4 OR sc.sord_crtdat < 1704067200)';
+            $where[] = '(sc.sord_status IN (3, 4) OR sc.sord_crtdat < 1704067200)';
         }
         $whereSql = implode(' AND ', $where);
 
@@ -3125,7 +3111,7 @@ SQL;
             $where[] = 'sc.sord_status IN (2, 3)';
             $where[] = 'sc.sord_crtdat >= 1704067200';
         } elseif ($statusFilter === 'complete') {
-            $where[] = '(sc.sord_status = 4 OR sc.sord_crtdat < 1704067200)';
+            $where[] = '(sc.sord_status IN (3, 4) OR sc.sord_crtdat < 1704067200)';
         }
 
         if ($supplierId !== null && $supplierId > 0) {
@@ -3244,7 +3230,7 @@ SQL;
             $where[] = 'sc.sord_status IN (2, 3)';
             $where[] = 'sc.sord_crtdat >= 1704067200';
         } elseif ($statusFilter === 'complete') {
-            $where[] = '(sc.sord_status = 4 OR sc.sord_crtdat < 1704067200)';
+            $where[] = '(sc.sord_status IN (3, 4) OR sc.sord_crtdat < 1704067200)';
         }
 
         if ($supplierId !== null && $supplierId > 0) {
@@ -4001,7 +3987,7 @@ SQL;
 
         $selectedMode = $this->normalizeReceptionMode((string)($receptionMode ?? ($line['reception_mode'] ?? 'QUANTITY')));
         $line['reception_mode'] = $selectedMode;
-        if ($weightKg <= 0) {
+        if ($selectedMode === 'WEIGHT' && $weightKg <= 0) {
             return ['ok' => false, 'errors' => ['weight_kg' => 'Peso real (Kg) debe ser mayor a 0.'], 'id' => null];
         }
         if ($selectedMode === 'WEIGHT' && $weightKg < 15) {
@@ -4029,7 +4015,7 @@ SQL;
             'operator_name' => trim($operatorName),
         ];
 
-        $result = $this->createRoll($input);
+        $result = $selectedMode === 'QUANTITY' ? $this->createReceptionUnits($input) : $this->createRoll($input);
         if ($result['ok'] !== true) {
             return $result;
         }
@@ -4064,6 +4050,11 @@ SQL;
         if ($line === null) {
             return ['ok' => false, 'errors' => ['import_container_item_id' => 'Línea de contenedor no existe.'], 'id' => null];
         }
+        try {
+            $this->assertImportContainerReceiptEditable((int)$line['import_container_id']);
+        } catch (Throwable $e) {
+            return ['ok' => false, 'errors' => ['erp' => $e->getMessage()], 'id' => null];
+        }
 
         $purchaseOrderLine = $this->getPurchaseOrderLine((int)$line['id']);
         if ($purchaseOrderLine === null) {
@@ -4072,7 +4063,7 @@ SQL;
 
         $selectedMode = $this->normalizeReceptionMode((string)($receptionMode ?? ($line['reception_mode'] ?? 'QUANTITY')));
         $line['reception_mode'] = $selectedMode;
-        if ($weightKg <= 0) {
+        if ($selectedMode === 'WEIGHT' && $weightKg <= 0) {
             return ['ok' => false, 'errors' => ['weight_kg' => 'Peso real (Kg) debe ser mayor a 0.'], 'id' => null];
         }
         if ($selectedMode === 'WEIGHT' && $weightKg < 15) {
@@ -4100,15 +4091,21 @@ SQL;
             'operator_name' => trim($operatorName),
         ];
 
-        $result = $this->createRoll($input);
+        $result = $selectedMode === 'QUANTITY' ? $this->createReceptionUnits($input) : $this->createRoll($input);
         if ($result['ok'] !== true) {
             return $result;
         }
 
-        $this->refreshPurchaseOrderStatus((int)$line['purchase_order_id']);
         $containerId = (int)($line['import_container_id'] ?? 0);
         if ($containerId > 0) {
-            $this->refreshImportContainerStatus($containerId);
+            try {
+                $this->refreshImportContainerStatus($containerId);
+                $this->refreshPurchaseOrderStatus((int)$line['purchase_order_id']);
+            } catch (Throwable $e) {
+                // La recepción física ya existe; no solicitar un segundo ingreso.
+                // Physical receipt is saved; retry ERP sync without receiving again.
+                $result['sync_error'] = 'Recepción guardada en trazabilidad, pendiente de sincronizar con ERP: ' . $e->getMessage();
+            }
         }
         return $result;
     }
@@ -4180,7 +4177,11 @@ SQL;
             return ['ok' => false, 'error' => 'ID de contenedor inválido'];
         }
         $this->ensureReceptionClosureSchema();
-        $this->syncImportContainerErpReceptionTransaction($containerId, $userId);
+        try {
+            $this->syncImportContainerErpReceptionTransaction($containerId, $userId);
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'No se puede cerrar sin sincronizar la recepción ERP: ' . $e->getMessage()];
+        }
 
         if (!$this->updateImportContainerClosureAcrossErps($containerId, $userId)) {
             return ['ok' => false, 'error' => 'No se pudo actualizar el contenedor en el ERP'];
@@ -4242,6 +4243,51 @@ SQL;
         return $this->updateImportContainerClosureAcrossErps($containerId, $userId);
     }
 
+    public function retryImportContainerReceptionSync(int $containerId, int $userId = 0): array
+    {
+        try {
+            $stmt = $this->pdo->prepare('SELECT id, purchase_order_id FROM rolls WHERE import_container_id = :id');
+            $stmt->execute([':id' => $containerId]);
+            $purchaseOrderIds = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $roll) {
+                $this->syncRollWarehouseTraceabilityEntry((int)$roll['id']);
+                $purchaseOrderIds[(int)$roll['purchase_order_id']] = true;
+            }
+            $this->syncImportContainerErpReceptionTransaction($containerId, $userId);
+            $this->refreshImportContainerStatus($containerId);
+            foreach (array_keys($purchaseOrderIds) as $purchaseOrderId) {
+                if ($purchaseOrderId > 0) {
+                    $this->refreshPurchaseOrderStatus($purchaseOrderId);
+                }
+            }
+            return ['ok' => true];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    private function assertImportContainerReceiptEditable(int $containerId): void
+    {
+        foreach ($this->getErpSyncTargets() as $erpPdo) {
+            $stmt = $erpPdo->prepare(
+                'SELECT COUNT(*) FROM stockchanges s
+                 WHERE s.sth_supporder_contenedorid = :container_id
+                   AND (s.stk_annotation <> :annotation OR s.stk_annotation IS NULL
+                        OR EXISTS (SELECT 1 FROM tran_data t WHERE t.tran_id = s.id
+                                   AND t.tran_type IN ("stockchangeup", "stockchangedown"))
+                        OR EXISTS (SELECT 1 FROM stockchanges_items i WHERE i.stk_id = s.id
+                                   AND (COALESCE(i.item_costprice_netto, 0) <> 0
+                                        OR COALESCE(i.item_cont_costadd, 0) <> 0
+                                        OR COALESCE(i.item_cont_unitprc_amt, 0) <> 0
+                                        OR COALESCE(i.item_cont_unitprc_kg, 0) <> 0)))'
+            );
+            $stmt->execute([':container_id' => $containerId, ':annotation' => 'Recepción sincronizada por sistema Unibag']);
+            if ((int)$stmt->fetchColumn() > 0) {
+                throw new RuntimeException('El contenedor tiene una recepción ERP previa, contabilizada o costeada. Ajusta esa recepción en el ERP antes de agregar o borrar productos.');
+            }
+        }
+    }
+
     public function refreshImportContainerStatus(int $containerId): void
     {
         if ($containerId <= 0) {
@@ -4267,27 +4313,45 @@ SQL;
         }
 
         $lines = $this->listImportContainerLines($containerId);
-        $dominantStorehouses = $this->getDominantErpStorehouseByImportContainerItemIds(array_column($lines, 'import_container_item_id'));
+        // Conservar bodega de recepción y cantidades, no la bodega actual del material.
+        // Preserve receipt warehouses and quantities even after subsequent transfers.
+        $receiptStmt = $this->pdo->prepare(
+            'SELECT r.import_container_item_id, w.erp_storehouse_id,
+                    SUM(r.received_qty) AS received_qty,
+                    SUM(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(m.payload, "$.weight_kg")), r.weight_kg)) AS weight_kg
+             FROM rolls r
+             LEFT JOIN movements m ON m.entity_type = "ROLL" AND m.entity_id = r.id
+                 AND m.id = (SELECT MIN(m2.id) FROM movements m2
+                             WHERE m2.entity_type = "ROLL" AND m2.entity_id = r.id AND m2.movement_type = "RECEIPT")
+             JOIN warehouses w ON w.id = COALESCE(m.to_warehouse_id, r.warehouse_id)
+             WHERE r.import_container_id = :container_id
+             GROUP BY r.import_container_item_id, w.erp_storehouse_id'
+        );
+        $receiptStmt->execute([':container_id' => $containerId]);
+        $receiptsByLine = [];
+        foreach ($receiptStmt->fetchAll(PDO::FETCH_ASSOC) as $receipt) {
+            $receiptsByLine[(int)$receipt['import_container_item_id']][] = $receipt;
+        }
         $items = [];
 
         foreach ($lines as $line) {
-            $summary = $this->summarizeReceptionLine($line);
-            $receivedValue = round((float)($summary['received_value'] ?? 0), 10);
-            if ($receivedValue <= 0) {
-                continue;
-            }
-
             $containerItemId = (int)($line['import_container_item_id'] ?? 0);
-            $items[] = [
-                'container_item_id' => $containerItemId,
-                'purchase_order_line_id' => (int)($line['id'] ?? 0),
-                'erp_item_id' => (int)($line['erp_item_id'] ?? 0),
-                'received_rolls' => $summary['mode'] === 'WEIGHT'
-                    ? round((float)($line['received_rolls'] ?? 0), 10)
-                    : round((float)($line['received_qty'] ?? $line['received_rolls'] ?? 0), 10),
-                'received_weight_kg' => round((float)($summary['received_weight_kg'] ?? 0), 2),
-                'erp_storehouse_id' => (int)($dominantStorehouses[$containerItemId] ?? 0),
-            ];
+            foreach ($receiptsByLine[$containerItemId] ?? [] as $receipt) {
+                if ((float)$receipt['received_qty'] <= 0) {
+                    continue;
+                }
+                if ((int)$receipt['erp_storehouse_id'] <= 0) {
+                    throw new RuntimeException('La bodega de recepción no tiene equivalencia ERP.');
+                }
+                $items[] = [
+                    'container_item_id' => $containerItemId,
+                    'purchase_order_line_id' => (int)($line['id'] ?? 0),
+                    'erp_item_id' => (int)($line['erp_item_id'] ?? 0),
+                    'received_rolls' => round((float)$receipt['received_qty'], 10),
+                    'received_weight_kg' => round((float)$receipt['weight_kg'], 2),
+                    'erp_storehouse_id' => (int)$receipt['erp_storehouse_id'],
+                ];
+            }
         }
 
         $annotation = 'Recepción sincronizada por sistema Unibag';
@@ -4310,15 +4374,32 @@ SQL;
         string $annotation,
         array $items
     ): void {
+        $hasPreReception = $erpPdo->query("SHOW TABLES LIKE 'stockchanges_preconteo'")->fetchColumn();
+        if ($hasPreReception !== false) {
+            $this->syncImportContainerPreReception($erpPdo, $containerId, $effectiveUserId, $annotation, $items);
+            return;
+        }
         $header = $this->getImportContainerErpHeaderForReceptionSync($containerId, $erpPdo);
         if ($header === null) {
-            return;
+            throw new RuntimeException('El contenedor no existe en una de las bases ERP configuradas.');
         }
 
         $now = time();
 
         try {
             $erpPdo->beginTransaction();
+            $lockHeader = $erpPdo->prepare('SELECT id FROM supplier_contenedor WHERE id = :id FOR UPDATE');
+            $lockHeader->execute([':id' => $containerId]);
+
+            $foreignReceipt = $erpPdo->prepare(
+                'SELECT COUNT(*) FROM stockchanges
+                 WHERE sth_supporder_contenedorid = :container_id
+                   AND (stk_annotation IS NULL OR stk_annotation <> :annotation)'
+            );
+            $foreignReceipt->execute([':container_id' => $containerId, ':annotation' => $annotation]);
+            if ((int)$foreignReceipt->fetchColumn() > 0) {
+                throw new RuntimeException('Existe una recepción creada en el ERP antiguo. No se generará otra que duplique sus cantidades; revisa la conciliación del contenedor.');
+            }
 
             $existingId = 0;
             $stmtExisting = $erpPdo->prepare(
@@ -4327,13 +4408,55 @@ SQL;
                  WHERE sth_supporder_contenedorid = :container_id
                    AND stk_annotation = :annotation
                  ORDER BY id DESC
-                 LIMIT 1'
+                 LIMIT 1 FOR UPDATE'
             );
             $stmtExisting->execute([
                 ':container_id' => $containerId,
                 ':annotation' => $annotation,
             ]);
             $existingId = (int)($stmtExisting->fetchColumn() ?: 0);
+
+            if ($existingId > 0) {
+                $costStmt = $erpPdo->prepare(
+                    'SELECT COUNT(*) FROM tran_data WHERE tran_id = :id
+                     AND tran_type IN ("stockchangeup", "stockchangedown")'
+                );
+                $costStmt->execute([':id' => $existingId]);
+                $pricedStmt = $erpPdo->prepare(
+                    'SELECT COUNT(*) FROM stockchanges_items WHERE stk_id = :id
+                     AND (COALESCE(item_costprice_netto, 0) <> 0 OR COALESCE(item_cont_costadd, 0) <> 0
+                          OR COALESCE(item_cont_unitprc_amt, 0) <> 0 OR COALESCE(item_cont_unitprc_kg, 0) <> 0)'
+                );
+                $pricedStmt->execute([':id' => $existingId]);
+                if ((int)$costStmt->fetchColumn() > 0 || (int)$pricedStmt->fetchColumn() > 0) {
+                    $oldStmt = $erpPdo->prepare(
+                        'SELECT item_contenedor_refid, item_st_id, item_amount, item_cont_kg_received
+                         FROM stockchanges_items WHERE stk_id = :id'
+                    );
+                    $oldStmt->execute([':id' => $existingId]);
+                    $oldValues = [];
+                    foreach ($oldStmt->fetchAll(PDO::FETCH_ASSOC) as $oldItem) {
+                        $oldValues[(int)$oldItem['item_contenedor_refid'] . ':' . (int)$oldItem['item_st_id']] = [
+                            number_format((float)$oldItem['item_amount'], 3, '.', ''),
+                            number_format((float)$oldItem['item_cont_kg_received'], 2, '.', ''),
+                        ];
+                    }
+                    $newValues = [];
+                    foreach ($items as $item) {
+                        $newValues[(int)$item['container_item_id'] . ':' . (int)$item['erp_storehouse_id']] = [
+                            number_format((float)$item['received_rolls'], 3, '.', ''),
+                            number_format((float)$item['received_weight_kg'], 2, '.', ''),
+                        ];
+                    }
+                    ksort($oldValues);
+                    ksort($newValues);
+                    if ($oldValues === $newValues) {
+                        $erpPdo->commit();
+                        return;
+                    }
+                    throw new RuntimeException('La recepción ERP ya fue contabilizada o costeada; no se reemplazará. Revisa el ajuste en el ERP antiguo.');
+                }
+            }
 
             if ($items === []) {
                 if ($existingId > 0) {
@@ -4415,7 +4538,7 @@ SQL;
             foreach ($items as $position => $item) {
                 $storehouseId = (int)$item['erp_storehouse_id'];
                 if ($storehouseId <= 0) {
-                    $storehouseId = 5; // Bodega 100 (MP PLA) fallback predeterminado para materia prima en company_shops_storehouses
+                    throw new RuntimeException('Falta la bodega ERP para una línea recibida.');
                 }
                 $insertItem->execute([
                     ':stk_id' => $existingId,
@@ -4429,11 +4552,94 @@ SQL;
                 ]);
             }
 
+            $erpPdo->prepare(
+                'UPDATE supplier_contenedor SET sord_stock_pending_act = 1,
+                 sord_upddat = :date, sord_updusr = :user WHERE id = :id'
+            )->execute([':date' => $now, ':user' => $effectiveUserId, ':id' => $containerId]);
             $erpPdo->commit();
-        } catch (Throwable) {
+        } catch (Throwable $e) {
             if ($erpPdo->inTransaction()) {
                 $erpPdo->rollBack();
             }
+            throw $e;
+        }
+    }
+
+    private function syncImportContainerPreReception(PDO $erpPdo, int $containerId, int $userId, string $annotation, array $items): void
+    {
+        $header = $this->getImportContainerErpHeaderForReceptionSync($containerId, $erpPdo);
+        if ($header === null) {
+            throw new RuntimeException('El contenedor no existe en ERP.');
+        }
+        if ((int)$header['company_id'] <= 0 || (int)$header['shop_id'] <= 0) {
+            throw new RuntimeException('El contenedor debe tener empresa y sucursal validas en el ERP antes de enviar a precosteo.');
+        }
+        $erpPdo->beginTransaction();
+        try {
+            $lock = $erpPdo->prepare('SELECT id, sord_stock_pending_act FROM supplier_contenedor WHERE id = :id FOR UPDATE');
+            $lock->execute([':id' => $containerId]);
+            $lockedHeader = $lock->fetch(PDO::FETCH_ASSOC);
+            if ((int)($lockedHeader['sord_stock_pending_act'] ?? 0) === 1) {
+                throw new RuntimeException('El ERP ya habilito el ingreso posterior al costeo. No se reemplazara la recepcion ni se reiniciara el costeo.');
+            }
+            // Receipt belongs to pre-costing, never to booked stock.
+            // La recepcion pertenece al precosteo, nunca al stock contabilizado.
+            $final = $erpPdo->prepare('SELECT COUNT(*) FROM stockchanges WHERE sth_supporder_contenedorid = :id AND stk_status > 0');
+            $final->execute([':id' => $containerId]);
+            if ((int)$final->fetchColumn() > 0) {
+                throw new RuntimeException('Hay un documento de ingreso final ERP activo. Conciliarlo antes de sincronizar el precosteo para evitar duplicar stock.');
+            }
+            $existing = $erpPdo->prepare('SELECT id, stk_annotation FROM stockchanges_preconteo WHERE sth_supporder_contenedorid = :id AND (stk_status > 0 OR stk_annotation = :annotation) FOR UPDATE');
+            $existing->execute([':id' => $containerId, ':annotation' => $annotation]);
+            $documents = $existing->fetchAll(PDO::FETCH_ASSOC);
+            if (count($documents) > 1 || ($documents !== [] && $documents[0]['stk_annotation'] !== $annotation)) {
+                throw new RuntimeException('Existe una recepcion nativa ERP. Conciliarla antes de agregar otra.');
+            }
+            $id = (int)($documents[0]['id'] ?? 0);
+            $now = time();
+            if ($id === 0 && $items !== []) {
+                $insert = $erpPdo->prepare(
+                    'INSERT INTO stockchanges_preconteo
+                     (stk_num,stk_annotation,stk_issueid,stk_companyid,stk_shopid,stk_bookdate,stk_status,
+                      stk_crtdat,stk_crtusr,sth_supporder_contenedorid,stk_cinumber,stk_vintnumber,
+                      sth_order_num,sth_fromrebo_agid_grphash)
+                     VALUES (:num,:annotation,17,:company,:shop,:date,2,:created,:user,:container,"","","","")'
+                );
+                $insert->execute([':num' => $this->generateNextErpStockChangeNumber((int)$header['company_id'], $erpPdo),
+                    ':annotation' => $annotation, ':company' => (int)$header['company_id'], ':shop' => (int)$header['shop_id'],
+                    ':date' => $now, ':created' => $now, ':user' => $userId, ':container' => $containerId]);
+                $id = (int)$erpPdo->lastInsertId();
+            }
+            if ($id > 0) {
+                $priced = $erpPdo->prepare('SELECT COUNT(*) FROM stockchanges_preconteo_items WHERE stk_id = :id AND COALESCE(item_costprice_netto,0) <> 0');
+                $priced->execute([':id' => $id]);
+                if ((int)$priced->fetchColumn() > 0) {
+                    throw new RuntimeException('El precosteo ya tiene precios; no se reemplazara.');
+                }
+                $erpPdo->prepare('DELETE FROM stockchanges_preconteo_items WHERE stk_id = :id')->execute([':id' => $id]);
+                $insertItem = $erpPdo->prepare(
+                    'INSERT INTO stockchanges_preconteo_items
+                     (stk_id,item_id,item_pos,item_amount,item_type,item_st_id,item_contenedor_refid,item_contenedor_supporderposid)
+                     VALUES (:id,:item,:pos,:amount,"item",:warehouse,:line,:po)'
+                );
+                foreach ($items as $pos => $item) {
+                    $insertItem->execute([':id' => $id, ':item' => $item['erp_item_id'], ':pos' => $pos,
+                        ':amount' => $item['received_rolls'], ':warehouse' => $item['erp_storehouse_id'],
+                        ':line' => $item['container_item_id'], ':po' => $item['purchase_order_line_id']]);
+                }
+                $erpPdo->prepare('UPDATE stockchanges_preconteo SET stk_status = :status,stk_upddat = :date,stk_updusr = :user WHERE id = :id')
+                    ->execute([':status' => $items === [] ? 0 : 2, ':date' => $now, ':user' => $userId, ':id' => $id]);
+            }
+            // Only ERP costing can enable stock entry; receipt must not enable it.
+            // Solo el costeo ERP habilita el ingreso; la recepcion no debe habilitarlo.
+            $erpPdo->prepare('UPDATE supplier_contenedor SET sord_upddat = :date,sord_updusr = :user WHERE id = :id')
+                ->execute([':date' => $now, ':user' => $userId, ':id' => $containerId]);
+            $erpPdo->commit();
+        } catch (Throwable $e) {
+            if ($erpPdo->inTransaction()) {
+                $erpPdo->rollBack();
+            }
+            throw $e;
         }
     }
 
@@ -4553,6 +4759,9 @@ SQL;
      */
     private function getErpSyncTargets(): array
     {
+        if ($this->legacyErpConnectionError !== null) {
+            throw new RuntimeException('No se pudo conectar al ERP antiguo: ' . $this->legacyErpConnectionError);
+        }
         $targets = [$this->erpPdo];
         if ($this->legacyErpPdo instanceof PDO && $this->legacyErpPdo !== $this->erpPdo) {
             $targets[] = $this->legacyErpPdo;
@@ -4562,7 +4771,7 @@ SQL;
 
     private function updateImportContainerClosureAcrossErps(int $containerId, int $userId = 0): bool
     {
-        $ok = false;
+        $ok = true;
         $params = [
             ':upddat' => time(),
             ':updusr' => $userId > 0 ? $userId : 1,
@@ -4571,17 +4780,22 @@ SQL;
 
         foreach ($this->getErpSyncTargets() as $erpPdo) {
             try {
+                $hasPreReception = $erpPdo->query("SHOW TABLES LIKE 'stockchanges_preconteo'")->fetchColumn() !== false;
                 $stmt = $erpPdo->prepare(
                     'UPDATE supplier_contenedor
-                     SET sord_status = 4,
-                         sord_stock_pending_act = 0,
+                     SET sord_status = CASE
+                             WHEN COALESCE(sord_stock_pending_act, 0) = 1 AND :pre_reception = 0 THEN sord_status
+                             WHEN sord_status = 4 THEN 4
+                             ELSE 3
+                         END,
                          sord_upddat = :upddat,
                          sord_updusr = :updusr
                      WHERE id = :id'
                 );
-                $result = $stmt->execute($params);
-                $ok = $ok || $result;
+                $result = $stmt->execute($params + [':pre_reception' => $hasPreReception ? 1 : 0]);
+                $ok = $ok && $result;
             } catch (Throwable) {
+                $ok = false;
                 continue;
             }
         }
@@ -4591,7 +4805,7 @@ SQL;
 
     private function updateImportContainerReceivedAcrossErps(int $containerId, int $userId = 0): bool
     {
-        $ok = false;
+        $ok = true;
         $params = [
             ':upddat' => time(),
             ':updusr' => $userId > 0 ? $userId : 1,
@@ -4602,14 +4816,14 @@ SQL;
             try {
                 $stmt = $erpPdo->prepare(
                     'UPDATE supplier_contenedor
-                     SET sord_status = 3,
-                         sord_upddat = :upddat,
+                     SET sord_upddat = :upddat,
                          sord_updusr = :updusr
                      WHERE id = :id AND sord_status < 3'
                 );
                 $result = $stmt->execute($params);
-                $ok = $ok || $result;
+                $ok = $ok && $result;
             } catch (Throwable) {
+                $ok = false;
                 continue;
             }
         }
@@ -17485,6 +17699,13 @@ SQL;
         $containerId = (int)($roll['import_container_id'] ?? 0);
         $rollCode = (string)($roll['roll_code'] ?? ('#' . $rollId));
         $weightKg = (float)($roll['weight_kg'] ?? 0);
+        if ($containerId > 0) {
+            try {
+                $this->assertImportContainerReceiptEditable($containerId);
+            } catch (Throwable $e) {
+                return ['ok' => false, 'error' => $e->getMessage()];
+            }
+        }
 
         $this->pdo->beginTransaction();
         try {
@@ -17532,8 +17753,28 @@ SQL;
     {
         $result = $this->rollReceptionService->createRoll($input);
         if (($result['ok'] ?? false) === true && (int)($result['id'] ?? 0) > 0) {
-            $this->syncRollWarehouseTraceabilityEntry((int)$result['id']);
-            $this->syncErpInventoryForReceivedRoll((int)$result['id'], 1.0, 'RECEPTION');
+            try {
+                $this->syncRollWarehouseTraceabilityEntry((int)$result['id']);
+                $this->syncErpInventoryForReceivedRoll((int)$result['id'], 1.0, 'RECEPTION');
+            } catch (Throwable $e) {
+                $result['sync_error'] = 'Recepcion guardada; sincronizacion pendiente: ' . $e->getMessage();
+            }
+        }
+        return $result;
+    }
+
+    private function createReceptionUnits(array $input): array
+    {
+        $result = $this->rollReceptionService->createUnits($input);
+        if (($result['ok'] ?? false) === true) {
+            foreach ($result['ids'] as $id) {
+                try {
+                    $this->syncRollWarehouseTraceabilityEntry((int)$id);
+                    $this->syncErpInventoryForReceivedRoll((int)$id, 1.0, 'RECEPTION');
+                } catch (Throwable $e) {
+                    $result['sync_error'] = 'Recepcion guardada; sincronizacion pendiente: ' . $e->getMessage();
+                }
+            }
         }
         return $result;
     }
@@ -24000,6 +24241,7 @@ SQL;
                  FROM rolls r
                  INNER JOIN skus s ON s.id = r.sku_id
                  WHERE r.status = 'RECEIVED'
+                   AND COALESCE(r.import_container_id, 0) = 0
                  GROUP BY r.warehouse_id, s.code"
             );
             $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
@@ -24043,7 +24285,7 @@ SQL;
         $this->ensureTraceabilityWarehouseEntriesTable();
 
         $stmt = $this->pdo->prepare(
-            'SELECT r.id, r.roll_code, r.weight_kg, r.received_qty, r.microns, r.width_mm, r.color, r.meters, r.status,
+            'SELECT r.id, r.roll_code, r.weight_kg, r.received_qty, r.reception_mode, r.microns, r.width_mm, r.color, r.meters, r.status,
                     w.id AS local_warehouse_id, w.code AS warehouse_code, w.name AS warehouse_name, w.erp_storehouse_id,
                     s.code AS sku_code, s.description AS sku_description
              FROM rolls r
@@ -24109,6 +24351,7 @@ SQL;
             ':item_code' => (string)($roll['sku_code'] ?? ''),
             ':item_description' => (string)($roll['sku_description'] ?? ''),
             ':quantity' => number_format($quantity, 3, '.', ''),
+            ':unit_name' => ($roll['reception_mode'] ?? '') === 'QUANTITY' ? 'UN' : 'BOB',
             ':weight_kg' => number_format((float)($roll['weight_kg'] ?? 0), 3, '.', ''),
             ':width_mm' => isset($roll['width_mm']) && $roll['width_mm'] !== '' ? (int)$roll['width_mm'] : null,
             ':microns' => isset($roll['microns']) && $roll['microns'] !== '' ? (int)$roll['microns'] : null,
@@ -24129,7 +24372,7 @@ SQL;
                      item_code = :item_code,
                      item_description = :item_description,
                      quantity = :quantity,
-                     unit_name = 'BOB',
+                     unit_name = :unit_name,
                      weight_kg = :weight_kg,
                      width_mm = :width_mm,
                      microns = :microns,
@@ -24149,7 +24392,7 @@ SQL;
                  lot_number, location_ref, order_ref, operator_name, comments, status, created_at)
              VALUES
                 (:traceability_code, 'ROLL', :entity_id, :warehouse_id, :warehouse_name, NULL, :item_code, :item_description,
-                 :quantity, 'BOB', NULL, 1, 1, :weight_kg, :width_mm, :microns, :meters,
+                 :quantity, :unit_name, NULL, 1, 1, :weight_kg, :width_mm, :microns, :meters,
                  NULL, NULL, NULL, :operator_name, NULL, :status, NOW())"
         );
         $insertStmt->execute($params);
@@ -24180,7 +24423,8 @@ SQL;
         }
 
         $stmt = $this->pdo->prepare(
-            'SELECT r.id, r.roll_code, r.received_qty, r.warehouse_id, s.code AS sku_code, w.code AS warehouse_code
+            'SELECT r.id, r.roll_code, r.received_qty, r.warehouse_id, r.import_container_id,
+                    s.code AS sku_code, w.code AS warehouse_code
              FROM rolls r
              INNER JOIN skus s ON s.id = r.sku_id
              INNER JOIN warehouses w ON w.id = r.warehouse_id
@@ -24190,6 +24434,11 @@ SQL;
         $stmt->execute([':id' => $rollId]);
         $roll = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$roll) {
+            return;
+        }
+        // Las importaciones se ingresan por recepción de contenedor y costeo ERP.
+        // Imports enter ERP inventory only through the container costing workflow.
+        if ((int)($roll['import_container_id'] ?? 0) > 0) {
             return;
         }
 

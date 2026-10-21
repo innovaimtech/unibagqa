@@ -133,12 +133,34 @@ final class Db
         $host = self::clean(Env::get('LEGACY_ERP_DB_HOST', ''), '');
         $name = self::clean(Env::get('LEGACY_ERP_DB_NAME', ''), '');
         $user = self::clean(Env::get('LEGACY_ERP_DB_USER', ''), '');
+        $pass = self::clean(Env::get('LEGACY_ERP_DB_PASS', ''), '');
+        // Read explicitly configured legacy credentials without executing ERP PHP.
+        // Leer credenciales configuradas sin ejecutar el PHP del ERP antiguo.
+        $configFile = self::clean(Env::get('LEGACY_ERP_CONFIG_FILE', ''), '');
+        if ($configFile !== '') {
+            $config = is_readable($configFile) ? file_get_contents($configFile) : false;
+            if ($config === false) {
+                throw new RuntimeException('No se puede leer LEGACY_ERP_CONFIG_FILE.');
+            }
+            $values = [];
+            foreach (['NAME', 'USER', 'PASS'] as $key) {
+                if (preg_match('/\["DATABASE"\]\["' . $key . '"\]\s*=\s*"([^"]*)"/', $config, $match) !== 1) {
+                    throw new RuntimeException('Falta DATABASE ' . $key . ' en la configuracion ERP antigua.');
+                }
+                $values[$key] = $match[1];
+            }
+            $name = $name !== '' ? $name : $values['NAME'];
+            $user = $user !== '' ? $user : $values['USER'];
+            $pass = $pass !== '' ? $pass : $values['PASS'];
+        }
         if ($host === '' || $name === '' || $user === '') {
+            if ($host !== '' || $name !== '' || $user !== '' || $configFile !== '') {
+                throw new RuntimeException('Configuracion ERP antiguo incompleta: requiere host, base y usuario.');
+            }
             return null;
         }
 
         $port = self::clean(Env::get('LEGACY_ERP_DB_PORT', '3306'), '3306');
-        $pass = self::clean(Env::get('LEGACY_ERP_DB_PASS', ''), '');
         $charset = self::clean(Env::get('LEGACY_ERP_DB_CHARSET', Env::get('ERP_DB_CHARSET', 'utf8mb4')), 'utf8mb4');
 
         $primaryHost = self::clean(Env::get('ERP_DB_HOST', '127.0.0.1'), '127.0.0.1');
