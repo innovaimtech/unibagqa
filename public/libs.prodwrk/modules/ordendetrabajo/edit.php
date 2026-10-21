@@ -779,12 +779,7 @@ else
       //----------------------------------------------------------------------------------
       if($_REQUEST["mode"] == "eventdelete")
       {
-         $sql = " update prod_worker_ot_events
-                  set
-                  evt_status = 0
-                  where
-                  id = {$_REQUEST["refid"]}";
-         $CON->no_result($sql);
+         // Deshabilitado por regla de negocio: no se permite eliminar eventos de la OT
       }
 
       //----------------------------------------------------------------------------------

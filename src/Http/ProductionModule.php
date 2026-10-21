@@ -113,32 +113,42 @@ function handleProductionRoutes(
         }
         $sep = str_contains($redirectTo, '?') ? '&' : '?';
 
+        $action = trim((string)($_POST['action'] ?? 'start'));
         $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
-        $today = date('Y-m-d');
-        $startTime = trim((string)($_POST['start_time'] ?? '13:00'));
-        $endTime = trim((string)($_POST['end_time'] ?? '13:30'));
-        $comments = trim((string)($_POST['comments'] ?? 'Colación registrada desde producción'));
         $initId = $activeInit !== null ? (int)$activeInit['id'] : (int)($_POST['init_id'] ?? 0);
         $machineId = $activeInit !== null ? (int)$activeInit['win_equipoid'] : (int)($_POST['machine_id'] ?? 0);
         $machineName = $activeInit !== null ? (string)$activeInit['equipo_name'] : trim((string)($_POST['machine_name'] ?? ''));
+        $comments = trim((string)($_POST['comments'] ?? ''));
 
-        $res = $receptionService->saveOperatorLunchBreak(
-            $today,
-            $currentOperatorName,
-            $startTime,
-            $endTime,
-            $workerId,
-            $initId,
-            $machineId,
-            $machineName,
-            $comments,
-            $currentOperatorName
-        );
-
-        if ($res['ok']) {
-            redirectResponse($redirectTo . $sep . 'lunch_saved=1');
+        if ($action === 'start') {
+            $res = $receptionService->startOperatorLunchBreak(
+                $currentOperatorName,
+                $workerId,
+                $initId,
+                $machineId,
+                $machineName,
+                $comments
+            );
+            if ($res['ok']) {
+                redirectResponse($redirectTo . $sep . 'lunch_started=1');
+            } else {
+                redirectResponse($redirectTo . $sep . 'error=' . rawurlencode((string)($res['error'] ?? 'Error al iniciar colación.')));
+            }
         } else {
-            redirectResponse($redirectTo . $sep . 'error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar colación.')));
+            $lunchId = (int)($_POST['lunch_id'] ?? 0);
+            $res = $receptionService->endOperatorLunchBreak(
+                $lunchId,
+                $currentOperatorName,
+                $workerId,
+                $initId,
+                $comments
+            );
+            if ($res['ok']) {
+                $dur = (int)($res['duration'] ?? 0);
+                redirectResponse($redirectTo . $sep . 'lunch_ended=1&duration=' . $dur);
+            } else {
+                redirectResponse($redirectTo . $sep . 'error=' . rawurlencode((string)($res['error'] ?? 'Error al finalizar colación.')));
+            }
         }
         return true;
     }
@@ -378,15 +388,10 @@ function handleProductionRoutes(
         return true;
     }
 
-    // Evento Delete (soporta GET o POST tradicional de editxid.php)
+    // Evento Delete (DESHABILITADO: En ninguna máquina se permite eliminar eventos de la OT)
     if (($path === '/production/work-orders/events/delete' || (isset($_REQUEST['mode']) && $_REQUEST['mode'] === 'eventdelete')) && ($method === 'GET' || $method === 'POST')) {
         $agId = (int)($_REQUEST['agid'] ?? 0);
-        $delId = (int)($_REQUEST['delid'] ?? ($_REQUEST['event_id'] ?? 0));
-        $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
-        if ($delId > 0) {
-            $prodService->deleteEvent($delId, $workerOtId);
-        }
-        redirectResponse('/production/work-orders/operate?agid=' . $agId . '&event_deleted=1');
+        redirectResponse('/production/work-orders/operate?agid=' . $agId . '&event_delete_blocked=1');
         return true;
     }
 
@@ -1214,6 +1219,7 @@ function handleProductionRoutes(
         $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
         $inkAction = trim((string)($_REQUEST['ink_action'] ?? ''));
         $comments = trim((string)($_REQUEST['comments'] ?? ''));
+        $returnTo = trim((string)($_REQUEST['return_to'] ?? ''));
 
         if ($workerOtId <= 0 && $agId > 0) {
             $openOt = $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
@@ -1222,11 +1228,50 @@ function handleProductionRoutes(
             }
         }
 
-        if ($workerOtId <= 0) {
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=tintas&error=' . rawurlencode('No se encontró la OT activa para registrar tintas.'));
+        if ($workerOtId <= 0 && $agId > 0) {
+            // Si la OT aún no tiene registro en worker_ot, intentar iniciarla
+            $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
+            if ($activeInit !== null) {
+                $startRes = $prodService->startWorkerOt($agId, (int)$activeInit['id']);
+                if ($startRes['ok']) {
+                    $workerOtId = (int)$startRes['worker_ot_id'];
+                }
+            }
         }
 
-        if ($inkAction === 'load') {
+        if ($workerOtId <= 0 && $agId <= 0) {
+            $errorDest = $returnTo !== '' ? $returnTo : ('/production/work-orders/operate?agid=' . $agId . '&mode=tintas');
+            $sep = str_contains($errorDest, '?') ? '&' : '?';
+            redirectResponse($errorDest . $sep . 'error=' . rawurlencode('No se encontró la OT activa para registrar tintas.'));
+            return true;
+        }
+
+        if ($inkAction === 'seri_consume') {
+            $itemId = (int)($_POST['item_id'] ?? 0);
+            $initialWeightKg = (float)str_replace(',', '.', (string)($_POST['initial_weight_kg'] ?? 0));
+            $loadedKg = (float)str_replace(',', '.', (string)($_POST['loaded_qty'] ?? 0));
+            $leftoverKg = (float)str_replace(',', '.', (string)($_POST['leftover_qty'] ?? 0));
+            $consumedKg = (float)str_replace(',', '.', (string)($_POST['consumed_qty'] ?? 0));
+            $colorLabel = trim((string)($_POST['color_label'] ?? ''));
+            $res = $prodService->recordSerigrafiaInkConsumption(
+                $workerOtId,
+                $agId,
+                $itemId,
+                $initialWeightKg,
+                $loadedKg,
+                $leftoverKg,
+                $consumedKg,
+                $colorLabel,
+                $currentOperatorName,
+                $comments,
+                16
+            );
+            $param = $res['ok'] ? '&ink_consumed=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar consumo de tinta de serigrafía.'));
+        } elseif ($inkAction === 'delete_load') {
+            $loadId = (int)($_POST['load_id'] ?? 0);
+            $res = $prodService->deleteMachineInkLoad($loadId, $workerOtId, $currentOperatorName);
+            $param = $res['ok'] ? '&ink_deleted=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al revertir registro de tinta.'));
+        } elseif ($inkAction === 'load') {
             $itemId = (int)($_POST['item_id'] ?? 0);
             $qty = (float)str_replace(',', '.', (string)($_POST['qty_kg'] ?? 0));
             $res = $prodService->loadInkToMachine($workerOtId, $agId, $itemId, $qty, $currentOperatorName, $comments, 16);
@@ -1243,6 +1288,12 @@ function handleProductionRoutes(
             $param = $res['ok'] ? '&ink_returned=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al devolver tinta a 3000 Insumos de Producción.'));
         } else {
             $param = '&error=' . rawurlencode('Acción de tinta no válida.');
+        }
+
+        if ($returnTo !== '') {
+            $sep = str_contains($returnTo, '?') ? '&' : '?';
+            redirectResponse($returnTo . $sep . ltrim($param, '&'));
+            return true;
         }
 
         redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=tintas' . $param);
@@ -1581,6 +1632,25 @@ function handleProductionRoutes(
         $ctx['prod_service'] = $prodService;
         $activeInitForInk = (isset($activeInit) && is_array($activeInit)) ? $activeInit : [];
         $isFlexoContext = (int)($activeInitForInk['equipo_prod_isprinter_flexo'] ?? ($ctx['agenda']['equipo_prod_isprinter_flexo'] ?? 0)) === 1;
+        $eqTypeIdForInk = (int)($activeInitForInk['equipo_type_id'] ?? ($ctx['agenda']['equipo_type_id'] ?? 0));
+        $eqNameForInk = (string)($activeInitForInk['equipo_name'] ?? ($ctx['agenda']['equipo_name'] ?? ''));
+        $isSeriContext = (int)($activeInitForInk['equipo_prod_isprinter_seri'] ?? 0) === 1
+            || ($eqTypeIdForInk === 11)
+            || ($eqTypeIdForInk === 22)
+            || (int)($activeInitForInk['win_equipoid'] ?? 0) === 36
+            || stripos($eqNameForInk, 'seri') !== false
+            || stripos($eqNameForInk, 'pulpo') !== false;
+
+        $rawBodega3000 = $receptionService->listWarehouseItemsByErpStorehouseId(16, false, 'TIN');
+        usort($rawBodega3000, function ($a, $b) {
+            $stockA = (float)($a['available_qty'] ?? 0);
+            $stockB = (float)($b['available_qty'] ?? 0);
+            if ($stockA > 0 && $stockB <= 0) return -1;
+            if ($stockA <= 0 && $stockB > 0) return 1;
+            return strcasecmp((string)($a['name'] ?? ''), (string)($b['name'] ?? ''));
+        });
+        $ctx['bodega3000_ink_items'] = $rawBodega3000;
+
         if ($isFlexoContext) {
             $inkWarehouse = productionResolveInkWarehouseForAgenda($activeInitForInk, $ctx['agenda'] ?? null);
             $ctx['ink_warehouse'] = $inkWarehouse;
@@ -1589,12 +1659,20 @@ function handleProductionRoutes(
                 true,
                 (string)($inkWarehouse['item_prefix'] ?? 'TIN')
             );
+        } elseif ($isSeriContext) {
+            $ctx['ink_warehouse'] = [
+                'id' => 16,
+                'erp_storehouse_id' => 16,
+                'storehouse_title' => '3000 INSUMOS EN PRODUCCION',
+                'name' => '3000 Insumos en Producción',
+                'item_prefix' => 'TIN',
+            ];
+            $ctx['ink_items'] = $rawBodega3000;
         } else {
             $ctx['ink_warehouse'] = [];
             $ctx['ink_items'] = [];
         }
-        $ctx['machine_ink_loads'] = $workerOtId > 0 ? $prodService->listMachineInkLoadsForWorkOrder($workerOtId, false) : [];
-        $ctx['bodega3000_ink_items'] = $receptionService->listWarehouseItemsByErpStorehouseId(16, true, 'TIN');
+        $ctx['machine_ink_loads'] = ($workerOtId > 0 || $agId > 0) ? $prodService->listMachineInkLoadsForWorkOrder($workerOtId, false, $agId) : [];
 
         renderProductionOperatorConsole(
             $ctx,
@@ -2328,6 +2406,327 @@ function renderProdwrkShell(
 }
 
 // =============================================================================
+// SECCIÓN REUTILIZABLE: CONSUMO DE TINTAS DE SERIGRAFÍA (BODEGA 3000)
+// =============================================================================
+
+/**
+ * Renderiza el panel de consumo de tintas de serigrafía (Pulpo y Serigrafía Plana)
+ * conectado directamente con Bodega 3000 (Insumos en Producción).
+ * Permite registrar peso al inicio, cuánto se cargó, cuánto sobró y consumo neto,
+ * descontando stock en Bodega 3000 y registrando trazabilidad en la OT.
+ */
+function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = '', bool $isCollapsible = true): void
+{
+    $agenda = $ctx['agenda'] ?? [];
+    $workerOt = $ctx['worker_ot'] ?? null;
+    $workerOtId = $workerOt !== null ? (int)$workerOt['id'] : 0;
+    $agId = (int)($agenda['id'] ?? 0);
+    $bodega3000Inks = $ctx['bodega3000_ink_items'] ?? [];
+    $machineInkLoads = $ctx['machine_ink_loads'] ?? [];
+
+    $totalConsumed = 0.0;
+    $seriLoads = [];
+    foreach ($machineInkLoads as $load) {
+        $totalConsumed += (float)($load['consumed_qty'] ?? 0);
+        $seriLoads[] = $load;
+    }
+
+    $otColors = [];
+    for ($cIdx = 1; $cIdx <= 10; $cIdx++) {
+        $cDesc = trim((string)($agenda["fab_print_colordesc_{$cIdx}"] ?? ''));
+        if ($cDesc !== '') {
+            $fCheck = (int)($agenda["fab_print_colors_front_{$cIdx}"] ?? 0);
+            $bCheck = (int)($agenda["fab_print_colors_back_{$cIdx}"] ?? 0);
+            $sideStr = '';
+            if ($fCheck > 0 && $bCheck > 0) $sideStr = ' [Frente y Dorso]';
+            elseif ($fCheck > 0) $sideStr = ' [Frente]';
+            elseif ($bCheck > 0) $sideStr = ' [Dorso]';
+            $otColors[] = "Color {$cIdx}: {$cDesc}{$sideStr}";
+        }
+    }
+    if (empty($otColors)) {
+        $otColors = ['Color 1', 'Color 2', 'Color 3', 'Color 4'];
+    }
+
+    if ($returnTo === '') {
+        $returnTo = $_SERVER['REQUEST_URI'] ?? ('/production/work-orders/operate?agid=' . $agId);
+    }
+    $uniqId = 'seri_ink_' . $agId . '_' . ($workerOtId > 0 ? $workerOtId : '0');
+    ?>
+    <div style="background-color:#FFFFFF;border:1px solid #CBD5E1;border-radius:8px;overflow:hidden;margin-bottom:15px;box-shadow:0 1px 3px rgba(15,23,42,0.06)">
+        <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_seri_inks_<?=$agId?>', 'icon_seri_inks_<?=$agId?>')" style="background:#F8FAFC;padding:12px 18px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;border-bottom:1px solid #E2E8F0">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <span style="width:34px;height:34px;border-radius:8px;background:#E0F2FE;color:#0284C7;display:inline-flex;align-items:center;justify-content:center;font-size:16px">
+                    <i class="fa fa-tint"></i>
+                </span>
+                <div>
+                    <span style="font-weight:800;font-size:14px;color:#0F172A">
+                        Consumo de Tintas de Serigrafía &mdash; Bodega 3000 (Insumos en Producción)
+                    </span>
+                    <span style="font-size:12px;color:#64748B;margin-left:8px">
+                        Control de tara inicial, carga a máquina y sobrante final
+                    </span>
+                </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <span style="background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:800">
+                    <i class="fa fa-warehouse"></i> Bodega 3000
+                </span>
+                <?php if ($totalConsumed > 0): ?>
+                    <span style="background:#ECFDF5;color:#065F46;border:1px solid #A7F3D0;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:800">
+                        <i class="fa fa-check"></i> Consumido OT: <?=number_format($totalConsumed, 2, ',', '.')?> kg
+                    </span>
+                <?php endif; ?>
+                <span class="unibag-collapse-btn" style="color:#64748B;font-size:12px">
+                    <span id="lbl_seri_inks_<?=$agId?>">Minimizar</span>
+                    <i id="icon_seri_inks_<?=$agId?>" class="fa fa-chevron-up"></i>
+                </span>
+            </div>
+        </div>
+
+        <div id="sec_seri_inks_<?=$agId?>" style="padding:18px">
+            <!-- Formulario de nuevo consumo -->
+            <form method="post" action="/production/work-orders/inks/manage" id="form_<?=$uniqId?>" onsubmit="return validateSeriInkForm(this);" style="margin:0 0 16px 0;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:16px">
+                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                <input type="hidden" name="agid" value="<?=$agId?>">
+                <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                <input type="hidden" name="ink_action" value="seri_consume">
+                <input type="hidden" name="return_to" value="<?=htmlspecialchars($returnTo)?>">
+
+                <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px;align-items:start">
+                    <!-- Tinta Bodega 3000 -->
+                    <div style="grid-column: span 2; min-width:280px">
+                        <label style="display:block;font-size:11.5px;font-weight:800;color:#334155;margin-bottom:4px">
+                            <i class="fa fa-flask" style="color:#0284C7"></i> Tinta desde Bodega 3000 *
+                        </label>
+                        <select name="item_id" id="<?=$uniqId?>_item" class="inptxt" style="width:100%;height:38px;font-size:12px;padding:4px 8px;border-radius:6px;background:#FFF;font-weight:600" required>
+                            <option value="">-- Seleccionar Tinta de Bodega 3000 --</option>
+                            <?php foreach ($bodega3000Inks as $ink):
+                                $stockVal = (float)($ink['available_qty'] ?? 0);
+                                $hasStock = $stockVal > 0.0001;
+                            ?>
+                                <option value="<?=$ink['item_id']?>" data-stock="<?=$stockVal?>">
+                                    <?=htmlspecialchars((string)$ink['code'])?> - <?=htmlspecialchars((string)$ink['name'])?> (Stock: <?=number_format($stockVal, 2, ',', '.')?> <?=$ink['unit_name']?>)<?=$hasStock ? ' ✓' : ''?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <div style="font-size:10.5px;color:#64748B;margin-top:3px">
+                            Catálogo de Bodega 3000 Insumos en Producción (prioriza con stock).
+                        </div>
+                    </div>
+
+                    <!-- Color de la OT -->
+                    <div>
+                        <label style="display:block;font-size:11.5px;font-weight:800;color:#334155;margin-bottom:4px">
+                            <i class="fa fa-palette" style="color:#6366F1"></i> Color Asignado
+                        </label>
+                        <select name="color_label" class="inptxt" style="width:100%;height:38px;font-size:12px;padding:4px 8px;border-radius:6px;background:#FFF">
+                            <option value="">&lt; General / Sin Color &gt;</option>
+                            <?php foreach ($otColors as $cText): ?>
+                                <option value="<?=htmlspecialchars($cText)?>"><?=htmlspecialchars($cText)?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+                    <!-- Peso Inicio (kg) -->
+                    <div>
+                        <label style="display:block;font-size:11.5px;font-weight:800;color:#334155;margin-bottom:4px">
+                            <i class="fa fa-weight-hanging" style="color:#059669"></i> Peso al Inicio (kg)
+                        </label>
+                        <input type="number" step="0.001" min="0" name="initial_weight_kg" id="<?=$uniqId?>_init" class="inptxt" style="width:100%;height:38px;font-size:13px;font-weight:700;text-align:right;padding-right:10px;border-radius:6px;background:#FFF" placeholder="0.000" oninput="calcSeriInkNet('<?=$uniqId?>')">
+                        <div style="font-size:10.5px;color:#64748B;margin-top:2px">Tara / peso tarro inicial</div>
+                    </div>
+
+                    <!-- Cuánto se cargó (kg) -->
+                    <div>
+                        <label style="display:block;font-size:11.5px;font-weight:800;color:#334155;margin-bottom:4px">
+                            <i class="fa fa-arrow-circle-down" style="color:#0284C7"></i> Cuánto se cargó (kg)
+                        </label>
+                        <input type="number" step="0.001" min="0" name="loaded_qty" id="<?=$uniqId?>_loaded" class="inptxt" style="width:100%;height:38px;font-size:13px;font-weight:700;text-align:right;padding-right:10px;border-radius:6px;background:#FFF" placeholder="0.000" oninput="calcSeriInkNet('<?=$uniqId?>')">
+                        <div style="font-size:10.5px;color:#64748B;margin-top:2px">Kilos cargados a matriz</div>
+                    </div>
+
+                    <!-- Cuánto sobró (kg) -->
+                    <div>
+                        <label style="display:block;font-size:11.5px;font-weight:800;color:#334155;margin-bottom:4px">
+                            <i class="fa fa-undo" style="color:#D97706"></i> Cuánto sobró (kg)
+                        </label>
+                        <input type="number" step="0.001" min="0" name="leftover_qty" id="<?=$uniqId?>_leftover" class="inptxt" style="width:100%;height:38px;font-size:13px;font-weight:700;text-align:right;padding-right:10px;border-radius:6px;background:#FFF" placeholder="0.000" oninput="calcSeriInkNet('<?=$uniqId?>')">
+                        <div style="font-size:10.5px;color:#64748B;margin-top:2px">Kilos no usados devueltos</div>
+                    </div>
+
+                    <!-- Consumo Neto Calculado -->
+                    <div>
+                        <label style="display:block;font-size:11.5px;font-weight:800;color:#0F766E;margin-bottom:4px">
+                            <i class="fa fa-calculator"></i> Consumo Neto (kg)
+                        </label>
+                        <div style="display:flex;align-items:center;height:38px;background:#ECFDF5;border:1.5px solid #10B981;border-radius:6px;padding:0 12px;justify-content:space-between">
+                            <span style="font-size:11px;font-weight:800;color:#047857">A DESCONTAR:</span>
+                            <span id="<?=$uniqId?>_display_net" style="font-size:16px;font-weight:900;color:#065F46">0.000 kg</span>
+                        </div>
+                        <input type="hidden" name="consumed_qty" id="<?=$uniqId?>_consumed" value="0">
+                        <div style="font-size:10.5px;color:#047857;margin-top:2px">Cargado &minus; Sobrante (o Inicio &minus; Sobrante)</div>
+                    </div>
+                </div>
+
+                <!-- Observaciones y Botón Guardar -->
+                <div style="display:flex;gap:12px;align-items:center;margin-top:14px;flex-wrap:wrap">
+                    <div style="flex:1;min-width:220px">
+                        <input type="text" name="comments" class="inptxt" style="width:100%;height:38px;border-radius:6px;font-size:12px;padding:0 10px;background:#FFF" placeholder="Observaciones opcionales (ej: matriz frente 1, prueba de tono...)">
+                    </div>
+                    <div>
+                        <button type="submit" class="btngreen" style="height:38px;padding:0 22px;border:none;border-radius:6px;font-size:13px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 1px 2px rgba(0,0,0,0.1)">
+                            <i class="fa fa-check-circle" style="font-size:15px"></i> Registrar Consumo en Bodega 3000
+                        </button>
+                    </div>
+                </div>
+            </form>
+
+            <!-- Historial de consumos en esta OT -->
+            <div>
+                <div style="font-size:13px;font-weight:800;color:#1E293B;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
+                    <span><i class="fa fa-history" style="color:#64748B"></i> Historial de Tintas Registradas en esta OT (<?=count($seriLoads)?>)</span>
+                    <span style="font-size:11.5px;color:#64748B;font-weight:normal">
+                        Total Neto Consumido: <b style="color:#0F766E"><?=number_format($totalConsumed, 2, ',', '.')?> kg</b>
+                    </span>
+                </div>
+
+                <?php if (empty($seriLoads)): ?>
+                    <div style="background:#F1F5F9;border:1px dashed #CBD5E1;border-radius:6px;padding:14px;text-align:center;color:#64748B;font-size:12px">
+                        No hay consumos de tinta registrados aún para esta orden de trabajo. Complete el formulario superior para registrar la primera tinta desde Bodega 3000.
+                    </div>
+                <?php else: ?>
+                    <div style="overflow-x:auto;border:1px solid #E2E8F0;border-radius:6px">
+                        <table border="0" width="100%" cellpadding="8" cellspacing="0" style="background:#FFF">
+                            <thead>
+                                <tr style="background:#F8FAFC;border-bottom:1px solid #E2E8F0;font-size:11.5px;color:#475569;text-transform:uppercase;letter-spacing:0.3px">
+                                    <th align="left" style="padding-left:12px">Tinta (Bodega 3000)</th>
+                                    <th align="left">Color</th>
+                                    <th align="right">Peso Inicio</th>
+                                    <th align="right">Cargado</th>
+                                    <th align="right">Sobrante</th>
+                                    <th align="right" style="color:#0F766E">Consumo Neto</th>
+                                    <th align="left">Operador / Fecha</th>
+                                    <th align="center" style="width:90px">Acción</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($seriLoads as $sLoad):
+                                    $sLoadId = (int)($sLoad['id'] ?? 0);
+                                    $sNet = (float)($sLoad['consumed_qty'] ?? 0);
+                                    $sInit = (float)($sLoad['initial_weight_kg'] ?? 0);
+                                    $sLoaded = (float)($sLoad['loaded_qty'] ?? 0);
+                                    $sLeft = (float)($sLoad['leftover_qty'] ?? 0);
+                                    $sColor = trim((string)($sLoad['color_label'] ?? ''));
+                                    $sOp = trim((string)($sLoad['operator_name'] ?? ''));
+                                    $sDate = (int)($sLoad['created_at'] ?? 0) > 0 ? date('d/m H:i', (int)$sLoad['created_at']) : '-';
+                                    $sComm = trim((string)($sLoad['comments'] ?? ''));
+                                ?>
+                                <tr style="border-bottom:1px solid #F1F5F9" onmouseover="this.style.backgroundColor='#F8FBFF'" onmouseout="this.style.backgroundColor=''">
+                                    <td style="padding-left:12px">
+                                        <div style="font-weight:700;color:#0F172A;font-size:12.5px">
+                                            <?=htmlspecialchars(trim((string)($sLoad['item_code'] ?? '') . ' - ' . (string)($sLoad['item_name'] ?? ''), ' -'))?>
+                                        </div>
+                                        <?php if ($sComm !== ''): ?>
+                                            <div style="font-size:11px;color:#64748B;font-style:italic"><?=htmlspecialchars($sComm)?></div>
+                                        <?php endif; ?>
+                                    </td>
+                                    <td style="font-size:12px;color:#334155">
+                                        <?=htmlspecialchars($sColor !== '' ? $sColor : '-')?>
+                                    </td>
+                                    <td align="right" style="font-size:12px;color:#475569">
+                                        <?=$sInit > 0 ? number_format($sInit, 2, ',', '.') . ' kg' : '-'?>
+                                    </td>
+                                    <td align="right" style="font-size:12px;color:#0284C7;font-weight:700">
+                                        <?=$sLoaded > 0 ? number_format($sLoaded, 2, ',', '.') . ' kg' : '-'?>
+                                    </td>
+                                    <td align="right" style="font-size:12px;color:#D97706">
+                                        <?=$sLeft > 0 ? number_format($sLeft, 2, ',', '.') . ' kg' : '-'?>
+                                    </td>
+                                    <td align="right" style="font-size:13px;font-weight:800;color:#0F766E">
+                                        <?=number_format($sNet, 2, ',', '.')?> kg
+                                    </td>
+                                    <td style="font-size:11.5px;color:#64748B">
+                                        <div><b><?=htmlspecialchars($sOp !== '' ? $sOp : 'Operador')?></b></div>
+                                        <div><?=$sDate?></div>
+                                    </td>
+                                    <td align="center">
+                                        <form method="post" action="/production/work-orders/inks/manage" style="margin:0" onsubmit="return confirm('¿Eliminar este registro de tinta y devolver <?=number_format($sNet, 2, ',', '.')?> kg al stock de Bodega 3000?');">
+                                            <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                                            <input type="hidden" name="agid" value="<?=$agId?>">
+                                            <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                                            <input type="hidden" name="ink_action" value="delete_load">
+                                            <input type="hidden" name="load_id" value="<?=$sLoadId?>">
+                                            <input type="hidden" name="return_to" value="<?=htmlspecialchars($returnTo)?>">
+                                            <button type="submit" class="btnred" style="padding:4px 8px;font-size:11px;cursor:pointer;border-radius:4px" title="Eliminar y devolver stock a Bodega 3000">
+                                                <i class="fa fa-trash"></i>
+                                            </button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    if (typeof calcSeriInkNet !== 'function') {
+        window.calcSeriInkNet = function(prefix) {
+            var initEl = document.getElementById(prefix + '_init');
+            var loadedEl = document.getElementById(prefix + '_loaded');
+            var leftoverEl = document.getElementById(prefix + '_leftover');
+            var displayEl = document.getElementById(prefix + '_display_net');
+            var consumedEl = document.getElementById(prefix + '_consumed');
+            if (!displayEl || !consumedEl) return;
+
+            var initVal = initEl ? parseFloat(initEl.value.replace(',', '.')) || 0 : 0;
+            var loadedVal = loadedEl ? parseFloat(loadedEl.value.replace(',', '.')) || 0 : 0;
+            var leftoverVal = leftoverEl ? parseFloat(leftoverEl.value.replace(',', '.')) || 0 : 0;
+
+            var net = 0;
+            if (loadedVal > 0) {
+                net = Math.max(0, loadedVal - leftoverVal);
+            } else if (initVal > 0 && leftoverVal > 0 && initVal >= leftoverVal) {
+                net = Math.max(0, initVal - leftoverVal);
+            } else if (initVal > 0 && loadedVal === 0 && leftoverVal === 0) {
+                net = 0;
+            }
+
+            net = Math.round(net * 1000) / 1000;
+            consumedEl.value = net.toFixed(3);
+            displayEl.textContent = net.toFixed(3) + ' kg';
+        };
+    }
+
+    if (typeof validateSeriInkForm !== 'function') {
+        window.validateSeriInkForm = function(form) {
+            var itemSelect = form.querySelector('select[name="item_id"]');
+            if (!itemSelect || !itemSelect.value) {
+                alert('Debe seleccionar una tinta desde Bodega 3000.');
+                if (itemSelect) itemSelect.focus();
+                return false;
+            }
+            var loaded = parseFloat((form.querySelector('input[name="loaded_qty"]').value || '0').replace(',', '.')) || 0;
+            var init = parseFloat((form.querySelector('input[name="initial_weight_kg"]').value || '0').replace(',', '.')) || 0;
+            var leftover = parseFloat((form.querySelector('input[name="leftover_qty"]').value || '0').replace(',', '.')) || 0;
+            var consumed = parseFloat((form.querySelector('input[name="consumed_qty"]').value || '0').replace(',', '.')) || 0;
+
+            if (loaded <= 0 && init <= 0 && consumed <= 0) {
+                alert('Debe indicar al menos cuánto se cargó o el peso al inicio de la tinta.');
+                return false;
+            }
+            return true;
+        };
+    }
+    </script>
+    <?php
+}
+
+// =============================================================================
 // CONSOLA DEL OPERARIO (Recreación exacta de editxid.php)
 // =============================================================================
 
@@ -2401,6 +2800,17 @@ function renderProductionOperatorConsole(
     $isEmbalaje = (int)($machineInit['type_createstock_act'] ?? 0) === 1;
     $materialsMachineProcessTitle = $isFlexo ? 'Flexografía' : ($isSeriPulpo ? 'Serigrafía Pulpo' : ($isSeri ? 'Serigrafía' : ($isSelladora ? 'Selladora' : ($isRebobinadora ? 'Rebobinadora' : (!empty($machineInit['equipo_name']) ? (string)$machineInit['equipo_name'] : 'Producción')))));
     $activeStandby = $ctx['active_standby'] ?? null;
+
+    $activeLunch = null;
+    try {
+        global $container;
+        $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
+        if ($recSvc) {
+            $wrkId = (int)($machineInit['win_wrkid'] ?? $machineInit['wrk_id'] ?? 0);
+            $initId = (int)($machineInit['id'] ?? 0);
+            $activeLunch = $recSvc->getActiveOperatorLunchBreak($wrkId, $initId, $currentOperatorName);
+        }
+    } catch (\Throwable) {}
 
     $prodService = $ctx['prod_service'] ?? new ProductionService(Db::erpPdo(), Db::trzPdo());
 
@@ -2764,20 +3174,7 @@ function renderProductionOperatorConsole(
     ob_start();
     ?>
 
-    <?php if ($activeStandby !== null): ?>
-        <div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:6px;padding:12px 18px;margin-bottom:15px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-            <div style="display:flex;align-items:center;gap:10px">
-                <i class="fa fa-pause-circle" style="font-size:24px;color:#EA580C"></i>
-                <div>
-                    <div style="font-weight:bold;color:#9A3412;font-size:14px">MÁQUINA EN ESPERA / SIN PRODUCCIÓN: <?=htmlspecialchars((string)$activeStandby['reason'])?></div>
-                    <div style="font-size:12px;color:#C2410C">Iniciado a las <b><?=htmlspecialchars((string)$activeStandby['start_time'])?></b> por <b><?=htmlspecialchars((string)$activeStandby['operator_name'])?></b><?php if (!empty($activeStandby['comments'])): ?> &bull; <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i><?php endif; ?></div>
-                </div>
-            </div>
-            <button type="button" class="btnorange" style="background:#EA580C;padding:7px 16px;border:none;cursor:pointer;font-size:13px" onclick="openStandbyEndModal()">
-                <i class="fa fa-play"></i> Finalizar Sin Producción
-            </button>
-        </div>
-    <?php endif; ?>
+
 
     <?php if (!empty($_GET['roll_created'])): ?>
         <div style="background:#E8F8F5;border:1.5px solid #2ECC71;color:#117A65;padding:16px 20px;border-radius:6px;margin-bottom:18px;font-size:14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
@@ -3017,12 +3414,17 @@ function renderProductionOperatorConsole(
                         <td class="tdnrm" colspan="2"><?=(int)($agenda['req_cliche_peli_recep_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_recep_dat']) : '<b class="msg_save_err">N/A</b>'?></td>
                     </tr>
                     <tr>
-                        <td class="tdleft" colspan="2">Imagen diseño</td>
-                        <td class="tdnrm" colspan="2">
+                        <td class="tdleft" colspan="2" valign="middle">Imagen diseño</td>
+                        <td class="tdnrm" colspan="2" valign="middle">
                             <?php if ($acHasImg): ?>
-                                <a href="<?=$acImgUrl?>" target="_blank" onclick="openDesignModal('<?=$acImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                                </a>
+                                <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                    <a href="<?=$acImgUrl?>" target="_blank" onclick="openDesignModal('<?=$acImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" title="Clic para ampliar diseño">
+                                        <img src="<?=$acImgUrl?>" alt="Foto Diseño" style="max-height:65px;max-width:105px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
+                                    </a>
+                                    <a href="<?=$acImgUrl?>" target="_blank" onclick="openDesignModal('<?=$acImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                    </a>
+                                </div>
                             <?php else: ?>
                                 <span style="color:#999">Sin imagen cargada</span>
                             <?php endif; ?>
@@ -3035,12 +3437,17 @@ function renderProductionOperatorConsole(
                             $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
                         ?>
                         <tr>
-                            <td class="tdleft" colspan="2">Imagen x #<?=($x + 1)?></td>
-                            <td class="tdnrm" colspan="2">
+                            <td class="tdleft" colspan="2" valign="middle">Imagen x #<?=($x + 1)?></td>
+                            <td class="tdnrm" colspan="2" valign="middle">
                                 <?php if ($adjIsImage): ?>
-                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                                    </a>
+                                    <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                        <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" title="Clic para ampliar adjunto">
+                                            <img src="<?=$adjUrl?>" alt="Adjunto #<?=($x + 1)?>" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
+                                        </a>
+                                        <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                            <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                        </a>
+                                    </div>
                                 <?php else: ?>
                                     <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
                                         <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
@@ -3156,12 +3563,17 @@ function renderProductionOperatorConsole(
                         </td>
                     </tr>
                     <tr>
-                        <td class="tdleft" colspan="2">Imagen diseño</td>
-                        <td class="tdnrm" colspan="2">
+                        <td class="tdleft" colspan="2" valign="middle">Imagen diseño</td>
+                        <td class="tdnrm" colspan="2" valign="middle">
                             <?php if ($acHasImg): ?>
-                                <a href="<?=$acImgUrl?>" target="_blank" onclick="openDesignModal('<?=$acImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                                </a>
+                                <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                    <a href="<?=$acImgUrl?>" target="_blank" onclick="openDesignModal('<?=$acImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" title="Clic para ampliar diseño">
+                                        <img src="<?=$acImgUrl?>" alt="Foto Diseño" style="max-height:65px;max-width:105px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
+                                    </a>
+                                    <a href="<?=$acImgUrl?>" target="_blank" onclick="openDesignModal('<?=$acImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($acFullDesign))?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                    </a>
+                                </div>
                             <?php else: ?>
                                 <span style="color:#999">Sin imagen cargada</span>
                             <?php endif; ?>
@@ -3174,12 +3586,17 @@ function renderProductionOperatorConsole(
                             $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
                         ?>
                         <tr>
-                            <td class="tdleft" colspan="2">Imagen x #<?=($x + 1)?></td>
-                            <td class="tdnrm" colspan="2">
+                            <td class="tdleft" colspan="2" valign="middle">Imagen x #<?=($x + 1)?></td>
+                            <td class="tdnrm" colspan="2" valign="middle">
                                 <?php if ($adjIsImage): ?>
-                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                                    </a>
+                                    <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                        <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" title="Clic para ampliar adjunto">
+                                            <img src="<?=$adjUrl?>" alt="Adjunto #<?=($x + 1)?>" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
+                                        </a>
+                                        <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($acMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                            <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                        </a>
+                                    </div>
                                 <?php else: ?>
                                     <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
                                         <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
@@ -3878,7 +4295,7 @@ function renderProductionOperatorConsole(
         <!-- Tarjeta 3: Botones auxiliares de autocontrol.form.php -->
         <?php
         $autoMaterialsLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
-        $autoHasTintasShortcut = $isFlexo;
+        $autoHasTintasShortcut = $isFlexo || $isSeri;
         $autoColWidth = $autoHasTintasShortcut ? '20%' : '25%';
         ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">
@@ -3906,15 +4323,21 @@ function renderProductionOperatorConsole(
                 </div>
             </td>
             <td width="<?=$autoColWidth?>" style="padding-left:3px">
-                <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#0284C7;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800;text-align:center" onclick="openLunchModal()" title="Registrar horario de colación">
-                    <i class="fa fa-fw fa-coffee"></i> Colación
-                </div>
+                <?php if ($activeLunch !== null): ?>
+                    <div class="btnorange" style="width:100%;box-sizing:border-box;background-color:#D97706;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800;text-align:center" onclick="openLunchModal()" title="Colación activa">
+                        <i class="fa fa-fw fa-coffee"></i> EN COLACIÓN
+                    </div>
+                <?php else: ?>
+                    <div class="btnblue" style="width:100%;box-sizing:border-box;background-color:#0284C7;padding:10px 0;cursor:pointer;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16);font-weight:800;text-align:center" onclick="openLunchModal()" title="Registrar horario de colación">
+                        <i class="fa fa-fw fa-coffee"></i> Colación
+                    </div>
+                <?php endif; ?>
             </td>
         </tr>
         </table>
         <?php
         echo renderDesignPreviewModal();
-        renderStandbyAndLunchModals($activeStandby, $machineInit, $currentOperatorName, '/production/work-orders/operate?agid=' . $agId);
+        renderStandbyAndLunchModals($activeStandby, $machineInit, $currentOperatorName, '/production/work-orders/operate?agid=' . $agId, $activeLunch);
         $content = ob_get_clean();
         renderProdwrkShell('Operar OT #' . $agenda['prd_number'], $content, 2, $currentOperatorName, $plantaName);
         return;
@@ -3990,9 +4413,15 @@ function renderProductionOperatorConsole(
                 </td>
                 <td align="right" width="360">
                     <div style="display:inline-flex;align-items:center;gap:8px">
-                        <button type="button" class="btnblue" style="background:#0284C7;padding:7px 14px;cursor:pointer;border:none;border-radius:4px;font-size:13px;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openLunchModal()" title="Registrar horario de colación">
-                            <i class="fa fa-coffee"></i> Colación
-                        </button>
+                        <?php if ($activeLunch !== null): ?>
+                            <button type="button" class="btnorange" style="background:#D97706;padding:7px 14px;cursor:pointer;border:none;border-radius:4px;font-size:13px;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openLunchModal()" title="Colación activa">
+                                <i class="fa fa-coffee"></i> EN COLACIÓN (desde <?=date('H:i', strtotime($activeLunch['start_time']))?>) &mdash; Terminar
+                            </button>
+                        <?php else: ?>
+                            <button type="button" class="btnblue" style="background:#0284C7;padding:7px 14px;cursor:pointer;border:none;border-radius:4px;font-size:13px;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openLunchModal()" title="Registrar horario de colación en tiempo real">
+                                <i class="fa fa-coffee"></i> Colación
+                            </button>
+                        <?php endif; ?>
                         <div class="btngreen" style="display:inline-block" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=terminarot'">
                             <i class="fa fa-fw fa-check" style="color:white;"></i> Terminar OT&nbsp;
                         </div>
@@ -5537,8 +5966,11 @@ function renderProductionOperatorConsole(
                     </table>
 
                     <!-- Tabla de 10 Unidades de Bastidores y Secadores -->
-                    <div id="pulpo-config-10" style="font-weight:bold;color:#115452;font-size:13.5px;margin-bottom:8px">
-                        <i class="fa fa-th"></i> Configuración de 10 Unidades de Bastidores / Secadores
+                    <div id="pulpo-config-10" style="font-weight:bold;color:#115452;font-size:13.5px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+                        <span><i class="fa fa-th"></i> Configuración de 10 Unidades de Bastidores / Secadores</span>
+                        <a href="#sec_seri_inks_<?=$agId?>" style="font-size:12px;font-weight:800;color:#0284C7;text-decoration:none;background:#EFF6FF;border:1px solid #BFDBFE;padding:4px 10px;border-radius:6px;display:inline-flex;align-items:center;gap:6px">
+                            <i class="fa fa-tint"></i> Consumo de Tintas Bodega 3000 &darr;
+                        </a>
                     </div>
                     <table border="0" width="100%" cellpadding="6" cellspacing="0" style="border:1px solid #DDDDDD">
                     <thead>
@@ -5576,6 +6008,8 @@ function renderProductionOperatorConsole(
                         $savedMesh = (float)($unit['val_mesh'] ?? 0);
                         $savedTempSec = (float)($unit['val_temp_secador'] ?? 0);
                         $savedTotalTinta = (float)($unit['val_total_tinta'] ?? 0);
+                        $savedCargaTinta = (float)($unit['val_carga_tinta'] ?? 0);
+                        $savedSobranteTinta = (float)($unit['val_sobrante_tinta'] ?? 0);
                     ?>
                     <tr>
                         <td class="tdnrm" align="center" style="font-weight:bold;background:#F8FAFC"><?=$px + 1?></td>
@@ -5608,10 +6042,10 @@ function renderProductionOperatorConsole(
                             <input type="number" step="0.01" name="unit_tinta_<?=$px?>" class="inptxt" style="width:85px;text-align:center" value="<?=$savedTotalTinta > 0 ? $savedTotalTinta : ''?>" placeholder="0.00">
                         </td>
                         <td class="tdnrm" align="center">
-                            <input type="number" step="0.01" name="unit_carga_tinta_<?=$px?>" class="inptxt" style="width:80px;text-align:center" placeholder="0.00">
+                            <input type="number" step="0.01" name="unit_carga_tinta_<?=$px?>" class="inptxt" style="width:80px;text-align:center" value="<?=$savedCargaTinta > 0 ? $savedCargaTinta : ''?>" placeholder="0.00">
                         </td>
                         <td class="tdnrm" align="center">
-                            <input type="number" step="0.01" name="unit_sobrante_tinta_<?=$px?>" class="inptxt" style="width:80px;text-align:center" placeholder="0.00">
+                            <input type="number" step="0.01" name="unit_sobrante_tinta_<?=$px?>" class="inptxt" style="width:80px;text-align:center" value="<?=$savedSobranteTinta > 0 ? $savedSobranteTinta : ''?>" placeholder="0.00">
                         </td>
                     </tr>
                     <?php endfor; ?>
@@ -5626,6 +6060,11 @@ function renderProductionOperatorConsole(
                 </form>
             </div>
         </div>
+
+        <!-- 3. CONSUMO DE TINTAS DE SERIGRAFÍA (BODEGA 3000) -->
+        <?php if ($isSeri): ?>
+            <?php renderSerigrafiaInkConsumptionSection($ctx); ?>
+        <?php endif; ?>
 
     <?php elseif ($isSeriPlana): ?>
         <!-- ============================================================== -->
@@ -5736,12 +6175,17 @@ function renderProductionOperatorConsole(
                     <td class="tdnrm" colspan="2"><?=(int)($agenda['req_cliche_peli_recep_dat'] ?? 0) > 0 ? date('d.m.Y', (int)$agenda['req_cliche_peli_recep_dat']) : '<b class="msg_save_err">N/A</b>'?></td>
                 </tr>
                 <tr>
-                    <td class="tdleft" colspan="2">Imagen diseño</td>
-                    <td class="tdnrm" colspan="2">
+                    <td class="tdleft" colspan="2" valign="middle">Imagen diseño</td>
+                    <td class="tdnrm" colspan="2" valign="middle">
                         <?php if ($seriHasImg): ?>
-                            <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                            </a>
+                            <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" title="Clic para ampliar diseño">
+                                    <img src="<?=$seriImgUrl?>" alt="Foto Diseño" style="max-height:65px;max-width:105px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
+                                </a>
+                                <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                </a>
+                            </div>
                         <?php else: ?>
                             <span style="color:#999">Sin imagen cargada</span>
                         <?php endif; ?>
@@ -5754,12 +6198,17 @@ function renderProductionOperatorConsole(
                         $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
                     ?>
                     <tr>
-                        <td class="tdleft" colspan="2">Imagen x #<?=($x + 1)?></td>
-                        <td class="tdnrm" colspan="2">
+                        <td class="tdleft" colspan="2" valign="middle">Imagen x #<?=($x + 1)?></td>
+                        <td class="tdnrm" colspan="2" valign="middle">
                             <?php if ($adjIsImage): ?>
-                                <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                                </a>
+                                <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" title="Clic para ampliar adjunto">
+                                        <img src="<?=$adjUrl?>" alt="Adjunto #<?=($x + 1)?>" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
+                                    </a>
+                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                    </a>
+                                </div>
                             <?php else: ?>
                                 <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
                                     <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
@@ -5871,12 +6320,17 @@ function renderProductionOperatorConsole(
                     </td>
                 </tr>
                 <tr>
-                    <td class="tdleft" colspan="2">Imagen diseño</td>
-                    <td class="tdnrm" colspan="2">
+                    <td class="tdleft" colspan="2" valign="middle">Imagen diseño</td>
+                    <td class="tdnrm" colspan="2" valign="middle">
                         <?php if ($seriHasImg): ?>
-                            <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                            </a>
+                            <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" title="Clic para ampliar diseño">
+                                    <img src="<?=$seriImgUrl?>" alt="Foto Diseño" style="max-height:65px;max-width:105px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
+                                </a>
+                                <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                </a>
+                            </div>
                         <?php else: ?>
                             <span style="color:#999">Sin imagen cargada</span>
                         <?php endif; ?>
@@ -5889,12 +6343,17 @@ function renderProductionOperatorConsole(
                         $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
                     ?>
                     <tr>
-                        <td class="tdleft" colspan="2">Imagen x #<?=($x + 1)?></td>
-                        <td class="tdnrm" colspan="2">
+                        <td class="tdleft" colspan="2" valign="middle">Imagen x #<?=($x + 1)?></td>
+                        <td class="tdnrm" colspan="2" valign="middle">
                             <?php if ($adjIsImage): ?>
-                                <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                                </a>
+                                <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
+                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" title="Clic para ampliar adjunto">
+                                        <img src="<?=$adjUrl?>" alt="Adjunto #<?=($x + 1)?>" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
+                                    </a>
+                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
+                                    </a>
+                                </div>
                             <?php else: ?>
                                 <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
                                     <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
@@ -5914,6 +6373,11 @@ function renderProductionOperatorConsole(
                 </table>
             </div>
         </div>
+
+        <!-- 2. CONSUMO DE TINTAS DE SERIGRAFÍA (BODEGA 3000) -->
+        <?php if ($isSeri): ?>
+            <?php renderSerigrafiaInkConsumptionSection($ctx); ?>
+        <?php endif; ?>
 
     <?php elseif ($isEmbalaje): ?>
         <!-- ============================================================== -->
@@ -7630,6 +8094,32 @@ function renderProductionOperatorConsole(
         </div>
 
     <?php elseif ($mode === 'tintas'): ?>
+        <?php if ($isSeri): ?>
+            <div style="margin-bottom:15px">
+                <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
+                    <i class="fa fa-fw fa-arrow-left"></i> Volver a la consola de Serigrafía
+                </div>
+            </div>
+
+            <?php if (!empty($_GET['ink_consumed'])): ?>
+                <div style="background:#ECFDF5;border:1.5px solid #10B981;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#065F46;font-size:13px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-check-circle" style="font-size:18px;color:#059669"></i> Consumo de tinta registrado exitosamente y descontado de Bodega 3000.
+                </div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['ink_deleted'])): ?>
+                <div style="background:#EFF6FF;border:1.5px solid #3B82F6;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#1E40AF;font-size:13px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-info-circle" style="font-size:18px;color:#2563EB"></i> Registro de tinta eliminado y stock reintegrado a Bodega 3000.
+                </div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['error'])): ?>
+                <div style="background:#FEF2F2;border:1.5px solid #EF4444;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#991B1B;font-size:13px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-exclamation-triangle" style="font-size:18px;color:#DC2626"></i>
+                    <div><?=htmlspecialchars((string)$_GET['error'])?></div>
+                </div>
+            <?php endif; ?>
+
+            <?php renderSerigrafiaInkConsumptionSection($ctx, '/production/work-orders/operate?agid=' . $agId . '&mode=tintas', false); ?>
+        <?php else: ?>
         <?php
         $availableInkRows = is_array($bodega3000InkItems) ? $bodega3000InkItems : [];
         $activeMachineInkLoads = [];
@@ -7873,6 +8363,7 @@ function renderProductionOperatorConsole(
             });
         }
         </script>
+        <?php endif; /* end if $isSeri */ ?>
 
     <?php elseif ($mode === 'materiales'): ?>
         <!-- SUBFORMULARIO: Materiales y Bobinas con Trazabilidad -->
@@ -11498,7 +11989,7 @@ function renderProductionOperatorConsole(
         <!-- ============================================================== -->
         <?php
         $isBarExpanded = ($hasAlis || $isRebobinadora);
-        $autoBarColWidth = $isFlexo ? '20%' : '25%';
+        $autoBarColWidth = ($isFlexo || $isSeri) ? '20%' : '25%';
         $actionBtnBaseStyle = 'border-radius:8px;padding:10px 14px;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;min-height:42px;box-shadow:0 1px 3px rgba(15,23,42,0.16);cursor:pointer';
         $actionBtnBlockStyle = $actionBtnBaseStyle . ($isBarExpanded ? '' : 'width:100%;box-sizing:border-box;text-align:center;display:flex;');
         $materialsActionLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
@@ -11545,7 +12036,7 @@ function renderProductionOperatorConsole(
                 </div>
             </td>
 
-            <?php if ($isFlexo): ?>
+            <?php if ($isFlexo || $isSeri): ?>
                 <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:20%'?>">
                     <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#1D4ED8" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas'">
                         <nobr><i class="fa fa-fw fa-tint" style="color:white;"></i> Tintas&nbsp;</nobr>
@@ -11583,9 +12074,15 @@ function renderProductionOperatorConsole(
 
             <!-- BOTÓN COLACIÓN DISPONIBLE EN TODAS LAS MÁQUINAS -->
             <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding-left:2px;width:' . $autoBarColWidth?>">
-                <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#0284C7" onclick="openLunchModal()" title="Registrar horario de colación">
-                    <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Colación&nbsp;</nobr>
-                </div>
+                <?php if ($activeLunch !== null): ?>
+                    <div class="btnorange" style="<?=$actionBtnBlockStyle?>;background-color:#D97706;font-weight:bold" onclick="openLunchModal()" title="Colación activa">
+                        <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> EN COLACIÓN&nbsp;</nobr>
+                    </div>
+                <?php else: ?>
+                    <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#0284C7" onclick="openLunchModal()" title="Registrar horario de colación en tiempo real">
+                        <nobr><i class="fa fa-fw fa-coffee" style="color:white;"></i> Colación&nbsp;</nobr>
+                    </div>
+                <?php endif; ?>
             </td>
 
         </tr>
@@ -11747,12 +12244,10 @@ function renderProductionOperatorConsole(
                                          onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$ev['id']?>'">
                                         <i class="fa fa-edit"></i> Ver
                                     </div>
+                                <?php else: ?>
+                                    <span style="color:#94A3B8;font-size:11px"><i class="fa fa-lock"></i> Registrado</span>
                                 <?php endif; ?>
                             <?php endif; ?>
-                            <div class="btnred" style="padding:4px 8px;font-size:12px;display:inline-block;margin-left:4px;cursor:pointer"
-                                  onclick="if(confirm('¿Seguro de eliminar este evento?')) location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=eventdelete&delid=<?=$ev['id']?>&worker_ot_id=<?=$workerOtId?>'">
-                                <i class="fa fa-trash"></i>
-                            </div>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -11814,7 +12309,7 @@ function renderProductionOperatorConsole(
     </script>
     <?php
     echo renderDesignPreviewModal();
-    renderStandbyAndLunchModals($activeStandby, $machineInit, $currentOperatorName, '/production/work-orders/operate?agid=' . $agId);
+    renderStandbyAndLunchModals($activeStandby, $machineInit, $currentOperatorName, '/production/work-orders/operate?agid=' . $agId, $activeLunch);
     $content = ob_get_clean();
     renderProdwrkShell('Operar OT #' . $agenda['prd_number'], $content, 2, $currentOperatorName, $plantaName);
 }
@@ -11823,20 +12318,37 @@ function renderProductionOperatorConsole(
 // MODALES COMUNES: REGISTRAR COLACIÓN Y EVENTO SIN PRODUCCIÓN
 // =============================================================================
 
-function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, string $operatorName, string $redirectTo = ''): void
+function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, string $operatorName, string $redirectTo = '', ?array $activeLunch = null): void
 {
+    if ($activeLunch === null) {
+        try {
+            global $container;
+            $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
+            if ($recSvc) {
+                $wrkId = (int)($activeInit['win_wrkid'] ?? $activeInit['wrk_id'] ?? 0);
+                $initId = (int)($activeInit['id'] ?? 0);
+                $activeLunch = $recSvc->getActiveOperatorLunchBreak($wrkId, $initId, $operatorName);
+            }
+        } catch (\Throwable) {}
+    }
+    $isLunchActive = ($activeLunch !== null);
+    $lunchStartTime = $isLunchActive ? date('H:i', strtotime((string)$activeLunch['start_time'])) : '';
 ?>
-    <!-- MODAL 1: REGISTRAR COLACIÓN -->
+    <!-- MODAL REGISTRAR COLACIÓN (TIEMPO REAL - SIN HORA FIJA MANUAL) -->
     <div id="modal_lunch" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;align-items:center;justify-content:center">
         <div style="background:#fff;border-radius:8px;max-width:480px;width:92%;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,0.3)">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;border-bottom:1px solid #e2e8f0;padding-bottom:10px">
-                <div style="font-size:17px;font-weight:bold;color:#0369A1;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-coffee"></i> Registrar Horario de Colación
+                <div style="font-size:17px;font-weight:bold;color:<?=$isLunchActive ? '#EA580C' : '#0369A1'?>;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-coffee"></i> <?=$isLunchActive ? 'Finalizar Horario de Colación' : 'Registrar Horario de Colación'?>
                 </div>
                 <button type="button" onclick="closeLunchModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b">&times;</button>
             </div>
             <form method="post" action="/production/machines/lunch">
                 <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
+                <input type="hidden" name="action" value="<?=$isLunchActive ? 'end' : 'start'?>">
+                <?php if ($isLunchActive): ?>
+                    <input type="hidden" name="lunch_id" value="<?=(int)$activeLunch['id']?>">
+                <?php endif; ?>
                 <?php if ($redirectTo !== ''): ?>
                     <input type="hidden" name="redirect_to" value="<?=htmlspecialchars($redirectTo)?>">
                 <?php endif; ?>
@@ -11850,106 +12362,46 @@ function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, 
                     <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Operario</label>
                     <input type="text" class="inptxt" style="width:100%;background:#f8fafc" value="<?=htmlspecialchars($operatorName)?>" readonly>
                 </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
-                    <div>
-                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Hora Inicio *</label>
-                        <input type="time" name="start_time" class="inptxt" style="width:100%" value="13:00" required>
+
+                <?php if ($isLunchActive): ?>
+                    <div style="background:#FFF7ED;border:1px solid #FED7AA;border-radius:6px;padding:12px;margin-bottom:14px">
+                        <div style="color:#C2410C;font-size:14px;font-weight:bold;margin-bottom:4px">
+                            <i class="fa fa-clock"></i> Colación iniciada a las <?=$lunchStartTime?> hrs
+                        </div>
+                        <div style="font-size:12.5px;color:#9A3412">
+                            Al hacer clic en el botón, se registrará la hora actual (<b><?=date('H:i')?> hrs</b>) como término de tu colación y se reanudará tu jornada.
+                        </div>
                     </div>
-                    <div>
-                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Hora Término *</label>
-                        <input type="time" name="end_time" class="inptxt" style="width:100%" value="13:30" required>
+                <?php else: ?>
+                    <div style="background:#F0F9FF;border:1px solid #BAE6FD;border-radius:6px;padding:12px;margin-bottom:14px">
+                        <div style="color:#0369A1;font-size:14px;font-weight:bold;margin-bottom:4px">
+                            <i class="fa fa-play-circle"></i> Hora de inicio actual: <?=date('H:i')?> hrs
+                        </div>
+                        <div style="font-size:12.5px;color:#075985">
+                            La hora se registra automáticamente en tiempo real. Al regresar de tu colación, vuelve a abrir este botón para registrar el término.
+                        </div>
                     </div>
-                </div>
+                <?php endif; ?>
+
                 <div style="margin-bottom:18px">
                     <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Observaciones / Motivo (opcional)</label>
-                    <textarea name="comments" class="inptxt" style="width:100%;height:55px" placeholder="Colación de turno"></textarea>
+                    <textarea name="comments" class="inptxt" style="width:100%;height:50px" placeholder="<?=$isLunchActive ? 'Comentarios de cierre...' : 'Observación de colación...'?>"></textarea>
                 </div>
                 <div style="display:flex;justify-content:flex-end;gap:10px">
                     <button type="button" class="btngrey" style="padding:8px 16px" onclick="closeLunchModal()">Cancelar</button>
-                    <button type="submit" class="btnblue" style="background:#0284C7;padding:8px 20px;border:none"><i class="fa fa-save"></i> Guardar Colación</button>
+                    <?php if ($isLunchActive): ?>
+                        <button type="submit" class="btngreen" style="background:#059669;padding:8px 20px;border:none;font-weight:bold;cursor:pointer">
+                            <i class="fa fa-check"></i> Terminar Colación Ahora
+                        </button>
+                    <?php else: ?>
+                        <button type="submit" class="btnblue" style="background:#0284C7;padding:8px 20px;border:none;font-weight:bold;cursor:pointer">
+                            <i class="fa fa-play"></i> Iniciar Colación Ahora
+                        </button>
+                    <?php endif; ?>
                 </div>
             </form>
         </div>
     </div>
-
-    <!-- MODAL 2: INICIAR EVENTO SIN PRODUCCIÓN -->
-    <div id="modal_standby_start" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;align-items:center;justify-content:center">
-        <div style="background:#fff;border-radius:8px;max-width:500px;width:92%;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,0.3)">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;border-bottom:1px solid #e2e8f0;padding-bottom:10px">
-                <div style="font-size:17px;font-weight:bold;color:#D97706;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-pause-circle"></i> Registrar Evento Sin Producción
-                </div>
-                <button type="button" onclick="closeStandbyStartModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b">&times;</button>
-            </div>
-            <form method="post" action="/production/machines/standby">
-                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                <input type="hidden" name="action" value="start">
-                <?php if ($redirectTo !== ''): ?>
-                    <input type="hidden" name="redirect_to" value="<?=htmlspecialchars($redirectTo)?>">
-                <?php endif; ?>
-
-                <div style="margin-bottom:12px">
-                    <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Motivo / Causa de Parada *</label>
-                    <select name="reason" class="inptxt" style="width:100%" required>
-                        <option value="Espera de Orden de Trabajo (OT)">Espera de Orden de Trabajo (OT)</option>
-                        <option value="Falta de Material / Insumos / Sustratos">Falta de Material / Insumos / Sustratos</option>
-                        <option value="Mantención Mecánica / Falla de Máquina">Mantención Mecánica / Falla de Máquina</option>
-                        <option value="Limpieza y Preparación de Máquina">Limpieza y Preparación de Máquina</option>
-                        <option value="Falta de Operador / Relevo">Falta de Operador / Relevo</option>
-                        <option value="Corte de Energía / Suministro">Corte de Energía / Suministro</option>
-                        <option value="Otro Motivo">Otro Motivo</option>
-                    </select>
-                </div>
-                <div style="margin-bottom:12px">
-                    <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Hora Inicio *</label>
-                    <input type="time" name="start_time" class="inptxt" style="width:160px" value="<?=date('H:i')?>" required>
-                </div>
-                <div style="margin-bottom:18px">
-                    <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Observaciones / Detalles</label>
-                    <textarea name="comments" class="inptxt" style="width:100%;height:65px" placeholder="Indicar detalles del por qué la máquina no tiene producción..." required></textarea>
-                </div>
-                <div style="display:flex;justify-content:flex-end;gap:10px">
-                    <button type="button" class="btngrey" style="padding:8px 16px" onclick="closeStandbyStartModal()">Cancelar</button>
-                    <button type="submit" class="btnorange" style="background:#D97706;padding:8px 20px;border:none"><i class="fa fa-play"></i> Iniciar Sin Producción</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- MODAL 3: FINALIZAR EVENTO SIN PRODUCCIÓN -->
-    <?php if ($activeStandby !== null): ?>
-    <div id="modal_standby_end" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;align-items:center;justify-content:center">
-        <div style="background:#fff;border-radius:8px;max-width:460px;width:92%;padding:24px;box-shadow:0 10px 25px rgba(0,0,0,0.3)">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;border-bottom:1px solid #e2e8f0;padding-bottom:10px">
-                <div style="font-size:17px;font-weight:bold;color:#EA580C;display:flex;align-items:gap:8px">
-                    <i class="fa fa-play-circle"></i> Finalizar Sin Producción
-                </div>
-                <button type="button" onclick="closeStandbyEndModal()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#64748b">&times;</button>
-            </div>
-            <form method="post" action="/production/machines/standby">
-                <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
-                <input type="hidden" name="action" value="end">
-                <input type="hidden" name="standby_id" value="<?=(int)$activeStandby['id']?>">
-                <?php if ($redirectTo !== ''): ?>
-                    <input type="hidden" name="redirect_to" value="<?=htmlspecialchars($redirectTo)?>">
-                <?php endif; ?>
-
-                <div style="margin-bottom:12px;background:#fff7ed;padding:10px 14px;border-radius:5px;border:1px solid #fed7aa;font-size:13px;color:#9a3412">
-                    <b>Motivo:</b> <?=htmlspecialchars((string)$activeStandby['reason'])?><br>
-                    <b>Iniciado:</b> <?=htmlspecialchars((string)$activeStandby['start_time'])?>
-                </div>
-                <div style="margin-bottom:18px">
-                    <label style="display:block;font-size:12.5px;font-weight:bold;color:#475569;margin-bottom:4px">Hora Término *</label>
-                    <input type="time" name="end_time" class="inptxt" style="width:160px" value="<?=date('H:i')?>" required>
-                </div>
-                <div style="display:flex;justify-content:flex-end;gap:10px">
-                    <button type="button" class="btngrey" style="padding:8px 16px" onclick="closeStandbyEndModal()">Cancelar</button>
-                    <button type="submit" class="btnorange" style="background:#EA580C;padding:8px 20px;border:none"><i class="fa fa-check"></i> Finalizar y Reanudar</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    <?php endif; ?>
 
     <script>
     function openLunchModal() {
@@ -11960,22 +12412,10 @@ function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, 
         var m = document.getElementById('modal_lunch');
         if (m) m.style.display = 'none';
     }
-    function openStandbyStartModal() {
-        var m = document.getElementById('modal_standby_start');
-        if (m) m.style.display = 'flex';
-    }
-    function closeStandbyStartModal() {
-        var m = document.getElementById('modal_standby_start');
-        if (m) m.style.display = 'none';
-    }
-    function openStandbyEndModal() {
-        var m = document.getElementById('modal_standby_end');
-        if (m) m.style.display = 'flex';
-    }
-    function closeStandbyEndModal() {
-        var m = document.getElementById('modal_standby_end');
-        if (m) m.style.display = 'none';
-    }
+    function openStandbyStartModal() {}
+    function closeStandbyStartModal() {}
+    function openStandbyEndModal() {}
+    function closeStandbyEndModal() {}
     </script>
 <?php
 }
@@ -12012,24 +12452,17 @@ function renderProductionMachinesScreen(array $machines, ?array $activeInit, str
         </div>
     <?php endif; ?>
 
-    <?php if ($activeStandby !== null): ?>
-        <div style="background:#FFF7ED;border:1.5px solid #F97316;border-radius:5px;padding:12px 16px;margin-bottom:15px;color:#9A3412;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-            <div style="display:flex;align-items:center;gap:10px">
-                <i class="fa fa-pause-circle" style="font-size:22px;color:#EA580C"></i>
-                <div>
-                    <span style="font-weight:bold;font-size:14px;text-transform:uppercase">MÁQUINA EN ESPERA / SIN PRODUCCIÓN: <?=htmlspecialchars((string)$activeStandby['reason'])?></span>
-                    <div style="font-size:12.5px;color:#C2410C;margin-top:2px">
-                        Iniciado a las <b><?=htmlspecialchars((string)$activeStandby['start_time'])?></b> por <b><?=htmlspecialchars((string)$activeStandby['operator_name'])?></b>
-                        <?php if (!empty($activeStandby['comments'])): ?>
-                            &bull; <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i>
-                        <?php endif; ?>
-                    </div>
-                </div>
-            </div>
-            <button type="button" class="btnorange" style="background:#EA580C;padding:7px 16px;font-size:13px;cursor:pointer;border:none" onclick="openStandbyEndModal()">
-                <i class="fa fa-play"></i> Finalizar Sin Producción
-            </button>
-        </div>
+    <?php if ($activeInit !== null): ?>
+        <?php
+        $activeLunch = null;
+        try {
+            global $container;
+            $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
+            if ($recSvc) {
+                $activeLunch = $recSvc->getActiveOperatorLunchBreak((int)($activeInit['win_wrkid'] ?? 0), (int)($activeInit['id'] ?? 0), $operatorName);
+            }
+        } catch (\Throwable) {}
+        ?>
     <?php endif; ?>
 
     <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:15px">
@@ -12048,19 +12481,14 @@ function renderProductionMachinesScreen(array $machines, ?array $activeInit, str
                         </span>
                         <a href="/production/work-orders/new" class="btngreen" style="padding:6px 12px;text-decoration:none"><i class="fa fa-play"></i> Ir a OTs</a>
                         
-                        <!-- BOTÓN 1: REGISTRAR COLACIÓN SIN ESTAR PRODUCIENDO -->
-                        <button type="button" class="btnblue" style="background:#0284C7;padding:6px 12px;cursor:pointer;border:none" onclick="openLunchModal()" title="Ingresar colación sin tener que estar produciendo">
-                            <i class="fa fa-coffee"></i> Registrar Colación
-                        </button>
-
-                        <!-- BOTÓN 2: EVENTO SIN PRODUCCIÓN -->
-                        <?php if ($activeStandby !== null): ?>
-                            <button type="button" class="btnorange" style="background:#EA580C;padding:6px 12px;cursor:pointer;border:none" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
-                                <i class="fa fa-play-circle"></i> Finalizar Sin Prod.
+                        <!-- BOTÓN: REGISTRAR COLACIÓN EN TIEMPO REAL -->
+                        <?php if (!empty($activeLunch)): ?>
+                            <button type="button" class="btnorange" style="background:#D97706;padding:6px 12px;cursor:pointer;border:none;font-weight:bold" onclick="openLunchModal()" title="Colación activa">
+                                <i class="fa fa-coffee"></i> EN COLACIÓN (desde <?=date('H:i', strtotime($activeLunch['start_time']))?>) &mdash; Terminar
                             </button>
                         <?php else: ?>
-                            <button type="button" class="btnorange" style="background:#D97706;padding:6px 12px;cursor:pointer;border:none" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
-                                <i class="fa fa-pause-circle"></i> Sin Producción
+                            <button type="button" class="btnblue" style="background:#0284C7;padding:6px 12px;cursor:pointer;border:none" onclick="openLunchModal()" title="Ingresar horario de colación en tiempo real">
+                                <i class="fa fa-coffee"></i> Colación
                             </button>
                         <?php endif; ?>
 
@@ -12246,16 +12674,23 @@ function renderProductionNewWorkOrderScreen(
                     <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
                         <i class="fa fa-dolly"></i> Solicitar Bobinas
                     </a>
-                    <button type="button" class="btnblue" style="background:#0284C7;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px" onclick="openLunchModal()" title="Registrar horario de colación">
-                        <i class="fa fa-coffee"></i> Registrar Colación
-                    </button>
-                    <?php if ($activeStandby !== null): ?>
-                        <button type="button" class="btnorange" style="background:#EA580C;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
-                            <i class="fa fa-play-circle"></i> Finalizar Sin Producción
+                    <?php
+                    $activeLunch = null;
+                    try {
+                        global $container;
+                        $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
+                        if ($recSvc) {
+                            $activeLunch = $recSvc->getActiveOperatorLunchBreak((int)($activeInit['win_wrkid'] ?? 0), (int)($activeInit['id'] ?? 0), $operatorName);
+                        }
+                    } catch (\Throwable) {}
+                    ?>
+                    <?php if (!empty($activeLunch)): ?>
+                        <button type="button" class="btnorange" style="background:#D97706;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px;font-weight:bold" onclick="openLunchModal()" title="Colación activa">
+                            <i class="fa fa-coffee"></i> EN COLACIÓN (desde <?=date('H:i', strtotime($activeLunch['start_time']))?>) &mdash; Terminar
                         </button>
                     <?php else: ?>
-                        <button type="button" class="btnorange" style="background:#D97706;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
-                            <i class="fa fa-pause-circle"></i> Sin Producción
+                        <button type="button" class="btnblue" style="background:#0284C7;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px" onclick="openLunchModal()" title="Registrar horario de colación en tiempo real">
+                            <i class="fa fa-coffee"></i> Colación
                         </button>
                     <?php endif; ?>
                 </div>
@@ -12263,26 +12698,6 @@ function renderProductionNewWorkOrderScreen(
         </td>
     </tr>
     </table>
-
-    <?php if ($activeStandby !== null): ?>
-        <div style="background:#FFF7ED;border:1.5px solid #F97316;border-radius:5px;padding:12px 16px;margin-bottom:12px;color:#9A3412;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-            <div style="display:flex;align-items:center;gap:10px">
-                <i class="fa fa-pause-circle" style="font-size:22px;color:#EA580C"></i>
-                <div>
-                    <span style="font-weight:bold;font-size:14px;text-transform:uppercase">MÁQUINA EN ESPERA / SIN PRODUCCIÓN: <?=htmlspecialchars((string)$activeStandby['reason'])?></span>
-                    <div style="font-size:12.5px;color:#C2410C;margin-top:2px">
-                        Iniciado a las <b><?=htmlspecialchars((string)$activeStandby['start_time'])?></b> por <b><?=htmlspecialchars((string)$activeStandby['operator_name'])?></b>
-                        <?php if (!empty($activeStandby['comments'])): ?>
-                            &bull; <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i>
-                        <?php endif; ?>
-                    </div>
-                </div>
-            </div>
-            <button type="button" class="btnorange" style="background:#EA580C;padding:7px 16px;font-size:13px;cursor:pointer;border:none" onclick="openStandbyEndModal()">
-                <i class="fa fa-play"></i> Finalizar Sin Producción
-            </button>
-        </div>
-    <?php endif; ?>
 
     <!-- PESTAÑA: PROGRAMADAS EN AGENDA -->
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px">
@@ -13620,25 +14035,16 @@ function renderProductionActiveOrdersScreen(
         <div style="clear:both;height:10px"></div>
 
         <?php if (!empty($activeInit['id'])): ?>
-        <?php if ($activeStandby !== null): ?>
-            <div style="background:#FFF7ED;border:1.5px solid #F97316;border-radius:5px;padding:12px 16px;margin-bottom:12px;color:#9A3412;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-                <div style="display:flex;align-items:center;gap:10px">
-                    <i class="fa fa-pause-circle" style="font-size:22px;color:#EA580C"></i>
-                    <div>
-                        <span style="font-weight:bold;font-size:14px;text-transform:uppercase">MÁQUINA EN ESPERA / SIN PRODUCCIÓN: <?=htmlspecialchars((string)$activeStandby['reason'])?></span>
-                        <div style="font-size:12.5px;color:#C2410C;margin-top:2px">
-                            Iniciado a las <b><?=htmlspecialchars((string)$activeStandby['start_time'])?></b> por <b><?=htmlspecialchars((string)$activeStandby['operator_name'])?></b>
-                            <?php if (!empty($activeStandby['comments'])): ?>
-                                &bull; <i><?=htmlspecialchars((string)$activeStandby['comments'])?></i>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                </div>
-                <button type="button" class="btnorange" style="background:#EA580C;padding:7px 16px;font-size:13px;cursor:pointer;border:none" onclick="openStandbyEndModal()">
-                    <i class="fa fa-play"></i> Finalizar Sin Producción
-                </button>
-            </div>
-        <?php endif; ?>
+        <?php
+        $activeLunch = null;
+        try {
+            global $container;
+            $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
+            if ($recSvc) {
+                $activeLunch = $recSvc->getActiveOperatorLunchBreak((int)($activeInit['win_wrkid'] ?? 0), (int)($activeInit['id'] ?? 0), $operatorName);
+            }
+        } catch (\Throwable) {}
+        ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0">
         <tr>
             <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
@@ -13667,16 +14073,13 @@ function renderProductionActiveOrdersScreen(
                     <td class="tdleft">Acciones</td>
                     <td class="tdnrm">
                         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                            <button type="button" class="btnblue" style="background:#0284C7;padding:6px 14px;cursor:pointer;border:none" onclick="openLunchModal()" title="Registrar horario de colación">
-                                <i class="fa fa-coffee"></i> Registrar Colación
-                            </button>
-                            <?php if ($activeStandby !== null): ?>
-                                <button type="button" class="btnorange" style="background:#EA580C;padding:6px 14px;cursor:pointer;border:none" onclick="openStandbyEndModal()" title="Finalizar estado sin producción">
-                                    <i class="fa fa-play-circle"></i> Finalizar Sin Producción
+                            <?php if (!empty($activeLunch)): ?>
+                                <button type="button" class="btnorange" style="background:#D97706;padding:6px 14px;cursor:pointer;border:none;font-weight:bold" onclick="openLunchModal()" title="Colación activa">
+                                    <i class="fa fa-coffee"></i> EN COLACIÓN (desde <?=date('H:i', strtotime($activeLunch['start_time']))?>) &mdash; Terminar
                                 </button>
                             <?php else: ?>
-                                <button type="button" class="btnorange" style="background:#D97706;padding:6px 14px;cursor:pointer;border:none" onclick="openStandbyStartModal()" title="Informar máquina sin producción / espera de OT / mantención">
-                                    <i class="fa fa-pause-circle"></i> Sin Producción
+                                <button type="button" class="btnblue" style="background:#0284C7;padding:6px 14px;cursor:pointer;border:none" onclick="openLunchModal()" title="Registrar horario de colación en tiempo real">
+                                    <i class="fa fa-coffee"></i> Colación
                                 </button>
                             <?php endif; ?>
                         </div>

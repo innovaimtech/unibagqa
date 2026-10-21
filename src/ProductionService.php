@@ -4030,15 +4030,9 @@ final class ProductionService
                     }
                 }
 
-                $evtComment = 'Desmontaje temporal de Bobina '
+                $evtComment = 'Bobina desmontada: '
                     . ($rollCode !== '' ? $rollCode : ('#' . $rollId))
-                    . ' desde máquina';
-                if ($entryWeightKg > 0) {
-                    $evtComment .= ' (Peso ingreso: ' . number_format($entryWeightKg, 2, '.', '') . ' kg)';
-                }
-                if (trim($operatorName) !== '') {
-                    $evtComment .= ' por ' . trim($operatorName);
-                }
+                    . ($entryWeightKg > 0 ? ' (' . number_format($entryWeightKg, 2, ',', '.') . ' kg)' : '');
 
                 $stmtErp = $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
@@ -4180,15 +4174,9 @@ final class ProductionService
 
             if ($this->erpPdo !== null) {
                 if ($wasMounted) {
-                    $erpUnmountComment = 'Desmontaje de Bobina '
+                    $erpUnmountComment = 'Bobina desmontada: '
                         . ($rollCode !== '' ? $rollCode : ('#' . $rollId))
-                        . ' para devolución a Bodega 3000';
-                    if ($entryWeightKg > 0) {
-                        $erpUnmountComment .= ' (Peso ingreso: ' . number_format($entryWeightKg, 2, '.', '') . ' kg)';
-                    }
-                    if (trim($operatorName) !== '') {
-                        $erpUnmountComment .= ' por ' . trim($operatorName);
-                    }
+                        . ($entryWeightKg > 0 ? ' (' . number_format($entryWeightKg, 2, ',', '.') . ' kg)' : '');
 
                     $stmtErpUnmount = $this->erpPdo->prepare("
                         INSERT INTO prod_worker_ot_events
@@ -4205,18 +4193,9 @@ final class ProductionService
                     ]);
                 }
 
-                $erpReturnComment = 'Bobina '
+                $erpReturnComment = 'Bobina devuelta a Bodega 3000: '
                     . ($rollCode !== '' ? $rollCode : ('#' . $rollId))
-                    . ' devuelta a Bodega 3000';
-                if ($skuCode !== '') {
-                    $erpReturnComment .= ' [' . $skuCode . ']';
-                }
-                if ($rollWeightKg > 0) {
-                    $erpReturnComment .= ' (' . number_format($rollWeightKg, 2, '.', '') . ' kg)';
-                }
-                if (trim($operatorName) !== '') {
-                    $erpReturnComment .= ' por ' . trim($operatorName);
-                }
+                    . ($rollWeightKg > 0 ? ' (' . number_format($rollWeightKg, 2, ',', '.') . ' kg)' : '');
 
                 $stmtErpReturn = $this->erpPdo->prepare("
                     INSERT INTO prod_worker_ot_events
@@ -5747,29 +5726,13 @@ final class ProductionService
     }
 
     /**
-     * Elimina un evento de la bitácora (soft delete con `evt_status = 0`).
+     * Elimina un evento de la bitácora (DESHABILITADO por regla de negocio y auditoría).
+     * En ninguna máquina se permite a los operadores eliminar eventos registrados.
      */
     public function deleteEvent(int $eventId, int $workerOtId): bool
     {
-        if ($eventId <= 0 || $workerOtId <= 0) {
-            return false;
-        }
-
-        $stmt = $this->erpPdo->prepare(
-            "UPDATE prod_worker_ot_events SET evt_status = 0 WHERE id = :id AND evt_prod_worker_otid = :ot_id"
-        );
-        $ok = $stmt->execute([':id' => $eventId, ':ot_id' => $workerOtId]);
-        if ($ok) {
-            try {
-                $stmtOt = $this->erpPdo->prepare("SELECT wok_ag_id FROM prod_worker_ot WHERE id = :id");
-                $stmtOt->execute([':id' => $workerOtId]);
-                $agId = (int)$stmtOt->fetchColumn();
-                if ($agId > 0) {
-                    $this->syncPulpoAgendaStats($agId);
-                }
-            } catch (Throwable) {}
-        }
-        return $ok;
+        // Por política de trazabilidad, auditoría y control de producción, está prohibido eliminar eventos.
+        return false;
     }
 
     // =========================================================================
@@ -7380,9 +7343,13 @@ final class ProductionService
                     item_code VARCHAR(80) NULL,
                     item_name VARCHAR(255) NULL,
                     unit_name VARCHAR(40) NULL,
+                    initial_weight_kg DECIMAL(10,3) NOT NULL DEFAULT 0.000,
                     loaded_qty DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    leftover_qty DECIMAL(10,3) NOT NULL DEFAULT 0.000,
                     consumed_qty DECIMAL(10,3) NOT NULL DEFAULT 0.000,
                     returned_qty DECIMAL(10,3) NOT NULL DEFAULT 0.000,
+                    color_label VARCHAR(100) NULL,
+                    machine_process VARCHAR(50) NULL DEFAULT 'SERIGRAFIA',
                     operator_name VARCHAR(150) NULL,
                     comments VARCHAR(255) NULL,
                     status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
@@ -7396,39 +7363,72 @@ final class ProductionService
                     KEY idx_wo_machine_ink_status (status)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             ");
+
+            // Asegurar columnas nuevas si la tabla ya existía previamente
+            $cols = [
+                "initial_weight_kg" => "DECIMAL(10,3) NOT NULL DEFAULT 0.000",
+                "leftover_qty" => "DECIMAL(10,3) NOT NULL DEFAULT 0.000",
+                "color_label" => "VARCHAR(100) NULL",
+                "machine_process" => "VARCHAR(50) NULL DEFAULT 'SERIGRAFIA'",
+            ];
+            foreach ($cols as $col => $type) {
+                try {
+                    $this->trzPdo->exec("ALTER TABLE work_order_machine_ink_loads ADD COLUMN {$col} {$type}");
+                } catch (Throwable) {}
+            }
         } catch (Throwable) {}
     }
 
     /**
      * @return array<int, array<string, mixed>>
      */
-    public function listMachineInkLoadsForWorkOrder(int $workerOtId, bool $onlyOpen = false): array
+    public function listMachineInkLoadsForWorkOrder(int $workerOtId, bool $onlyOpen = false, int $agId = 0): array
     {
-        if ($workerOtId <= 0 || $this->trzPdo === null) {
+        if ($workerOtId <= 0 && $agId <= 0) {
+            return [];
+        }
+        if ($this->trzPdo === null) {
             return [];
         }
 
         $this->ensureMachineInkLoadsSchema();
 
         try {
+            $whereParts = [];
+            $params = [];
+            if ($workerOtId > 0 && $agId > 0) {
+                $whereParts[] = "(worker_ot_id = :worker_ot_id OR ag_id = :ag_id)";
+                $params[':worker_ot_id'] = $workerOtId;
+                $params[':ag_id'] = $agId;
+            } elseif ($workerOtId > 0) {
+                $whereParts[] = "worker_ot_id = :worker_ot_id";
+                $params[':worker_ot_id'] = $workerOtId;
+            } else {
+                $whereParts[] = "ag_id = :ag_id";
+                $params[':ag_id'] = $agId;
+            }
+
+            if ($onlyOpen) {
+                $whereParts[] = "(loaded_qty - consumed_qty - returned_qty) > 0.0001";
+            }
+
             $sql = "
                 SELECT *,
                        (loaded_qty - consumed_qty - returned_qty) AS available_qty
                 FROM work_order_machine_ink_loads
-                WHERE worker_ot_id = :worker_ot_id
+                WHERE " . implode(' AND ', $whereParts) . "
+                ORDER BY status = 'ACTIVE' DESC, id DESC
             ";
-            if ($onlyOpen) {
-                $sql .= " AND (loaded_qty - consumed_qty - returned_qty) > 0.0001";
-            }
-            $sql .= " ORDER BY status = 'ACTIVE' DESC, id DESC";
 
             $stmt = $this->trzPdo->prepare($sql);
-            $stmt->execute([':worker_ot_id' => $workerOtId]);
+            $stmt->execute($params);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
             foreach ($rows as &$row) {
                 $row['loaded_qty'] = (float)($row['loaded_qty'] ?? 0);
                 $row['consumed_qty'] = (float)($row['consumed_qty'] ?? 0);
                 $row['returned_qty'] = (float)($row['returned_qty'] ?? 0);
+                $row['initial_weight_kg'] = (float)($row['initial_weight_kg'] ?? 0);
+                $row['leftover_qty'] = (float)($row['leftover_qty'] ?? 0);
                 $row['available_qty'] = max(0.0, (float)($row['available_qty'] ?? 0));
             }
             unset($row);
@@ -7526,11 +7526,11 @@ final class ProductionService
                 ':amt' => round($qty, 3),
                 ':crtdat' => $now,
                 ':enddat' => $now,
-                ':comments' => 'Carga tinta a máquina desde 3000 Insumos de Producción: '
+                ':comments' => 'Carga Tinta: '
                     . ($itemCode !== '' ? $itemCode . ' - ' : '')
-                    . $itemName
-                    . ' / ' . number_format($qty, 3, '.', '') . ' kg'
-                    . ($comments !== '' ? ' (' . $comments . ')' : ''),
+                    . $this->simplifyInkTitle($itemName)
+                    . ' | ' . number_format($qty, 2, ',', '.') . ' kg'
+                    . ($comments !== '' ? ' | Obs: ' . $comments : ''),
             ]);
 
             return ['ok' => true, 'load_id' => $loadId];
@@ -7660,15 +7660,308 @@ final class ProductionService
                 ':amt' => round($qty, 3),
                 ':crtdat' => $now,
                 ':enddat' => $now,
-                ':comments' => $label . ': '
-                    . trim((string)($load['item_code'] ?? '') . ' - ' . (string)($load['item_name'] ?? ''), ' -')
-                    . ' / ' . number_format($qty, 3, '.', '') . ' kg'
-                    . ($comments !== '' ? ' (' . $comments . ')' : ''),
+                ':comments' => ($action === 'consume' ? 'Consumo Tinta: ' : 'Devolución Tinta: ')
+                    . ($load['item_code'] !== '' ? $load['item_code'] . ' - ' : '')
+                    . $this->simplifyInkTitle((string)($load['item_name'] ?? ''))
+                    . ' | ' . number_format($qty, 2, ',', '.') . ' kg'
+                    . ($action !== 'consume' ? ' a Bodega 3000' : '')
+                    . ($comments !== '' ? ' | Obs: ' . $comments : ''),
             ]);
 
             return ['ok' => true, 'remaining_qty' => $remainingQty];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al actualizar la carga de tinta: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Limpia nombres comerciales de tintas para hacerlos más legibles para los operadores.
+     */
+    public function simplifyInkTitle(string $title): string
+    {
+        $t = trim($title);
+        $t = preg_replace('/^(solvent|water)\s+based\s+ink\s+/i', '', $t);
+        $t = preg_replace('/^tinta\s+(serigraf[ií]a|flexo(gr[aá]fica)?|al\s+agua|al\s+solvente)\s+/i', '', $t);
+        $t = preg_replace('/\s+balde\s+\d+(\.\d+)?\s*(lts?|litros|kg)?/i', '', $t);
+        $t = preg_replace('/\s+\d+(\.\d+)?\s*(kg|kilos|lt|litros)\b/i', '', $t);
+        return trim($t);
+    }
+
+    /**
+     * Registra el consumo completo de tinta para Serigrafía (Pulpo o Plana) desde Bodega 3000.
+     * Permite registrar:
+     * - Tinta seleccionada desde Bodega 3000 (Insumos en producción, st_id = 16)
+     * - Color asignado / pasada
+     * - Cuánto pesa al inicio (initial_weight_kg)
+     * - Cuánto se cargó (loaded_qty)
+     * - Cuánto sobró (leftover_qty)
+     * - Consumo neto (consumed_qty)
+     * - Descuenta el inventario real en item_shops_storehouses (st_id = 16)
+     * - Registra el evento en prod_worker_ot_events (tipo materiales) y en work_order_machine_ink_loads
+     */
+    public function recordSerigrafiaInkConsumption(
+        int $workerOtId,
+        int $agId,
+        int $itemId,
+        float $initialWeightKg,
+        float $loadedKg,
+        float $leftoverKg,
+        float $consumedKg,
+        string $colorLabel,
+        string $operatorName,
+        string $comments = '',
+        int $warehouseCode = 16
+    ): array {
+        if ($workerOtId <= 0 && $agId <= 0) {
+            return ['ok' => false, 'error' => 'No se pudo identificar la orden de trabajo para registrar la tinta.'];
+        }
+        if ($itemId <= 0) {
+            return ['ok' => false, 'error' => 'Debe seleccionar una tinta válida de Bodega 3000.'];
+        }
+        if ($this->trzPdo === null) {
+            return ['ok' => false, 'error' => 'Base de datos de trazabilidad no disponible.'];
+        }
+
+        $this->ensureMachineInkLoadsSchema();
+        $now = time();
+
+        $initialWeightKg = max(0.0, round($initialWeightKg, 3));
+        $loadedKg = max(0.0, round($loadedKg, 3));
+        $leftoverKg = max(0.0, round($leftoverKg, 3));
+        $consumedKg = round($consumedKg, 3);
+
+        if ($consumedKg <= 0.0) {
+            if ($loadedKg > 0.0) {
+                $consumedKg = max(0.0, round($loadedKg - $leftoverKg, 3));
+            } elseif ($initialWeightKg > 0.0 && $leftoverKg > 0.0 && $initialWeightKg >= $leftoverKg) {
+                $consumedKg = max(0.0, round($initialWeightKg - $leftoverKg, 3));
+            } elseif ($loadedKg > 0.0) {
+                $consumedKg = $loadedKg;
+            }
+        }
+
+        if ($consumedKg <= 0.0 && $loadedKg <= 0.0 && $initialWeightKg <= 0.0) {
+            return ['ok' => false, 'error' => 'Debe ingresar al menos el peso cargado, el peso inicial o el consumo de tinta.'];
+        }
+
+        try {
+            // Obtener datos del ítem en ERP
+            $stmtItem = $this->erpPdo->prepare("
+                SELECT i.id, i.item_number_prod, i.item_title
+                FROM item i
+                WHERE i.id = :id
+                LIMIT 1
+            ");
+            $stmtItem->execute([':id' => $itemId]);
+            $item = $stmtItem->fetch(PDO::FETCH_ASSOC);
+            if (!$item) {
+                return ['ok' => false, 'error' => 'No se encontró la tinta seleccionada en el catálogo.'];
+            }
+
+            $itemCode = trim((string)($item['item_number_prod'] ?? ''));
+            $itemName = trim((string)($item['item_title'] ?? ''));
+            $colorLabel = trim($colorLabel);
+
+            // 1. Insertar en work_order_machine_ink_loads
+            $stmt = $this->trzPdo->prepare("
+                INSERT INTO work_order_machine_ink_loads
+                    (worker_ot_id, ag_id, warehouse_code, item_id, item_code, item_name, unit_name,
+                     initial_weight_kg, loaded_qty, leftover_qty, consumed_qty, returned_qty,
+                     color_label, machine_process, operator_name, comments, status, created_at, updated_at, closed_at)
+                VALUES
+                    (:worker_ot_id, :ag_id, :warehouse_code, :item_id, :item_code, :item_name, 'KG',
+                     :initial_weight_kg, :loaded_qty, :leftover_qty, :consumed_qty, :returned_qty,
+                     :color_label, 'SERIGRAFIA', :operator_name, :comments, 'CLOSED', :created_at, :updated_at, :closed_at)
+            ");
+            $stmt->execute([
+                ':worker_ot_id' => $workerOtId,
+                ':ag_id' => $agId > 0 ? $agId : null,
+                ':warehouse_code' => $warehouseCode,
+                ':item_id' => $itemId,
+                ':item_code' => $itemCode !== '' ? $itemCode : null,
+                ':item_name' => $itemName !== '' ? $itemName : null,
+                ':initial_weight_kg' => $initialWeightKg,
+                ':loaded_qty' => $loadedKg > 0 ? $loadedKg : $consumedKg,
+                ':leftover_qty' => $leftoverKg,
+                ':consumed_qty' => $consumedKg,
+                ':returned_qty' => $leftoverKg,
+                ':color_label' => $colorLabel !== '' ? $colorLabel : null,
+                ':operator_name' => $operatorName !== '' ? $operatorName : null,
+                ':comments' => $comments !== '' ? $comments : null,
+                ':created_at' => $now,
+                ':updated_at' => $now,
+                ':closed_at' => $now,
+            ]);
+            $loadId = (int)$this->trzPdo->lastInsertId();
+
+            // 2. Descontar inventario en Bodega 3000 (item_shops_storehouses st_id = 16)
+            if ($consumedKg > 0.0) {
+                try {
+                    $updStock = $this->erpPdo->prepare("
+                        UPDATE item_shops_storehouses
+                        SET iss_inventory = GREATEST(0, iss_inventory - :amt)
+                        WHERE item_id = :item_id AND st_id = 16
+                    ");
+                    $updStock->execute([
+                        ':amt' => $consumedKg,
+                        ':item_id' => $itemId,
+                    ]);
+                } catch (Throwable) {}
+            }
+
+            // 3. Registrar evento en bitácora de la OT en el ERP (prod_worker_ot_events)
+            if ($workerOtId > 0) {
+                $cleanName = $this->simplifyInkTitle($itemName);
+                $header = "Tinta: " . ($itemCode !== '' ? $itemCode . ' - ' : '') . ($cleanName !== '' ? $cleanName : $itemName);
+                if ($colorLabel !== '') {
+                    $header .= " ({$colorLabel})";
+                }
+
+                $detailParts = [];
+                $detailParts[] = "Neto: " . number_format($consumedKg, 2, ',', '.') . " kg";
+                if ($loadedKg > 0 && $leftoverKg > 0) {
+                    $detailParts[] = "Cargó " . number_format($loadedKg, 2, ',', '.') . " kg, Sobró " . number_format($leftoverKg, 2, ',', '.') . " kg";
+                } elseif ($loadedKg > 0) {
+                    $detailParts[] = "Cargó " . number_format($loadedKg, 2, ',', '.') . " kg";
+                } elseif ($initialWeightKg > 0 && $leftoverKg > 0) {
+                    $detailParts[] = "Tarro inicio " . number_format($initialWeightKg, 2, ',', '.') . " kg, Sobró " . number_format($leftoverKg, 2, ',', '.') . " kg";
+                }
+                if ($comments !== '') {
+                    $detailParts[] = "Obs: {$comments}";
+                }
+
+                $eventComment = $header . ' | ' . implode(' | ', $detailParts);
+
+                $stmtErp = $this->erpPdo->prepare("
+                    INSERT INTO prod_worker_ot_events
+                        (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                    VALUES
+                        (:ot_id, :amt, :crtdat, :enddat, 2, 'materiales', :comments)
+                ");
+                $stmtErp->execute([
+                    ':ot_id' => $workerOtId,
+                    ':amt' => $consumedKg,
+                    ':crtdat' => $now,
+                    ':enddat' => $now,
+                    ':comments' => $eventComment,
+                ]);
+            }
+
+            // 4. Registrar auditoría en TRZ events
+            $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
+                ':type' => 'SERIGRAFIA_INK_CONSUMED',
+                ':payload' => json_encode([
+                    'load_id' => $loadId,
+                    'worker_ot_id' => $workerOtId,
+                    'ag_id' => $agId,
+                    'item_id' => $itemId,
+                    'item_code' => $itemCode,
+                    'item_name' => $itemName,
+                    'color_label' => $colorLabel,
+                    'initial_weight_kg' => $initialWeightKg,
+                    'loaded_qty' => $loadedKg,
+                    'leftover_qty' => $leftoverKg,
+                    'consumed_qty' => $consumedKg,
+                    'operator' => $operatorName,
+                    'comments' => $comments,
+                    'timestamp' => $now,
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            return [
+                'ok' => true,
+                'load_id' => $loadId,
+                'consumed_kg' => $consumedKg,
+                'item_code' => $itemCode,
+                'item_name' => $itemName,
+            ];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al registrar consumo de tinta de serigrafía: ' . $e->getMessage()];
+        }
+    }
+
+    /**
+     * Elimina / revierte un registro de tinta en máquina y reintegra el stock a Bodega 3000 si aplica.
+     */
+    public function deleteMachineInkLoad(int $loadId, int $workerOtId, string $operatorName = ''): array
+    {
+        if ($loadId <= 0 || $this->trzPdo === null) {
+            return ['ok' => false, 'error' => 'Identificador de carga de tinta inválido.'];
+        }
+
+        try {
+            $stmt = $this->trzPdo->prepare("
+                SELECT * FROM work_order_machine_ink_loads
+                WHERE id = :id " . ($workerOtId > 0 ? "AND worker_ot_id = :wot" : "") . "
+                LIMIT 1
+            ");
+            $params = [':id' => $loadId];
+            if ($workerOtId > 0) {
+                $params[':wot'] = $workerOtId;
+            }
+            $stmt->execute($params);
+            $load = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$load) {
+                return ['ok' => false, 'error' => 'No se encontró el registro de tinta a eliminar.'];
+            }
+
+            $itemId = (int)($load['item_id'] ?? 0);
+            $consumedQty = (float)($load['consumed_qty'] ?? 0);
+            $whCode = (int)($load['warehouse_code'] ?? 16);
+
+            // Reintegrar stock a Bodega 3000 si fue consumido
+            if ($itemId > 0 && $consumedQty > 0.0 && $whCode === 16) {
+                try {
+                    $this->erpPdo->prepare("
+                        UPDATE item_shops_storehouses
+                        SET iss_inventory = iss_inventory + :amt
+                        WHERE item_id = :item_id AND st_id = 16
+                    ")->execute([
+                        ':amt' => $consumedQty,
+                        ':item_id' => $itemId,
+                    ]);
+
+                    // Registrar evento de anulación claro para los operadores en la OT
+                    if ($workerOtId > 0) {
+                        $delCode = trim((string)($load['item_code'] ?? ''));
+                        $delName = $this->simplifyInkTitle((string)($load['item_name'] ?? ''));
+                        $delComment = "Anulación Tinta: " . ($delCode !== '' ? $delCode . ' - ' : '') . ($delName !== '' ? $delName : 'Tinta')
+                            . " | Reintegrados " . number_format($consumedQty, 2, ',', '.') . " kg a Bodega 3000"
+                            . ($operatorName !== '' ? " (por {$operatorName})" : "");
+
+                        $this->erpPdo->prepare("
+                            INSERT INTO prod_worker_ot_events
+                                (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                            VALUES
+                                (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
+                        ")->execute([
+                            ':ot_id' => $workerOtId,
+                            ':crtdat' => time(),
+                            ':enddat' => time(),
+                            ':comments' => $delComment,
+                        ]);
+                    }
+                } catch (Throwable) {}
+            }
+
+            // Eliminar registro
+            $this->trzPdo->prepare("DELETE FROM work_order_machine_ink_loads WHERE id = :id")->execute([':id' => $loadId]);
+
+            // Auditoría
+            $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
+                ':type' => 'MACHINE_INK_LOAD_DELETED',
+                ':payload' => json_encode([
+                    'load_id' => $loadId,
+                    'item_id' => $itemId,
+                    'consumed_reintegrated' => $consumedQty,
+                    'operator' => $operatorName,
+                    'timestamp' => time(),
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            return ['ok' => true, 'reintegrated_kg' => $consumedQty];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => 'Error al revertir registro de tinta: ' . $e->getMessage()];
         }
     }
 
@@ -9580,40 +9873,40 @@ final class ProductionService
                 }
             }
 
-            // Registrar eventos en la OT para informe de consumo y trazabilidad
+            // Registrar evento único y claro en la OT para seguimiento y trazabilidad (sin duplicidad de materiales)
             if ($workerOtId > 0) {
                 try {
                     $mermaKg = (float)str_replace(',', '.', (string)($postData['itemmermakg'] ?? 0));
-
-                    // 1. Evento de consumo de materiales (SOLO si es bobina virgen TEL)
-                    if ($isVirginTel) {
-                        $this->erpPdo->prepare("
-                            INSERT INTO prod_worker_ot_events
-                            (evt_prod_worker_otid, evt_type, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_comments)
-                            VALUES
-                            (:ot_id, 'materiales', 1, :kg, :now, :now, 2, :comments)
-                        ")->execute([
-                            ':ot_id' => $workerOtId,
-                            ':kg' => $useKgAmt,
-                            ':now' => $now,
-                            ':comments' => "Consumo bobina virgen TEL: {$itemSel['item_number_prod']} ({$useKgAmt} Kg)",
-                        ]);
-                    }
-
-                    // 2. Evento de registro de corte/producción
                     $totalCuts = count($prodItems);
-                    $prodComments = "Corte de bobina finalizado - Origen: {$itemSel['item_number_prod']} ({$useKgAmt} Kg " . ($isVirginTel ? "consumidos" : "procesados") . ", Merma: {$mermaKg} Kg)";
-                    if (!$isVirginTel) {
-                        $prodComments .= " [Proveniente de proceso previo (Flexo/Seri), sin duplicar consumo]";
+
+                    // Resumen detallado y profesional del proceso de corte/rebobinado
+                    $cutsSummary = [];
+                    $totalProducedRolls = 0;
+                    foreach ($prodItems as $p) {
+                        $amt = (int)($p['item_reboprod_amt'] ?? 1);
+                        $totalProducedRolls += $amt;
+                        $dim = (float)($p['dest_dims'] ?? 0);
+                        $destLbl = !empty($p['destino_label']) ? trim((string)$p['destino_label']) : ($p['dest_type'] === 'handle' ? 'Manilla' : 'Bolsa');
+                        $cutsSummary[] = "{$amt}x {$dim}cm ({$destLbl})";
                     }
+                    $cutsText = !empty($cutsSummary) ? implode(', ', $cutsSummary) : "{$totalCuts} rollos";
+
+                    $taskName = $isRebobinado ? 'Rebobinado' : 'Corte';
+                    $originText = $isVirginTel 
+                        ? "Bobina virgen TEL: {$itemSel['item_number_prod']} ({$useKgAmt} Kg consumidos)"
+                        : "Bobina procesada previa: {$itemSel['item_number_prod']} ({$useKgAmt} Kg procesados)";
+
+                    $prodComments = "{$taskName} finalizado: {$originText} -> Obtenidos {$totalProducedRolls} rollos [{$cutsText}], Merma: {$mermaKg} Kg";
+
+                    // Un solo evento de producción ('prod') con estado finalizado y detalle completo
                     $this->erpPdo->prepare("
                         INSERT INTO prod_worker_ot_events
                         (evt_prod_worker_otid, evt_type, evt_amount, prod_bobina_kg, evt_amount2, evt_crtdat, evt_enddat, evt_status, evt_comments)
                         VALUES
-                        (:ot_id, 'prod', :amt, :kg, :merma, :now, :now, 1, :comments)
+                        (:ot_id, 'prod', :amt, :kg, :merma, :now, :now, 2, :comments)
                     ")->execute([
                         ':ot_id' => $workerOtId,
-                        ':amt' => $totalCuts > 0 ? $totalCuts : 1,
+                        ':amt' => $totalProducedRolls > 0 ? $totalProducedRolls : 1,
                         ':kg' => $useKgAmt,
                         ':merma' => $mermaKg,
                         ':now' => $now,

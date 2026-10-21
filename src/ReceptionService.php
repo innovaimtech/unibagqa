@@ -22370,6 +22370,203 @@ SQL;
     }
 
     /**
+     * Obtiene la colación activa (sin terminar) de un operario para el día actual.
+     */
+    public function getActiveOperatorLunchBreak(int $workerId = 0, int $initId = 0, string $operatorName = ''): ?array
+    {
+        $this->ensureOperatorLunchBreaksTable();
+        $today = date('Y-m-d');
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT * FROM production_operator_lunch_breaks
+                WHERE shift_date = :d
+                  AND end_time IS NULL
+                  AND (
+                      (:wrkid > 0 AND worker_id = :wrkid)
+                      OR (:init_id > 0 AND init_id = :init_id)
+                      OR (:wrkid <= 0 AND :init_id <= 0 AND operator_name = :opname)
+                  )
+                ORDER BY id DESC LIMIT 1
+            ");
+            $stmt->execute([
+                ':d' => $today,
+                ':wrkid' => $workerId,
+                ':init_id' => $initId,
+                ':opname' => trim($operatorName),
+            ]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $row ?: null;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * Inicia la colación de un operario usando la hora exacta actual del sistema (sin hora fija manual).
+     */
+    public function startOperatorLunchBreak(
+        string $operatorName,
+        int $workerId = 0,
+        int $initId = 0,
+        int $machineId = 0,
+        string $machineName = '',
+        ?string $comments = null
+    ): array {
+        $this->ensureOperatorLunchBreaksTable();
+        $operatorName = trim($operatorName);
+        if ($operatorName === '') {
+            return ['ok' => false, 'error' => 'Nombre de operario requerido.'];
+        }
+
+        $existing = $this->getActiveOperatorLunchBreak($workerId, $initId, $operatorName);
+        if ($existing !== null) {
+            $st = date('H:i', strtotime((string)$existing['start_time']));
+            return ['ok' => false, 'error' => "Ya tienes una colación en curso iniciada a las {$st}."];
+        }
+
+        $today = date('Y-m-d');
+        $now = time();
+        $startDt = date('Y-m-d H:i:s', $now);
+
+        // 1. Abrir evento de pausa tipo 1 (Colación) en la OT activa del ERP si existe
+        $erpEventId = null;
+        try {
+            $targetOtId = 0;
+            if ($initId > 0) {
+                $stmtOt = $this->erpPdo->prepare("SELECT id FROM prod_worker_ot WHERE wok_init_id = :init_id ORDER BY id DESC LIMIT 1");
+                $stmtOt->execute([':init_id' => $initId]);
+                $targetOtId = (int)$stmtOt->fetchColumn();
+            }
+            if ($targetOtId <= 0 && $workerId > 0) {
+                list($y, $m, $d) = explode('-', $today);
+                $stmtOt = $this->erpPdo->prepare("
+                    SELECT ot.id 
+                    FROM prod_worker_ot ot
+                    INNER JOIN prod_worker_init wi ON ot.wok_init_id = wi.id
+                    WHERE wi.win_wrkid = :wrkid AND wi.win_day = :d AND wi.win_month = :m AND wi.win_year = :y
+                    ORDER BY ot.id DESC LIMIT 1
+                ");
+                $stmtOt->execute([':wrkid' => $workerId, ':d' => (int)$d, ':m' => (int)$m, ':y' => (int)$y]);
+                $targetOtId = (int)$stmtOt->fetchColumn();
+            }
+
+            if ($targetOtId > 0) {
+                $ins = $this->erpPdo->prepare("
+                    INSERT INTO prod_worker_ot_events
+                        (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments, evt_pause_id)
+                    VALUES
+                        (:otid, 0, :start_ts, 0, 1, 'pause', :comments, 1)
+                ");
+                $ins->execute([
+                    ':otid' => $targetOtId,
+                    ':start_ts' => $now,
+                    ':comments' => 'Colación en curso iniciada a las ' . date('H:i', $now) . ($comments ? " ({$comments})" : ''),
+                ]);
+                $erpEventId = (int)$this->erpPdo->lastInsertId();
+            }
+        } catch (Throwable) {}
+
+        // 2. Registrar en la base local de trazabilidad
+        try {
+            $stmt = $this->pdo->prepare("
+                INSERT INTO production_operator_lunch_breaks
+                    (shift_date, init_id, worker_id, operator_name, machine_id, machine_name, start_time, end_time, duration_minutes, erp_event_id, comments, created_by)
+                VALUES
+                    (:d, :init_id, :wrkid, :opname, :mid, :mname, :st, NULL, NULL, :erpid, :comm, :cby)
+            ");
+            $stmt->execute([
+                ':d' => $today,
+                ':init_id' => $initId > 0 ? $initId : null,
+                ':wrkid' => $workerId > 0 ? $workerId : null,
+                ':opname' => $operatorName,
+                ':mid' => $machineId > 0 ? $machineId : null,
+                ':mname' => $machineName ?: null,
+                ':st' => $startDt,
+                ':erpid' => $erpEventId,
+                ':comm' => $comments ?: 'Colación iniciada en tiempo real',
+                ':cby' => $operatorName,
+            ]);
+            $lunchId = (int)$this->pdo->lastInsertId();
+            return ['ok' => true, 'id' => $lunchId, 'start_time' => date('H:i', $now)];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Finaliza la colación de un operario usando la hora exacta actual del sistema (sin hora fija manual).
+     */
+    public function endOperatorLunchBreak(
+        int $lunchId = 0,
+        string $operatorName = '',
+        int $workerId = 0,
+        int $initId = 0,
+        ?string $comments = null
+    ): array {
+        $this->ensureOperatorLunchBreaksTable();
+        $lunch = null;
+        if ($lunchId > 0) {
+            $stmt = $this->pdo->prepare("SELECT * FROM production_operator_lunch_breaks WHERE id = :id");
+            $stmt->execute([':id' => $lunchId]);
+            $lunch = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
+        if (!$lunch) {
+            $lunch = $this->getActiveOperatorLunchBreak($workerId, $initId, $operatorName);
+        }
+        if (!$lunch) {
+            return ['ok' => false, 'error' => 'No se encontró una colación activa en curso para finalizar.'];
+        }
+
+        $now = time();
+        $endDt = date('Y-m-d H:i:s', $now);
+        $startTs = strtotime((string)$lunch['start_time']);
+        $duration = max(1, (int)round(($now - $startTs) / 60));
+
+        // 1. Cerrar evento en el ERP si existe
+        if (!empty($lunch['erp_event_id'])) {
+            try {
+                $upd = $this->erpPdo->prepare("
+                    UPDATE prod_worker_ot_events
+                    SET evt_enddat = :now, evt_status = 2, evt_amount = :dur,
+                        evt_comments = :comments
+                    WHERE id = :id
+                ");
+                $upd->execute([
+                    ':now' => $now,
+                    ':dur' => $duration,
+                    ':comments' => 'Colación finalizada (' . $duration . ' min de ' . date('H:i', $startTs) . ' a ' . date('H:i', $now) . ')' . ($comments ? " - {$comments}" : ''),
+                    ':id' => (int)$lunch['erp_event_id'],
+                ]);
+            } catch (Throwable) {}
+        }
+
+        // 2. Actualizar registro en base local
+        try {
+            $stmt = $this->pdo->prepare("
+                UPDATE production_operator_lunch_breaks
+                SET end_time = :et, duration_minutes = :dur,
+                    comments = CONCAT(COALESCE(comments, ''), :comm)
+                WHERE id = :id
+            ");
+            $stmt->execute([
+                ':et' => $endDt,
+                ':dur' => $duration,
+                ':comm' => $comments ? " | Fin: {$comments}" : '',
+                ':id' => (int)$lunch['id'],
+            ]);
+
+            return [
+                'ok' => true,
+                'duration' => $duration,
+                'start_time' => date('H:i', $startTs),
+                'end_time' => date('H:i', $now),
+            ];
+        } catch (Throwable $e) {
+            return ['ok' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
      * Guarda colación de forma masiva para todos los operarios de una máquina en la fecha.
      */
     public function saveMachineLunchBreaks(
