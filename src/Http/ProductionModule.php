@@ -2188,18 +2188,21 @@ function renderProdwrkShell(
     <td style="background-color:#00A9A4" valign="middle" align="left">
         <table border="0" width="100%" cellpadding="0" cellspacing="0">
         <tr>
-            <td width="60">
-                <i class="fa fa-fw fa-bars" style="font-size:24px;color:#FFFFFF;margin-left:15px;cursor:pointer"
-                   onclick="var m=document.querySelectorAll('.tdmenu'); m.forEach(function(el){el.style.display=(el.style.display==='none'?'':'none');});"></i>
+            <td width="50">
+                <i class="fa fa-fw fa-bars" style="font-size:22px;color:#FFFFFF;margin-left:15px;cursor:pointer"
+                   onclick="var m=document.querySelectorAll('.tdmenu'); m.forEach(function(el){el.style.display=(el.style.display==='none'?'':'none');});" title="Alternar menú lateral"></i>
             </td>
-            <td style="font-size:12px;color:white;line-height:1.5">
-                <i class="fa fa-fw fa-user" style="font-size:12px;color:#FFFFFF;"></i> USUARIO: <b><?=htmlspecialchars($operatorName !== '' ? $operatorName : 'OPERARIO')?></b><br>
-                <i class="fa fa-fw fa-home" style="font-size:12px;color:#FFFFFF;"></i> PLANTA: <?=htmlspecialchars($plantaName !== '' ? $plantaName : 'PLANTA 1')?>
+            <td style="font-size:12px;color:white;line-height:1.4;padding:0 10px">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                    <span><i class="fa fa-fw fa-user" style="color:#FFFFFF;"></i> USUARIO: <b><?=htmlspecialchars($operatorName !== '' ? $operatorName : 'OPERARIO')?></b></span>
+                    <span style="opacity:0.65">|</span>
+                    <span><i class="fa fa-fw fa-home" style="color:#FFFFFF;"></i> PLANTA: <?=htmlspecialchars($plantaName !== '' ? $plantaName : 'PLANTA 1')?></span>
+                </div>
             </td>
-            <td style="font-size:12px;color:white" align="right" width="140">
-                <i class="fa fa-fw fa-bell" style="font-size:22px;color:#FFFFFF;cursor:pointer" title="Notificaciones"></i>
-                <i class="fa fa-fw fa-times-circle" style="font-size:24px;color:#FFFFFF;margin-right:20px;margin-left:20px;cursor:pointer"
-                   title="Cerrar Sesión / Salir" onclick="if(confirm('¿Desea cerrar sesión?')) location.href='/logout';"></i>
+            <td style="font-size:12px;color:white;padding-right:15px" align="right">
+                <a href="/logout" style="background:#DC2626;color:#FFFFFF;border:1px solid #B91C1C;border-radius:4px;padding:6px 14px;text-decoration:none;font-size:12px;font-weight:bold;display:inline-flex;align-items:center;gap:6px;box-shadow:0 1px 3px rgba(0,0,0,0.2);cursor:pointer;transition:background 0.2s" onclick="return confirm('¿Desea cerrar sesión del sistema?');" title="Cerrar sesión / Salir">
+                    <i class="fa fa-sign-out-alt"></i> <span>Cerrar Sesión</span>
+                </a>
             </td>
         </tr>
         </table>
@@ -2257,6 +2260,13 @@ function renderProdwrkShell(
         <div style="cursor:pointer;font-size:14px;padding-left:25px;color:#B8D5D3;padding-top:10px;padding-bottom:10px"
              onclick="alert('Sin mensajes pendientes.');">
             <i class="fa fa-fw fa-circle" style="font-size:12px;color:#7FA8A5"></i> Buzon
+        </div>
+
+        <div style="clear:both;height:14px"></div>
+        <div style="border-top:1px solid rgba(255,255,255,0.18);margin:10px 15px"></div>
+        <div style="cursor:pointer;font-size:13px;padding-left:25px;color:#FECACA;padding-top:8px;padding-bottom:8px"
+             onclick="if(confirm('¿Desea cerrar sesión del sistema?')) location.href='/logout';">
+            <i class="fa fa-fw fa-sign-out-alt" style="font-size:13px;color:#F87171"></i> Cerrar sesión
         </div>
     </td>
     <td valign="top" style="padding:20px;background-color:#EDF0F6;vertical-align:top">
@@ -4438,12 +4448,14 @@ function renderProductionOperatorConsole(
             <table border="0" cellpadding="0" cellspacing="0" width="100%">
             <tr>
                 <td align="left">
-                    <i class="fa fa-fw fa-laptop-code" style="font-size:14px;"></i> Ordenes de trabajo
+                    <a href="/production/work-orders/active" style="color:inherit;text-decoration:none;font-weight:bold" title="Ver órdenes de trabajo">
+                        <i class="fa fa-fw fa-laptop-code" style="font-size:14px;"></i> Ordenes de trabajo
+                    </a>
                     <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
                     <b>En curso</b>: OT #<?=htmlspecialchars((string)$agenda['prd_number'])?> | Máquina: <b><?=htmlspecialchars((string)($machineInit['equipo_name'] ?? '-'))?></b>
                 </td>
-                <td align="right" width="360">
-                    <div style="display:inline-flex;align-items:center;gap:8px">
+                <td align="right">
+                    <div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end">
                         <?php if ($activeLunch !== null): ?>
                             <button type="button" class="btnorange" style="background:#D97706;padding:7px 14px;cursor:pointer;border:none;border-radius:4px;font-size:13px;font-weight:bold;display:inline-flex;align-items:center;gap:6px" onclick="openLunchModal()" title="Colación activa">
                                 <i class="fa fa-coffee"></i> EN COLACIÓN (desde <?=date('H:i', strtotime($activeLunch['start_time']))?>) &mdash; Terminar
@@ -4456,6 +4468,9 @@ function renderProductionOperatorConsole(
                         <div class="btngreen" style="display:inline-block" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=terminarot'">
                             <i class="fa fa-fw fa-check" style="color:white;"></i> Terminar OT&nbsp;
                         </div>
+                        <a href="/logout" class="btnred" style="padding:7px 12px;background:#DC2626;color:#FFF;border-radius:4px;text-decoration:none;font-size:12px;font-weight:bold;display:inline-flex;align-items:center;gap:5px" onclick="return confirm('¿Desea cerrar sesión del sistema?');" title="Cerrar sesión / Salir">
+                            <i class="fa fa-sign-out-alt"></i> Salir
+                        </a>
                     </div>
                 </td>
             </tr>
@@ -10184,16 +10199,18 @@ function renderProductionOperatorConsole(
             function liveUpdateCutWidth() {
                 var rollWidth = <?=json_encode((float)$rollWidth)?>;
                 var totalW = 0;
-                var i = 0;
-                while (true) {
-                    var amtEl = document.querySelector('input[name="reboamt_' + i + '"]');
-                    var dimEl = document.querySelector('input[name="rollo_dims_' + i + '"]');
-                    if (!amtEl || !dimEl) break;
-                    var amt = parseFloat(amtEl.value.replace(/,/g, '.')) || 0;
-                    var dim = parseFloat(dimEl.value.replace(/,/g, '.')) || 0;
-                    totalW += (amt * dim);
-                    i++;
-                }
+                var allAmtInputs = document.querySelectorAll('input[name^="reboamt_"]');
+                allAmtInputs.forEach(function(amtEl) {
+                    var m = amtEl.name.match(/^reboamt_(\d+)$/);
+                    if (m) {
+                        var idx = m[1];
+                        var dimEl = document.querySelector('input[name="rollo_dims_' + idx + '"]');
+                        var amt = parseFloat(amtEl.value.replace(/,/g, '.')) || 0;
+                        var dim = dimEl ? (parseFloat(dimEl.value.replace(/,/g, '.')) || 0) : 0;
+                        totalW += (amt * dim);
+                    }
+                });
+                totalW = Math.round(totalW * 100) / 100;
                 var totalWidthEl = document.getElementById('idx_total_width');
                 var statusText = document.getElementById('idx_width_status_text');
                 var matches = (Math.abs(totalW - rollWidth) < 0.1);
@@ -10266,23 +10283,110 @@ function renderProductionOperatorConsole(
                 var mermaWrap = document.getElementById('merma_manillas_wrap_' + idx);
                 var mermaInp = document.getElementById('manillas_merma_amt_' + idx);
                 if (!sel) return;
-                var isHandle = (sel.value === 'manilla');
+                var val = sel.value;
                 if (badge) {
-                    if (!isHandle) {
-                        badge.style.background = '#6C3483';
-                        badge.innerHTML = '<i class="fa fa-shopping-bag"></i> CUERPO BOLSA (ROLL-BOL-)';
-                    } else {
+                    if (val === 'merma') {
+                        badge.style.background = '#C0392B';
+                        badge.innerHTML = '<i class="fa fa-trash"></i> MERMA / REFILE (100%)';
+                    } else if (val === 'manilla') {
                         badge.style.background = '#1B4F72';
                         badge.innerHTML = '<i class="fa fa-cut"></i> MANILLAS (ROLL-MAN-)';
+                    } else {
+                        badge.style.background = '#6C3483';
+                        badge.innerHTML = '<i class="fa fa-shopping-bag"></i> CUERPO BOLSA (ROLL-BOL-)';
                     }
                 }
                 if (mermaWrap) {
-                    mermaWrap.style.display = isHandle ? 'flex' : 'none';
+                    mermaWrap.style.display = (val === 'manilla') ? 'flex' : 'none';
                 }
-                if (mermaInp && !isHandle) {
+                if (mermaInp && val !== 'manilla') {
                     mermaInp.value = '0';
                 }
                 markCutsFormModified('destino_' + idx);
+            }
+
+            function addReboCutRow() {
+                var highestIdx = -1;
+                var allAmtInputs = document.querySelectorAll('input[name^="reboamt_"]');
+                allAmtInputs.forEach(function(el) {
+                    var m = el.name.match(/^reboamt_(\d+)$/);
+                    if (m) {
+                        var n = parseInt(m[1], 10);
+                        if (n > highestIdx) highestIdx = n;
+                    }
+                });
+                var nextIdx = highestIdx + 1;
+
+                var rollWidth = <?=json_encode((float)$rollWidth)?>;
+                var currentSum = 0;
+                allAmtInputs.forEach(function(el) {
+                    var m = el.name.match(/^reboamt_(\d+)$/);
+                    if (m) {
+                        var idx = m[1];
+                        var dimEl = document.querySelector('input[name="rollo_dims_' + idx + '"]');
+                        var a = parseFloat(el.value.replace(/,/g, '.')) || 0;
+                        var d = dimEl ? (parseFloat(dimEl.value.replace(/,/g, '.')) || 0) : 0;
+                        currentSum += (a * d);
+                    }
+                });
+                var remainingWidth = Math.max(0.5, Math.round((rollWidth - currentSum) * 100) / 100);
+                if (remainingWidth <= 0) remainingWidth = 2.0;
+
+                var tbody = document.getElementById('table_cuts_rows');
+                if (!tbody) return;
+
+                var tr = document.createElement('tr');
+                tr.id = 'cut_row_' + nextIdx;
+                tr.style.borderBottom = '1px solid #EEEEEE';
+                tr.innerHTML = '<td class="tdnrm" style="border-left:1px solid #DDDDDD;">'
+                    + '<input type="text" class="inptxt clsreboamt" style="width:100%;text-align:center" name="reboamt_' + nextIdx + '" value="1" oninput="markCutsFormModified(\'reboamt_' + nextIdx + '\');">'
+                    + '</td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left">'
+                    + '<select name="rebo_destino_' + nextIdx + '" id="rebo_destino_' + nextIdx + '" style="width:100%;font-size:12px;font-weight:bold;padding:5px 8px;border:1px solid #BDC3C7;border-radius:4px;background:#FFFFFF" onchange="updateDestinoRow(' + nextIdx + ');">'
+                    + '<option value="merma" selected>🗑️ 100% Merma / Refile</option>'
+                    + '<option value="manilla">🏷️ Manilla</option>'
+                    + '<option value="bolsa">📦 Cuerpo de Bolsa</option>'
+                    + '</select>'
+                    + '</td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left">'
+                    + '<span id="badge_dest_' + nextIdx + '" style="background:#C0392B;color:#FFFFFF;padding:4px 8px;border-radius:4px;font-size:11px;font-weight:bold;white-space:nowrap;display:inline-flex;align-items:center;gap:4px">'
+                    + '<i class="fa fa-trash"></i> MERMA / REFILE (100%)'
+                    + '</span>'
+                    + '</td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=htmlspecialchars((string)$itemsel['material'])?></td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left"><?=htmlspecialchars((string)$itemsel['colordesc'])?></td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$fmt($itemsel['item_reg_gsm'])?></td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">'
+                    + '<input type="text" class="inptxt" id="rollo_dims_' + nextIdx + '" name="rollo_dims_' + nextIdx + '" style="width:100%;text-align:center" oninput="markCutsFormModified(\'rollo_dims_' + nextIdx + '\');" value="' + remainingWidth.toFixed(2).replace('.', ',') + '">'
+                    + '</td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><b>(Recalcular)</b></td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">0,00</td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">'
+                    + '<div style="font-weight:bold;color:#C0392B">100% Merma</div>'
+                    + '</td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">'
+                    + '<div id="merma_manillas_wrap_' + nextIdx + '" style="display:none;align-items:center;justify-content:center;gap:4px">'
+                    + '<input type="number" min="0" max="1" step="1" name="manillas_merma_amt_' + nextIdx + '" id="manillas_merma_amt_' + nextIdx + '" value="0" class="inptxt" style="width:65px;text-align:center;padding:4px;border-radius:4px" oninput="markCutsFormModified(\'manillas_merma_' + nextIdx + '\');">'
+                    + '<span style="font-size:11px;color:#64748B">unid</span>'
+                    + '</div>'
+                    + '<span id="merma_dash_' + nextIdx + '" style="color:#94A3B8;font-size:13px">&mdash;</span>'
+                    + '</td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">-</td>'
+                    + '<td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">'
+                    + '<button type="button" class="btngrey" style="padding:3px 7px;font-size:11px;color:#C0392B;border-radius:3px;cursor:pointer" onclick="removeReboCutRow(' + nextIdx + ');" title="Eliminar esta fila">'
+                    + '<i class="fa fa-trash"></i>'
+                    + '</button>'
+                    + '</td>';
+                tbody.appendChild(tr);
+                markCutsFormModified('add_row');
+            }
+
+            function removeReboCutRow(idx) {
+                var tr = document.getElementById('cut_row_' + idx);
+                if (tr) {
+                    tr.remove();
+                    markCutsFormModified('remove_row');
+                }
             }
 
             function attachCutsFormListeners() {
@@ -10417,7 +10521,9 @@ function renderProductionOperatorConsole(
                             <td align="center" class="tdheader" width="85" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD" title="Distribución de merma de acorde al peso del producto">Kg/Merma</td>
                             <td align="center" class="tdheader" width="115" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD" title="Manillas que se van a merma por bobina sucia o descarte">Merma (Manillas)</td>
                             <td align="center" class="tdheader" width="75" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Largo</td>
+                            <td align="center" class="tdheader" width="60" style="color: white;background-color: #0EA9A4;border-left:1px solid #DDDDDD;border-top:1px solid #DDDDDD">Acción</td>
                         </tr>
+                        <tbody id="table_cuts_rows">
                         <?php
                         $cutsList = [];
                         if ($corteSub === 'manillas') {
@@ -10469,6 +10575,27 @@ function renderProductionOperatorConsole(
                             ];
                         }
 
+                        // Detectar todas las filas enviadas por el formulario (incluyendo filas agregadas dinámicamente)
+                        $submittedIndices = [];
+                        foreach ($_REQUEST as $rk => $rv) {
+                            if (preg_match('/^reboamt_(\d+)$/', (string)$rk, $rm)) {
+                                $submittedIndices[] = (int)$rm[1];
+                            }
+                        }
+                        $submittedIndices = array_unique($submittedIndices);
+                        sort($submittedIndices);
+
+                        if (!empty($submittedIndices)) {
+                            $cutsList = [];
+                            foreach ($submittedIndices as $sIdx) {
+                                $cutsList[$sIdx] = [
+                                    'rollo_amt' => max(1, (int)($_REQUEST["reboamt_{$sIdx}"] ?? 1)),
+                                    'rollo_dims' => (float)str_replace(',', '.', (string)($_REQUEST["rollo_dims_{$sIdx}"] ?? 0)),
+                                    'destino' => (string)($_REQUEST["rebo_destino_{$sIdx}"] ?? 'bolsa'),
+                                ];
+                            }
+                        }
+
                         $rollWidth = (float)($itemsel['item_reg_width'] ?? 100);
                         if ($rollWidth <= 0) $rollWidth = 100.0;
 
@@ -10480,15 +10607,22 @@ function renderProductionOperatorConsole(
                             $cReqDims = isset($_REQUEST["rollo_dims_{$idxTemp}"]) ? (float)str_replace(',', '.', (string)$_REQUEST["rollo_dims_{$idxTemp}"]) : (float)$rebovalTemp['rollo_dims'];
                             $rawDest = mb_strtolower(trim((string)($_REQUEST["rebo_destino_{$idxTemp}"] ?? ($rebovalTemp['destino'] ?? ''))));
 
-                            if ($rawDest === 'bolsa' || $rawDest === '3000' || str_contains($rawDest, 'bolsa')) {
+                            if ($rawDest === 'merma' || str_contains($rawDest, 'merma') || str_contains($rawDest, 'refile')) {
+                                $cDestino = 'merma';
+                                $isHandleCut = false;
+                                $isMermaCut = true;
+                            } elseif ($rawDest === 'bolsa' || $rawDest === '3000' || str_contains($rawDest, 'bolsa')) {
                                 $cDestino = 'bolsa';
                                 $isHandleCut = false;
+                                $isMermaCut = false;
                             } elseif ($rawDest === 'manilla' || $rawDest === 'rebo_handle_pallet' || str_contains($rawDest, 'manilla')) {
                                 $cDestino = 'manilla';
                                 $isHandleCut = true;
+                                $isMermaCut = false;
                             } else {
                                 $isHandleCut = ($corteSub === 'manillas');
                                 $cDestino = $isHandleCut ? 'manilla' : 'bolsa';
+                                $isMermaCut = false;
                             }
 
                             $cMermaAmt = 0;
@@ -10504,6 +10638,7 @@ function renderProductionOperatorConsole(
                                 'dims' => $cReqDims,
                                 'destino' => $cDestino,
                                 'is_handle' => $isHandleCut,
+                                'is_merma' => $isMermaCut,
                                 'merma_amt' => $cMermaAmt,
                                 'line_width' => $lineWidth,
                             ];
@@ -10520,6 +10655,7 @@ function renderProductionOperatorConsole(
 
                         $totalScrappedManillasUnits = 0;
                         $totalScrappedManillasKgSum = 0.0;
+                        $totalCutMermaKgSum = 0.0;
                         $totalUsableRollsCount = 0;
                         $totalUsableKgSum = 0.0;
 
@@ -10528,6 +10664,7 @@ function renderProductionOperatorConsole(
                             $cReqDims = $cData['dims'];
                             $cDestino = $cData['destino'];
                             $isHandleCut = $cData['is_handle'];
+                            $isMermaCut = !empty($cData['is_merma']);
                             $cMermaAmt = $cData['merma_amt'];
                             $lineWidth = $cData['line_width'];
 
@@ -10538,28 +10675,37 @@ function renderProductionOperatorConsole(
                             $_KG = round($netProductsKg * $productProportion, 2);
                             $unitKg = $cReqAmt > 0 ? round($_KG / $cReqAmt, 2) : 0.0;
 
-                            // Distribución de la Merma General de acorde al peso del producto:
-                            $lineGeneralMermaKg = round($itemMermaKg * $productProportion, 2);
+                            if ($isMermaCut) {
+                                $usableAmt = 0;
+                                $usableKg = 0.0;
+                                $lineGeneralMermaKg = 0.0;
+                                $lineScrappedManillasKg = 0.0;
+                                $lineTotalMermaKg = $_KG; // 100% de esta tira se asigna a merma/refile
+                                $totalCutMermaKgSum += $_KG;
+                            } else {
+                                // Distribución de la Merma General de acorde al peso del producto:
+                                $lineGeneralMermaKg = round($itemMermaKg * $productProportion, 2);
 
-                            // Kilos de manillas descartadas a merma (por bobina sucia):
-                            $lineScrappedManillasKg = round($cMermaAmt * $unitKg, 2);
+                                // Kilos de manillas descartadas a merma (por bobina sucia):
+                                $lineScrappedManillasKg = round($cMermaAmt * $unitKg, 2);
 
-                            // Merma total correspondiente a esta línea:
-                            $lineTotalMermaKg = round($lineGeneralMermaKg + $lineScrappedManillasKg, 2);
+                                // Merma total correspondiente a esta línea:
+                                $lineTotalMermaKg = round($lineGeneralMermaKg + $lineScrappedManillasKg, 2);
 
-                            // Unidades útiles resultantes que se darán de alta
-                            $usableAmt = max(0, $cReqAmt - $cMermaAmt);
-                            $usableKg = round($usableAmt * $unitKg, 2);
+                                // Unidades útiles resultantes que se darán de alta
+                                $usableAmt = max(0, $cReqAmt - $cMermaAmt);
+                                $usableKg = round($usableAmt * $unitKg, 2);
 
-                            $totalScrappedManillasUnits += $cMermaAmt;
-                            $totalScrappedManillasKgSum += $lineScrappedManillasKg;
-                            $totalUsableRollsCount += $usableAmt;
-                            $totalUsableKgSum += $usableKg;
+                                $totalScrappedManillasUnits += $cMermaAmt;
+                                $totalScrappedManillasKgSum += $lineScrappedManillasKg;
+                                $totalUsableRollsCount += $usableAmt;
+                                $totalUsableKgSum += $usableKg;
+                            }
                         ?>
                             <input type="hidden" name="stockplustotalkg_<?=$x?>" value="<?=round($_KG, 2)?>">
                             <input type="hidden" name="stockpluslargo_<?=$x?>" value="<?=round($_LARGO, 2)?>">
                             <input type="hidden" name="stockplusitemid_<?=$x?>" value="">
-                            <tr>
+                            <tr id="cut_row_<?=$x?>">
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;">
                                     <input type="text" class="inptxt clsreboamt" style="width:100%;text-align:center"
                                     name="reboamt_<?=$x?>" value="<?=$cReqAmt?>"
@@ -10570,10 +10716,15 @@ function renderProductionOperatorConsole(
                                             onchange="updateDestinoRow(<?=$x?>);">
                                         <option value="bolsa" <?=$cDestino === 'bolsa' ? 'selected' : ''?>>📦 Cuerpo de Bolsa</option>
                                         <option value="manilla" <?=$cDestino === 'manilla' ? 'selected' : ''?>>🏷️ Manilla</option>
+                                        <option value="merma" <?=$cDestino === 'merma' ? 'selected' : ''?>>🗑️ 100% Merma / Refile</option>
                                     </select>
                                 </td>
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="left">
-                                    <?php if ($isHandleCut): ?>
+                                    <?php if ($isMermaCut): ?>
+                                        <span id="badge_dest_<?=$x?>" style="background:#C0392B;color:#FFFFFF;padding:4px 8px;border-radius:4px;font-size:11px;font-weight:bold;white-space:nowrap;display:inline-flex;align-items:center;gap:4px">
+                                            <i class="fa fa-trash"></i> MERMA / REFILE (100%)
+                                        </span>
+                                    <?php elseif ($isHandleCut): ?>
                                         <span id="badge_dest_<?=$x?>" style="background:#1B4F72;color:#FFFFFF;padding:4px 8px;border-radius:4px;font-size:11px;font-weight:bold;white-space:nowrap;display:inline-flex;align-items:center;gap:4px">
                                             <i class="fa fa-cut"></i> MANILLA (ROLL-MAN-)
                                         </span>
@@ -10599,10 +10750,15 @@ function renderProductionOperatorConsole(
                                     <?=number_format($unitKg, 2, ',', '.')?>
                                 </td>
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
-                                    <div style="font-weight:bold;color:#2C3E50"><?=number_format($lineTotalMermaKg, 2, ',', '.')?> Kg</div>
-                                    <div style="font-size:10px;color:#64748B">
-                                        (<?=number_format($productProportion * 100, 1, ',', '.')?>% peso<?= $cMermaAmt > 0 ? " + {$cMermaAmt} descarte" : "" ?>)
-                                    </div>
+                                    <?php if ($isMermaCut): ?>
+                                        <div style="font-weight:bold;color:#C0392B"><?=number_format($lineTotalMermaKg, 2, ',', '.')?> Kg</div>
+                                        <div style="font-size:10px;color:#C0392B">(100% Merma de Corte)</div>
+                                    <?php else: ?>
+                                        <div style="font-weight:bold;color:#2C3E50"><?=number_format($lineTotalMermaKg, 2, ',', '.')?> Kg</div>
+                                        <div style="font-size:10px;color:#64748B">
+                                            (<?=number_format($productProportion * 100, 1, ',', '.')?>% peso<?= $cMermaAmt > 0 ? " + {$cMermaAmt} descarte" : "" ?>)
+                                        </div>
+                                    <?php endif; ?>
                                 </td>
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
                                     <?php if ($isHandleCut): ?>
@@ -10626,12 +10782,27 @@ function renderProductionOperatorConsole(
                                     <?php endif; ?>
                                 </td>
                                 <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center"><?=$fmt($_LARGO)?></td>
+                                <td class="tdnrm" style="border-left:1px solid #DDDDDD;" align="center">
+                                    <button type="button" class="btngrey" style="padding:3px 7px;font-size:11px;color:#C0392B;border-radius:3px;cursor:pointer"
+                                            onclick="removeReboCutRow(<?=$x?>);" title="Eliminar fila">
+                                        <i class="fa fa-trash"></i>
+                                    </button>
+                                </td>
                             </tr>
                         <?php endforeach; ?>
+                        </tbody>
                         </table>
 
+                        <!-- BOTÓN PARA AGREGAR FILA DE CORTE / MERMA DINÁMICAMENTE -->
+                        <div style="margin:10px 12px;display:flex;justify-content:flex-start">
+                            <button type="button" class="btnblue" style="padding:7px 16px;border-radius:5px;font-size:13px;font-weight:bold;cursor:pointer;display:inline-flex;align-items:center;gap:6px;box-shadow:0 1px 3px rgba(0,0,0,0.12)"
+                                    onclick="addReboCutRow();">
+                                <i class="fa fa-plus-circle"></i> ➕ Agregar Fila de Corte / Merma
+                            </button>
+                        </div>
+
                         <?php
-                        $totalProcessMermaKg = round($itemMermaKg + $totalScrappedManillasKgSum, 2);
+                        $totalProcessMermaKg = round($itemMermaKg + $totalScrappedManillasKgSum + $totalCutMermaKgSum, 2);
                         $widthMatches = round($_TOTAL_WIDTH, 1) == round($rollWidth, 1);
                         ?>
 
@@ -10643,6 +10814,9 @@ function renderProductionOperatorConsole(
                                 <span><b>Merma General (por peso):</b> <?=number_format($itemMermaKg, 2, ',', '.')?> Kg</span>
                                 <?php if ($totalScrappedManillasUnits > 0): ?>
                                     | <span style="color:#C0392B;font-weight:bold"><b>Manillas a Merma (Sucia):</b> <?=$totalScrappedManillasUnits?> unid (<?=number_format($totalScrappedManillasKgSum, 2, ',', '.')?> Kg)</span>
+                                <?php endif; ?>
+                                <?php if ($totalCutMermaKgSum > 0): ?>
+                                    | <span style="color:#C0392B;font-weight:bold"><b>Merma de Refile / Corte:</b> <?=number_format($totalCutMermaKgSum, 2, ',', '.')?> Kg</span>
                                 <?php endif; ?>
                                 | <span><b>Merma Total Proceso:</b> <b style="color:#C0392B"><?=number_format($totalProcessMermaKg, 2, ',', '.')?> Kg</b></span>
                             </div>
@@ -11079,7 +11253,19 @@ function renderProductionOperatorConsole(
                                 <?=htmlspecialchars($cr['parent_roll_code'] ?: ('ID #' . ($cr['parent_roll_id'] ?? '-')))?>
                             </td>
                             <td class="tdnrm" style="border-left:1px solid #DDDDDD" align="left">
-                                <b><?=htmlspecialchars((string)($cr['sku_code'] ?? ''))?></b> <?=htmlspecialchars((string)($cr['sku_desc'] ?? ''))?>
+                                <div><b style="color:#2C3E50"><?=htmlspecialchars((string)($cr['sku_code'] ?? ''))?></b></div>
+                                <div style="font-size:11.5px;color:#555555;margin-top:2px">
+                                    <?php 
+                                    $descStr = (string)($cr['sku_desc'] ?? '');
+                                    if (str_contains($descStr, 'Cargada a SKU:')) {
+                                        $parts = explode(' - Cargada a SKU: ', $descStr, 2);
+                                        echo htmlspecialchars($parts[0]);
+                                        echo ' <span style="background:#E8F8F5;color:#117A65;font-weight:bold;padding:1px 6px;border-radius:3px;border:1px solid #A3E4D7;font-size:11px"><i class="fa fa-bullseye"></i> Cargada a SKU: ' . htmlspecialchars($parts[1]) . '</span>';
+                                    } else {
+                                        echo htmlspecialchars($descStr);
+                                    }
+                                    ?>
+                                </div>
                             </td>
                             <td class="tdnrm" style="border-left:1px solid #DDDDDD" align="center">
                                 <?=!empty($cr['width_mm']) ? number_format((float)$cr['width_mm'], 0) . ' mm' : '-'?>
@@ -12811,6 +12997,12 @@ function renderProductionMachinesScreen(array $machines, ?array $activeInit, str
                             <button type="submit" class="btnred" style="padding:6px 12px;border-radius:4px" onclick="return confirm('¿Seguro que deseas cerrar turno en esta máquina?')">Cerrar turno</button>
                         </form>
                     </div>
+                <?php else: ?>
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                        <a href="/logout" class="btnred" style="padding:6px 14px;border-radius:4px;text-decoration:none;background:#DC2626;color:#FFF;display:inline-flex;align-items:center;gap:6px;font-weight:bold" onclick="return confirm('¿Desea cerrar sesión del sistema?')" title="Cerrar sesión / Salir">
+                            <i class="fa fa-sign-out-alt"></i> Cerrar sesión
+                        </a>
+                    </div>
                 <?php endif; ?>
             </div>
         </td>
@@ -12882,8 +13074,14 @@ function renderProductionNeedMachineScreen(string $operatorName, string $plantaN
     <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:30px;text-align:center;max-width:600px;margin:30px auto">
         <div style="font-size:36px;color:#E1A500;margin-bottom:15px"><i class="fa fa-exclamation-triangle"></i></div>
         <div style="font-size:18px;font-weight:bold;color:#333;margin-bottom:10px">No tienes una máquina asignada actualmente</div>
-        <div style="color:#666;font-size:13px;margin-bottom:20px">Debes iniciar turno en una máquina para poder visualizar y comenzar órdenes de trabajo.</div>
-        <a href="/production/machines" class="btngreen" style="padding:10px 24px;font-size:14px;text-decoration:none"><i class="fa fa-arrow-right"></i> Ir a Asignación de Máquinas</a>
+        <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:20px">
+            <a href="/production/machines" class="btngreen" style="padding:10px 22px;font-size:13px;font-weight:bold;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px">
+                <i class="fa fa-arrow-right"></i> Ir a Asignación de Máquinas
+            </a>
+            <a href="/logout" class="btnred" style="padding:10px 18px;font-size:13px;font-weight:bold;text-decoration:none;background:#DC2626;color:#FFF;border-radius:4px;display:inline-flex;align-items:center;gap:6px" onclick="return confirm('¿Desea cerrar sesión del sistema?');" title="Cerrar sesión / Salir">
+                <i class="fa fa-sign-out-alt"></i> Cerrar Sesión
+            </a>
+        </div>
     </div>
     <?php
     $content = ob_get_clean();
@@ -14858,12 +15056,21 @@ function renderProductionTraceabilityScreen(
         $body .= '<div style="overflow-x:auto">';
         $body .= '<table style="width:100%;border-collapse:collapse;font-size:13px">';
         $body .= '<thead><tr style="background:#f5f3ff;color:#5b21b6;text-align:left;border-bottom:2px solid #ddd6fe">';
-        $body .= '<th style="padding:8px">Código Bobina Hija</th><th style="padding:8px">Ancho (mm)</th><th style="padding:8px">Largo (m)</th><th style="padding:8px">Peso (Kg)</th><th style="padding:8px">Estado</th><th style="padding:8px;text-align:center">Acción</th>';
+        $body .= '<th style="padding:8px">Código Bobina Hija</th><th style="padding:8px">SKU / Destino (Cargado a)</th><th style="padding:8px">Ancho (mm)</th><th style="padding:8px">Largo (m)</th><th style="padding:8px">Peso (Kg)</th><th style="padding:8px">Estado</th><th style="padding:8px;text-align:center">Acción</th>';
         $body .= '</tr></thead><tbody>';
         foreach ($childRolls as $cr) {
             $isCur = ($roll && (int)$roll['id'] === (int)$cr['id']);
+            $crDesc = (string)($cr['sku_desc'] ?? '');
+            $skuHtml = '<b>' . htmlspecialchars((string)($cr['sku_code'] ?? '')) . '</b>';
+            if (str_contains($crDesc, 'Cargada a SKU:')) {
+                $parts = explode(' - Cargada a SKU: ', $crDesc, 2);
+                $skuHtml .= '<br><span style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:700">🎯 Cargada a SKU: ' . htmlspecialchars($parts[1]) . '</span>';
+            } elseif ($crDesc !== '') {
+                $skuHtml .= '<br><span style="font-size:11px;color:#64748b">' . htmlspecialchars($crDesc) . '</span>';
+            }
             $body .= '<tr style="border-bottom:1px solid #e2e8f0;' . ($isCur ? 'background:#ecfdf5;font-weight:bold' : '') . '">';
             $body .= '<td style="padding:8px"><b>' . htmlspecialchars((string)$cr['roll_code']) . '</b>' . ($isCur ? ' <span style="color:#059669">[CONSULTADA]</span>' : '') . '</td>';
+            $body .= '<td style="padding:8px">' . $skuHtml . '</td>';
             $body .= '<td style="padding:8px">' . ((int)($cr['width_mm'] ?? 0) > 0 ? (int)$cr['width_mm'] . ' mm' : '-') . '</td>';
             $body .= '<td style="padding:8px">' . number_format((float)($cr['meters'] ?? 0), 0, ',', '.') . ' m</td>';
             $body .= '<td style="padding:8px">' . number_format((float)($cr['weight_kg'] ?? 0), 2, ',', '.') . ' Kg</td>';

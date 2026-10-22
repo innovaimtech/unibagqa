@@ -16656,7 +16656,7 @@ SQL;
         } else {
             if ($rollCurrentWorkOrderId > 0) {
                 $errors['roll'] = 'La bobina está asignada a una OT y no se puede trasladar a bodega.';
-            } elseif (!in_array($rollStatus, ['RECEIVED'], true)) {
+            } elseif (!in_array($rollStatus, ['RECEIVED', 'IN_PROCESS'], true)) {
                 $errors['roll'] = 'Solo se pueden trasladar a bodega bobinas disponibles.';
             }
         }
@@ -16748,7 +16748,7 @@ SQL;
         $rollCurrentWorkOrderId = (int)($roll['current_work_order_id'] ?? 0);
         if ($rollCurrentWorkOrderId > 0) {
             $errors['roll'] = 'La bobina está asignada a una OT y no se puede mover solo en trazabilidad.';
-        } elseif (!in_array($rollStatus, ['RECEIVED'], true)) {
+        } elseif (!in_array($rollStatus, ['RECEIVED', 'IN_PROCESS'], true)) {
             $errors['roll'] = 'Solo se pueden mover en trazabilidad bobinas disponibles.';
         }
 
@@ -17228,6 +17228,46 @@ SQL;
         }
     }
 
+    /**
+     * Lista todas las bobinas activas para el módulo de Traspaso Rápido Masivo entre bodegas.
+     * Incluye bobinas madre, hijas cortadas (CUT), empalmes e impresas de todas las bodegas.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function listAllRollsForWarehouseTransfer(?int $warehouseId = null, int $limit = 2000): array
+    {
+        try {
+            $whereWh = '';
+            if ($warehouseId !== null && $warehouseId > 0) {
+                $whereWh = ' AND r.warehouse_id = :wh ';
+            }
+            $stmt = $this->pdo->prepare("
+                SELECT r.id, r.roll_code, r.weight_kg, r.status, r.warehouse_id, r.process_stage,
+                       r.parent_roll_id, r.meters, r.width_mm, r.created_at,
+                       w.code AS wh_code, w.name AS wh_name,
+                       s.code AS sku_code, s.description AS sku_description,
+                       pr.roll_code AS parent_roll_code
+                FROM rolls r
+                JOIN warehouses w ON r.warehouse_id = w.id
+                JOIN skus s ON r.sku_id = s.id
+                LEFT JOIN rolls pr ON pr.id = r.parent_roll_id
+                WHERE (r.status = 'RECEIVED' OR r.status = 'IN_PROCESS')
+                  AND (r.current_work_order_id IS NULL OR r.current_work_order_id = 0)
+                  {$whereWh}
+                ORDER BY r.id DESC
+                LIMIT :lim
+            ");
+            if ($warehouseId !== null && $warehouseId > 0) {
+                $stmt->bindValue(':wh', $warehouseId, PDO::PARAM_INT);
+            }
+            $stmt->bindValue(':lim', $limit, PDO::PARAM_INT);
+            $stmt->execute();
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
     public function getRoll(int $id): ?array
     {
         $stmt = $this->pdo->prepare(
@@ -17645,7 +17685,7 @@ SQL;
                  AND m.entity_id = r.id 
                  AND m.movement_type = "RECEIPT"
                  AND m.id = (SELECT MIN(m2.id) FROM movements m2 WHERE m2.entity_type = "ROLL" AND m2.entity_id = r.id AND m2.movement_type = "RECEIPT")
-                WHERE (w.id = :id1 OR w.code = :code1 OR w.erp_storehouse_id = :erpid1)
+                WHERE (w.id = :id1 OR w.code = :code1 OR w.erp_storehouse_id = :erpid1 OR (:erpid1 IN (16, 3000) AND w.id IN (18, 58)))
                   AND r.status IN ("RECEIVED", "IN_PROCESS", "BLOCKED")
                 ORDER BY r.id DESC';
         if ($limit > 0) {

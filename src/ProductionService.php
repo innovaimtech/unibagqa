@@ -9116,36 +9116,38 @@ final class ProductionService
         $itemId = (int)$item['id'];
         $stock3000 = (float)($item['stock_3000'] ?? 0);
 
-        // Si no tiene stock en Bodega 3000, ingresarla / transferirla a Bodega 3000 (1 bobina)
-        if ($stock3000 <= 0.0001) {
-            // Descontar de MP si hay stock
-            $stockMp = (float)($item['stock_mp'] ?? 0);
-            if ($stockMp > 0) {
-                try {
-                    $this->erpPdo->prepare("
-                        UPDATE item_shops_storehouses
-                        SET iss_inventory = GREATEST(0, iss_inventory - 1)
-                        WHERE item_id = :itid AND st_id IN (10, 11, 1) AND iss_inventory > 0
-                        LIMIT 1
-                    ")->execute([':itid' => $itemId]);
-                } catch (Throwable) {}
+        // Validación estricta de Bodega 3000:
+        // 1. Si es una bobina de trazabilidad (TRZ), verificar que esté en Bodega 3000 (warehouse_id 18 o 58) y no consumida.
+        if (!empty($trzRoll)) {
+            $trzWhId = (int)($trzRoll['warehouse_id'] ?? 0);
+            $trzStatus = strtoupper(trim((string)($trzRoll['status'] ?? '')));
+            if ($trzStatus === 'CONSUMED') {
+                return [
+                    'ok' => false,
+                    'error' => "La bobina de trazabilidad '{$code}' figura como CONSUMIDA en el sistema. No puede volver a procesarse.",
+                ];
             }
-
-            // Ingresar a Bodega 3000
-            try {
-                $upd = $this->erpPdo->prepare("
-                    UPDATE item_shops_storehouses
-                    SET iss_inventory = iss_inventory + 1
-                    WHERE item_id = :itid AND st_id = :stid
-                ");
-                $upd->execute([':itid' => $itemId, ':stid' => $stId3000]);
-                if ($upd->rowCount() === 0) {
-                    $this->erpPdo->prepare("
-                        INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_inventory)
-                        VALUES (:itid, :shopid, :stid, 1)
-                    ")->execute([':itid' => $itemId, ':shopid' => $shopId, ':stid' => $stId3000]);
-                }
-            } catch (Throwable) {}
+            if (!in_array($trzWhId, [18, 58], true)) {
+                $whName = 'Bodega ID #' . $trzWhId;
+                try {
+                    $stWh = $this->trzPdo->prepare("SELECT name FROM warehouses WHERE id = :w LIMIT 1");
+                    $stWh->execute([':w' => $trzWhId]);
+                    $whName = $stWh->fetchColumn() ?: $whName;
+                } catch (Throwable) {}
+                return [
+                    'ok' => false,
+                    'error' => "La bobina '{$code}' no está en Bodega 3000 (actualmente en '{$whName}'). Debe solicitarla o trasladarla a Bodega 3000 antes de cortarla.",
+                ];
+            }
+        } else {
+            // 2. Si es un SKU o código de ERP, verificar que tenga stock disponible en Bodega 3000
+            if ($stock3000 <= 0.0001) {
+                $itemLabel = trim(($item['item_number_prod'] ?? '') . ' - ' . ($item['item_title'] ?? ''));
+                return [
+                    'ok' => false,
+                    'error' => "El ítem/SKU '{$code}' ({$itemLabel}) no tiene stock disponible en Bodega 3000 (Stock actual: 0). Verifique que tenga inventario en Bodega 3000 antes de cargarlo.",
+                ];
+            }
         }
 
         return [
@@ -9421,6 +9423,33 @@ final class ProductionService
      * - Da de alta la bobina resultante empalmada en ERP (Bodega 3000 entrada stk_negative=0, issue 20)
      *   y en TRZ crea la nueva bobina en rolls (ROLL-EMP-XXXXX, process_stage='EMPALME', status='RECEIVED').
      */
+    /**
+     * Busca el id de una bodega en TRZ a partir de su código numérico (ej: 3000 -> 18).
+     */
+    public function findWarehouseIdByCode(int $warehouseCode): ?int
+    {
+        if ($this->trzPdo === null) {
+            return null;
+        }
+        try {
+            // Bodega 3000 de producción e insumos en TRZ corresponde a warehouse_id = 58 (erp_storehouse_id = 16 '3000 INSUMOS EN PRODUCCION')
+            if ($warehouseCode === 3000 || $warehouseCode === 16) {
+                $stmt = $this->trzPdo->query("SELECT id FROM warehouses WHERE erp_storehouse_id = 16 OR name LIKE '%3000 INSUMOS%' LIMIT 1");
+                $foundId = $stmt->fetchColumn();
+                if ($foundId) {
+                    return (int)$foundId;
+                }
+            }
+
+            $stmt = $this->trzPdo->prepare('SELECT id FROM warehouses WHERE code = :code LIMIT 1');
+            $stmt->execute([':code' => $warehouseCode]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $row !== false ? (int)$row['id'] : null;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
     public function executeReboEmpalme(int $agId, array $postData, int $userId, int $companyId, int $workerOtId = 0, string $operatorName = ''): array
     {
         if ($agId <= 0) {
@@ -9701,7 +9730,7 @@ final class ProductionService
                 $nextNum = ((int)$stmtMax->fetchColumn()) + 1;
                 $childRollCode = sprintf('ROLL-EMP-%05d', $nextNum);
                 $widthMm = (int)round(((float)($primaryItem['item_reg_width'] ?? 0)) * 10);
-                $wh3000Trz = $this->findWarehouseIdByCode(3000) ?: 18;
+                $wh3000Trz = $this->findWarehouseIdByCode(3000) ?: 58;
 
                 $insRoll = $this->trzPdo->prepare("
                     INSERT INTO rolls
@@ -9720,6 +9749,38 @@ final class ProductionService
                     ':wo_id' => $workerOtId > 0 ? $workerOtId : null,
                 ]);
                 $childRollId = (int)$this->trzPdo->lastInsertId();
+
+                try {
+                    $stmtWhName = $this->trzPdo->prepare("SELECT name FROM warehouses WHERE id = :id LIMIT 1");
+                    $stmtWhName->execute([':id' => $wh3000Trz]);
+                    $whNameStr = (string)($stmtWhName->fetchColumn() ?: '3000 INSUMOS EN PRODUCCION');
+
+                    $stmtInsTwe = $this->trzPdo->prepare("
+                        INSERT INTO traceability_warehouse_entries
+                        (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name,
+                         item_id, item_code, item_description, quantity, unit_name,
+                         weight_kg, width_mm, meters, order_ref, operator_name, comments, status, created_at)
+                        VALUES
+                        (:code, 'ROLL', :eid, :wh_id, :wh_name,
+                         :item_id, :item_code, :item_desc, 1.000, 'UNID',
+                         :weight, :width, :meters, :order_ref, :op_name, :comments, 'IN_WAREHOUSE', NOW())
+                    ");
+                    $stmtInsTwe->execute([
+                        ':code' => $childRollCode,
+                        ':eid' => $childRollId,
+                        ':wh_id' => $wh3000Trz,
+                        ':wh_name' => $whNameStr,
+                        ':item_id' => $primaryItemId > 0 ? $primaryItemId : null,
+                        ':item_code' => $skuCode,
+                        ':item_desc' => 'Bobina Empalmada ' . ($primaryItem['item_title'] ?? ''),
+                        ':weight' => $destNetKg,
+                        ':width' => $widthMm > 0 ? $widthMm : null,
+                        ':meters' => $totalMeters > 0 ? $totalMeters : null,
+                        ':order_ref' => $workerOtId > 0 ? ('OT #' . $workerOtId) : null,
+                        ':op_name' => $operatorName !== '' ? $operatorName : 'Operador Rebobinadora',
+                        ':comments' => 'Empalme de bobinas: ' . implode(', ', array_column($inputRolls, 'roll_code')),
+                    ]);
+                } catch (Throwable) {}
 
                 $stmtEvt = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
                 $stmtEvt->execute([
@@ -10027,6 +10088,8 @@ final class ProductionService
             $totalScrappedManillasAmt = 0;
             $totalScrappedManillasKg = 0.0;
             $scrappedManillasDetails = [];
+            $totalCutMermaKg = 0.0;
+            $cutMermaDetails = [];
             $generalMermaKg = (float)str_replace(',', '.', (string)($postData['itemmermakg'] ?? 0));
             $netProductsKg = max(0.0, $useKgAmt - $generalMermaKg);
             $rollWidth = (float)($itemSel['item_reg_width'] ?? 100);
@@ -10063,7 +10126,13 @@ final class ProductionService
                 $reboAmt = max(1, (int)($postData["reboamt_{$idx}"] ?? 1));
                 $destLargo = (float)($postData["stockpluslargo_{$idx}"] ?? $calcLargo);
                 $destinoLabel = trim((string)($postData["rebo_destino_{$idx}"] ?? ''));
-                $destType = $this->isReboHandleDestination($destinoLabel, $destDims, $agenda) ? 'handle' : 'bag';
+
+                $isMermaDest = ($destinoLabel === 'merma' || str_contains(mb_strtolower($destinoLabel), 'merma') || str_contains(mb_strtolower($destinoLabel), 'refile'));
+                if ($isMermaDest) {
+                    $destType = 'merma';
+                } else {
+                    $destType = $this->isReboHandleDestination($destinoLabel, $destDims, $agenda) ? 'handle' : 'bag';
+                }
 
                 if ($destDims <= 0) {
                     continue;
@@ -10074,6 +10143,27 @@ final class ProductionService
                 $destUseKg = round($netProductsKg * $productProportion, 2);
                 if ($destUseKg <= 0 && $netProductsKg > 0) {
                     $destUseKg = round($netProductsKg / max(1, count($cutIndices)), 2);
+                }
+
+                // Si la fila está marcada como 100% Merma / Refile, los kilos van directamente a merma
+                if ($destType === 'merma') {
+                    $totalCutMermaKg += $destUseKg;
+                    $cutMermaDetails[] = "{$reboAmt}x Refile/Merma {$destDims}cm ({$destUseKg} Kg)";
+                    $prodItems[] = [
+                        'dest_itemid' => 0,
+                        'dest_units' => 0,
+                        'item_reboprod_amt' => 0,
+                        'total_cut_amt' => $reboAmt,
+                        'scrapped_amt' => $reboAmt,
+                        'scrapped_kg' => $destUseKg,
+                        'usable_kg' => 0.0,
+                        'item_reboprod_unitkg' => 0.0,
+                        'dest_dims' => $destDims,
+                        'dest_largo' => $destLargo,
+                        'destino_label' => 'Merma / Refile',
+                        'dest_type' => 'merma',
+                    ];
+                    continue;
                 }
 
                 // Manillas a merma seleccionadas por el operador (por bobina sucia o defecto)
@@ -10101,21 +10191,9 @@ final class ProductionService
                     $destItemId = $this->findOrCreateCutItem($itemSel, $destDims, $destLargo, $userId);
                 }
 
-                // Determinar peso base para cálculo de unidades
-                $destBaseKg = 0.0;
-                if ($destItemId > 0) {
-                    $stmtDI = $this->erpPdo->prepare("SELECT item_reg_kg FROM item WHERE id = :id LIMIT 1");
-                    $stmtDI->execute([':id' => $destItemId]);
-                    $destBaseKg = (float)($stmtDI->fetchColumn() ?: 0);
-                }
-                if ($destBaseKg <= 0) {
-                    $destBaseKg = $unitKg > 0 ? $unitKg : 1.0;
-                }
-
-                $destUnits = round($usableKg / $destBaseKg, 10);
-                if ($destUnits <= 0 && $usableAmt > 0) {
-                    $destUnits = $usableAmt;
-                }
+                // Unidades producidas: exactamente la cantidad de rollos útiles obtenidos ($usableAmt).
+                // Cada rollo cortado equivale a 1 unidad física en el inventario.
+                $destUnits = (float)$usableAmt;
 
                 $prodItems[] = [
                     'dest_itemid' => $destItemId,
@@ -10203,7 +10281,7 @@ final class ProductionService
             }
 
             // Registrar evento único y claro en la OT para seguimiento y trazabilidad (sin duplicidad de materiales)
-            $totalProcessMermaKg = round($generalMermaKg + $totalScrappedManillasKg, 2);
+            $totalProcessMermaKg = round($generalMermaKg + $totalScrappedManillasKg + $totalCutMermaKg, 2);
             if ($workerOtId > 0) {
                 try {
                     $totalCuts = count($prodItems);
@@ -10227,7 +10305,10 @@ final class ProductionService
 
                     $prodComments = "{$taskName} finalizado: {$originText} -> Obtenidos {$totalProducedRolls} rollos útiles [{$cutsText}]. Merma total: {$totalProcessMermaKg} Kg";
                     if ($totalScrappedManillasAmt > 0) {
-                        $prodComments .= " (incluye {$totalScrappedManillasAmt} manillas descartadas a merma por bobina sucia: {$totalScrappedManillasKg} Kg)";
+                        $prodComments .= " (incluye {$totalScrappedManillasAmt} manillas descartadas a merma: {$totalScrappedManillasKg} Kg)";
+                    }
+                    if ($totalCutMermaKg > 0) {
+                        $prodComments .= " (incluye " . implode(', ', $cutMermaDetails) . ")";
                     }
 
                     // Un solo evento de producción ('prod') con estado finalizado y detalle completo
@@ -10276,6 +10357,30 @@ final class ProductionService
                         ")->execute([':used' => $useKgAmt, ':c' => $rollCodePost]);
                     }
 
+                    // Obtener target SKU del producto de la OT para asociarlo a las manillas
+                    $targetProductSku = '';
+                    $targetProductTitle = '';
+                    if ($orderId > 0) {
+                        try {
+                            $stmtTgt = $this->erpPdo->prepare("
+                                SELECT i.item_number_prod, i.item_title
+                                FROM orders_items oi
+                                JOIN item i ON oi.item_id = i.id
+                                WHERE oi.req_id = :ord_id
+                                LIMIT 1
+                            ");
+                            $stmtTgt->execute([':ord_id' => $orderId]);
+                            $tgtRow = $stmtTgt->fetch(PDO::FETCH_ASSOC);
+                            if ($tgtRow) {
+                                $targetProductSku = trim((string)($tgtRow['item_number_prod'] ?? ''));
+                                $targetProductTitle = trim((string)($tgtRow['item_title'] ?? ''));
+                            }
+                        } catch (Throwable) {}
+                    }
+                    if ($targetProductSku === '' && !empty($agenda['item_number_prod'])) {
+                        $targetProductSku = trim((string)$agenda['item_number_prod']);
+                    }
+
                     // Generar bobinas hijas cortadas (CUT) en TRZ
                     foreach ($prodItems as $pRow) {
                         $usableAmt = (int)($pRow['item_reboprod_amt'] ?? 0);
@@ -10287,7 +10392,12 @@ final class ProductionService
                         $destType = (string)($pRow['dest_type'] ?? 'bag');
                         $destinoLabel = trim((string)($pRow['destino_label'] ?? ''));
 
-                        $skuCode = ($destType === 'handle' ? 'CUT-MAN-' : 'CUT-BOL-') . $destItemId;
+                        if ($destType === 'merma' || ($usableAmt <= 0 && $scrappedAmt <= 0)) {
+                            continue;
+                        }
+
+                        $skuSuffix = ($destType === 'handle' && $targetProductSku !== '') ? "-{$targetProductSku}" : '';
+                        $skuCode = ($destType === 'handle' ? 'CUT-MAN-' : 'CUT-BOL-') . $destItemId . $skuSuffix;
                         $skuId = 1;
                         try {
                             $stmtSku = $this->trzPdo->prepare("SELECT id FROM skus WHERE code = :c LIMIT 1");
@@ -10296,18 +10406,19 @@ final class ProductionService
                             if ($foundSku) {
                                 $skuId = (int)$foundSku;
                             } else {
+                                $skuDesc = $destType === 'handle'
+                                    ? ("Manilla Cortada {$pRow['dest_dims']}cm" . ($targetProductSku !== '' ? " - Cargada a SKU: {$targetProductSku} (OT #{$orderNum})" : ''))
+                                    : ("Cuerpo de Bolsa Cortada {$pRow['dest_dims']}cm" . ($targetProductSku !== '' ? " - Para OT #{$orderNum}" : ''));
                                 $stmtInsSku = $this->trzPdo->prepare("INSERT INTO skus (code, description, is_active) VALUES (:c, :d, 1)");
                                 $stmtInsSku->execute([
                                     ':c' => $skuCode,
-                                    ':d' => $destType === 'handle'
-                                        ? ("Manilla Cortada {$pRow['dest_dims']}cm")
-                                        : ("Cuerpo de Bolsa Cortada {$pRow['dest_dims']}cm"),
+                                    ':d' => $skuDesc,
                                 ]);
                                 $skuId = (int)$this->trzPdo->lastInsertId();
                             }
                         } catch (Throwable) {}
 
-                        $wh3000Trz = $this->findWarehouseIdByCode(3000) ?: 18;
+                        $wh3000Trz = $this->findWarehouseIdByCode(3000) ?: 58;
 
                         // 1. Rollos útiles recibidos en bodega 3000
                         for ($k = 1; $k <= $usableAmt; $k++) {
@@ -10336,6 +10447,38 @@ final class ProductionService
                                 ]);
                                 $childRollId = (int)$this->trzPdo->lastInsertId();
 
+                                try {
+                                    $stmtWhName = $this->trzPdo->prepare("SELECT name FROM warehouses WHERE id = :id LIMIT 1");
+                                    $stmtWhName->execute([':id' => $wh3000Trz]);
+                                    $whNameStr = (string)($stmtWhName->fetchColumn() ?: '3000 INSUMOS EN PRODUCCION');
+
+                                    $stmtInsTwe = $this->trzPdo->prepare("
+                                        INSERT INTO traceability_warehouse_entries
+                                        (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name,
+                                         item_id, item_code, item_description, quantity, unit_name,
+                                         weight_kg, width_mm, meters, order_ref, operator_name, comments, status, created_at)
+                                        VALUES
+                                        (:code, 'ROLL', :eid, :wh_id, :wh_name,
+                                         :item_id, :item_code, :item_desc, 1.000, 'UNID',
+                                         :weight, :width, :meters, :order_ref, :op_name, :comments, 'IN_WAREHOUSE', NOW())
+                                    ");
+                                    $stmtInsTwe->execute([
+                                        ':code' => $childRollCode,
+                                        ':eid' => $childRollId,
+                                        ':wh_id' => $wh3000Trz,
+                                        ':wh_name' => $whNameStr,
+                                        ':item_id' => $destItemId > 0 ? $destItemId : null,
+                                        ':item_code' => $skuCode,
+                                        ':item_desc' => $skuDesc ?? $destinoLabel,
+                                        ':weight' => $unitKg,
+                                        ':width' => $widthMm > 0 ? $widthMm : null,
+                                        ':meters' => $meters > 0 ? $meters : null,
+                                        ':order_ref' => $orderNum !== '' ? ('OT #' . $orderNum) : null,
+                                        ':op_name' => $operatorName !== '' ? $operatorName : 'Operador Rebobinadora',
+                                        ':comments' => 'Corte/Rebobinado desde ' . ($rollCodePost ?: ('Bobina #' . $rollIdPost)),
+                                    ]);
+                                } catch (Throwable) {}
+
                                 $stmtEvt = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
                                 $stmtEvt->execute([
                                     ':type' => 'CHILD_ROLL_CREATED',
@@ -10347,13 +10490,17 @@ final class ProductionService
                                         'weight_kg' => $unitKg,
                                         'width_mm' => $widthMm,
                                         'meters' => $meters,
+                                        'dest_type' => $destType,
+                                        'target_product_sku' => $targetProductSku,
+                                        'target_product_title' => $targetProductTitle,
+                                        'order_number' => $orderNum,
                                         'source_work_order_id' => $workerOtId,
                                         'operator_id' => $userId,
                                         'timestamp' => $now,
                                     ], JSON_UNESCAPED_UNICODE),
                                 ]);
 
-                                $createdChildRolls[] = [
+                                $childRollData = [
                                     'id' => $childRollId,
                                     'roll_code' => $childRollCode,
                                     'weight_kg' => $unitKg,
@@ -10361,25 +10508,14 @@ final class ProductionService
                                     'meters' => $meters,
                                     'dest_type' => $destType,
                                     'destino_label' => $destinoLabel,
+                                    'target_product_sku' => $targetProductSku,
+                                    'order_number' => $orderNum,
                                 ];
+                                $createdChildRolls[] = $childRollData;
                                 if ($destType === 'handle') {
-                                    $createdHandleRolls[] = [
-                                        'id' => $childRollId,
-                                        'roll_code' => $childRollCode,
-                                        'weight_kg' => $unitKg,
-                                        'width_mm' => $widthMm,
-                                        'meters' => $meters,
-                                        'destino_label' => $destinoLabel,
-                                    ];
+                                    $createdHandleRolls[] = $childRollData;
                                 } else {
-                                    $createdBagRolls[] = [
-                                        'id' => $childRollId,
-                                        'roll_code' => $childRollCode,
-                                        'weight_kg' => $unitKg,
-                                        'width_mm' => $widthMm,
-                                        'meters' => $meters,
-                                        'destino_label' => $destinoLabel,
-                                    ];
+                                    $createdBagRolls[] = $childRollData;
                                 }
                             } catch (Throwable) {}
                         }
@@ -11508,11 +11644,11 @@ final class ProductionService
                         }
                     }
 
-                    // Detección de bobina impresa en TRZ (RP-, ROLL-SE-, process_stage=PRINTED, o con source_work_order_id)
+                    // Detección de bobina impresa en TRZ (RP-, ROLL-SE-, process_stage=PRINTED, o con source_work_order_id de impresión)
                     $isPrinted = ($row['process_stage'] === 'PRINTED'
                         || str_starts_with($rCode, 'RP-')
                         || str_starts_with($rCode, 'ROLL-SE-')
-                        || !empty($row['source_work_order_id'])
+                        || ($row['process_stage'] !== 'CUT' && !empty($row['source_work_order_id']))
                         || stripos($rDesc, 'IMPRES') !== false);
 
                     if ($unprintedOnly && $isPrinted) {

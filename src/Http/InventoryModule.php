@@ -2581,8 +2581,14 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
 
         $html .= '<div style="display:flex;flex-direction:column;gap:8px">';
         foreach ($childRolls as $cRoll) {
+            $cRollDesc = (string)($cRoll['sku_desc'] ?? '');
+            $targetSkuBadge = '';
+            if (str_contains($cRollDesc, 'Cargada a SKU:')) {
+                $parts = explode(' - Cargada a SKU: ', $cRollDesc, 2);
+                $targetSkuBadge = ' <span style="background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;padding:1px 6px;border-radius:4px;font-size:10.5px;font-weight:700">🎯 Cargada a SKU: ' . h($parts[1]) . '</span>';
+            }
             $html .= '<div style="background:#faf5ff;border:1px solid #e9d5ff;border-radius:8px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;font-size:12px;flex-wrap:wrap;gap:8px">';
-            $html .= '<div><span style="font-weight:800;color:#6d28d9">Bobina hija: ' . h((string)$cRoll['roll_code']) . '</span> <span style="color:#64748b">(' . h((string)($cRoll['sku_code'] ?? '')) . ')</span><div style="font-size:11px;color:#64748B;margin-top:2px">' . h((string)($cRoll['status'] ?? '')) . '</div></div>';
+            $html .= '<div><span style="font-weight:800;color:#6d28d9">Bobina hija: ' . h((string)$cRoll['roll_code']) . '</span> <span style="color:#64748b">(' . h((string)($cRoll['sku_code'] ?? '')) . ')</span>' . $targetSkuBadge . '<div style="font-size:11px;color:#64748B;margin-top:2px">' . h((string)($cRoll['status'] ?? '')) . '</div></div>';
             $html .= '<div style="font-weight:800;color:#0f172a;text-align:right">' . $fmtQty((float)($cRoll['weight_kg'] ?? 0), 2) . ' kg<div style="font-size:11px;color:#64748B;margin-top:2px">' . $fmtQty((float)($cRoll['meters'] ?? 0), 0) . ' m</div></div>';
             $html .= '</div>';
         }
@@ -2727,6 +2733,7 @@ function unibagCanOverrideTransferOperator(string $operatorName): bool
 function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?ProductionService $prodService, string $currentOperatorName): void
 {
     $availableRolls = $service->listAvailableRollsForTransfer(150);
+    $allTransferRolls = $service->listAllRollsForWarehouseTransfer(null, 2500);
     $warehouses = array_values(array_filter(
         $service->listWarehouses(),
         static fn(array $warehouse): bool => (int)($warehouse['id'] ?? 0) > 0
@@ -2738,6 +2745,14 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
 
     $isDispatched = isset($_GET['dispatched']) && (string)$_GET['dispatched'] === '1';
     $isWarehouseMoved = isset($_GET['moved']) && (string)$_GET['moved'] === '1';
+    $isBulkDone = isset($_GET['bulk_done']) && (string)$_GET['bulk_done'] === '1';
+    $bulkSuccessCount = (int)($_GET['success_count'] ?? 0);
+    $bulkFailCount = (int)($_GET['fail_count'] ?? 0);
+    $bulkToWh = trim((string)($_GET['to_wh'] ?? ''));
+    $bulkTotalWeight = (float)($_GET['total_weight'] ?? 0);
+    $bulkTraceOnly = isset($_GET['trace_only']) && (string)$_GET['trace_only'] === '1';
+    $bulkErrors = trim((string)($_GET['bulk_errors'] ?? ''));
+
     $dispatchedRollId = (int)($_GET['roll_id'] ?? 0);
     $dispatchedRollCode = trim((string)($_GET['roll_code'] ?? ''));
     $dispatchedOt = trim((string)($_GET['ot'] ?? ''));
@@ -2762,7 +2777,48 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $transferOperatorHelp = $canOverrideTransferOperator
         ? 'Puede ajustar manualmente el operador del traspaso.'
         : 'Se registrará automáticamente el operador actual.';
-    $activeTab = trim((string)($_GET['tab'] ?? (($isDispatched || $isWarehouseMoved) ? 'historial' : 'nuevo')));
+    $activeTab = trim((string)($_GET['tab'] ?? (($isDispatched || $isWarehouseMoved) ? 'historial' : 'masivo')));
+
+    // Agrupación y métricas de bobinas disponibles para traspaso masivo
+    $originWhCounts = [];
+    $totalKgAvailable = 0.0;
+    $countChildRolls = 0;
+    foreach ($allTransferRolls as $r) {
+        $wId = (int)$r['warehouse_id'];
+        $wName = trim((string)($r['wh_name'] ?? ''));
+        $wCode = trim((string)($r['wh_code'] ?? ''));
+        $displayName = $wCode !== '' ? "{$wCode} - {$wName}" : $wName;
+        if (!isset($originWhCounts[$wId])) {
+            $originWhCounts[$wId] = ['id' => $wId, 'name' => $displayName, 'count' => 0];
+        }
+        $originWhCounts[$wId]['count']++;
+        $totalKgAvailable += (float)($r['weight_kg'] ?? 0);
+        $isChild = !empty($r['parent_roll_id']) || stripos((string)$r['roll_code'], 'ROLL-') === 0 || ($r['process_stage'] ?? '') === 'CUT';
+        if ($isChild) {
+            $countChildRolls++;
+        }
+    }
+    uasort($originWhCounts, static fn(array $a, array $b): int => $b['count'] <=> $a['count']);
+
+    // Ordenar bodegas destino priorizando las más frecuentes
+    $priorityOrder = [58, 1, 2, 21, 9, 8, 10, 18, 19, 20];
+    $sortedWarehouses = $warehouses;
+    usort($sortedWarehouses, static function (array $a, array $b) use ($priorityOrder): int {
+        $idA = (int)($a['id'] ?? 0);
+        $idB = (int)($b['id'] ?? 0);
+        $idxA = array_search($idA, $priorityOrder, true);
+        $idxB = array_search($idB, $priorityOrder, true);
+        if ($idxA !== false && $idxB !== false) {
+            return $idxA <=> $idxB;
+        }
+        if ($idxA !== false) {
+            return -1;
+        }
+        if ($idxB !== false) {
+            return 1;
+        }
+        return strcasecmp((string)($a['name'] ?? ''), (string)($b['name'] ?? ''));
+    });
 
     $body = '<div class="transfers-shell" style="max-width:1280px;margin:0 auto;padding:12px 16px 40px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
 
@@ -2888,12 +2944,40 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         $body .= '</div>';
     }
 
+    if ($isBulkDone) {
+        $body .= '<div style="background:linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);border:1px solid #86efac;border-radius:12px;padding:18px 22px;margin-bottom:22px;box-shadow:0 4px 12px rgba(22,163,74,0.08)">';
+        $body .= '  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px">';
+        $body .= '    <div>';
+        $body .= '      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
+        $body .= '        <span style="font-size:24px">⚡</span>';
+        $body .= '        <span style="font-size:17px;font-weight:800;color:#15803d">¡Traspaso masivo registrado exitosamente!</span>';
+        $body .= '      </div>';
+        $body .= '      <div style="font-size:13.5px;color:#166534;line-height:1.6">';
+        $body .= '        Se traspasaron con éxito <strong>' . $bulkSuccessCount . ' bobina(s)</strong> (total <strong>' . number_format($bulkTotalWeight, 2, ',', '.') . ' kg</strong>)';
+        if ($bulkToWh !== '') {
+            $body .= ' hacia <strong>' . h($bulkToWh) . '</strong>';
+        }
+        $body .= '.<br>';
+        $body .= '        <span style="font-size:12.5px;display:inline-block;margin-top:2px;color:#15803d"><strong>Modo:</strong> ' . ($bulkTraceOnly ? 'Solo trazabilidad (sin movimiento en inventario contable ERP)' : 'Traspaso completo (Trazabilidad TRZ + Inventario ERP)') . '</span>';
+        if ($bulkFailCount > 0) {
+            $body .= '        <div style="margin-top:6px;color:#b91c1c;font-weight:700">⚠️ ' . $bulkFailCount . ' bobina(s) tuvieron errores: ' . h($bulkErrors) . '</div>';
+        }
+        $body .= '      </div>';
+        $body .= '    </div>';
+        $body .= '    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+        $body .= '      <a href="/stock/transfers?tab=masivo" class="btn" style="background:#15803d;color:#fff;font-size:13px;padding:9px 14px;border-radius:6px;text-decoration:none">🔄 Otro Traspaso Masivo</a>';
+        $body .= '      <a href="/stock/transfers?tab=historial" class="btn secondary" style="font-size:13px;padding:9px 14px;border-radius:6px;text-decoration:none">📜 Ver Historial</a>';
+        $body .= '    </div>';
+        $body .= '  </div>';
+        $body .= '</div>';
+    }
+
     // Mini KPIs informativos
     $body .= '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:20px">';
     $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
-    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Modo Rápido</div>';
-    $body .= '    <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:2px">Producción o Bodega</div>';
-    $body .= '    <div style="font-size:11.5px;color:#0369a1;margin-top:2px">Despacho flexible según necesidad</div>';
+    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Traspaso Rápido Masivo</div>';
+    $body .= '    <div style="font-size:18px;font-weight:800;color:#2563eb;margin-top:2px">' . count($allTransferRolls) . ' bobinas</div>';
+    $body .= '    <div style="font-size:11.5px;color:#0369a1;margin-top:2px">Con selección múltiple y filtros</div>';
     $body .= '  </div>';
     $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
     $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">OTs Disponibles</div>';
@@ -2901,7 +2985,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '    <div style="font-size:11.5px;color:#166534;margin-top:2px">Listas para recibir material</div>';
     $body .= '  </div>';
     $body .= '  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 16px">';
-    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Bobinas en Bodega Central</div>';
+    $body .= '    <div style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase">Bobinas Bodega Central</div>';
     $body .= '    <div style="font-size:18px;font-weight:800;color:#0f172a;margin-top:2px">' . count($availableRolls) . ' disponibles</div>';
     $body .= '    <div style="font-size:11.5px;color:#475569;margin-top:2px">Bodegas 100, 200 y stock TRZ</div>';
     $body .= '  </div>';
@@ -2913,9 +2997,12 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '</div>';
 
     // Barra de Navegación por Pestañas
-    $body .= '<div style="display:flex;gap:8px;border-bottom:2px solid #e2e8f0;margin-bottom:20px">';
+    $body .= '<div style="display:flex;gap:8px;border-bottom:2px solid #e2e8f0;margin-bottom:20px;overflow-x:auto">';
+    $body .= '  <button type="button" class="tab-btn" id="btn_tab_masivo" onclick="switchTransferTab(\'masivo\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
+    $body .= '    ⚡ Traspaso Rápido Masivo <span style="background:#dbeafe;color:#1e40af;font-size:11px;font-weight:800;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($allTransferRolls) . '</span>';
+    $body .= '  </button>';
     $body .= '  <button type="button" class="tab-btn" id="btn_tab_nuevo" onclick="switchTransferTab(\'nuevo\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
-    $body .= '    🚚 Nuevo Traspaso';
+    $body .= '    🚚 Traspaso Individual / a OT';
     $body .= '  </button>';
     $body .= '  <button type="button" class="tab-btn" id="btn_tab_solicitudes" onclick="switchTransferTab(\'solicitudes\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
     $body .= '    📥 Solicitudes y Agenda Planta <span style="background:#e2e8f0;color:#334155;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($pendingRequests) . '</span>';
@@ -2923,6 +3010,237 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '  <button type="button" class="tab-btn" id="btn_tab_historial" onclick="switchTransferTab(\'historial\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
     $body .= '    📜 Historial & Trazabilidad <span style="background:#e2e8f0;color:#334155;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($history) . '</span>';
     $body .= '  </button>';
+    $body .= '</div>';
+
+    // =========================================================================
+    // TAB 0: TRASPASO RÁPIDO MASIVO (SELECCIÓN CON CHECKBOX Y FILTROS)
+    // =========================================================================
+    $body .= '<div id="panel_tab_masivo" class="transfer-panel">';
+    $body .= '  <form method="post" action="/stock/transfers" id="form_mass_transfer" onsubmit="return validateMassTransferForm()">';
+    $body .= '    <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+    $body .= '    <input type="hidden" name="action_mode" value="bulk_transfer">';
+    if ($canOverrideTransferOperator) {
+        $body .= '    <input type="hidden" name="transfer_operator_name" value="' . h($currentOperatorName) . '">';
+    }
+
+    // Barra de Acción Adherente (Sticky Bar)
+    $body .= '    <div style="position:sticky;top:10px;z-index:40;background:#ffffff;border:2px solid #3b82f6;border-radius:12px;padding:16px 20px;margin-bottom:18px;box-shadow:0 10px 25px -5px rgba(59,130,246,0.18)">';
+    $body .= '      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #e2e8f0">';
+    $body .= '        <div style="display:flex;align-items:center;gap:12px">';
+    $body .= '          <span style="font-size:26px">⚡</span>';
+    $body .= '          <div>';
+    $body .= '            <div style="font-size:16px;font-weight:800;color:#0f172a" id="lbl_mass_selection_summary">0 bobinas seleccionadas (0,00 kg)</div>';
+    $body .= '            <div style="font-size:12px;color:#64748b" id="lbl_mass_subtext">Marque los checkboxes en la tabla para armar su lote de traspaso.</div>';
+    $body .= '          </div>';
+    $body .= '        </div>';
+    $body .= '        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+    $body .= '          <button type="button" class="btn secondary" onclick="massSelectVisibleOnly(true)" style="padding:7px 12px;font-size:12px;font-weight:700">✓ Marcar visibles (<span id="lbl_visible_quick_count">' . count($allTransferRolls) . '</span>)</button>';
+    $body .= '          <button type="button" class="btn secondary" onclick="massSelectVisibleOnly(false)" style="padding:7px 12px;font-size:12px">✕ Desmarcar visibles</button>';
+    $body .= '          <button type="button" class="btn secondary" onclick="massDeselectAll()" style="padding:7px 12px;font-size:12px;color:#dc2626">Limpiar selección</button>';
+    $body .= '        </div>';
+    $body .= '      </div>';
+
+    $body .= '      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px">';
+    $body .= '        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">';
+    $body .= '          <div style="display:flex;align-items:center;gap:8px">';
+    $body .= '            <label for="sel_mass_to_warehouse" style="font-size:13px;font-weight:700;color:#0f172a;white-space:nowrap">Bodega Destino <span style="color:#ef4444">*</span>:</label>';
+    $body .= '            <select name="to_warehouse_id" id="sel_mass_to_warehouse" required style="padding:9px 14px;border:1.5px solid #3b82f6;border-radius:8px;font-size:13.5px;font-weight:700;color:#0f172a;background:#f0f7ff;min-width:270px;cursor:pointer">';
+    $body .= '              <option value="">-- Seleccionar Bodega Destino --</option>';
+    foreach ($sortedWarehouses as $w) {
+        $wId = (int)$w['id'];
+        $wCode = (string)($w['code'] ?? '');
+        $wName = (string)($w['name'] ?? '');
+        $isPrio = in_array($wId, [58, 1, 2, 21, 9, 8], true);
+        $optStyle = $wId === 58 ? ' style="font-weight:800;background:#dbeafe"' : '';
+        $star = $isPrio ? '⭐ ' : '';
+        $disp = $wCode !== '' ? "{$wCode} - {$wName}" : $wName;
+        $body .= '              <option value="' . $wId . '"' . $optStyle . '>' . $star . h($disp) . '</option>';
+    }
+    $body .= '            </select>';
+    $body .= '          </div>';
+
+    $body .= '          <label style="display:inline-flex;align-items:center;gap:8px;background:#f0fdf4;padding:8px 14px;border-radius:8px;border:1.5px solid #86efac;font-size:13px;font-weight:700;color:#166534;cursor:pointer" title="Active esta casilla si solo desea registrar el cambio de ubicación en Trazabilidad TRZ sin alterar el stock contable en el ERP">';
+    $body .= '            <input type="checkbox" name="traceability_only" value="1" id="chk_mass_trace_only" style="width:18px;height:18px;cursor:pointer">';
+    $body .= '            <span>🏷️ Solo mover código de trazabilidad (sin mover ERP)</span>';
+    $body .= '          </label>';
+    $body .= '        </div>';
+
+    $body .= '        <div>';
+    $body .= '          <button type="submit" id="btn_submit_mass_transfer" class="btn" style="background:#2563eb;color:#fff;font-size:14px;font-weight:800;padding:11px 24px;border-radius:8px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 14px rgba(37,99,235,0.35);transition:all 0.2s">';
+    $body .= '            <span>🚀 Traspasar Bobinas Seleccionadas</span>';
+    $body .= '          </button>';
+    $body .= '        </div>';
+    $body .= '      </div>';
+    $body .= '    </div>';
+
+    // Barra de Búsqueda y Filtros
+    $body .= '    <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $body .= '      <div style="display:grid;grid-template-columns:minmax(280px, 2fr) minmax(220px, 1.2fr) minmax(200px, 1fr) auto;gap:12px;align-items:center">';
+    $body .= '        <div>';
+    $body .= '          <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:4px">🔍 Filtro Instantáneo por SKU o Código de Bobina (Hija / Madre):</label>';
+    $body .= '          <div style="position:relative">';
+    $body .= '            <input type="text" id="mass_search_input" placeholder="Escriba SKU (ej: 0405...), Código Hijo (ROLL-MAN-..., ROLL-BOL-...), Madre (BOB-...) o nombre..." oninput="applyMassRollsFilter()" style="width:100%;padding:10px 14px 10px 36px;border:1.5px solid #94a3b8;border-radius:8px;font-size:13.5px;box-sizing:border-box">';
+    $body .= '            <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:15px;color:#94a3b8">🔍</span>';
+    $body .= '          </div>';
+    $body .= '        </div>';
+
+    $body .= '        <div>';
+    $body .= '          <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:4px">🏢 Bodega Origen:</label>';
+    $body .= '          <select id="mass_filter_wh" onchange="applyMassRollsFilter()" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;box-sizing:border-box">';
+    $body .= '            <option value="">Todas las bodegas de origen (' . count($allTransferRolls) . ')</option>';
+    foreach ($originWhCounts as $ow) {
+        $body .= '            <option value="' . $ow['id'] . '">' . h($ow['name']) . ' (' . $ow['count'] . ')</option>';
+    }
+    $body .= '          </select>';
+    $body .= '        </div>';
+
+    $body .= '        <div>';
+    $body .= '          <label style="display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:4px">📋 Tipo / Etapa:</label>';
+    $body .= '          <select id="mass_filter_stage" onchange="applyMassRollsFilter()" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px;box-sizing:border-box">';
+    $body .= '            <option value="">Todos los tipos y etapas</option>';
+    $body .= '            <option value="child">👶 Bobinas Hijas / Cortes (' . $countChildRolls . ')</option>';
+    $body .= '            <option value="mother">📦 Bobinas Madres / MP (' . (count($allTransferRolls) - $countChildRolls) . ')</option>';
+    $body .= '            <option value="PRINT">🖨️ Impresas (PRINT)</option>';
+    $body .= '            <option value="CUT">✂️ Corte (CUT)</option>';
+    $body .= '            <option value="RECEIVED">📥 En Bodega (RECEIVED)</option>';
+    $body .= '          </select>';
+    $body .= '        </div>';
+
+    $body .= '        <div style="padding-top:18px">';
+    $body .= '          <button type="button" class="btn secondary" onclick="resetMassFilters()" style="padding:10px 16px;font-size:13px;font-weight:600;white-space:nowrap">✕ Limpiar Filtros</button>';
+    $body .= '        </div>';
+    $body .= '      </div>';
+
+    $body .= '      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-top:14px;padding-top:12px;border-top:1px solid #f1f5f9">';
+    $body .= '        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">';
+    $body .= '          <span style="font-size:12px;font-weight:700;color:#64748b;margin-right:4px">Filtros rápidos:</span>';
+    $body .= '          <button type="button" class="filter-pill" onclick="setQuickFilter(\'all\')" style="border:1px solid #cbd5e1;background:#f8fafc;padding:3px 10px;border-radius:14px;font-size:11.5px;font-weight:600;color:#334155;cursor:pointer">✨ Todas (' . count($allTransferRolls) . ')</button>';
+    $body .= '          <button type="button" class="filter-pill" onclick="setQuickFilter(\'child\')" style="border:1px solid #bfdbfe;background:#eff6ff;padding:3px 10px;border-radius:14px;font-size:11.5px;font-weight:700;color:#1e40af;cursor:pointer">👶 Solo Hijas / Cortes (' . $countChildRolls . ')</button>';
+    if (isset($originWhCounts[58])) {
+        $body .= '          <button type="button" class="filter-pill" onclick="setQuickFilter(\'wh\', \'58\')" style="border:1px solid #fde68a;background:#fefce8;padding:3px 10px;border-radius:14px;font-size:11.5px;font-weight:700;color:#854d0e;cursor:pointer">🏭 Bodega 3000 Insumos (' . $originWhCounts[58]['count'] . ')</button>';
+    }
+    if (isset($originWhCounts[1])) {
+        $body .= '          <button type="button" class="filter-pill" onclick="setQuickFilter(\'wh\', \'1\')" style="border:1px solid #cbd5e1;background:#f8fafc;padding:3px 10px;border-radius:14px;font-size:11.5px;font-weight:600;color:#334155;cursor:pointer">🏢 Bodega 100 PLA (' . $originWhCounts[1]['count'] . ')</button>';
+    }
+    if (isset($originWhCounts[2])) {
+        $body .= '          <button type="button" class="filter-pill" onclick="setQuickFilter(\'wh\', \'2\')" style="border:1px solid #cbd5e1;background:#f8fafc;padding:3px 10px;border-radius:14px;font-size:11.5px;font-weight:600;color:#334155;cursor:pointer">🏢 Bodega 200 PP (' . $originWhCounts[2]['count'] . ')</button>';
+    }
+    $body .= '        </div>';
+
+    $body .= '        <div style="font-size:13px;color:#475569">';
+    $body .= '          Mostrando <strong id="lbl_visible_count" style="color:#0f172a">' . count($allTransferRolls) . '</strong> de ' . count($allTransferRolls) . ' bobinas (<strong id="lbl_visible_kg" style="color:#0f172a">' . number_format($totalKgAvailable, 2, ',', '.') . '</strong> kg disponibles)';
+    $body .= '        </div>';
+    $body .= '      </div>';
+    $body .= '    </div>';
+
+    // Tabla de Bobinas con Selección de Checkbox
+    $body .= '    <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05);margin-bottom:20px">';
+    $body .= '      <div style="overflow-x:auto;max-height:700px;overflow-y:auto">';
+    $body .= '        <table style="width:100%;border-collapse:collapse;text-align:left;font-size:13px" id="table_mass_rolls">';
+    $body .= '          <thead style="background:#f8fafc;border-bottom:2px solid #e2e8f0;position:sticky;top:0;z-index:20">';
+    $body .= '            <tr>';
+    $body .= '              <th style="padding:12px 14px;width:40px;text-align:center">';
+    $body .= '                <input type="checkbox" id="chk_mass_master" onclick="toggleMassSelectAll(this)" title="Marcar/Desmarcar todas las bobinas visibles" style="width:18px;height:18px;cursor:pointer">';
+    $body .= '              </th>';
+    $body .= '              <th style="padding:12px 14px;font-weight:700;color:#334155">Código Bobina / Trazabilidad</th>';
+    $body .= '              <th style="padding:12px 14px;font-weight:700;color:#334155">Tipo / Genealogía</th>';
+    $body .= '              <th style="padding:12px 14px;font-weight:700;color:#334155">SKU / Material</th>';
+    $body .= '              <th style="padding:12px 14px;font-weight:700;color:#334155">Bodega Actual</th>';
+    $body .= '              <th style="padding:12px 14px;font-weight:700;color:#334155;text-align:right">Peso (Kg)</th>';
+    $body .= '              <th style="padding:12px 14px;font-weight:700;color:#334155;text-align:right">Metros / Ancho</th>';
+    $body .= '              <th style="padding:12px 14px;font-weight:700;color:#334155;text-align:center">Etapa</th>';
+    $body .= '              <th style="padding:12px 14px;font-weight:700;color:#334155;text-align:center">Acciones</th>';
+    $body .= '            </tr>';
+    $body .= '          </thead>';
+    $body .= '          <tbody>';
+
+    foreach ($allTransferRolls as $r) {
+        $rId = (int)$r['id'];
+        $rCode = (string)$r['roll_code'];
+        $rSku = (string)$r['sku_code'];
+        $rDesc = (string)($r['sku_description'] ?: $rSku);
+        $rKg = (float)$r['weight_kg'];
+        $rMeters = (float)($r['meters'] ?? 0);
+        $rWidth = (float)($r['width_mm'] ?? 0);
+        $rWhName = (string)$r['wh_name'];
+        $rWhCode = (string)$r['wh_code'];
+        $rWhId = (int)$r['warehouse_id'];
+        $rStage = (string)($r['process_stage'] ?? '');
+        $rParentId = (int)($r['parent_roll_id'] ?? 0);
+        $rParentCode = (string)($r['parent_roll_code'] ?? '');
+        $isChild = $rParentId > 0 || stripos($rCode, 'ROLL-') === 0 || $rStage === 'CUT';
+        $isSplice = stripos($rCode, 'EMP-') === 0;
+
+        $searchBlob = strtolower(implode(' ', [
+            $rCode,
+            $rSku,
+            $rDesc,
+            $rParentCode,
+            $rWhName,
+            $rWhCode,
+            $rStage,
+            $isChild ? 'hija corte child' : 'madre mother mp',
+        ]));
+
+        $body .= '            <tr class="mass-roll-row" id="mass_row_' . $rId . '" data-roll-id="' . $rId . '" data-wh-id="' . $rWhId . '" data-stage="' . h($rStage) . '" data-is-child="' . ($isChild ? '1' : '0') . '" data-is-splice="' . ($isSplice ? '1' : '0') . '" data-kg="' . $rKg . '" data-search="' . h($searchBlob) . '" onclick="onMassRowClick(event, this)" style="border-bottom:1px solid #f1f5f9;cursor:pointer;transition:background-color 0.15s">';
+        $body .= '              <td style="padding:10px 14px;text-align:center" onclick="event.stopPropagation()">';
+        $body .= '                <input type="checkbox" name="selected_rolls[]" value="' . $rId . '" class="mass-roll-chk" data-kg="' . $rKg . '" data-code="' . h($rCode) . '" onchange="onMassRowCheckChange(this)" style="width:18px;height:18px;cursor:pointer">';
+        $body .= '              </td>';
+        $body .= '              <td style="padding:10px 14px">';
+        $body .= '                <div style="display:flex;align-items:center;gap:8px">';
+        $body .= '                  <span style="font-family:monospace;font-size:13.5px;font-weight:700;color:#0f172a">' . h($rCode) . '</span>';
+        $body .= '                  <a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" onclick="event.stopPropagation()" style="text-decoration:none;font-size:13px" title="Ver Árbol de Trazabilidad 360°">🌳</a>';
+        $body .= '                </div>';
+        $body .= '              </td>';
+        $body .= '              <td style="padding:10px 14px">';
+        if ($isChild) {
+            $body .= '                <span style="display:inline-flex;align-items:center;gap:4px;background:#eff6ff;color:#1e40af;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #bfdbfe">👶 Hija Corte ' . ($rParentCode !== '' ? '(Madre: ' . h($rParentCode) . ')' : '') . '</span>';
+        } elseif ($isSplice) {
+            $body .= '                <span style="display:inline-flex;align-items:center;gap:4px;background:#fef3c7;color:#92400e;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #fde68a">🔗 Empalme</span>';
+        } else {
+            $body .= '                <span style="display:inline-flex;align-items:center;gap:4px;background:#f8fafc;color:#475569;font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:12px;border:1px solid #e2e8f0">📦 Madre / MP</span>';
+        }
+        $body .= '              </td>';
+        $body .= '              <td style="padding:10px 14px">';
+        $body .= '                <div style="font-weight:700;color:#0f172a">' . h($rSku) . '</div>';
+        $body .= '                <div style="font-size:11.5px;color:#64748b;max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' . h($rDesc) . '">' . h($rDesc) . '</div>';
+        $body .= '              </td>';
+        $body .= '              <td style="padding:10px 14px">';
+        $whStyle = $rWhId === 58 ? 'background:#fefce8;color:#854d0e;border:1px solid #fef08a' : 'background:#f1f5f9;color:#334155;border:1px solid #e2e8f0';
+        $body .= '                <span style="' . $whStyle . ';padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700">' . h($rWhCode !== '' ? "{$rWhCode} - {$rWhName}" : $rWhName) . '</span>';
+        $body .= '              </td>';
+        $body .= '              <td style="padding:10px 14px;text-align:right;font-weight:800;color:#0f172a">' . number_format($rKg, 2, ',', '.') . ' kg</td>';
+        $body .= '              <td style="padding:10px 14px;text-align:right;font-size:12px;color:#64748b">';
+        $body .= ($rMeters > 0 ? number_format($rMeters, 0, ',', '.') . ' m' : '-');
+        if ($rWidth > 0) {
+            $body .= ' · ' . number_format($rWidth, 0, ',', '.') . ' mm';
+        }
+        $body .= '              </td>';
+        $body .= '              <td style="padding:10px 14px;text-align:center">';
+        if ($rStage === 'CUT') {
+            $body .= '                <span style="background:#e0f2fe;color:#0369a1;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800">CORTE</span>';
+        } elseif ($rStage === 'PRINT') {
+            $body .= '                <span style="background:#f3e8ff;color:#7e22ce;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800">IMPRESIÓN</span>';
+        } else {
+            $body .= '                <span style="background:#f1f5f9;color:#64748b;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600">' . h($rStage ?: 'STOCK') . '</span>';
+        }
+        $body .= '              </td>';
+        $body .= '              <td style="padding:10px 14px;text-align:center;white-space:nowrap" onclick="event.stopPropagation()">';
+        $body .= '                <a href="/rolls/' . $rId . '/label?server_print=1" target="_blank" class="btn" style="background:#15803d;color:#fff;font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none;margin-right:2px" title="Imprimir Zebra (100×70)">🖨️</a>';
+        $body .= '                <a href="/rolls/' . $rId . '/label" target="_blank" class="btn secondary" style="font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none;margin-right:2px" title="Vista Previa Etiqueta">👁️</a>';
+        $body .= '                <a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" class="btn secondary" style="font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none" title="Ver Árbol 360°">🌳</a>';
+        $body .= '              </td>';
+        $body .= '            </tr>';
+    }
+
+    $body .= '            <tr id="mass_no_results_row" style="display:none">';
+    $body .= '              <td colspan="9" style="text-align:center;padding:36px;color:#64748b;font-size:14px">🔍 No se encontraron bobinas con los filtros ingresados. Intente con otro SKU o código hijo.</td>';
+    $body .= '            </tr>';
+    $body .= '          </tbody>';
+    $body .= '        </table>';
+    $body .= '      </div>';
+    $body .= '    </div>';
+    $body .= '  </form>';
     $body .= '</div>';
 
     // =========================================================================
@@ -3342,23 +3660,280 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     // Script interactivo de UI
     $body .= '<script>
       function switchTransferTab(tab) {
-        document.getElementById("panel_tab_nuevo").style.display = tab === "nuevo" ? "block" : "none";
-        document.getElementById("panel_tab_solicitudes").style.display = tab === "solicitudes" ? "block" : "none";
-        document.getElementById("panel_tab_historial").style.display = tab === "historial" ? "block" : "none";
-
-        var tabs = ["nuevo", "solicitudes", "historial"];
-        tabs.forEach(function(t) {
-          var btn = document.getElementById("btn_tab_" + t);
+        var panels = {
+          "masivo": document.getElementById("panel_tab_masivo"),
+          "nuevo": document.getElementById("panel_tab_nuevo"),
+          "solicitudes": document.getElementById("panel_tab_solicitudes"),
+          "historial": document.getElementById("panel_tab_historial")
+        };
+        for (var key in panels) {
+          if (panels[key]) {
+            panels[key].style.display = key === tab ? "block" : "none";
+          }
+          var btn = document.getElementById("btn_tab_" + key);
           if (btn) {
-            if (t === tab) {
+            if (key === tab) {
               btn.style.color = "#0f172a";
-              btn.style.borderBottomColor = "#0f172a";
+              btn.style.borderBottomColor = "#2563eb";
             } else {
               btn.style.color = "#64748b";
               btn.style.borderBottomColor = "transparent";
             }
           }
-        });
+        }
+      }
+
+      function applyMassRollsFilter() {
+        var searchInput = document.getElementById("mass_search_input");
+        var query = searchInput ? (searchInput.value || "").trim().toLowerCase() : "";
+        var whSelect = document.getElementById("mass_filter_wh");
+        var whFilter = whSelect ? whSelect.value : "";
+        var stageSelect = document.getElementById("mass_filter_stage");
+        var stageFilter = stageSelect ? stageSelect.value : "";
+
+        var tokens = query ? query.split(/\\s+/).filter(Boolean) : [];
+        var rows = document.querySelectorAll(".mass-roll-row");
+        var visibleCount = 0;
+        var visibleKg = 0;
+
+        for (var i = 0; i < rows.length; i++) {
+          var row = rows[i];
+          var searchBlob = row.getAttribute("data-search") || "";
+          var rowWh = row.getAttribute("data-wh-id") || "";
+          var rowStage = row.getAttribute("data-stage") || "";
+          var isChild = row.getAttribute("data-is-child") === "1";
+          var isSplice = row.getAttribute("data-is-splice") === "1";
+          var rowKg = parseFloat(row.getAttribute("data-kg") || "0");
+
+          var matchesText = true;
+          for (var t = 0; t < tokens.length; t++) {
+            if (searchBlob.indexOf(tokens[t]) === -1) {
+              matchesText = false;
+              break;
+            }
+          }
+
+          var matchesWh = !whFilter || rowWh === whFilter;
+
+          var matchesStage = true;
+          if (stageFilter === "child") {
+            matchesStage = isChild;
+          } else if (stageFilter === "mother") {
+            matchesStage = !isChild;
+          } else if (stageFilter === "splice") {
+            matchesStage = isSplice;
+          } else if (stageFilter) {
+            matchesStage = rowStage === stageFilter;
+          }
+
+          if (matchesText && matchesWh && matchesStage) {
+            row.style.display = "";
+            visibleCount++;
+            visibleKg += rowKg;
+          } else {
+            row.style.display = "none";
+          }
+        }
+
+        var noResRow = document.getElementById("mass_no_results_row");
+        if (noResRow) {
+          noResRow.style.display = visibleCount === 0 ? "" : "none";
+        }
+
+        var lblCount = document.getElementById("lbl_visible_count");
+        if (lblCount) lblCount.textContent = visibleCount;
+        var lblQuick = document.getElementById("lbl_visible_quick_count");
+        if (lblQuick) lblQuick.textContent = visibleCount;
+        var lblKg = document.getElementById("lbl_visible_kg");
+        if (lblKg) lblKg.textContent = visibleKg.toLocaleString("es-CL", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+        syncMassMasterCheckbox();
+      }
+
+      function onMassRowClick(event, row) {
+        if (!row) return;
+        var chk = row.querySelector(".mass-roll-chk");
+        if (chk) {
+          chk.checked = !chk.checked;
+          onMassRowCheckChange(chk);
+        }
+      }
+
+      function onMassRowCheckChange(chk) {
+        if (!chk) return;
+        var row = chk.closest(".mass-roll-row");
+        if (row) {
+          row.style.backgroundColor = chk.checked ? "#eff6ff" : "";
+        }
+        updateMassSelectionSummary();
+        syncMassMasterCheckbox();
+      }
+
+      function toggleMassSelectAll(masterChk) {
+        var state = masterChk.checked;
+        var rows = document.querySelectorAll(".mass-roll-row");
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].style.display !== "none") {
+            var chk = rows[i].querySelector(".mass-roll-chk");
+            if (chk) {
+              chk.checked = state;
+              rows[i].style.backgroundColor = state ? "#eff6ff" : "";
+            }
+          }
+        }
+        updateMassSelectionSummary();
+      }
+
+      function massSelectVisibleOnly(state) {
+        var rows = document.querySelectorAll(".mass-roll-row");
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].style.display !== "none") {
+            var chk = rows[i].querySelector(".mass-roll-chk");
+            if (chk) {
+              chk.checked = state;
+              rows[i].style.backgroundColor = state ? "#eff6ff" : "";
+            }
+          }
+        }
+        updateMassSelectionSummary();
+        syncMassMasterCheckbox();
+      }
+
+      function massDeselectAll() {
+        var chks = document.querySelectorAll(".mass-roll-chk");
+        for (var i = 0; i < chks.length; i++) {
+          chks[i].checked = false;
+          var row = chks[i].closest(".mass-roll-row");
+          if (row) row.style.backgroundColor = "";
+        }
+        updateMassSelectionSummary();
+        syncMassMasterCheckbox();
+      }
+
+      function syncMassMasterCheckbox() {
+        var master = document.getElementById("chk_mass_master");
+        if (!master) return;
+        var rows = document.querySelectorAll(".mass-roll-row");
+        var visibleCount = 0;
+        var checkedVisibleCount = 0;
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].style.display !== "none") {
+            visibleCount++;
+            var chk = rows[i].querySelector(".mass-roll-chk");
+            if (chk && chk.checked) {
+              checkedVisibleCount++;
+            }
+          }
+        }
+        if (visibleCount === 0) {
+          master.checked = false;
+          master.indeterminate = false;
+        } else if (checkedVisibleCount === visibleCount) {
+          master.checked = true;
+          master.indeterminate = false;
+        } else if (checkedVisibleCount > 0) {
+          master.checked = false;
+          master.indeterminate = true;
+        } else {
+          master.checked = false;
+          master.indeterminate = false;
+        }
+      }
+
+      function updateMassSelectionSummary() {
+        var chks = document.querySelectorAll(".mass-roll-chk:checked");
+        var totalCount = chks.length;
+        var totalKg = 0;
+        for (var i = 0; i < chks.length; i++) {
+          totalKg += parseFloat(chks[i].getAttribute("data-kg") || "0");
+        }
+
+        var summaryLbl = document.getElementById("lbl_mass_selection_summary");
+        var subtextLbl = document.getElementById("lbl_mass_subtext");
+        var submitBtn = document.getElementById("btn_submit_mass_transfer");
+
+        if (summaryLbl) {
+          summaryLbl.textContent = totalCount + " bobina(s) seleccionada(s) (" + totalKg.toLocaleString("es-CL", {minimumFractionDigits: 2, maximumFractionDigits: 2}) + " kg)";
+        }
+        if (subtextLbl) {
+          subtextLbl.textContent = totalCount > 0
+            ? "Listo para traspasar. Seleccione la bodega destino y confirme."
+            : "Marque los checkboxes en la tabla para armar su lote de traspaso.";
+        }
+        if (submitBtn) {
+          submitBtn.innerHTML = totalCount > 0
+            ? "<span>🚀 Traspasar " + totalCount + " Bobinas (" + totalKg.toFixed(1) + " kg)</span>"
+            : "<span>🚀 Traspasar Bobinas Seleccionadas</span>";
+        }
+      }
+
+      function setQuickFilter(type, value) {
+        var searchInput = document.getElementById("mass_search_input");
+        var whSelect = document.getElementById("mass_filter_wh");
+        var stageSelect = document.getElementById("mass_filter_stage");
+
+        if (type === "all") {
+          if (searchInput) searchInput.value = "";
+          if (whSelect) whSelect.value = "";
+          if (stageSelect) stageSelect.value = "";
+        } else if (type === "child") {
+          if (stageSelect) stageSelect.value = "child";
+        } else if (type === "wh") {
+          if (whSelect) whSelect.value = value;
+        }
+        applyMassRollsFilter();
+      }
+
+      function resetMassFilters() {
+        var searchInput = document.getElementById("mass_search_input");
+        var whSelect = document.getElementById("mass_filter_wh");
+        var stageSelect = document.getElementById("mass_filter_stage");
+        if (searchInput) searchInput.value = "";
+        if (whSelect) whSelect.value = "";
+        if (stageSelect) stageSelect.value = "";
+        applyMassRollsFilter();
+      }
+
+      function validateMassTransferForm() {
+        var chks = document.querySelectorAll(".mass-roll-chk:checked");
+        if (chks.length === 0) {
+          alert("Debe seleccionar al menos una bobina para realizar el traspaso masivo.");
+          return false;
+        }
+
+        var selWh = document.getElementById("sel_mass_to_warehouse");
+        if (!selWh || !selWh.value) {
+          alert("Debe seleccionar la bodega destino para las bobinas seleccionadas.");
+          if (selWh) selWh.focus();
+          return false;
+        }
+
+        var whText = selWh.options[selWh.selectedIndex].text.trim();
+        var traceChk = document.getElementById("chk_mass_trace_only");
+        var traceOnly = traceChk ? traceChk.checked : false;
+        var totalKg = 0;
+        for (var i = 0; i < chks.length; i++) {
+          totalKg += parseFloat(chks[i].getAttribute("data-kg") || "0");
+        }
+
+        var modeMsg = traceOnly
+          ? "⚠️ MODO SOLO TRAZABILIDAD (sin mover inventario contable en el ERP)"
+          : "📦 TRASPASO COMPLETO (Trazabilidad TRZ + Inventario ERP)";
+
+        var confirmMsg = "¿Confirma el traspaso de " + chks.length + " bobina(s) (" + totalKg.toFixed(2) + " kg) hacia:\n\n"
+          + "📍 " + whText + "\n\n"
+          + modeMsg + "?";
+
+        if (!confirm(confirmMsg)) {
+          return false;
+        }
+
+        var submitBtn = document.getElementById("btn_submit_mass_transfer");
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.innerHTML = "<span>⏳ Procesando traspaso masivo...</span>";
+        }
+        return true;
       }
 
       function toggleOriginMode(mode) {
@@ -3643,6 +4218,8 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
       // Inicializar pestaña activa
       switchTransferTab("' . h($activeTab) . '");
       toggleDestinationMode("production");
+      applyMassRollsFilter();
+      updateMassSelectionSummary();
     </script>';
 
     $body .= '</div>'; // Fin transfers-shell
@@ -3675,6 +4252,72 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
             || !empty($_POST['machine_name'])
             || !empty($_POST['ot_number'])
             || !empty($_POST['ot_id']);
+
+        if ($actionMode === 'bulk_transfer') {
+            try {
+                $toWarehouseId = (int)($_POST['to_warehouse_id'] ?? 0);
+                $selectedRollIds = array_map('intval', (array)($_POST['selected_rolls'] ?? []));
+                $selectedRollIds = array_values(array_filter($selectedRollIds, static fn(int $id): bool => $id > 0));
+                $traceabilityOnly = !empty($_POST['traceability_only']);
+
+                if (empty($selectedRollIds)) {
+                    redirectResponse('/stock/transfers?tab=masivo&error=' . rawurlencode('No seleccionó ninguna bobina para el traspaso masivo.'));
+                    return true;
+                }
+                if ($toWarehouseId <= 0) {
+                    redirectResponse('/stock/transfers?tab=masivo&error=' . rawurlencode('Debe seleccionar la bodega destino para el traspaso masivo.'));
+                    return true;
+                }
+
+                $toWarehouseName = '';
+                foreach ($service->listWarehouses() as $warehouse) {
+                    if ((int)($warehouse['id'] ?? 0) === $toWarehouseId) {
+                        $toWarehouseName = trim((string)(($warehouse['code'] ?? '') . ' - ' . ($warehouse['name'] ?? '')));
+                        break;
+                    }
+                }
+
+                $successCount = 0;
+                $failCount = 0;
+                $totalWeight = 0.0;
+                $errors = [];
+
+                foreach ($selectedRollIds as $rollId) {
+                    $roll = $service->getRoll($rollId);
+                    $rollCode = (string)($roll['roll_code'] ?? "#{$rollId}");
+                    $result = $traceabilityOnly
+                        ? $service->transferRollTraceabilityOnly($rollId, $toWarehouseId, $effectiveTransferOperator)
+                        : $service->transferRoll($rollId, $toWarehouseId, $effectiveTransferOperator, null);
+
+                    if (($result['ok'] ?? false) === true) {
+                        $successCount++;
+                        $totalWeight += (float)($roll['weight_kg'] ?? 0);
+                    } else {
+                        $failCount++;
+                        $errStr = !empty($result['errors']) ? implode('; ', (array)$result['errors']) : 'Error desconocido';
+                        $errors[] = "{$rollCode}: {$errStr}";
+                    }
+                }
+
+                $params = [
+                    'tab' => 'masivo',
+                    'bulk_done' => 1,
+                    'success_count' => $successCount,
+                    'fail_count' => $failCount,
+                    'to_wh' => $toWarehouseName,
+                    'total_weight' => round($totalWeight, 2),
+                    'trace_only' => $traceabilityOnly ? 1 : 0,
+                ];
+                if (!empty($errors)) {
+                    $params['bulk_errors'] = implode(' | ', array_slice($errors, 0, 5));
+                }
+                redirectResponse('/stock/transfers?' . http_build_query($params));
+                return true;
+            } catch (Throwable $e) {
+                redirectResponse('/stock/transfers?tab=masivo&error=' . rawurlencode('Error interno en traspaso masivo: ' . $e->getMessage()));
+                return true;
+            }
+        }
 
         if ($actionMode === 'to_warehouse') {
             try {
