@@ -67,3 +67,10 @@ container_279_rolls.sql
 container_279_rolls_fixed.sql
 .env
 .env.example
+scratch/fix_test_records.php
+scratch/inspect_1014_full.php
+scratch/inspect_1014.php
+scratch/inspect_recent.php
+scratch/test_flow_complete.php
+scratch/test_res_1014.php
+scratch/verify_sc.php

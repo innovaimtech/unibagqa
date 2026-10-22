@@ -2842,12 +2842,27 @@ final class ProductionService
 
                     $stmtOut = $this->trzPdo->prepare("
                         SELECT type, payload, created_at FROM events
-                        WHERE type IN ('ROLL_OUTPUT_COMPLETED', 'ROLL_CONSUMED')
-                          AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
-                          AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                        WHERE (
+                            (type IN ('ROLL_OUTPUT_COMPLETED', 'ROLL_CONSUMED') AND (
+                                JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                                OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.remaining_mounted_roll_id')) = :rid2
+                            ))
+                            OR (type = 'ROLL_REMAINED_MOUNTED_AFTER_OUTPUT' AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.remaining_mounted_roll_id')) = :rid3)
+                        )
+                        AND (
+                            JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                            OR (:trz_ot_id > 0 AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :trz_otid)
+                        )
                         ORDER BY id DESC LIMIT 1
                     ");
-                    $stmtOut->execute([':rid' => (string)$arId, ':otid' => (string)$workerOtId]);
+                    $stmtOut->execute([
+                        ':rid' => (string)$arId,
+                        ':rid2' => (string)$arId,
+                        ':rid3' => (string)$arId,
+                        ':otid' => (string)$workerOtId,
+                        ':trz_ot_id' => $traceabilityWorkOrderId,
+                        ':trz_otid' => (string)$traceabilityWorkOrderId,
+                    ]);
                     $lastOut = $stmtOut->fetch(PDO::FETCH_ASSOC);
                     if ($lastOut && !empty($lastOut['payload'])) {
                         $outData = json_decode((string)$lastOut['payload'], true);
@@ -2863,7 +2878,10 @@ final class ProductionService
                         $ar['remaining_mounted_roll_id'] = (int)($outData['remaining_mounted_roll_id'] ?? 0);
                         $ar['remaining_mounted_roll_code'] = (string)($outData['remaining_mounted_roll_code'] ?? '');
                         $ar['remaining_mounted_kg'] = (float)($outData['remaining_mounted_kg'] ?? 0);
+                        $ar['remaining_mounted_units'] = (float)($outData['remaining_mounted_units'] ?? 0);
                         $ar['remaining_mounted_formula'] = (string)($outData['remaining_mounted_formula'] ?? '');
+                        $ar['total_consumed_units'] = (float)($outData['total_consumed_units'] ?? 0);
+                        $ar['total_net_consumed_kg'] = (float)($outData['total_net_consumed_kg'] ?? 0);
                         if ($ar['leftover_roll_id'] <= 0 && $ar['leftover_roll_code'] !== '') {
                             $stFindSob = $this->trzPdo->prepare("SELECT id FROM rolls WHERE roll_code = :c LIMIT 1");
                             $stFindSob->execute([':c' => $ar['leftover_roll_code']]);
@@ -2871,6 +2889,19 @@ final class ProductionService
                         }
                         $ar['mermas_detail'] = (array)($outData['mermas_detail'] ?? []);
                         $ar['output_at'] = $lastOut['created_at'];
+                    }
+
+                    if ((string)($ar['status'] ?? '') === 'CONSUMED') {
+                        $ar['is_mounted'] = false;
+                    }
+
+                    if ($ar['is_mounted'] && (string)($ar['status'] ?? '') === 'IN_PROCESS' && (float)($ar['remaining_mounted_kg'] ?? 0) > 0) {
+                        $ar['entry_weight_kg'] = (float)$ar['remaining_mounted_kg'];
+                        $ar['current_weight_kg'] = (float)$ar['remaining_mounted_kg'];
+                        if (!empty($ar['remaining_mounted_units']) && (float)$ar['remaining_mounted_units'] > 0) {
+                            $ar['received_qty'] = (float)$ar['remaining_mounted_units'];
+                            $ar['available_units'] = (float)$ar['remaining_mounted_units'];
+                        }
                     }
                 }
                 unset($ar);
@@ -3441,31 +3472,89 @@ final class ProductionService
             }
             $normalizedMergedSourceRollIds = array_values(array_unique($normalizedMergedSourceRollIds));
 
-            $resolveMountedEntryWeight = function (int $sourceRollId, float $fallbackWeight) use ($workerOtId): float {
+            $resolveMountedEntryWeightAndUnits = function (int $sourceRollId, float $fallbackWeight, float $fallbackUnits) use ($workerOtId, $traceabilityWorkOrderId): array {
                 $resolvedWeight = $fallbackWeight;
-                $stMount = $this->trzPdo->prepare("
-                    SELECT payload FROM events
-                    WHERE type = 'ROLL_MOUNTED_ON_MACHINE'
-                      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
-                      AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                $resolvedUnits = $fallbackUnits > 0 ? $fallbackUnits : 1.0;
+
+                $stEv = $this->trzPdo->prepare("
+                    SELECT type, payload FROM events
+                    WHERE (
+                        (type = 'ROLL_MOUNTED_ON_MACHINE' AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid)
+                        OR
+                        (type = 'ROLL_OUTPUT_COMPLETED' AND (
+                            JSON_UNQUOTE(JSON_EXTRACT(payload, '$.roll_id')) = :rid
+                            OR JSON_UNQUOTE(JSON_EXTRACT(payload, '$.remaining_mounted_roll_id')) = :rid
+                        ))
+                        OR
+                        (type = 'ROLL_REMAINED_MOUNTED_AFTER_OUTPUT' AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.remaining_mounted_roll_id')) = :rid)
+                    )
+                    AND (
+                        JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :otid
+                        OR (:trz_ot_id > 0 AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.worker_ot_id')) = :trz_otid)
+                    )
                     ORDER BY id DESC LIMIT 1
                 ");
-                $stMount->execute([
+                $stEv->execute([
                     ':rid' => (string)$sourceRollId,
                     ':otid' => (string)$workerOtId,
+                    ':trz_ot_id' => $traceabilityWorkOrderId,
+                    ':trz_otid' => (string)$traceabilityWorkOrderId,
                 ]);
-                $mountEvent = $stMount->fetch(PDO::FETCH_ASSOC);
-                if ($mountEvent && !empty($mountEvent['payload'])) {
-                    $mountPayload = json_decode((string)$mountEvent['payload'], true);
-                    if (!empty($mountPayload['entry_weight_kg'])) {
-                        $resolvedWeight = (float)$mountPayload['entry_weight_kg'];
+                $lastEv = $stEv->fetch(PDO::FETCH_ASSOC);
+                if ($lastEv && !empty($lastEv['payload'])) {
+                    $pData = json_decode((string)$lastEv['payload'], true);
+                    $evType = (string)$lastEv['type'];
+
+                    if ($evType === 'ROLL_REMAINED_MOUNTED_AFTER_OUTPUT'
+                        || ($evType === 'ROLL_OUTPUT_COMPLETED' && !empty($pData['keep_remaining_mounted']) && (int)($pData['remaining_mounted_roll_id'] ?? 0) === $sourceRollId)
+                    ) {
+                        if (isset($pData['remaining_mounted_kg']) && (float)$pData['remaining_mounted_kg'] > 0) {
+                            $resolvedWeight = (float)$pData['remaining_mounted_kg'];
+                        }
+                        if (!empty($pData['remaining_mounted_units']) && (float)$pData['remaining_mounted_units'] > 0) {
+                            $resolvedUnits = (float)$pData['remaining_mounted_units'];
+                        } else {
+                            $foundDetail = false;
+                            foreach ((array)($pData['source_rolls_detail'] ?? []) as $srd) {
+                                if ((int)($srd['id'] ?? 0) === $sourceRollId) {
+                                    if (isset($srd['remaining_units']) && (float)$srd['remaining_units'] > 0) {
+                                        $resolvedUnits = (float)$srd['remaining_units'];
+                                    } else {
+                                        $srdConsumed = (float)($srd['consumed_units'] ?? 0);
+                                        $srdAvail = (float)($srd['available_units'] ?? 1.0);
+                                        if ($srdAvail <= 0) $srdAvail = 1.0;
+                                        $resolvedUnits = max(0.0001, round($srdAvail - $srdConsumed, 4));
+                                    }
+                                    $foundDetail = true;
+                                    break;
+                                }
+                            }
+                            if (!$foundDetail) {
+                                $origEntry = (float)($pData['entry_weight_kg'] ?? $pData['total_source_weight_kg'] ?? 0);
+                                if ($origEntry > 0) {
+                                    $resolvedUnits = round($resolvedWeight / $origEntry, 4);
+                                }
+                            }
+                        }
+                    } elseif ($evType === 'ROLL_MOUNTED_ON_MACHINE' && !empty($pData['entry_weight_kg'])) {
+                        $resolvedWeight = (float)$pData['entry_weight_kg'];
+                        $resolvedUnits = $fallbackUnits > 0 ? $fallbackUnits : 1.0;
                     }
                 }
-                return $resolvedWeight;
+
+                if ($resolvedUnits <= 0) {
+                    $resolvedUnits = 1.0;
+                }
+
+                return [$resolvedWeight, $resolvedUnits];
             };
 
-            // Buscar peso de ingreso en el último evento de montaje si existe
-            $entryWeight = $resolveMountedEntryWeight($rollId, $entryWeight);
+            // Buscar peso de ingreso y unidades disponibles en el último evento de montaje o salida previa
+            [$entryWeight, $primaryRollUnits] = $resolveMountedEntryWeightAndUnits(
+                $rollId,
+                $entryWeight,
+                (float)($roll['received_qty'] ?? 1.0)
+            );
 
             $mergedSourceRolls = [];
             $mergedSourceCodes = [];
@@ -3517,9 +3606,10 @@ final class ProductionService
                     }
 
                     $mergeRollCode = trim((string)($mergeRoll['roll_code'] ?? ''));
-                    $mergeEntryWeight = $resolveMountedEntryWeight(
+                    [$mergeEntryWeight, $mergeRollUnits] = $resolveMountedEntryWeightAndUnits(
                         $mergedSourceRollId,
-                        (float)($mergeRoll['weight_kg'] ?? 0)
+                        (float)($mergeRoll['weight_kg'] ?? 0),
+                        (float)($mergeRoll['received_qty'] ?? 1.0)
                     );
 
                     $mergedSourceRolls[] = [
@@ -3527,6 +3617,7 @@ final class ProductionService
                         'roll_code' => $mergeRollCode,
                         'sku_code' => trim((string)($mergeRoll['sku_code'] ?? '')),
                         'entry_weight_kg' => $mergeEntryWeight,
+                        'available_units' => $mergeRollUnits,
                         'status' => $mergeStatus,
                     ];
                     $mergedSourceCodes[] = $mergeRollCode !== '' ? $mergeRollCode : ('#' . $mergedSourceRollId);
@@ -3599,6 +3690,105 @@ final class ProductionService
                 $leftoverKg = 0.0;
             }
 
+            // Consolidar todas las bobinas de entrada (principal + adicionales unidas)
+            $sourceRollsList = [];
+            $sourceRollsList[] = [
+                'id' => $rollId,
+                'roll_code' => $rollCode,
+                'sku_code' => $skuCode,
+                'sku_id' => $skuId,
+                'entry_weight_kg' => $entryWeight,
+                'available_units' => $primaryRollUnits,
+                'is_primary' => true,
+            ];
+            foreach ($mergedSourceRolls as $mRoll) {
+                $mId = (int)$mRoll['id'];
+                $sourceRollsList[] = [
+                    'id' => $mId,
+                    'roll_code' => (string)$mRoll['roll_code'],
+                    'sku_code' => (string)$mRoll['sku_code'],
+                    'sku_id' => (int)($mergeRowsById[$mId]['sku_id'] ?? $skuId),
+                    'entry_weight_kg' => (float)$mRoll['entry_weight_kg'],
+                    'available_units' => (float)($mRoll['available_units'] ?? 1.0),
+                    'is_primary' => false,
+                ];
+            }
+
+            // Cálculo proporcional exacto de consumo y remanente por bobina
+            $totalConsumedUnits = 0.0;
+            $leftoverUnits = 0.0;
+            $leftoverSourceSku = $skuCode;
+            $leftoverSkuId = $skuId;
+
+            if ($keepRemainingMounted) {
+                if ($remainingMountedRollId === $rollId) {
+                    $netConsumedKg = max(0.0, round($entryWeight - $remainingMountedKg, 2));
+                } else {
+                    $netConsumedKg = round($entryWeight, 2);
+                }
+                $totalNetConsumedKg = max(0.0, round($totalSourceWeightKg - $remainingMountedKg, 2));
+
+                foreach ($sourceRollsList as &$sRoll) {
+                    $sWeight = (float)$sRoll['entry_weight_kg'];
+                    $sAvailUnits = (float)($sRoll['available_units'] ?? 1.0);
+                    if ($sAvailUnits <= 0) $sAvailUnits = 1.0;
+
+                    if ((int)$sRoll['id'] === $remainingMountedRollId) {
+                        $sRem = min($sWeight, max(0.0, $remainingMountedKg));
+                        $sConsumed = max(0.0, round($sWeight - $sRem, 2));
+                    } else {
+                        $sRem = 0.0;
+                        $sConsumed = $sWeight;
+                    }
+                    $sFrac = $sWeight > 0.0 ? round(($sConsumed / $sWeight) * $sAvailUnits, 4) : $sAvailUnits;
+                    $sRemUnits = $sWeight > 0.0 ? round(($sRem / $sWeight) * $sAvailUnits, 4) : 0.0;
+
+                    $sRoll['consumed_kg'] = $sConsumed;
+                    $sRoll['consumed_units'] = $sFrac;
+                    $sRoll['remaining_kg'] = $sRem;
+                    $sRoll['remaining_units'] = $sRemUnits;
+                    $totalConsumedUnits += $sFrac;
+                }
+                unset($sRoll);
+            } else {
+                $totalNetConsumedKg = max(0.0, round($totalSourceWeightKg - $leftoverKg, 2));
+                $remToConsume = $totalNetConsumedKg;
+                foreach ($sourceRollsList as &$sRoll) {
+                    $sWeight = (float)$sRoll['entry_weight_kg'];
+                    $sAvailUnits = (float)($sRoll['available_units'] ?? 1.0);
+                    if ($sAvailUnits <= 0) $sAvailUnits = 1.0;
+
+                    $sConsumed = min($sWeight, $remToConsume);
+                    $sConsumed = max(0.0, round($sConsumed, 2));
+                    $remToConsume = max(0.0, round($remToConsume - $sConsumed, 2));
+                    $sRem = max(0.0, round($sWeight - $sConsumed, 2));
+                    $sFrac = $sWeight > 0.0 ? round(($sConsumed / $sWeight) * $sAvailUnits, 4) : $sAvailUnits;
+                    $sRemUnits = $sWeight > 0.0 ? round(($sRem / $sWeight) * $sAvailUnits, 4) : 0.0;
+
+                    $sRoll['consumed_kg'] = $sConsumed;
+                    $sRoll['consumed_units'] = $sFrac;
+                    $sRoll['remaining_kg'] = $sRem;
+                    $sRoll['remaining_units'] = $sRemUnits;
+                    $totalConsumedUnits += $sFrac;
+                    if ($sRem > 0.0) {
+                        $leftoverUnits += round(($sRem / max(0.01, $sWeight)) * $sAvailUnits, 4);
+                        $leftoverSourceSku = (string)$sRoll['sku_code'];
+                        $leftoverSkuId = (int)$sRoll['sku_id'];
+                    }
+                }
+                unset($sRoll);
+                $netConsumedKg = (float)($sourceRollsList[0]['consumed_kg'] ?? 0);
+            }
+
+            $totalConsumedUnits = max(0.0, round($totalConsumedUnits, 4));
+            if ($totalConsumedUnits <= 0.0 && $totalNetConsumedKg > 0.0) {
+                $totalConsumedUnits = (float)($sourceRollsList[0]['available_units'] ?? 1.0);
+            }
+            $leftoverUnits = max(0.0, round($leftoverUnits, 4));
+            if ($leftoverKg > 0.0 && $leftoverUnits <= 0.0) {
+                $leftoverUnits = round(($leftoverKg / max(0.01, $entryWeight)) * (float)($sourceRollsList[0]['available_units'] ?? 1.0), 4);
+            }
+
             if ($createOutputRoll && $outputBobinaKg > 0) {
                 $resolvedOutputSku = trim($outputSkuCode) !== '' ? trim($outputSkuCode) : $skuCode;
                 $outputRes = $this->createOutputRollFromWorkOrder(
@@ -3618,16 +3808,17 @@ final class ProductionService
                 $outputRollCode = (string)($outputRes['child_roll_code'] ?? '');
             }
 
-            // 1. SI HAY SOBRANTE EN LA BOBINA -> GENERAR NUEVO CÓDIGO CON TRAZABILIDAD
+            // 1. SI HAY SOBRANTE EN LA BOBINA -> GENERAR NUEVO CÓDIGO CON TRAZABILIDAD Y REINTEGRAR PROPORCIÓN A BODEGA 3000
             if (!$keepRemainingMounted && $leftoverKg > 0) {
                 $dateSuffix = date('ymd');
                 $randSuffix = strtoupper(substr(bin2hex(random_bytes(2)), 0, 4));
-                if (str_starts_with(strtoupper($skuCode), 'TEL')) {
-                    $leftoverRollCode = "{$skuCode}-SOB-{$dateSuffix}-{$randSuffix}";
+                $targetLeftoverSku = $leftoverSourceSku !== '' ? $leftoverSourceSku : $skuCode;
+                if (str_starts_with(strtoupper($targetLeftoverSku), 'TEL')) {
+                    $leftoverRollCode = "{$targetLeftoverSku}-SOB-{$dateSuffix}-{$randSuffix}";
                 } elseif (str_starts_with(strtoupper($rollCode), 'BOB-')) {
                     $leftoverRollCode = "{$rollCode}-SOB-{$randSuffix}";
                 } else {
-                    $leftoverRollCode = "BOB-{$skuCode}-SOB-{$dateSuffix}-{$randSuffix}";
+                    $leftoverRollCode = "BOB-{$targetLeftoverSku}-SOB-{$dateSuffix}-{$randSuffix}";
                 }
 
                 // Resolver Bodega 3000
@@ -3636,22 +3827,23 @@ final class ProductionService
                     $whId = (int)($roll['warehouse_id'] ?? 1);
                 }
 
-                // Insertar nueva bobina sobrante en TRZ disponible en Bodega 3000
+                // Insertar nueva bobina sobrante en TRZ disponible en Bodega 3000 con la cantidad proporcional
                 $insSob = $this->trzPdo->prepare("
                     INSERT INTO rolls
                         (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode,
                          status, current_work_order_id, parent_roll_id, source_work_order_id,
                          process_stage, width_mm, microns, color, meters, created_at)
                     VALUES
-                        (:code, :sku_id, :wh_id, :weight_kg, 1, 'SOBRANTE',
+                        (:code, :sku_id, :wh_id, :weight_kg, :qty, 'SOBRANTE',
                          'RECEIVED', NULL, :parent_id, :src_ot,
                          'PRODUCTION', :width, :microns, :color, :meters, NOW())
                 ");
                 $insSob->execute([
                     ':code' => $leftoverRollCode,
-                    ':sku_id' => $skuId,
+                    ':sku_id' => $leftoverSkuId > 0 ? $leftoverSkuId : $skuId,
                     ':wh_id' => $whId,
                     ':weight_kg' => $leftoverKg,
+                    ':qty' => $leftoverUnits > 0 ? $leftoverUnits : 1.0,
                     ':parent_id' => $rollId,
                     ':src_ot' => $workerOtId,
                     ':width' => (int)($roll['width_mm'] ?? 0),
@@ -3660,6 +3852,14 @@ final class ProductionService
                     ':meters' => round($leftoverKg / max(0.01, ($entryWeight > 0 ? ($entryWeight / max(1, (float)$roll['meters'])) : 0.08)), 1),
                 ]);
                 $newRollId = (int)$this->trzPdo->lastInsertId();
+
+                // Reintegrar la fracción sobrante al inventario de Bodega 3000 en ERP
+                // ya que cuando la bobina fue tomada para la OT se descontó 1 bobina completa de Bodega 3000
+                if ($leftoverUnits > 0.0) {
+                    try {
+                        $this->adjustBodega3000InventoryBySku($targetLeftoverSku, $leftoverUnits);
+                    } catch (Throwable) {}
+                }
 
                 // Registrar evento de sobrante en TRZ
                 $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
@@ -3670,6 +3870,7 @@ final class ProductionService
                         'new_roll_id' => $newRollId,
                         'new_roll_code' => $leftoverRollCode,
                         'leftover_kg' => $leftoverKg,
+                        'leftover_units' => $leftoverUnits,
                         'warehouse' => '3000 Insumos de Produccion',
                         'warehouse_id' => $whId,
                         'worker_ot_id' => $workerOtId,
@@ -3680,6 +3881,19 @@ final class ProductionService
             }
 
             // 2. CERRAR / ACTUALIZAR BOBINAS SEGÚN EL RESULTADO DEL DESMONTAJE
+            $remainingMountedUnits = 0.0;
+            if ($keepRemainingMounted) {
+                foreach ($sourceRollsList as $srItem) {
+                    if ((int)$srItem['id'] === $remainingMountedRollId) {
+                        $remainingMountedUnits = (float)($srItem['remaining_units'] ?? 0.0);
+                        break;
+                    }
+                }
+                if ($remainingMountedUnits <= 0.0 && $totalSourceWeightKg > 0.0) {
+                    $remainingMountedUnits = round($remainingMountedKg / $totalSourceWeightKg, 4);
+                }
+            }
+
             if ($keepRemainingMounted && $remainingMountedRollId === $rollId) {
                 $remainingMeters = null;
                 $rollMeters = (float)($roll['meters'] ?? 0);
@@ -3689,6 +3903,7 @@ final class ProductionService
                 $this->trzPdo->prepare("
                     UPDATE rolls
                     SET weight_kg = :weight_kg,
+                        received_qty = :received_qty,
                         meters = :meters,
                         status = 'IN_PROCESS',
                         source_work_order_id = :src_ot,
@@ -3697,6 +3912,7 @@ final class ProductionService
                 ")->execute([
                     ':id' => $rollId,
                     ':weight_kg' => $remainingMountedKg,
+                    ':received_qty' => $remainingMountedUnits,
                     ':meters' => $remainingMeters,
                     ':src_ot' => $workerOtId,
                     ':curr_ot' => $traceabilityWorkOrderId > 0 ? $traceabilityWorkOrderId : $currentWorkOrderId,
@@ -3722,6 +3938,7 @@ final class ProductionService
                     $this->trzPdo->prepare("
                         UPDATE rolls
                         SET weight_kg = :weight_kg,
+                            received_qty = :received_qty,
                             meters = :meters,
                             status = 'IN_PROCESS',
                             source_work_order_id = :src_ot,
@@ -3730,6 +3947,7 @@ final class ProductionService
                     ")->execute([
                         ':id' => (int)$mergedSourceRoll['id'],
                         ':weight_kg' => $remainingMountedKg,
+                        ':received_qty' => $remainingMountedUnits,
                         ':meters' => $remainingMeters,
                         ':src_ot' => $workerOtId,
                         ':curr_ot' => $traceabilityWorkOrderId > 0 ? $traceabilityWorkOrderId : $workerOtId,
@@ -3766,19 +3984,13 @@ final class ProductionService
             }
 
             if ($keepRemainingMounted) {
-                if ($remainingMountedRollId === $rollId) {
-                    $netConsumedKg = max(0.0, round($entryWeight - $remainingMountedKg, 2));
-                } else {
-                    $netConsumedKg = round($entryWeight, 2);
-                }
-                $totalNetConsumedKg = max(0.0, round($totalSourceWeightKg - $remainingMountedKg, 2));
-
                 $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)")->execute([
                     ':type' => 'ROLL_REMAINED_MOUNTED_AFTER_OUTPUT',
                     ':payload' => json_encode([
                         'remaining_mounted_roll_id' => $remainingMountedRollId,
                         'remaining_mounted_roll_code' => $remainingMountedRollCode,
                         'remaining_mounted_kg' => $remainingMountedKg,
+                        'remaining_mounted_units' => $remainingMountedUnits,
                         'remaining_mounted_formula' => $remainingMountedFormula,
                         'total_source_weight_kg' => $totalSourceWeightKg,
                         'output_bobina_kg' => $outputBobinaKg,
@@ -3789,10 +4001,6 @@ final class ProductionService
                         'timestamp' => $now,
                     ], JSON_UNESCAPED_UNICODE),
                 ]);
-            } else {
-                // Kilos consumidos reales de tela = ingreso - sobrante
-                $netConsumedKg = max(0.0, round($entryWeight - $leftoverKg, 2));
-                $totalNetConsumedKg = round($netConsumedKg + $mergedSourceWeightKg, 2);
             }
 
             // Registrar evento de salida de bobina en TRZ
@@ -3811,10 +4019,12 @@ final class ProductionService
                     'leftover_kg' => $leftoverKg,
                     'leftover_roll_id' => $newRollId,
                     'leftover_roll_code' => $leftoverRollCode,
+                    'leftover_units' => $leftoverUnits,
                     'keep_remaining_mounted' => $keepRemainingMounted,
                     'remaining_mounted_roll_id' => $remainingMountedRollId,
                     'remaining_mounted_roll_code' => $remainingMountedRollCode,
                     'remaining_mounted_kg' => $remainingMountedKg,
+                    'remaining_mounted_units' => $remainingMountedUnits,
                     'remaining_mounted_formula' => $remainingMountedFormula,
                     'merged_source_roll_ids' => array_column($mergedSourceRolls, 'id'),
                     'merged_source_roll_codes' => $mergedSourceCodes,
@@ -3824,6 +4034,8 @@ final class ProductionService
                     'mermas_detail' => $mermasDetail,
                     'net_consumed_kg' => $netConsumedKg,
                     'total_net_consumed_kg' => $totalNetConsumedKg,
+                    'total_consumed_units' => $totalConsumedUnits,
+                    'source_rolls_detail' => $sourceRollsList,
                     'worker_ot_id' => $workerOtId,
                     'operator' => $operatorName,
                     'comments' => $comments,
@@ -3832,14 +4044,15 @@ final class ProductionService
             ]);
 
             // 3. REGISTRAR EVENTOS EN ERP (prod_worker_ot_events)
-            $descMat = "Salida Bobina {$rollCode}: Ingreso {$entryWeight} kg -> Bobina: {$outputBobinaKg} kg, Mermas: {$scrapKg} kg";
+            $unitText = number_format($totalConsumedUnits, 2, ',', '.') . ' ' . (abs($totalConsumedUnits - 1.0) < 0.0001 ? 'bobina' : 'bobinas');
+            $descMat = "Salida Bobina {$rollCode}: Ingreso {$totalSourceWeightKg} kg -> Consumo: {$unitText} (" . number_format($totalNetConsumedKg, 2, ',', '.') . " kg), Salida: {$outputBobinaKg} kg, Mermas: {$scrapKg} kg";
             if (!empty($mergedSourceCodes)) {
                 $descMat .= ', Unida con: ' . implode(', ', $mergedSourceCodes);
             }
             if ($keepRemainingMounted && $remainingMountedKg > 0) {
                 $descMat .= ", Queda montada: {$remainingMountedRollCode} ({$remainingMountedKg} kg). Cálculo: {$remainingMountedFormula}";
             } elseif ($leftoverKg > 0) {
-                $descMat .= ", Sobrante: {$leftoverKg} kg (Código: {$leftoverRollCode})";
+                $descMat .= ", Sobrante: {$leftoverKg} kg (" . number_format($leftoverUnits, 2, ',', '.') . " bobinas, Código: {$leftoverRollCode})";
             } else {
                 $descMat .= " (Consumida completa)";
             }
@@ -3861,17 +4074,62 @@ final class ProductionService
                 ':comments' => $descMat,
             ]);
 
-            // 3b. Registrar consumo en ERP oficial (stockchanges / stockchanges_items) para el informe oficial de consumo
+            // 3b. Registrar consumo en ERP oficial (stockchanges / stockchanges_items) para el informe oficial de consumo por máquina
+            // NOTA: Se pasa deductInventory = false porque el stock en Bodega 3000 (item_shops_storehouses)
+            // fue descontado previamente al momento de tomar y montar cada bobina en la máquina.
             if ($totalNetConsumedKg > 0) {
                 try {
-                    $this->recordStockChangeForRollConsumption(
-                        $workerOtId,
-                        $rollCode,
-                        $skuCode,
-                        $totalNetConsumedKg,
-                        0,
-                        !empty($mergedSourceCodes) ? ('Unida con: ' . implode(', ', $mergedSourceCodes)) : ''
-                    );
+                    $consumptionsBySku = [];
+                    foreach ($sourceRollsList as $sr) {
+                        $sSku = trim((string)$sr['sku_code']);
+                        if ($sSku === '') $sSku = $skuCode;
+                        if (!isset($consumptionsBySku[$sSku])) {
+                            $consumptionsBySku[$sSku] = [
+                                'sku_code' => $sSku,
+                                'consumed_kg' => 0.0,
+                                'consumed_units' => 0.0,
+                                'roll_codes' => [],
+                            ];
+                        }
+                        $consumptionsBySku[$sSku]['consumed_kg'] += (float)($sr['consumed_kg'] ?? 0);
+                        $consumptionsBySku[$sSku]['consumed_units'] += (float)($sr['consumed_units'] ?? 0);
+                        $consumptionsBySku[$sSku]['roll_codes'][] = (string)$sr['roll_code'];
+                    }
+
+                    if (count($consumptionsBySku) <= 1) {
+                        $this->recordStockChangeForRollConsumption(
+                            $workerOtId,
+                            $rollCode,
+                            $skuCode,
+                            $totalNetConsumedKg,
+                            0,
+                            !empty($mergedSourceCodes) ? ('Unida con: ' . implode(', ', $mergedSourceCodes)) : '',
+                            0,
+                            $totalConsumedUnits,
+                            false
+                        );
+                    } else {
+                        foreach ($consumptionsBySku as $cSku => $cData) {
+                            $cKg = round($cData['consumed_kg'], 2);
+                            $cUnits = round($cData['consumed_units'], 4);
+                            if ($cKg > 0 || $cUnits > 0) {
+                                $cRollCode = $cData['roll_codes'][0] ?? $rollCode;
+                                $cOtherCodes = array_slice($cData['roll_codes'], 1);
+                                $cAnnot = !empty($cOtherCodes) ? ('Unida con: ' . implode(', ', $cOtherCodes)) : '';
+                                $this->recordStockChangeForRollConsumption(
+                                    $workerOtId,
+                                    $cRollCode,
+                                    $cSku,
+                                    $cKg,
+                                    0,
+                                    $cAnnot,
+                                    0,
+                                    $cUnits,
+                                    false
+                                );
+                            }
+                        }
+                    }
                 } catch (Throwable) {}
             }
 
@@ -4153,7 +4411,11 @@ final class ProductionService
                 && !empty($roll['sku_code'])
                 && strtoupper((string)($roll['reception_mode'] ?? '')) !== 'MANUAL_NO_TRACEABILITY'
             ) {
-                $this->adjustBodega3000InventoryBySku((string)$roll['sku_code'], 1);
+                $restoreQty = (float)($roll['received_qty'] ?? 1);
+                if ($restoreQty <= 0) {
+                    $restoreQty = 1.0;
+                }
+                $this->adjustBodega3000InventoryBySku((string)$roll['sku_code'], $restoreQty);
             }
 
             $stmtEvent->execute([
@@ -4565,7 +4827,11 @@ final class ProductionService
                 $skuCode !== ''
                 && strtoupper((string)($roll['reception_mode'] ?? '')) !== 'MANUAL_NO_TRACEABILITY'
             ) {
-                $this->adjustBodega3000InventoryBySku($skuCode, 1);
+                $restoreQty = (float)($roll['received_qty'] ?? 1);
+                if ($restoreQty <= 0) {
+                    $restoreQty = 1.0;
+                }
+                $this->adjustBodega3000InventoryBySku($skuCode, $restoreQty);
             }
 
             // 6. Registrar evento ROLL_RETURNED_TO_WAREHOUSE en TRZ
@@ -4742,13 +5008,17 @@ final class ProductionService
             // Consumo en ERP oficial (stockchanges / stockchanges_items) para el informe oficial de consumo
             if ($consumedKg > 0) {
                 try {
+                    $cUnits = ($originalWeight > 0.0) ? round($consumedKg / $originalWeight, 4) : 1.0;
                     $this->recordStockChangeForRollConsumption(
                         $workerOtId,
                         $rollCode,
                         $skuCode,
                         $consumedKg,
                         0,
-                        $comments
+                        $comments,
+                        0,
+                        $cUnits,
+                        false
                     );
                 } catch (Throwable) {}
             }
@@ -7730,18 +8000,18 @@ final class ProductionService
         $leftoverKg = max(0.0, round($leftoverKg, 3));
         $consumedKg = round($consumedKg, 3);
 
-        if ($consumedKg <= 0.0) {
-            if ($loadedKg > 0.0) {
-                $consumedKg = max(0.0, round($loadedKg - $leftoverKg, 3));
-            } elseif ($initialWeightKg > 0.0 && $leftoverKg > 0.0 && $initialWeightKg >= $leftoverKg) {
-                $consumedKg = max(0.0, round($initialWeightKg - $leftoverKg, 3));
-            } elseif ($loadedKg > 0.0) {
-                $consumedKg = $loadedKg;
-            }
+        if ($initialWeightKg > 0.0) {
+            $consumedKg = max(0.0, round($initialWeightKg - $leftoverKg, 3));
+        } elseif ($loadedKg > 0.0) {
+            $consumedKg = max(0.0, round($loadedKg - $leftoverKg, 3));
         }
 
-        if ($consumedKg <= 0.0 && $loadedKg <= 0.0 && $initialWeightKg <= 0.0) {
-            return ['ok' => false, 'error' => 'Debe ingresar al menos el peso cargado, el peso inicial o el consumo de tinta.'];
+        if ($loadedKg <= 0.0) {
+            $loadedKg = $consumedKg;
+        }
+
+        if ($consumedKg <= 0.0 && $initialWeightKg <= 0.0 && $loadedKg <= 0.0) {
+            return ['ok' => false, 'error' => 'Debe ingresar el peso al inicio del tarro de tinta.'];
         }
 
         try {
@@ -7818,13 +8088,13 @@ final class ProductionService
                 }
 
                 $detailParts = [];
-                $detailParts[] = "Neto: " . number_format($consumedKg, 2, ',', '.') . " kg";
-                if ($loadedKg > 0 && $leftoverKg > 0) {
+                $detailParts[] = "Consumo: " . number_format($consumedKg, 2, ',', '.') . " kg";
+                if ($initialWeightKg > 0) {
+                    $detailParts[] = "Tarro inicio " . number_format($initialWeightKg, 2, ',', '.') . " kg, Sobró " . number_format($leftoverKg, 2, ',', '.') . " kg";
+                } elseif ($loadedKg > 0 && $leftoverKg > 0) {
                     $detailParts[] = "Cargó " . number_format($loadedKg, 2, ',', '.') . " kg, Sobró " . number_format($leftoverKg, 2, ',', '.') . " kg";
                 } elseif ($loadedKg > 0) {
                     $detailParts[] = "Cargó " . number_format($loadedKg, 2, ',', '.') . " kg";
-                } elseif ($initialWeightKg > 0 && $leftoverKg > 0) {
-                    $detailParts[] = "Tarro inicio " . number_format($initialWeightKg, 2, ',', '.') . " kg, Sobró " . number_format($leftoverKg, 2, ',', '.') . " kg";
                 }
                 if ($comments !== '') {
                     $detailParts[] = "Obs: {$comments}";
@@ -9333,7 +9603,7 @@ final class ProductionService
         if ($primaryBaseKg <= 0) $primaryBaseKg = 1.0;
         $destUnits = round($destNetKg / $primaryBaseKg, 10);
         if ($destUnits <= 0) $destUnits = 1.0;
-        $stkFixedSthId = (int)($primaryItem['st_id'] ?? 16);
+        $stkFixedSthId = 16; // Siempre a Bodega 3000 Insumos en Produccion
 
         $stkNumIn = $this->generateNextStockChangeNumber($companyId);
         $stmtSCIn = $this->erpPdo->prepare("
@@ -9342,7 +9612,7 @@ final class ProductionService
              stk_status, stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash,
              sth_fromprodotid, sth_order_id, sth_order_num, sth_planta_id, sth_assign_wrkid, sth_assign_equipoid)
             VALUES
-            (:num, 'Generado por producción - Bobina Empalmada', 20, :compid, :shopid, :bdate, 0, 2, :crtdat, :crtusr, :sthid, :agid, :grphash,
+            (:num, 'Generado por producción - Bobina Empalmada', 20, :compid, :shopid, :bdate, 0, 2, :crtdat, :crtusr, 16, :agid, :grphash,
              :ot_id, :order_id, :order_num, :planta_id, :worker_id, :equipo_id)
         ");
         $stmtSCIn->execute([
@@ -9352,7 +9622,6 @@ final class ProductionService
             ':bdate' => $now,
             ':crtdat' => $now,
             ':crtusr' => $userId,
-            ':sthid' => $stkFixedSthId,
             ':agid' => $agId,
             ':grphash' => $grpHash,
             ':ot_id' => $workerOtId,
@@ -9370,12 +9639,11 @@ final class ProductionService
              item_costprice_brutto, item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes,
              item_charges_act, item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
             VALUES
-            (:stk_id, :itid, 0, :amt, 'item', :sthid, 0, 0, 0, 0, 0, 0, 1, :unitkg)
+            (:stk_id, :itid, 0, :amt, 'item', 16, 0, 0, 0, 0, 0, 0, 1, :unitkg)
         ")->execute([
             ':stk_id' => $stkIdIn,
             ':itid' => $primaryItem['id'],
             ':amt' => $destUnits,
-            ':sthid' => $stkFixedSthId,
             ':unitkg' => round($destNetKg, 2),
         ]);
 
@@ -9383,14 +9651,14 @@ final class ProductionService
             $upd = $this->erpPdo->prepare("
                 UPDATE item_shops_storehouses
                 SET iss_inventory = iss_inventory + :amt
-                WHERE item_id = :itid AND st_id = :stid
+                WHERE item_id = :itid AND st_id = 16
             ");
-            $upd->execute([':amt' => $destUnits, ':itid' => $primaryItem['id'], ':stid' => $stkFixedSthId]);
+            $upd->execute([':amt' => $destUnits, ':itid' => $primaryItem['id']]);
             if ($upd->rowCount() === 0) {
                 $this->erpPdo->prepare("
                     INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_inventory)
-                    VALUES (:itid, :shopid, :stid, :amt)
-                ")->execute([':itid' => $primaryItem['id'], ':shopid' => $reqShopId, ':stid' => $stkFixedSthId, ':amt' => $destUnits]);
+                    VALUES (:itid, :shopid, 16, :amt)
+                ")->execute([':itid' => $primaryItem['id'], ':shopid' => $reqShopId, ':amt' => $destUnits]);
             }
         } catch (Throwable) {}
 
@@ -9411,7 +9679,7 @@ final class ProductionService
             } catch (Throwable) {}
         }
 
-        // 5. Alta en TRZ rolls
+        // 5. Alta en TRZ rolls en Bodega 3000
         $childRollId = 0;
         $childRollCode = '';
         if ($this->trzPdo !== null) {
@@ -9433,16 +9701,18 @@ final class ProductionService
                 $nextNum = ((int)$stmtMax->fetchColumn()) + 1;
                 $childRollCode = sprintf('ROLL-EMP-%05d', $nextNum);
                 $widthMm = (int)round(((float)($primaryItem['item_reg_width'] ?? 0)) * 10);
+                $wh3000Trz = $this->findWarehouseIdByCode(3000) ?: 18;
 
                 $insRoll = $this->trzPdo->prepare("
                     INSERT INTO rolls
                     (roll_code, sku_id, warehouse_id, weight_kg, received_qty, width_mm, meters, status, parent_roll_id, source_work_order_id, process_stage)
                     VALUES
-                    (:code, :sku, 1, :weight, 1.000, :width, :meters, 'RECEIVED', :parent, :wo_id, 'EMPALME')
+                    (:code, :sku, :wh_id, :weight, 1.000, :width, :meters, 'RECEIVED', :parent, :wo_id, 'EMPALME')
                 ");
                 $insRoll->execute([
                     ':code' => $childRollCode,
                     ':sku' => $skuId,
+                    ':wh_id' => $wh3000Trz,
                     ':weight' => number_format($destNetKg, 3, '.', ''),
                     ':width' => $widthMm > 0 ? $widthMm : null,
                     ':meters' => $totalMeters > 0 ? $totalMeters : null,
@@ -9632,7 +9902,7 @@ final class ProductionService
                 ':bdate' => $now,
                 ':crtdat' => $now,
                 ':crtusr' => $userId,
-                ':sthid' => $stkFixedSthId,
+                ':sthid' => 16, // Siempre a Bodega 3000
                 ':grphash' => $grpHash,
                 ':order_id' => $orderId,
                 ':order_num' => $orderNum,
@@ -9648,11 +9918,10 @@ final class ProductionService
                      item_costprice_brutto, item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes,
                      item_charges_act, item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
                     VALUES
-                    (:stk_id, :itid, 0, 1, 'item', :sthid, 0, 0, 0, 0, 0, 0, 1, :unitkg)
+                    (:stk_id, :itid, 0, 1, 'item', 16, 0, 0, 0, 0, 0, 0, 1, :unitkg)
                 ")->execute([
                     ':stk_id' => $stkIdIn,
                     ':itid' => $selItemId,
-                    ':sthid' => $stkFixedSthId,
                     ':unitkg' => round($destUseKg, 2),
                 ]);
             }
@@ -9759,78 +10028,109 @@ final class ProductionService
             $totalScrappedManillasKg = 0.0;
             $scrappedManillasDetails = [];
             $generalMermaKg = (float)str_replace(',', '.', (string)($postData['itemmermakg'] ?? 0));
+            $netProductsKg = max(0.0, $useKgAmt - $generalMermaKg);
+            $rollWidth = (float)($itemSel['item_reg_width'] ?? 100);
+            if ($rollWidth <= 0) $rollWidth = 100.0;
+            $baseRegKg = (float)($itemSel['item_reg_kg'] ?? 1);
+            if ($baseRegKg <= 0) $baseRegKg = 1.0;
+            $sobranteKg = (float)str_replace(',', '.', (string)($postData['sobranteamt_1'] ?? 0));
+            $calcLargo = (float)($itemSel['item_reg_length'] ?? 0)
+                - (($generalMermaKg * (float)($itemSel['item_reg_length'] ?? 0)) / $baseRegKg)
+                - (($sobranteKg * (float)($itemSel['item_reg_length'] ?? 0)) / $baseRegKg);
 
+            // Recolectar todos los cortes definidos en el formulario
+            $cutIndices = [];
             foreach ($postData as $reqKey => $val) {
-                if (str_starts_with($reqKey, 'stockplustotalkg_')) {
-                    $idx = (int)substr($reqKey, strlen('stockplustotalkg_'));
-                    $destItemId = (int)($postData["stockplusitemid_{$idx}"] ?? 0);
-                    $destDims = round((float)str_replace(',', '.', (string)($postData["rollo_dims_{$idx}"] ?? 0)), 2);
-                    $destUseKg = (float)str_replace(',', '.', (string)($postData["stockplustotalkg_{$idx}"] ?? 0));
-                    $reboAmt = max(1, (int)($postData["reboamt_{$idx}"] ?? 1));
-                    $destLargo = (float)($postData["stockpluslargo_{$idx}"] ?? 0);
-                    $destinoLabel = trim((string)($postData["rebo_destino_{$idx}"] ?? ''));
-                    $destType = $this->isReboHandleDestination($destinoLabel, $destDims, $agenda) ? 'handle' : 'bag';
-
-                    if ($destDims <= 0 || $destUseKg <= 0) {
-                        continue;
-                    }
-
-                    // Manillas a merma seleccionadas por el operador (por bobina sucia o defecto)
-                    $manillasMermaAmt = 0;
-                    if ($destType === 'handle') {
-                        $manillasMermaAmt = max(0, min($reboAmt, (int)($postData["manillas_merma_amt_{$idx}"] ?? 0)));
-                        if ($manillasMermaAmt === 0 && !empty($postData['total_manillas_merma_amt'])) {
-                            $manillasMermaAmt = max(0, min($reboAmt, (int)$postData['total_manillas_merma_amt']));
-                        }
-                    }
-
-                    $unitKg = $reboAmt > 0 ? round($destUseKg / $reboAmt, 2) : 0.0;
-                    $usableAmt = max(0, $reboAmt - $manillasMermaAmt);
-                    $scrappedKg = round($manillasMermaAmt * $unitKg, 2);
-                    $usableKg = round($usableAmt * $unitKg, 2);
-
-                    if ($manillasMermaAmt > 0) {
-                        $totalScrappedManillasAmt += $manillasMermaAmt;
-                        $totalScrappedManillasKg += $scrappedKg;
-                        $scrappedManillasDetails[] = "{$manillasMermaAmt}x Manillas {$destDims}cm ({$scrappedKg} Kg)";
-                    }
-
-                    // Si no tiene destItemId, buscar si existe un ítem con ese ancho y color, o crearlo
-                    if ($destItemId <= 0) {
-                        $destItemId = $this->findOrCreateCutItem($itemSel, $destDims, $destLargo, $userId);
-                    }
-
-                    // Determinar peso base para cálculo de unidades
-                    $destBaseKg = 0.0;
-                    if ($destItemId > 0) {
-                        $stmtDI = $this->erpPdo->prepare("SELECT item_reg_kg FROM item WHERE id = :id LIMIT 1");
-                        $stmtDI->execute([':id' => $destItemId]);
-                        $destBaseKg = (float)($stmtDI->fetchColumn() ?: 0);
-                    }
-                    if ($destBaseKg <= 0) {
-                        $destBaseKg = $unitKg > 0 ? $unitKg : 1.0;
-                    }
-
-                    $destUnits = round($usableKg / $destBaseKg, 10);
-                    if ($destUnits <= 0 && $usableAmt > 0) {
-                        $destUnits = $usableAmt;
-                    }
-
-                    $prodItems[] = [
-                        'dest_itemid' => $destItemId,
-                        'dest_units' => $destUnits,
-                        'item_reboprod_amt' => $usableAmt,
-                        'total_cut_amt' => $reboAmt,
-                        'scrapped_amt' => $manillasMermaAmt,
-                        'scrapped_kg' => $scrappedKg,
-                        'usable_kg' => $usableKg,
-                        'item_reboprod_unitkg' => $unitKg,
-                        'dest_dims' => $destDims,
-                        'dest_largo' => $destLargo,
-                        'destino_label' => $destinoLabel,
-                        'dest_type' => $destType,
-                    ];
+                if (str_starts_with($reqKey, 'reboamt_')) {
+                    $cutIndices[] = (int)substr($reqKey, strlen('reboamt_'));
+                } elseif (str_starts_with($reqKey, 'stockplustotalkg_')) {
+                    $cutIndices[] = (int)substr($reqKey, strlen('stockplustotalkg_'));
                 }
+            }
+            $cutIndices = array_unique($cutIndices);
+            sort($cutIndices);
+
+            $sumCutWidth = 0.0;
+            foreach ($cutIndices as $cIdx) {
+                $cAmt = max(1, (int)($postData["reboamt_{$cIdx}"] ?? 1));
+                $cDims = round((float)str_replace(',', '.', (string)($postData["rollo_dims_{$cIdx}"] ?? 0)), 2);
+                $sumCutWidth += ($cAmt * $cDims);
+            }
+
+            foreach ($cutIndices as $idx) {
+                $destItemId = (int)($postData["stockplusitemid_{$idx}"] ?? 0);
+                $destDims = round((float)str_replace(',', '.', (string)($postData["rollo_dims_{$idx}"] ?? 0)), 2);
+                $reboAmt = max(1, (int)($postData["reboamt_{$idx}"] ?? 1));
+                $destLargo = (float)($postData["stockpluslargo_{$idx}"] ?? $calcLargo);
+                $destinoLabel = trim((string)($postData["rebo_destino_{$idx}"] ?? ''));
+                $destType = $this->isReboHandleDestination($destinoLabel, $destDims, $agenda) ? 'handle' : 'bag';
+
+                if ($destDims <= 0) {
+                    continue;
+                }
+
+                $lineWidth = $reboAmt * $destDims;
+                $productProportion = $rollWidth > 0 ? ($lineWidth / $rollWidth) : ($lineWidth / max(1, $sumCutWidth));
+                $destUseKg = round($netProductsKg * $productProportion, 2);
+                if ($destUseKg <= 0 && $netProductsKg > 0) {
+                    $destUseKg = round($netProductsKg / max(1, count($cutIndices)), 2);
+                }
+
+                // Manillas a merma seleccionadas por el operador (por bobina sucia o defecto)
+                $manillasMermaAmt = 0;
+                if ($destType === 'handle') {
+                    $manillasMermaAmt = max(0, min($reboAmt, (int)($postData["manillas_merma_amt_{$idx}"] ?? 0)));
+                    if ($manillasMermaAmt === 0 && !empty($postData['total_manillas_merma_amt'])) {
+                        $manillasMermaAmt = max(0, min($reboAmt, (int)$postData['total_manillas_merma_amt']));
+                    }
+                }
+
+                $unitKg = $reboAmt > 0 ? round($destUseKg / $reboAmt, 2) : 0.0;
+                $usableAmt = max(0, $reboAmt - $manillasMermaAmt);
+                $scrappedKg = round($manillasMermaAmt * $unitKg, 2);
+                $usableKg = round($usableAmt * $unitKg, 2);
+
+                if ($manillasMermaAmt > 0) {
+                    $totalScrappedManillasAmt += $manillasMermaAmt;
+                    $totalScrappedManillasKg += $scrappedKg;
+                    $scrappedManillasDetails[] = "{$manillasMermaAmt}x Manillas {$destDims}cm ({$scrappedKg} Kg)";
+                }
+
+                // Si no tiene destItemId, buscar si existe un ítem con ese ancho y color, o crearlo
+                if ($destItemId <= 0) {
+                    $destItemId = $this->findOrCreateCutItem($itemSel, $destDims, $destLargo, $userId);
+                }
+
+                // Determinar peso base para cálculo de unidades
+                $destBaseKg = 0.0;
+                if ($destItemId > 0) {
+                    $stmtDI = $this->erpPdo->prepare("SELECT item_reg_kg FROM item WHERE id = :id LIMIT 1");
+                    $stmtDI->execute([':id' => $destItemId]);
+                    $destBaseKg = (float)($stmtDI->fetchColumn() ?: 0);
+                }
+                if ($destBaseKg <= 0) {
+                    $destBaseKg = $unitKg > 0 ? $unitKg : 1.0;
+                }
+
+                $destUnits = round($usableKg / $destBaseKg, 10);
+                if ($destUnits <= 0 && $usableAmt > 0) {
+                    $destUnits = $usableAmt;
+                }
+
+                $prodItems[] = [
+                    'dest_itemid' => $destItemId,
+                    'dest_units' => $destUnits,
+                    'item_reboprod_amt' => $usableAmt,
+                    'total_cut_amt' => $reboAmt,
+                    'scrapped_amt' => $manillasMermaAmt,
+                    'scrapped_kg' => $scrappedKg,
+                    'usable_kg' => $usableKg,
+                    'item_reboprod_unitkg' => $unitKg,
+                    'dest_dims' => $destDims,
+                    'dest_largo' => $destLargo,
+                    'destino_label' => $destinoLabel,
+                    'dest_type' => $destType,
+                ];
             }
 
             // Insertar cabecera e ítems de entrada (stk_negative = 0, issue 20 = Generado por producción)
@@ -9844,7 +10144,7 @@ final class ProductionService
                      stk_status, stk_crtdat, stk_crtusr, stk_fixedsthid, sth_fromrebo_agid, sth_fromrebo_agid_grphash,
                      sth_fromprodotid, sth_order_id, sth_order_num, sth_planta_id, sth_assign_wrkid, sth_assign_equipoid)
                     VALUES
-                    (:num, 'Generado por producción', 20, :compid, :shopid, :bdate, 0, 2, :crtdat, :crtusr, :sthid, :agid, :grphash,
+                    (:num, 'Generado por producción', 20, :compid, :shopid, :bdate, 0, 2, :crtdat, :crtusr, 16, :agid, :grphash,
                      :ot_id, :order_id, :order_num, :planta_id, :worker_id, :equipo_id)
                 ");
                 $stmtSCIn->execute([
@@ -9854,7 +10154,6 @@ final class ProductionService
                     ':bdate' => $now,
                     ':crtdat' => $now,
                     ':crtusr' => $userId,
-                    ':sthid' => $stkFixedSthId,
                     ':agid' => $agId,
                     ':grphash' => $grpHash,
                     ':ot_id' => $workerOtId,
@@ -9874,31 +10173,30 @@ final class ProductionService
                          item_costprice_brutto, item_costprice_taxes_perc, item_costprice_netto, item_costprice_taxes,
                          item_charges_act, item_sellprice_brutto, item_reboprod_amt, item_reboprod_unitkg)
                         VALUES
-                        (:stk_id, :itid, :pos, :amt, 'item', :sthid, 0, 0, 0, 0, 0, 0, :reboamt, :unitkg)
+                        (:stk_id, :itid, :pos, :amt, 'item', 16, 0, 0, 0, 0, 0, 0, :reboamt, :unitkg)
                     ")->execute([
                         ':stk_id' => $stkIdIn,
                         ':itid' => $pRow['dest_itemid'],
                         ':pos' => $pos++,
                         ':amt' => $pRow['dest_units'],
-                        ':sthid' => $stkFixedSthId,
                         ':reboamt' => $pRow['item_reboprod_amt'],
                         ':unitkg' => $pRow['item_reboprod_unitkg'],
                     ]);
 
-                    // Incrementar inventario del subproducto en Bodega 3000
+                    // Incrementar inventario del subproducto en Bodega 3000 (st_id = 16)
                     try {
                         $upd = $this->erpPdo->prepare("
                             UPDATE item_shops_storehouses
                             SET iss_inventory = iss_inventory + :amt
-                            WHERE item_id = :itid AND st_id = :stid
+                            WHERE item_id = :itid AND st_id = 16
                         ");
-                        $upd->execute([':amt' => $pRow['dest_units'], ':itid' => $pRow['dest_itemid'], ':stid' => $stkFixedSthId]);
+                        $upd->execute([':amt' => $pRow['dest_units'], ':itid' => $pRow['dest_itemid']]);
                         if ($upd->rowCount() === 0) {
                             $this->erpPdo->prepare("
                                 INSERT INTO item_shops_storehouses
                                 (item_id, shop_id, st_id, iss_inventory)
-                                VALUES (:itid, :shopid, :stid, :amt)
-                            ")->execute([':itid' => $pRow['dest_itemid'], ':shopid' => $reqShopId, ':stid' => $stkFixedSthId, ':amt' => $pRow['dest_units']]);
+                                VALUES (:itid, :shopid, 16, :amt)
+                            ")->execute([':itid' => $pRow['dest_itemid'], ':shopid' => $reqShopId, ':amt' => $pRow['dest_units']]);
                         }
                     } catch (Throwable) {}
                 }
@@ -10009,6 +10307,8 @@ final class ProductionService
                             }
                         } catch (Throwable) {}
 
+                        $wh3000Trz = $this->findWarehouseIdByCode(3000) ?: 18;
+
                         // 1. Rollos útiles recibidos en bodega 3000
                         for ($k = 1; $k <= $usableAmt; $k++) {
                             try {
@@ -10022,11 +10322,12 @@ final class ProductionService
                                     INSERT INTO rolls
                                     (roll_code, sku_id, warehouse_id, weight_kg, received_qty, width_mm, meters, status, parent_roll_id, source_work_order_id, process_stage)
                                     VALUES
-                                    (:code, :sku, 1, :weight, 1.000, :width, :meters, 'RECEIVED', :parent, :wo_id, 'CUT')
+                                    (:code, :sku, :wh_id, :weight, 1.000, :width, :meters, 'RECEIVED', :parent, :wo_id, 'CUT')
                                 ");
                                 $insRoll->execute([
                                     ':code' => $childRollCode,
                                     ':sku' => $skuId,
+                                    ':wh_id' => $wh3000Trz,
                                     ':weight' => number_format($unitKg, 3, '.', ''),
                                     ':width' => $widthMm > 0 ? $widthMm : null,
                                     ':meters' => $meters > 0 ? $meters : null,
@@ -10042,6 +10343,7 @@ final class ProductionService
                                         'child_roll_id' => $childRollId,
                                         'child_roll_code' => $childRollCode,
                                         'parent_roll_id' => $rollIdPost,
+                                        'warehouse_id' => $wh3000Trz,
                                         'weight_kg' => $unitKg,
                                         'width_mm' => $widthMm,
                                         'meters' => $meters,
@@ -10093,11 +10395,12 @@ final class ProductionService
                                     INSERT INTO rolls
                                     (roll_code, sku_id, warehouse_id, weight_kg, received_qty, width_mm, meters, status, parent_roll_id, source_work_order_id, process_stage)
                                     VALUES
-                                    (:code, :sku, 1, :weight, 0.000, :width, :meters, 'CONSUMED', :parent, :wo_id, 'CUT')
+                                    (:code, :sku, :wh_id, :weight, 0.000, :width, :meters, 'CONSUMED', :parent, :wo_id, 'CUT')
                                 ");
                                 $insRollM->execute([
                                     ':code' => $mermaRollCode,
                                     ':sku' => $skuId,
+                                    ':wh_id' => $wh3000Trz,
                                     ':weight' => number_format($unitKg, 3, '.', ''),
                                     ':width' => $widthMm > 0 ? $widthMm : null,
                                     ':meters' => $meters > 0 ? $meters : null,
@@ -10271,7 +10574,9 @@ final class ProductionService
         float $consumedKg,
         int $userId = 0,
         string $extraAnnotation = '',
-        int $fallbackAgId = 0
+        int $fallbackAgId = 0,
+        float $consumedUnits = 0.0,
+        bool $deductInventory = false
     ): ?int {
         if ($consumedKg <= 0) {
             return null;
@@ -10375,9 +10680,10 @@ final class ProductionService
             $baseKg = (float)($itemRow['item_reg_kg'] ?? 0);
             $itemSku = strtoupper(trim((string)($itemRow['item_number_prod'] ?? $cleanSku)));
 
-            // Si es bobina (TEL, BTE, BOB, ROLL), siempre representa 1 bobina consumida.
-            // Los kilogramos consumidos se registran en item_reboprod_unitkg y en la anotación stk_annotation
-            if (preg_match('/^(TEL|BTE|BOB|ROLL)/i', $itemSku) || (int)($itemRow['item_unit'] ?? 0) === 1) {
+            // Si viene una cantidad explícita de bobinas consumidas (puede ser decimal, ej: 1.5, 2.0, 0.5)
+            if ($consumedUnits > 0.0) {
+                $amountUnits = round($consumedUnits, 4);
+            } elseif (preg_match('/^(TEL|BTE|BOB|ROLL)/i', $itemSku) || (int)($itemRow['item_unit'] ?? 0) === 1) {
                 $amountUnits = 1.0;
             } elseif ($baseKg > 1.0) {
                 $amountUnits = round($consumedKg / $baseKg, 4);
@@ -10388,8 +10694,12 @@ final class ProductionService
             // 3. Generar número de movimiento
             $stkNum = $this->generateNextStockChangeNumber($companyId);
             $annotText = number_format($consumedKg, 2, ',', '.') . " Kilogramos";
+            if ($amountUnits > 0) {
+                $unitLabel = ($amountUnits == 1.0) ? '1 bobina' : (number_format($amountUnits, 2, ',', '.') . ' bobinas');
+                $annotText .= " ({$unitLabel})";
+            }
             if ($rollCode !== '') {
-                $annotText .= " ({$rollCode})";
+                $annotText .= " [{$rollCode}]";
             }
             if ($extraAnnotation !== '') {
                 $annotText .= " - {$extraAnnotation}";
@@ -10434,27 +10744,30 @@ final class ProductionService
                     VALUES
                     (:stk_id, :itid, 0, :amt, 'item', :sthid,
                      0, 0, 0, 0,
-                     0, 0, 1, :unitkg)
+                     0, 0, :reboprod_amt, :unitkg)
                 ")->execute([
                     ':stk_id' => $stkId,
                     ':itid' => $itemId,
                     ':amt' => $amountUnits,
                     ':sthid' => $stkFixedSthId,
+                    ':reboprod_amt' => $amountUnits,
                     ':unitkg' => round($consumedKg, 2),
                 ]);
 
-                // 6. Descontar inventario en item_shops_storehouses
-                try {
-                    $this->erpPdo->prepare("
-                        UPDATE item_shops_storehouses
-                        SET iss_inventory = GREATEST(0, iss_inventory - :amt)
-                        WHERE item_id = :itid AND st_id = :stid
-                    ")->execute([
-                        ':amt' => $amountUnits,
-                        ':itid' => $itemId,
-                        ':stid' => $stkFixedSthId,
-                    ]);
-                } catch (Throwable) {}
+                // 6. Descontar inventario en item_shops_storehouses sólo si se solicita explícitamente
+                if ($deductInventory) {
+                    try {
+                        $this->erpPdo->prepare("
+                            UPDATE item_shops_storehouses
+                            SET iss_inventory = GREATEST(0, iss_inventory - :amt)
+                            WHERE item_id = :itid AND st_id = :stid
+                        ")->execute([
+                            ':amt' => $amountUnits,
+                            ':itid' => $itemId,
+                            ':stid' => $stkFixedSthId,
+                        ]);
+                    } catch (Throwable) {}
+                }
             }
 
             return $stkId;
@@ -11263,10 +11576,10 @@ final class ProductionService
         return $rolls;
     }
 
-    private function adjustBodega3000InventoryBySku(string $skuCode, int $delta): bool
+    private function adjustBodega3000InventoryBySku(string $skuCode, float $delta): bool
     {
         $skuCode = trim($skuCode);
-        if ($skuCode === '' || $delta === 0) {
+        if ($skuCode === '' || abs($delta) < 0.0001) {
             return false;
         }
 
@@ -11305,7 +11618,6 @@ final class ProductionService
                     SET iss_inventory = GREATEST(0, iss_inventory - :qty)
                     WHERE item_id = :item_id
                       AND st_id = :st_id
-                      AND iss_inventory >= :qty
                 ");
                 $stmtUpd->execute([
                     ':qty' => $qty,
@@ -11775,7 +12087,11 @@ final class ProductionService
                     return ['ok' => false, 'error' => 'El código de trazabilidad ingresado no corresponde a la bobina seleccionada.'];
                 }
 
-                if ($sku !== '' && !$this->adjustBodega3000InventoryBySku($sku, -1)) {
+                $deductQty = (float)($roll['received_qty'] ?? 1);
+                if ($deductQty <= 0) {
+                    $deductQty = 1.0;
+                }
+                if ($sku !== '' && !$this->adjustBodega3000InventoryBySku($sku, -$deductQty)) {
                     return ['ok' => false, 'error' => 'No se pudo descontar la bobina del stock de Bodega 3000.'];
                 }
 

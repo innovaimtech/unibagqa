@@ -2502,7 +2502,7 @@ function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = ''
                         Consumo de Tintas de Serigrafía &mdash; Bodega 3000 (Insumos en Producción)
                     </span>
                     <span style="font-size:12px;color:#64748B;margin-left:8px">
-                        Control de tara inicial, carga a máquina y sobrante final
+                        Consumo = Peso al Inicio del tarro menos Cuánto sobró (el resto en bastidor se pierde al lavar)
                     </span>
                 </div>
             </div>
@@ -2566,44 +2566,36 @@ function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = ''
                         </select>
                     </div>
 
-                    <!-- Peso Inicio (kg) -->
+                    <!-- Peso al Inicio (kg) -->
                     <div>
                         <label style="display:block;font-size:11.5px;font-weight:800;color:#334155;margin-bottom:4px">
-                            <i class="fa fa-weight-hanging" style="color:#059669"></i> Peso al Inicio (kg)
+                            <i class="fa fa-weight-hanging" style="color:#059669"></i> Peso al Inicio (kg) *
                         </label>
-                        <input type="number" step="0.001" min="0" name="initial_weight_kg" id="<?=$uniqId?>_init" class="inptxt" style="width:100%;height:38px;font-size:13px;font-weight:700;text-align:right;padding-right:10px;border-radius:6px;background:#FFF" placeholder="0.000" oninput="calcSeriInkNet('<?=$uniqId?>')">
-                        <div style="font-size:10.5px;color:#64748B;margin-top:2px">Tara / peso tarro inicial</div>
-                    </div>
-
-                    <!-- Cuánto se cargó (kg) -->
-                    <div>
-                        <label style="display:block;font-size:11.5px;font-weight:800;color:#334155;margin-bottom:4px">
-                            <i class="fa fa-arrow-circle-down" style="color:#0284C7"></i> Cuánto se cargó (kg)
-                        </label>
-                        <input type="number" step="0.001" min="0" name="loaded_qty" id="<?=$uniqId?>_loaded" class="inptxt" style="width:100%;height:38px;font-size:13px;font-weight:700;text-align:right;padding-right:10px;border-radius:6px;background:#FFF" placeholder="0.000" oninput="calcSeriInkNet('<?=$uniqId?>')">
-                        <div style="font-size:10.5px;color:#64748B;margin-top:2px">Kilos cargados a matriz</div>
+                        <input type="number" step="0.001" min="0" name="initial_weight_kg" id="<?=$uniqId?>_init" class="inptxt" style="width:100%;height:38px;font-size:13px;font-weight:700;text-align:right;padding-right:10px;border-radius:6px;background:#FFF" placeholder="0.000" oninput="calcSeriInkNet('<?=$uniqId?>')" required>
+                        <div style="font-size:10.5px;color:#64748B;margin-top:2px">Peso del tarro preparado al iniciar</div>
                     </div>
 
                     <!-- Cuánto sobró (kg) -->
                     <div>
                         <label style="display:block;font-size:11.5px;font-weight:800;color:#334155;margin-bottom:4px">
-                            <i class="fa fa-undo" style="color:#D97706"></i> Cuánto sobró (kg)
+                            <i class="fa fa-undo" style="color:#D97706"></i> Cuánto sobró (kg) *
                         </label>
-                        <input type="number" step="0.001" min="0" name="leftover_qty" id="<?=$uniqId?>_leftover" class="inptxt" style="width:100%;height:38px;font-size:13px;font-weight:700;text-align:right;padding-right:10px;border-radius:6px;background:#FFF" placeholder="0.000" oninput="calcSeriInkNet('<?=$uniqId?>')">
-                        <div style="font-size:10.5px;color:#64748B;margin-top:2px">Kilos no usados devueltos</div>
+                        <input type="number" step="0.001" min="0" name="leftover_qty" id="<?=$uniqId?>_leftover" class="inptxt" style="width:100%;height:38px;font-size:13px;font-weight:700;text-align:right;padding-right:10px;border-radius:6px;background:#FFF" placeholder="0.000" oninput="calcSeriInkNet('<?=$uniqId?>')" required>
+                        <div style="font-size:10.5px;color:#64748B;margin-top:2px">Peso restante en el tarro al finalizar</div>
                     </div>
 
                     <!-- Consumo Neto Calculado -->
                     <div>
                         <label style="display:block;font-size:11.5px;font-weight:800;color:#0F766E;margin-bottom:4px">
-                            <i class="fa fa-calculator"></i> Consumo Neto (kg)
+                            <i class="fa fa-calculator"></i> Consumo (kg)
                         </label>
                         <div style="display:flex;align-items:center;height:38px;background:#ECFDF5;border:1.5px solid #10B981;border-radius:6px;padding:0 12px;justify-content:space-between">
                             <span style="font-size:11px;font-weight:800;color:#047857">A DESCONTAR:</span>
                             <span id="<?=$uniqId?>_display_net" style="font-size:16px;font-weight:900;color:#065F46">0.000 kg</span>
                         </div>
                         <input type="hidden" name="consumed_qty" id="<?=$uniqId?>_consumed" value="0">
-                        <div style="font-size:10.5px;color:#047857;margin-top:2px">Cargado &minus; Sobrante (o Inicio &minus; Sobrante)</div>
+                        <input type="hidden" name="loaded_qty" id="<?=$uniqId?>_loaded" value="0">
+                        <div style="font-size:10.5px;color:#047857;margin-top:2px">Peso al Inicio &minus; Cuánto sobró</div>
                     </div>
                 </div>
 
@@ -2640,10 +2632,9 @@ function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = ''
                                 <tr style="background:#F8FAFC;border-bottom:1px solid #E2E8F0;font-size:11.5px;color:#475569;text-transform:uppercase;letter-spacing:0.3px">
                                     <th align="left" style="padding-left:12px">Tinta (Bodega 3000)</th>
                                     <th align="left">Color</th>
-                                    <th align="right">Peso Inicio</th>
-                                    <th align="right">Cargado</th>
-                                    <th align="right">Sobrante</th>
-                                    <th align="right" style="color:#0F766E">Consumo Neto</th>
+                                    <th align="right">Peso al Inicio</th>
+                                    <th align="right">Cuánto sobró</th>
+                                    <th align="right" style="color:#0F766E">Consumo (kg)</th>
                                     <th align="left">Operador / Fecha</th>
                                     <th align="center" style="width:90px">Acción</th>
                                 </tr>
@@ -2653,7 +2644,6 @@ function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = ''
                                     $sLoadId = (int)($sLoad['id'] ?? 0);
                                     $sNet = (float)($sLoad['consumed_qty'] ?? 0);
                                     $sInit = (float)($sLoad['initial_weight_kg'] ?? 0);
-                                    $sLoaded = (float)($sLoad['loaded_qty'] ?? 0);
                                     $sLeft = (float)($sLoad['leftover_qty'] ?? 0);
                                     $sColor = trim((string)($sLoad['color_label'] ?? ''));
                                     $sOp = trim((string)($sLoad['operator_name'] ?? ''));
@@ -2674,9 +2664,6 @@ function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = ''
                                     </td>
                                     <td align="right" style="font-size:12px;color:#475569">
                                         <?=$sInit > 0 ? number_format($sInit, 2, ',', '.') . ' kg' : '-'?>
-                                    </td>
-                                    <td align="right" style="font-size:12px;color:#0284C7;font-weight:700">
-                                        <?=$sLoaded > 0 ? number_format($sLoaded, 2, ',', '.') . ' kg' : '-'?>
                                     </td>
                                     <td align="right" style="font-size:12px;color:#D97706">
                                         <?=$sLeft > 0 ? number_format($sLeft, 2, ',', '.') . ' kg' : '-'?>
@@ -2715,27 +2702,23 @@ function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = ''
     if (typeof calcSeriInkNet !== 'function') {
         window.calcSeriInkNet = function(prefix) {
             var initEl = document.getElementById(prefix + '_init');
-            var loadedEl = document.getElementById(prefix + '_loaded');
             var leftoverEl = document.getElementById(prefix + '_leftover');
             var displayEl = document.getElementById(prefix + '_display_net');
             var consumedEl = document.getElementById(prefix + '_consumed');
+            var loadedEl = document.getElementById(prefix + '_loaded');
             if (!displayEl || !consumedEl) return;
 
             var initVal = initEl ? parseFloat(initEl.value.replace(',', '.')) || 0 : 0;
-            var loadedVal = loadedEl ? parseFloat(loadedEl.value.replace(',', '.')) || 0 : 0;
             var leftoverVal = leftoverEl ? parseFloat(leftoverEl.value.replace(',', '.')) || 0 : 0;
 
             var net = 0;
-            if (loadedVal > 0) {
-                net = Math.max(0, loadedVal - leftoverVal);
-            } else if (initVal > 0 && leftoverVal > 0 && initVal >= leftoverVal) {
+            if (initVal > 0) {
                 net = Math.max(0, initVal - leftoverVal);
-            } else if (initVal > 0 && loadedVal === 0 && leftoverVal === 0) {
-                net = 0;
             }
 
             net = Math.round(net * 1000) / 1000;
             consumedEl.value = net.toFixed(3);
+            if (loadedEl) loadedEl.value = net.toFixed(3);
             displayEl.textContent = net.toFixed(3) + ' kg';
         };
     }
@@ -2748,13 +2731,19 @@ function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = ''
                 if (itemSelect) itemSelect.focus();
                 return false;
             }
-            var loaded = parseFloat((form.querySelector('input[name="loaded_qty"]').value || '0').replace(',', '.')) || 0;
             var init = parseFloat((form.querySelector('input[name="initial_weight_kg"]').value || '0').replace(',', '.')) || 0;
             var leftover = parseFloat((form.querySelector('input[name="leftover_qty"]').value || '0').replace(',', '.')) || 0;
-            var consumed = parseFloat((form.querySelector('input[name="consumed_qty"]').value || '0').replace(',', '.')) || 0;
 
-            if (loaded <= 0 && init <= 0 && consumed <= 0) {
-                alert('Debe indicar al menos cuánto se cargó o el peso al inicio de la tinta.');
+            if (init <= 0) {
+                alert('Debe ingresar el Peso al Inicio (kg) del tarro de tinta preparado.');
+                var initEl = form.querySelector('input[name="initial_weight_kg"]');
+                if (initEl) initEl.focus();
+                return false;
+            }
+            if (leftover > init) {
+                alert('El peso que sobró (' + leftover + ' kg) no puede ser mayor al peso al inicio del tarro (' + init + ' kg).');
+                var leftEl = form.querySelector('input[name="leftover_qty"]');
+                if (leftEl) leftEl.focus();
                 return false;
             }
             return true;
@@ -4337,7 +4326,7 @@ function renderProductionOperatorConsole(
         <!-- Tarjeta 3: Botones auxiliares de autocontrol.form.php -->
         <?php
         $autoMaterialsLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
-        $autoHasTintasShortcut = $isFlexo || $isSeri;
+        $autoHasTintasShortcut = $isFlexo;
         $autoColWidth = $autoHasTintasShortcut ? '20%' : '25%';
         ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">
@@ -5901,7 +5890,7 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">Imágenes impresas en bastidor</td>
                     <td class="tdnrm" colspan="3">
                         <form method="get" action="/production/work-orders/operate" class="js-bastidor-form" onsubmit="return handleBastidorSubmit(event, this);" style="margin:0;display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
-                            <input type="hidden" name="agid" value="<?=$selectedAgId?>">
+                            <input type="hidden" name="agid" value="<?=$agId?>">
                             <input type="hidden" name="mode" value="setspecparams">
                             <input type="hidden" name="req_id" value="<?=(int)($agenda['ag_reqid'] ?? $agenda['req_id'] ?? 0)?>">
                             <input type="hidden" name="return_to" value="<?=htmlspecialchars($_SERVER['REQUEST_URI'] ?? '')?>">
@@ -6008,11 +5997,8 @@ function renderProductionOperatorConsole(
                     </table>
 
                     <!-- Tabla de 10 Unidades de Bastidores y Secadores -->
-                    <div id="pulpo-config-10" style="font-weight:bold;color:#115452;font-size:13.5px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+                    <div id="pulpo-config-10" style="font-weight:bold;color:#115452;font-size:13.5px;margin-bottom:8px">
                         <span><i class="fa fa-th"></i> Configuración de 10 Unidades de Bastidores / Secadores</span>
-                        <a href="#sec_seri_inks_<?=$agId?>" style="font-size:12px;font-weight:800;color:#0284C7;text-decoration:none;background:#EFF6FF;border:1px solid #BFDBFE;padding:4px 10px;border-radius:6px;display:inline-flex;align-items:center;gap:6px">
-                            <i class="fa fa-tint"></i> Consumo de Tintas Bodega 3000 &darr;
-                        </a>
                     </div>
                     <table border="0" width="100%" cellpadding="6" cellspacing="0" style="border:1px solid #DDDDDD">
                     <thead>
@@ -6070,9 +6056,11 @@ function renderProductionOperatorConsole(
                         <td class="tdnrm">
                             <select name="unit_mesh_<?=$px?>" class="inptxt" style="width:100%">
                                 <option value="0">&lt; Seleccione &gt;</option>
-                                <?php foreach ($bastidoresList as $b): ?>
-                                    <option value="<?=$b['densidad']?>" <?=abs($savedMesh - (float)$b['densidad']) < 0.01 ? 'selected' : ''?>>
-                                        <?=htmlspecialchars((string)$b['descripcion'])?>
+                                <?php foreach ($bastidoresList as $b):
+                                    $bMeshVal = (float)($b['valor1'] ?? $b['densidad'] ?? $b['codigo'] ?? 0);
+                                ?>
+                                    <option value="<?=$bMeshVal?>" <?=abs($savedMesh - $bMeshVal) < 0.01 ? 'selected' : ''?>>
+                                        <?=htmlspecialchars((string)($b['descripcion'] ?? $b['codigo'] ?? ''))?>
                                     </option>
                                 <?php endforeach; ?>
                             </select>
@@ -6103,10 +6091,7 @@ function renderProductionOperatorConsole(
             </div>
         </div>
 
-        <!-- 3. CONSUMO DE TINTAS DE SERIGRAFÍA (BODEGA 3000) -->
-        <?php if ($isSeri): ?>
-            <?php renderSerigrafiaInkConsumptionSection($ctx); ?>
-        <?php endif; ?>
+
 
     <?php elseif ($isSeriPlana): ?>
         <!-- ============================================================== -->
@@ -6416,10 +6401,7 @@ function renderProductionOperatorConsole(
             </div>
         </div>
 
-        <!-- 2. CONSUMO DE TINTAS DE SERIGRAFÍA (BODEGA 3000) -->
-        <?php if ($isSeri): ?>
-            <?php renderSerigrafiaInkConsumptionSection($ctx); ?>
-        <?php endif; ?>
+
 
     <?php elseif ($isEmbalaje): ?>
         <!-- ============================================================== -->
@@ -8137,30 +8119,12 @@ function renderProductionOperatorConsole(
 
     <?php elseif ($mode === 'tintas'): ?>
         <?php if ($isSeri): ?>
-            <div style="margin-bottom:15px">
-                <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
-                    <i class="fa fa-fw fa-arrow-left"></i> Volver a la consola de Serigrafía
-                </div>
+            <!-- Para Serigrafía redirigir a Insumos (mode=materiales) -->
+            <script>location.href = '/production/work-orders/operate?agid=<?=$agId?>&mode=materiales';</script>
+            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;text-align:center">
+                <p>Redirigiendo a <b>Insumos de Serigrafía</b>...</p>
+                <a href="/production/work-orders/operate?agid=<?=$agId?>&mode=materiales" class="btnblue">Ir a Insumos</a>
             </div>
-
-            <?php if (!empty($_GET['ink_consumed'])): ?>
-                <div style="background:#ECFDF5;border:1.5px solid #10B981;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#065F46;font-size:13px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-check-circle" style="font-size:18px;color:#059669"></i> Consumo de tinta registrado exitosamente y descontado de Bodega 3000.
-                </div>
-            <?php endif; ?>
-            <?php if (!empty($_GET['ink_deleted'])): ?>
-                <div style="background:#EFF6FF;border:1.5px solid #3B82F6;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#1E40AF;font-size:13px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-info-circle" style="font-size:18px;color:#2563EB"></i> Registro de tinta eliminado y stock reintegrado a Bodega 3000.
-                </div>
-            <?php endif; ?>
-            <?php if (!empty($_GET['error'])): ?>
-                <div style="background:#FEF2F2;border:1.5px solid #EF4444;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#991B1B;font-size:13px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-exclamation-triangle" style="font-size:18px;color:#DC2626"></i>
-                    <div><?=htmlspecialchars((string)$_GET['error'])?></div>
-                </div>
-            <?php endif; ?>
-
-            <?php renderSerigrafiaInkConsumptionSection($ctx, '/production/work-orders/operate?agid=' . $agId . '&mode=tintas', false); ?>
         <?php else: ?>
         <?php
         $availableInkRows = is_array($bodega3000InkItems) ? $bodega3000InkItems : [];
@@ -8458,7 +8422,8 @@ function renderProductionOperatorConsole(
         $availableBodega3000Kg = 0.0;
         foreach ($availableBodega3000Rolls as $availableRoll) {
             $unitKg = (float)($availableRoll['weight_kg'] ?? $availableRoll['current_weight_kg'] ?? 0);
-            $qty = max(1.0, (float)($availableRoll['stock_qty'] ?? 1));
+            $qty = (float)($availableRoll['stock_qty'] ?? $availableRoll['received_qty'] ?? 1);
+            if ($qty <= 0) $qty = 1.0;
             $availableBodega3000Kg += (!empty($availableRoll['source']) && $availableRoll['source'] === 'ERP')
                 ? ($unitKg * $qty)
                 : $unitKg;
@@ -8505,87 +8470,38 @@ function renderProductionOperatorConsole(
         ?>
         <div style="margin-bottom:15px">
             <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
-                <i class="fa fa-fw fa-arrow-left"></i> Volver al listado de eventos
+                <i class="fa fa-fw fa-arrow-left"></i> <?= $isSeri ? 'Volver a la consola de Serigrafía' : 'Volver al listado de eventos' ?>
             </div>
         </div>
 
-        <?php if ($isSeriPulpo): ?>
-            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:18px;margin-bottom:18px">
-                <div style="font-size:16px;font-weight:bold;color:#1E3A8A;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-palette"></i> Insumos - Serigrafía Pulpo (OT #<?=htmlspecialchars((string)$agenda['prd_number'])?>)
+        <?php if ($isSeri): ?>
+            <?php if (!empty($_GET['ink_consumed'])): ?>
+                <div style="background:#ECFDF5;border:1.5px solid #10B981;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#065F46;font-size:13px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-check-circle" style="font-size:18px;color:#059669"></i> Consumo de tinta registrado exitosamente y descontado de Bodega 3000.
                 </div>
-                <div style="font-size:12.5px;color:#64748B;margin-top:4px">
-                    En Pulpo la tinta no se registra en esta pantalla. La solicitud se hace a bodega y la utilización queda configurada en la tabla de <b>10 Unidades de Bastidores / Secadores</b>.
+            <?php endif; ?>
+            <?php if (!empty($_GET['ink_deleted'])): ?>
+                <div style="background:#EFF6FF;border:1.5px solid #3B82F6;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#1E40AF;font-size:13px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-info-circle" style="font-size:18px;color:#2563EB"></i> Registro de tinta eliminado y stock reintegrado a Bodega 3000.
                 </div>
-            </div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['error'])): ?>
+                <div style="background:#FEF2F2;border:1.5px solid #EF4444;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#991B1B;font-size:13px;display:flex;align-items:center;gap:8px">
+                    <i class="fa fa-exclamation-triangle" style="font-size:18px;color:#DC2626"></i>
+                    <div><?=htmlspecialchars((string)$_GET['error'])?></div>
+                </div>
+            <?php endif; ?>
 
-            <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-radius:6px;padding:14px 16px;margin-bottom:18px">
-                <div style="font-size:13px;font-weight:bold;color:#1E293B;margin-bottom:6px">
-                    <i class="fa fa-shopping-bag" style="color:#0F766E"></i> Sustrato base de esta OT
-                </div>
-                <div style="font-size:12.5px;color:#334155">
-                    <b><?=htmlspecialchars((string)($agenda['item_number_prod'] ?? ''))?></b>
-                    <?php if (!empty($agenda['item_title'])): ?>
-                        - <?=htmlspecialchars((string)$agenda['item_title'])?>
-                    <?php endif; ?>
-                </div>
-                <div style="font-size:11.5px;color:#64748B;margin-top:4px">
-                    En Pulpo la impresión se realiza directamente sobre estas bolsas/unidades base. Por eso aquí no corresponde montaje de bobinas ni consumo manual de tinta.
-                </div>
-            </div>
+            <?php renderSerigrafiaInkConsumptionSection($ctx, '/production/work-orders/operate?agid=' . $agId . '&mode=materiales', false); ?>
 
-            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;margin-bottom:18px">
-                <div style="font-size:15px;font-weight:bold;color:#3F4C9B;margin-bottom:10px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-fw fa-sitemap"></i> Flujo correcto para Pulpo
-                </div>
-                <div style="font-size:12.5px;color:#475569;line-height:1.6;margin-bottom:14px">
-                    1. <b>Solicitar tintas e insumos a bodega</b> desde el módulo exterior.<br>
-                    2. <b>Configurar bastidores, mesh, secadores y total de tinta</b> en la tabla de 10 unidades dentro de la OT.<br>
-                    3. Continuar el tiraje sin mezclar este proceso con bobinas montadas.
-                </div>
-                <div style="display:flex;gap:10px;flex-wrap:wrap">
-                    <a href="/production/materials/request?agid=<?=$agId?>&material_kind=inks" class="btnblue" style="text-decoration:none;font-size:13px;padding:9px 18px;display:inline-flex;align-items:center;gap:7px">
-                        <i class="fa fa-paper-plane"></i> Solicitar Tintas e Insumos
-                    </a>
-                    <a href="/production/work-orders/operate?agid=<?=$agId?>#pulpo-config-10" class="btngreen" style="text-decoration:none;font-size:13px;padding:9px 18px;display:inline-flex;align-items:center;gap:7px">
-                        <i class="fa fa-th"></i> Ir a Configuración 10 Unidades
-                    </a>
-                    <a href="/production/work-orders/operate?agid=<?=$agId?>" class="btngrey" style="text-decoration:none;font-size:13px;padding:9px 18px;display:inline-flex;align-items:center;gap:7px">
-                        <i class="fa fa-arrow-left"></i> Volver a la OT
+            <?php if ($isSeriPulpo): ?>
+                <div style="margin-top:14px;text-align:right">
+                    <a href="/production/work-orders/operate?agid=<?=$agId?>#pulpo-config-10" class="btnblue" style="text-decoration:none;font-size:13px;padding:8px 16px;display:inline-flex;align-items:center;gap:7px">
+                        <i class="fa fa-th"></i> Configuración 10 Unidades (Bastidores / Secadores)
                     </a>
                 </div>
-            </div>
-
-            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:18px;margin-bottom:18px">
-                <div style="font-size:15px;font-weight:bold;color:#115452;margin-bottom:10px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-check-circle"></i> Qué se hace en cada pantalla
-                </div>
-                <table border="0" width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #E2E8F0;border-radius:6px;overflow:hidden">
-                    <thead>
-                        <tr style="background:#F8FAFC;color:#334155;font-size:12px;text-transform:uppercase">
-                            <th class="tdheader" align="left">Pantalla</th>
-                            <th class="tdheader" align="left">Función</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr style="border-bottom:1px solid #E2E8F0">
-                            <td class="tdnrm"><b>Insumos</b></td>
-                            <td class="tdnrm">Solicitar tintas e insumos a bodega para la OT.</td>
-                        </tr>
-                        <tr style="border-bottom:1px solid #E2E8F0">
-                            <td class="tdnrm"><b>Configuración de 10 Unidades</b></td>
-                            <td class="tdnrm">Registrar bastidor, mesh, secador y total de tinta por unidad/color.</td>
-                        </tr>
-                        <tr>
-                            <td class="tdnrm"><b>Producción</b></td>
-                            <td class="tdnrm">Ejecutar el tiraje sobre bolsas base, sin mezclar este flujo con bobinas.</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
+            <?php endif; ?>
         <?php endif; ?>
-
-        <?php if (!$isSeriPulpo): ?>
         <?php
         $printerOutputDefaultSku = trim((string)($agenda['item_number_prod'] ?? $agenda['item_title'] ?? $agenda['fab_type'] ?? 'BOBINA-IMPRESA'));
         $printerOutputSuggestedMeters = (float)($metros_a_imprimir ?? ($stats['total_meters'] ?? 0));
@@ -8772,7 +8688,8 @@ function renderProductionOperatorConsole(
                             $b3000Code = (string)($b3000Roll['roll_code'] ?? $b3000Roll['sku_code'] ?? '-');
                             $b3000Desc = (string)($b3000Roll['sku_desc'] ?? '-');
                             $b3000Weight = (float)($b3000Roll['weight_kg'] ?? $b3000Roll['current_weight_kg'] ?? 0);
-                            $b3000Qty = max(1.0, (float)($b3000Roll['stock_qty'] ?? 1));
+                            $b3000Qty = (float)($b3000Roll['stock_qty'] ?? $b3000Roll['received_qty'] ?? 1);
+                            if ($b3000Qty <= 0) $b3000Qty = 1.0;
                             $b3000Source = (string)($b3000Roll['source'] ?? '');
                             $b3000HasTraceability = ($b3000Source === 'TRZ');
                             $b3000IsCompatible = !empty($b3000Roll['is_compatible']);
@@ -8790,7 +8707,7 @@ function renderProductionOperatorConsole(
                                 </td>
                                 <td class="tdnrm" align="center" style="padding:9px 8px;vertical-align:middle">
                                     <span style="background:#ECFDF5;color:#166534;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800">
-                                        <?=number_format($b3000Qty, 0, ',', '.')?>
+                                        <?=number_format($b3000Qty, ($b3000Qty == (int)$b3000Qty ? 0 : 2), ',', '.')?>
                                     </span>
                                 </td>
                                 <td class="tdnrm" align="center" style="padding:9px 8px;vertical-align:middle">
@@ -8930,6 +8847,7 @@ function renderProductionOperatorConsole(
                             <div style="margin-top:8px;font-size:12px;color:#334155;display:flex;gap:14px;flex-wrap:wrap">
                                 <span>Ingreso: <b><?=number_format((float)($ar['entry_weight_kg'] ?? $ar['weight_kg'] ?? 0), 2, ',', '.')?> kg</b></span>
                                 <span>Salida: <b><?=number_format((float)($ar['output_bobina_kg'] ?? 0), 2, ',', '.')?> kg</b></span>
+                                <span>Consumo: <b><?=number_format((float)($ar['total_net_consumed_kg'] ?? $ar['net_consumed_kg'] ?? 0), 2, ',', '.')?> kg</b><?php if (!empty($ar['total_consumed_units'])): ?> (<b><?=number_format((float)$ar['total_consumed_units'], ((float)$ar['total_consumed_units'] == (int)$ar['total_consumed_units'] ? 0 : 2), ',', '.')?></b> bob.)<?php endif; ?></span>
                                 <span>Mermas: <b style="color:#DC2626"><?=number_format((float)($ar['scrap_kg'] ?? 0), 2, ',', '.')?> kg</b></span>
                                 <?php if (!empty($ar['output_at'])): ?>
                                     <span><?=htmlspecialchars((string)$ar['output_at'])?></span>
@@ -9116,9 +9034,7 @@ function renderProductionOperatorConsole(
             });
         });
         </script>
-        <?php endif; ?>
 
-        <?php if (!$isSeriPulpo): ?>
         <!-- VENTANA FLOTANTE (MODAL): DESMONTAJE Y SALIDA DE BOBINA -->
         <div id="modal_roll_output" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,23,42,0.65);z-index:99999;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;backdrop-filter:blur(3px)">
             <div style="background:#FFFFFF;border-radius:10px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.3),0 10px 10px -5px rgba(0,0,0,0.2);width:100%;max-width:680px;max-height:92vh;overflow-y:auto;position:relative;border:1px solid #CBD5E1">
@@ -9631,7 +9547,6 @@ function renderProductionOperatorConsole(
             }
         });
         </script>
-        <?php endif; ?>
 
     <?php elseif ($mode === 'consumo'): ?>
         <!-- Redirigir a modo materiales para gestionar montaje y salida de bobinas con trazabilidad -->
@@ -9700,6 +9615,8 @@ function renderProductionOperatorConsole(
         }
         $itemsel = $reboItemSel1;
         $lidx = 1;
+        $totalScrappedManillasUnits = 0;
+        $totalScrappedManillasKgSum = 0.0;
         ?>
 
         <!-- INDICADOR DE TAREA PLANIFICADA SEGÚN CLASIFICACIÓN (FIJA / NO MODIFICABLE POR OPERADOR) -->
@@ -10259,16 +10176,44 @@ function renderProductionOperatorConsole(
             $rawMerma = isset($_REQUEST['itemmermakg']) ? trim((string)$_REQUEST['itemmermakg']) : '0';
             $itemMermaKg = (float)str_replace(',', '.', $rawMerma);
             $isReboCalc = !empty($_REQUEST['rebocalc']);
+            $rollWidth = (float)($itemsel['item_reg_width'] ?? 100);
+            if ($rollWidth <= 0) $rollWidth = 100.0;
             ?>
 
             <script language="Javascript">
-            window.cutsFormIsDirty = false;
+            function liveUpdateCutWidth() {
+                var rollWidth = <?=json_encode((float)$rollWidth)?>;
+                var totalW = 0;
+                var i = 0;
+                while (true) {
+                    var amtEl = document.querySelector('input[name="reboamt_' + i + '"]');
+                    var dimEl = document.querySelector('input[name="rollo_dims_' + i + '"]');
+                    if (!amtEl || !dimEl) break;
+                    var amt = parseFloat(amtEl.value.replace(/,/g, '.')) || 0;
+                    var dim = parseFloat(dimEl.value.replace(/,/g, '.')) || 0;
+                    totalW += (amt * dim);
+                    i++;
+                }
+                var totalWidthEl = document.getElementById('idx_total_width');
+                var statusText = document.getElementById('idx_width_status_text');
+                var matches = (Math.abs(totalW - rollWidth) < 0.1);
+                if (totalWidthEl) {
+                    totalWidthEl.innerText = totalW.toFixed(2).replace('.', ',') + ' cm';
+                    totalWidthEl.style.color = matches ? '#0E6251' : '#C0392B';
+                }
+                if (statusText) {
+                    if (matches) {
+                        statusText.innerHTML = '<span style="color:#0E6251"><i class="fa fa-check-circle"></i> Ancho distribuido coincide exactamente con el ancho de bobina (' + rollWidth.toFixed(2).replace('.', ',') + ' cm). Listo para finalizar.</span>';
+                    } else {
+                        statusText.innerHTML = '<span style="color:#C0392B"><i class="fa fa-exclamation-circle"></i> Ancho total sumado (' + totalW.toFixed(2).replace('.', ',') + ' cm) debe coincidir con bobina (' + rollWidth.toFixed(2).replace('.', ',') + ' cm).</span>';
+                    }
+                }
+            }
 
             function markCutsFormModified(origin) {
-                window.cutsFormIsDirty = true;
+                liveUpdateCutWidth();
                 var btnTerm = document.getElementById('idx_btn_term');
                 var btnSave = document.getElementById('idx_btn_save');
-                var warnBox = document.getElementById('idx_update_warning');
                 var statusText = document.getElementById('idx_width_status_text');
 
                 if (btnTerm) {
@@ -10279,12 +10224,9 @@ function renderProductionOperatorConsole(
                     btnSave.style.backgroundColor = '#D97706';
                     btnSave.style.color = '#FFFFFF';
                 }
-                if (warnBox) {
-                    warnBox.style.display = 'flex';
-                }
                 if (statusText) {
                     statusText.style.color = '#D97706';
-                    statusText.innerHTML = '<i class="fa fa-exclamation-triangle"></i> Modificaciones pendientes. Presione <b>"Actualizar y Recalcular Distribución"</b> para validar el corte.';
+                    statusText.innerHTML = '<i class="fa fa-sync-alt"></i> Modificaciones pendientes. Presione <b>"Actualizar y Recalcular Distribución"</b> para validar el corte.';
                 }
             }
 
@@ -10711,14 +10653,6 @@ function renderProductionOperatorConsole(
                             </div>
                         </div>
 
-                        <!-- AVISO DE CAMBIOS PENDIENTES -->
-                        <div id="idx_update_warning" style="display:none;background:#FEF9E7;border:1.5px solid #F39C12;color:#7D6608;padding:10px 14px;border-radius:6px;font-size:13px;font-weight:bold;margin:0 12px 10px 12px;align-items:center;gap:8px">
-                            <i class="fa fa-exclamation-triangle" style="font-size:18px;color:#D68910"></i>
-                            <div>
-                                Ha modificado medidas, cantidades o manillas a merma. Debe hacer clic en <u>"Actualizar y Recalcular Distribución"</u> para revalidar los datos antes de poder finalizar el corte.
-                            </div>
-                        </div>
-
                         <table border="0" cellpadding="6" cellspacing="0" style="margin:8px 12px 16px 12px;width:calc(100% - 24px)">
                         <tr>
                             <td width="330">
@@ -10791,16 +10725,6 @@ function renderProductionOperatorConsole(
         (function () {
             var reboFinalizeKind = '';
             window.openReboFinalizeModal = function (kind) {
-                if (window.cutsFormIsDirty) {
-                    alert('Ha modificado medidas, cantidades o merma en el corte.\n\nDebe presionar primero el botón "Actualizar y Recalcular Distribución" para calcular y validar los datos antes de finalizar el corte.');
-                    var btnSave = document.getElementById('idx_btn_save');
-                    if (btnSave) {
-                        btnSave.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        btnSave.focus();
-                    }
-                    return;
-                }
-
                 reboFinalizeKind = kind || 'corte';
                 var message = document.getElementById('rebo_finalize_modal_message');
                 if (message) {
@@ -10842,10 +10766,6 @@ function renderProductionOperatorConsole(
                 }
             };
             window.submitReboFinalize = function () {
-                if (window.cutsFormIsDirty) {
-                    alert('Ha modificado medidas o cantidades. Debe presionar "Actualizar y Recalcular Distribución" antes de finalizar.');
-                    return;
-                }
                 if (!document.xform_itemcalc) return;
                 document.xform_itemcalc.rebofinalize.value = '1';
                 document.xform_itemcalc.submit();
@@ -12254,7 +12174,7 @@ function renderProductionOperatorConsole(
         <!-- ============================================================== -->
         <?php
         $isBarExpanded = ($hasAlis || $isRebobinadora);
-        $autoBarColWidth = ($isFlexo || $isSeri) ? '20%' : '25%';
+        $autoBarColWidth = $isFlexo ? '20%' : '25%';
         $actionBtnBaseStyle = 'border-radius:8px;padding:10px 14px;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;min-height:42px;box-shadow:0 1px 3px rgba(15,23,42,0.16);cursor:pointer';
         $actionBtnBlockStyle = $actionBtnBaseStyle . ($isBarExpanded ? '' : 'width:100%;box-sizing:border-box;text-align:center;display:flex;');
         $materialsActionLabel = $isRebobinadora ? 'Bobina' : (($isSeri || $isSeriPulpo) ? 'Insumos' : 'Materiales');
@@ -12301,7 +12221,7 @@ function renderProductionOperatorConsole(
                 </div>
             </td>
 
-            <?php if ($isFlexo || $isSeri): ?>
+            <?php if ($isFlexo): ?>
                 <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:20%'?>">
                     <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#1D4ED8" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas'">
                         <nobr><i class="fa fa-fw fa-tint" style="color:white;"></i> Tintas&nbsp;</nobr>
