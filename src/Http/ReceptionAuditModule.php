@@ -872,6 +872,8 @@ function handleReceptionAuditContainerDetail(ReceptionService $service, int $con
     $scaleWeights = array_map(static fn(array $r): float => (float)($r['weight_kg'] ?? 0.0), $rolls);
     $scaleTotalKg = $scaleRollsCount > 0 ? (float)array_sum($scaleWeights) : 0.0;
     $hasScale = ($scaleRollsCount > 0);
+    $absWeightDiffPct = 0.0;
+    $absQtyDiff = 0.0;
 
     if ($hasScale) {
         $physicalRolls = (float)$scaleRollsCount;

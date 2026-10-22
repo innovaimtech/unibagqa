@@ -115,6 +115,7 @@ function unibagHandleLoginPost(): void
         $trzPdo = Db::trzPdo();
     } catch (Throwable $e) {
         renderDatabaseConnectionError($e);
+        return;
     }
     $erpPdo = null;
     try {
@@ -681,4 +682,3 @@ function unibagIsUserJavier(): bool
 
     return false;
 }
-

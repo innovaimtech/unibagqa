@@ -9685,10 +9685,10 @@ function renderProductionOperatorConsole(
                 </span>
             <?php else: ?>
                 <span style="background:#6C3483;color:#FFFFFF;padding:6px 12px;border-radius:4px;font-weight:bold;font-size:12.5px;letter-spacing:0.5px">
-                    <i class="fa fa-shopping-bag"></i> CORTE: CUERPOS DE BOLSA (+ MANILLAS) - SOLO ESCANEO
+                    <i class="fa fa-shopping-bag"></i> CORTE: CUERPOS DE BOLSA (+ MANILLAS)
                 </span>
                 <span style="font-size:13px;color:#2C3E50">
-                    Bobinas provenientes de máquinas anteriores (Flexo/Seri). <b>Debe ingresar la bobina escaneando su código de trazabilidad (ROLL-...)</b> para cargar las especificaciones y proceder al corte. No genera duplicidad en el informe de materiales.
+                    Puede cortar una bobina impresa o una tela virgen antes de imprimir. <b>Los cuerpos cortados de tela virgen quedan disponibles para impresión en Bodega 3000</b>. Escanee la bobina o seleccione una tela virgen del listado.
                 </span>
             <?php endif; ?>
         </div>
@@ -9726,7 +9726,7 @@ function renderProductionOperatorConsole(
                 } elseif ($task === 'rebobinado') {
                     $scanPh = 'Escanee código de trazabilidad o SKU de la bobina a rebobinar (Ej: ROLL-..., TEL...)...';
                 } elseif ($corteSub === 'bolsa') {
-                    $scanPh = 'Escanee código de trazabilidad de la bobina (Ej: ROLL-00123)...';
+                    $scanPh = 'Escanee bobina virgen o impresa (RB-..., ROLL-..., TEL...)...';
                 } else {
                     $scanPh = 'Escanee código de bobina TEL virgen o elija de Bodega 3000...';
                 }
@@ -10862,17 +10862,17 @@ function renderProductionOperatorConsole(
                     <i class="fa fa-barcode"></i>
                 </div>
                 <div style="font-size:17px;font-weight:bold;color:#2C3E50;margin-bottom:6px">
-                    <?= $corteSub === 'bolsa' ? 'Esperando Escaneo de Bobina (Flexografía / Serigrafía)' : 'Esperando Selección o Escaneo de Bobina' ?>
+                    Esperando Selección o Escaneo de Bobina
                 </div>
                 <div style="font-size:13.5px;color:#5D6D7E;max-width:620px;margin:0 auto 12px auto;line-height:1.5">
                     <?php if ($corteSub === 'bolsa'): ?>
-                        En esta tarea las bobinas provienen de los procesos previos (Flexo / Seri). <b>Escanee con la pistola lectora el código de trazabilidad (ROLL-...)</b> impreso en la etiqueta de la bobina, o digítelo en el buscador superior para cargarla a la entrada de corte.
+                        Puede ingresar una bobina impresa o una tela virgen. <b>Escanee su código de trazabilidad</b> o seleccione una tela virgen de Bodega 3000 para cortarla antes de imprimir.
                     <?php else: ?>
                         Escanee la bobina virgen <b>TEL</b> en el lector superior o selecciónela directamente de la lista inferior de <b>Bodega 3000</b>.
                     <?php endif; ?>
                 </div>
                 <span style="display:inline-flex;align-items:center;gap:6px;background:<?=$corteSub === 'bolsa' ? '#F4ECF7' : '#EBF5FB'?>;color:<?=$corteSub === 'bolsa' ? '#6C3483' : '#1B4F72'?>;padding:5px 12px;border-radius:20px;font-size:12px;font-weight:bold">
-                    <i class="fa fa-info-circle"></i> <?= $corteSub === 'bolsa' ? 'Ingreso exclusivo mediante código de trazabilidad' : 'Solo bobinas vírgenes TEL disponibles para confección de manillas' ?>
+                    <i class="fa fa-info-circle"></i> <?= $corteSub === 'bolsa' ? 'Tela virgen o bobina impresa' : 'Solo bobinas vírgenes TEL disponibles para confección de manillas' ?>
                 </span>
             </div>
         <?php endif; ?>
@@ -10953,21 +10953,21 @@ function renderProductionOperatorConsole(
         </script>
 
         <!-- TABLA: BOBINAS DISPONIBLES EN BODEGA 3000 (INVENTARIO ERP) -->
-        <?php if ($task === 'empalme' || $task === 'rebobinado' || ($task === 'corte' && $corteSub === 'manillas')): ?>
+        <?php if (in_array($task, ['empalme', 'rebobinado', 'corte'], true)): ?>
             <?php
             if ($task === 'rebobinado') {
                 $displayMaterials = $reboAvailableMaterials ?: [];
                 $tableTitle = 'BOBINAS DISPONIBLES EN BODEGA 3000 (SELECCIONAR BOBINA A REBOBINAR)';
                 $tableSubtitle = 'Seleccione la bobina que se rebobinó o escanéela con el lector superior';
                 $headerColor = '#D35400';
-            } elseif ($task === 'corte' && $corteSub === 'manillas') {
+            } elseif ($task === 'corte') {
                 // Para solo manillas: estrictamente bobinas TEL vírgenes
                 $displayMaterials = array_filter($reboAvailableMaterials ?: [], function ($am) {
                     $sku = (string)($am['item_number_prod'] ?? '');
                     return stripos($sku, 'TEL') === 0;
                 });
-                $tableTitle = 'BOBINAS TEL VÍRGENES DISPONIBLES EN BODEGA 3000 (SOLO MANILLAS)';
-                $tableSubtitle = 'Bobinas de tela nueva para confección de manillas';
+                $tableTitle = 'BOBINAS TEL VÍRGENES DISPONIBLES EN BODEGA 3000';
+                $tableSubtitle = $corteSub === 'manillas' ? 'Tela para confección de manillas' : 'Tela para cortar antes de imprimir';
                 $headerColor = '#1B4F72';
             } else {
                 // Para empalme: todas las bobinas disponibles en Bodega 3000
@@ -11090,7 +11090,7 @@ function renderProductionOperatorConsole(
                                                 <i class="fa fa-check-circle"></i> Cargada
                                             </span>
                                         <?php else: ?>
-                                            <a href="/production/work-orders/operate?agid=<?=$agId?>&mode=reboprod&task=corte&corte_sub=manillas&selitemid1=<?=(int)$am['id']?>"
+                                            <a href="/production/work-orders/operate?agid=<?=$agId?>&mode=reboprod&task=corte&corte_sub=<?=htmlspecialchars($corteSub)?>&selitemid1=<?=(int)$am['id']?>"
                                                class="btnblue" style="text-decoration:none;padding:5px 12px;font-size:12px;font-weight:bold;border-radius:4px;display:inline-block">
                                                 <i class="fa fa-arrow-up"></i> Cargar a Entrada
                                             </a>

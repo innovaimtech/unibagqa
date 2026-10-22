@@ -17268,6 +17268,219 @@ SQL;
         }
     }
 
+    /**
+     * Da de baja / descuenta una bobina que ya fue ocupada o consumida en producción.
+     * Retira la bobina del inventario de bodega TRZ (traceability_warehouse_entries)
+     * y marca su estado como CONSUMED, registrando la auditoría del operador (Javier).
+     * Opcionalmente descuenta también el saldo contable en el ERP.
+     */
+    public function decommissionRoll(
+        int $rollId,
+        string $operatorName,
+        string $reason = 'CONSUMED_IN_PRODUCTION',
+        string $notes = '',
+        bool $traceabilityOnly = true
+    ): array {
+        $roll = $this->getRoll($rollId);
+        if ($roll === null) {
+            return ['ok' => false, 'errors' => ['roll' => 'La bobina no existe en el sistema.']];
+        }
+
+        $rollStatus = strtoupper(trim((string)($roll['status'] ?? '')));
+        if ($rollStatus === 'CONSUMED') {
+            return ['ok' => false, 'errors' => ['roll' => 'La bobina ya está registrada como consumida.']];
+        }
+
+        $rollCode = trim((string)($roll['roll_code'] ?? ('#' . $rollId)));
+        $fromWarehouseId = (int)($roll['warehouse_id'] ?? 0);
+        $weightKg = (float)($roll['weight_kg'] ?? 0);
+        $effectiveOperator = trim($operatorName) !== '' ? trim($operatorName) : 'Javier Perozo';
+
+        $startedTx = false;
+        if (!$this->pdo->inTransaction()) {
+            $this->pdo->beginTransaction();
+            $startedTx = true;
+        }
+        try {
+            // 1. Actualizar estado en rolls a CONSUMED
+            $stmt = $this->pdo->prepare(
+                'UPDATE rolls
+                 SET status = :status, current_work_order_id = NULL
+                 WHERE id = :id'
+            );
+            $stmt->execute([
+                ':status' => 'CONSUMED',
+                ':id' => $rollId,
+            ]);
+
+            // 2. Eliminar entrada en traceability_warehouse_entries (stock físico de bodega)
+            $this->deleteRollWarehouseTraceabilityEntry($rollId, $rollCode);
+
+            // 3. Registrar movimiento de ajuste/baja en movements
+            $stmt = $this->pdo->prepare(
+                'INSERT INTO movements (entity_type, entity_id, movement_type, from_warehouse_id, to_warehouse_id, payload)
+                 VALUES (:entity_type, :entity_id, :movement_type, :from_warehouse_id, :to_warehouse_id, :payload)'
+            );
+            $stmt->execute([
+                ':entity_type' => 'ROLL',
+                ':entity_id' => $rollId,
+                ':movement_type' => 'ADJUSTMENT',
+                ':from_warehouse_id' => $fromWarehouseId > 0 ? $fromWarehouseId : null,
+                ':to_warehouse_id' => null,
+                ':payload' => json_encode([
+                    'action' => 'DECOMMISSION',
+                    'operator_name' => $effectiveOperator,
+                    'reason' => $reason,
+                    'notes' => $notes,
+                    'roll_code' => $rollCode,
+                    'weight_kg' => $weightKg,
+                    'traceability_only' => $traceabilityOnly,
+                    'decommissioned_at' => date('Y-m-d H:i:s'),
+                ], JSON_UNESCAPED_UNICODE),
+            ]);
+
+            // 4. Registrar evento auditado en events
+            $this->insertEvent('ROLL_DECOMMISSIONED', [
+                'roll_id' => $rollId,
+                'roll_code' => $rollCode,
+                'operator_name' => $effectiveOperator,
+                'reason' => $reason,
+                'notes' => $notes,
+                'weight_kg' => $weightKg,
+                'from_warehouse_id' => $fromWarehouseId,
+                'traceability_only' => $traceabilityOnly,
+            ]);
+
+            // 5. Descuento en ERP si no es solo trazabilidad
+            if (!$traceabilityOnly && $fromWarehouseId > 0) {
+                $this->syncErpInventoryForReceivedRoll($rollId, -1.0, 'CONSUMO_PRODUCCION');
+            }
+
+            if ($startedTx && $this->pdo->inTransaction()) {
+                $this->pdo->commit();
+            }
+            return ['ok' => true, 'errors' => []];
+        } catch (Throwable $e) {
+            if ($startedTx && $this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            return ['ok' => false, 'errors' => ['decommission' => 'Error al dar de baja bobina ' . $rollCode . ': ' . $e->getMessage()]];
+        }
+    }
+
+    /**
+     * Da de baja en lote una lista de IDs de bobinas.
+     */
+    public function decommissionRollsBulk(
+        array $rollIds,
+        string $operatorName,
+        string $reason = 'CONSUMED_IN_PRODUCTION',
+        string $notes = '',
+        bool $traceabilityOnly = true
+    ): array {
+        $successCount = 0;
+        $failCount = 0;
+        $totalWeight = 0.0;
+        $errors = [];
+
+        foreach ($rollIds as $rId) {
+            $rId = (int)$rId;
+            if ($rId <= 0) {
+                continue;
+            }
+            $rInfo = $this->getRoll($rId);
+            $rCode = (string)($rInfo['roll_code'] ?? "#{$rId}");
+            $res = $this->decommissionRoll($rId, $operatorName, $reason, $notes, $traceabilityOnly);
+            if ($res['ok'] ?? false) {
+                $successCount++;
+                $totalWeight += (float)($rInfo['weight_kg'] ?? 0);
+            } else {
+                $failCount++;
+                $errStr = !empty($res['errors']) ? implode('; ', (array)$res['errors']) : 'Error desconocido';
+                $errors[] = "{$rCode}: {$errStr}";
+            }
+        }
+
+        return [
+            'ok' => $successCount > 0,
+            'success_count' => $successCount,
+            'fail_count' => $failCount,
+            'total_weight' => round($totalWeight, 2),
+            'errors' => $errors,
+        ];
+    }
+
+    /**
+     * Obtiene el historial de bobinas dadas de baja / consumidas por Javier.
+     */
+    public function listDecommissionedRollsHistory(int $limit = 60): array
+    {
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT r.id, r.roll_code, r.weight_kg, r.status, r.process_stage,
+                       r.warehouse_id, w.code AS wh_code, w.name AS wh_name,
+                       s.code AS sku_code, s.description AS sku_description,
+                       pr.roll_code AS parent_roll_code,
+                       m.id AS movement_id, m.created_at AS decommissioned_at,
+                       m.payload AS movement_payload
+                FROM movements m
+                JOIN rolls r ON r.id = m.entity_id
+                LEFT JOIN warehouses w ON w.id = r.warehouse_id
+                LEFT JOIN skus s ON s.id = r.sku_id
+                LEFT JOIN rolls pr ON pr.id = r.parent_roll_id
+                WHERE m.entity_type = 'ROLL'
+                  AND m.movement_type = 'ADJUSTMENT'
+                  AND JSON_UNQUOTE(JSON_EXTRACT(m.payload, '$.action')) = 'DECOMMISSION'
+                ORDER BY m.id DESC
+                LIMIT :lim
+            ");
+            $stmt->bindValue(':lim', $limit, PDO::PARAM_INT);
+            $stmt->execute();
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Busca bobinas activas coincidentes por una lista de códigos (para escaneo/pegado masivo).
+     */
+    public function findRollsByCodes(array $codes): array
+    {
+        $normalized = [];
+        foreach ($codes as $c) {
+            $c = strtoupper(trim((string)$c));
+            if ($c !== '') {
+                $normalized[] = $c;
+            }
+        }
+        $normalized = array_values(array_unique($normalized));
+        if (empty($normalized)) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($normalized), '?'));
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT r.id, r.roll_code, r.weight_kg, r.status, r.warehouse_id, r.process_stage,
+                       r.parent_roll_id, r.meters, r.width_mm, r.created_at,
+                       w.code AS wh_code, w.name AS wh_name,
+                       s.code AS sku_code, s.description AS sku_description,
+                       pr.roll_code AS parent_roll_code
+                FROM rolls r
+                JOIN warehouses w ON r.warehouse_id = w.id
+                JOIN skus s ON r.sku_id = s.id
+                LEFT JOIN rolls pr ON pr.id = r.parent_roll_id
+                WHERE UPPER(r.roll_code) IN ({$placeholders})
+                ORDER BY r.id DESC
+            ");
+            $stmt->execute($normalized);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
     public function getRoll(int $id): ?array
     {
         $stmt = $this->pdo->prepare(
@@ -20390,7 +20603,7 @@ SQL;
     /**
      * Implementación genérica de consulta ERP para producción en el período 26–25.
      *
-     * @param int|null $equipotypeId Si viene, filtra por prod_agenda.ag_equipotype_id
+     * @param int[]|null $equipotypeIds Si viene, filtra por prod_agenda.ag_equipotype_id
      * @return array{ok:bool, errors:string[], period:array{month_key:string,start_date:string,end_date:string,start_ts:int,end_ts:int}, rows:list<array<string,mixed>>}
      */
     private function listErpProductionForBonusPeriod(string|array $monthKey, ?string $operatorName, ?string $costCenter, ?array $equipotypeIds, ?array $equipoIds, ?int $limit, bool $filterEquipoOnWorker = false, ?array $excludeWorkerEquipoNameLike = null): array

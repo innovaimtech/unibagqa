@@ -721,14 +721,9 @@ final class ProductionService
     }
 
     /**
-     * Incorpora a la planificación e inicia formalmente una Orden de Trabajo que no estaba agendada en la máquina.
-     * Crea el registro correspondiente en `prod_agenda` y arranca `prod_worker_ot`.
-     *
      * @param int $prdId ID de prod_header
-     * @param int $initId ID de sesión de máquina (prod_worker_init)
      * @param int $equipoId ID de máquina
      * @param int $plantaId ID de planta
-    /**
      * Asegura o crea el registro en prod_agenda para una OT no planificada en una máquina.
      * Retorna el id de prod_agenda (ag_id) o 0 en caso de error.
      */
@@ -1402,13 +1397,7 @@ final class ProductionService
         }
 
         if (!is_array($agendaData)) {
-            $sqlRelaxed = str_replace("AND t3x.prd_status >= 2", "", $sql);
-            $stmt = $this->erpPdo->prepare($sqlRelaxed);
-            $stmt->execute([':ag_id' => $agId]);
-            $agendaData = $stmt->fetch();
-            if (!is_array($agendaData)) {
-                return null;
-            }
+            return null;
         }
 
         // Obtener comentarios / características adicionales (tran_comments)
@@ -9770,7 +9759,7 @@ final class ProductionService
                         ':eid' => $childRollId,
                         ':wh_id' => $wh3000Trz,
                         ':wh_name' => $whNameStr,
-                        ':item_id' => $primaryItemId > 0 ? $primaryItemId : null,
+                        ':item_id' => (int)($primaryItem['id'] ?? 0) > 0 ? (int)$primaryItem['id'] : null,
                         ':item_code' => $skuCode,
                         ':item_desc' => 'Bobina Empalmada ' . ($primaryItem['item_title'] ?? ''),
                         ':weight' => $destNetKg,
@@ -9936,6 +9925,14 @@ final class ProductionService
         // -------------------------------------------------------------
         // CASO 1: REBOBINADO SIMPLE -> SOLO REBOBINA LA BOBINA (NO AFECTA INFORME DE MATERIALES)
         // -------------------------------------------------------------
+        $isRebobinado = $reboType === 'Rebobinado' || ($postData['task'] ?? '') === 'rebobinado';
+        $createdChildRolls = [];
+        $createdBagRolls = [];
+        $createdHandleRolls = [];
+        $createdHandlePallet = null;
+        $totalScrappedManillasAmt = 0;
+        $totalScrappedManillasKg = 0.0;
+        $generalMermaKg = (float)str_replace(',', '.', (string)($postData['itemmermakg'] ?? 0));
         if ($reboType === 'Rebobinado' || (!empty($postData['task']) && $postData['task'] === 'rebobinado')) {
             $mermaKg = (float)str_replace(',', '.', (string)($postData['itemmermakg'] ?? 0));
             $destUseKg = max(0.0, $useKgAmt - $mermaKg);
@@ -10022,6 +10019,16 @@ final class ProductionService
             // Solo las bobinas TEL vírgenes (Bodega 3000) se consumen en el ERP oficial e informe de materiales.
             // Las bobinas provenientes de Flexo o Seri YA fueron consumidas en sus respectivas máquinas.
             $isVirginTel = (stripos($skuCode, 'TEL') === 0);
+            $sourceTraceRollId = (int)($postData['scanned_roll_id'] ?? $postData['roll_id'] ?? 0);
+            $sourceTraceRoll = null;
+            if ($sourceTraceRollId > 0 && $this->trzPdo !== null) {
+                $sourceStmt = $this->trzPdo->prepare('SELECT process_stage, microns, color FROM rolls WHERE id = :id');
+                $sourceStmt->execute([':id' => $sourceTraceRollId]);
+                $sourceTraceRoll = $sourceStmt->fetch(PDO::FETCH_ASSOC) ?: null;
+                if ($sourceTraceRoll !== null && in_array((string)$sourceTraceRoll['process_stage'], ['PRINTED', 'CUT'], true)) {
+                    $isVirginTel = false;
+                }
+            }
 
             if ($isVirginTel) {
                 // 1. Crear número de transacción para la salida de la bobina virgen TEL
@@ -10187,8 +10194,16 @@ final class ProductionService
                 }
 
                 // Si no tiene destItemId, buscar si existe un ítem con ese ancho y color, o crearlo
-                if ($destItemId <= 0) {
+                if ($destItemId <= 0 && !($isVirginTel && $destType === 'bag')) {
                     $destItemId = $this->findOrCreateCutItem($itemSel, $destDims, $destLargo, $userId);
+                }
+                if ($isVirginTel && $destType === 'bag') {
+                    // Pre-print bodies must remain fabric stock, not printed bag stock.
+                    // Los cuerpos sin imprimir conservan un SKU de tela, no de bolsa impresa.
+                    $destItemId = $this->findOrCreateCutItem($itemSel, $destDims, $destLargo, $userId);
+                    if ($destItemId <= 0) {
+                        throw new RuntimeException('No se pudo resolver la tela cortada para impresion.');
+                    }
                 }
 
                 // Unidades producidas: exactamente la cantidad de rollos útiles obtenidos ($usableAmt).
@@ -10398,6 +10413,20 @@ final class ProductionService
 
                         $skuSuffix = ($destType === 'handle' && $targetProductSku !== '') ? "-{$targetProductSku}" : '';
                         $skuCode = ($destType === 'handle' ? 'CUT-MAN-' : 'CUT-BOL-') . $destItemId . $skuSuffix;
+                        $cutBeforePrinting = $isVirginTel && $destType === 'bag';
+                        $childStage = $cutBeforePrinting ? 'RAW' : 'CUT';
+                        $skuDesc = $destinoLabel;
+                        if ($cutBeforePrinting) {
+                            $fabricStmt = $this->erpPdo->prepare('SELECT item_number_prod, item_title FROM item WHERE id = :id');
+                            $fabricStmt->execute([':id' => $destItemId]);
+                            $fabricItem = $fabricStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+                            $skuCode = trim((string)($fabricItem['item_number_prod'] ?? ''));
+                            if (!str_starts_with(strtoupper($skuCode), 'TEL')) {
+                                throw new RuntimeException('El rollo sin imprimir debe conservar el SKU TEL de su ancho de corte.');
+                            }
+                            $skuDesc = "Tela virgen cortada {$pRow['dest_dims']}cm - Sin imprimir";
+                        }
+                        $skuCode = substr($skuCode, 0, 60);
                         $skuId = 1;
                         try {
                             $stmtSku = $this->trzPdo->prepare("SELECT id FROM skus WHERE code = :c LIMIT 1");
@@ -10406,9 +10435,9 @@ final class ProductionService
                             if ($foundSku) {
                                 $skuId = (int)$foundSku;
                             } else {
-                                $skuDesc = $destType === 'handle'
+                                $skuDesc = $cutBeforePrinting ? $skuDesc : ($destType === 'handle'
                                     ? ("Manilla Cortada {$pRow['dest_dims']}cm" . ($targetProductSku !== '' ? " - Cargada a SKU: {$targetProductSku} (OT #{$orderNum})" : ''))
-                                    : ("Cuerpo de Bolsa Cortada {$pRow['dest_dims']}cm" . ($targetProductSku !== '' ? " - Para OT #{$orderNum}" : ''));
+                                    : ("Cuerpo de Bolsa Cortada {$pRow['dest_dims']}cm" . ($targetProductSku !== '' ? " - Para OT #{$orderNum}" : '')));
                                 $stmtInsSku = $this->trzPdo->prepare("INSERT INTO skus (code, description, is_active) VALUES (:c, :d, 1)");
                                 $stmtInsSku->execute([
                                     ':c' => $skuCode,
@@ -10431,9 +10460,9 @@ final class ProductionService
 
                                 $insRoll = $this->trzPdo->prepare("
                                     INSERT INTO rolls
-                                    (roll_code, sku_id, warehouse_id, weight_kg, received_qty, width_mm, meters, status, parent_roll_id, source_work_order_id, process_stage)
+                                    (roll_code, sku_id, warehouse_id, weight_kg, received_qty, width_mm, meters, status, parent_roll_id, source_work_order_id, process_stage, microns, color)
                                     VALUES
-                                    (:code, :sku, :wh_id, :weight, 1.000, :width, :meters, 'RECEIVED', :parent, :wo_id, 'CUT')
+                                    (:code, :sku, :wh_id, :weight, 1.000, :width, :meters, 'RECEIVED', :parent, :wo_id, :stage, :grams, :color)
                                 ");
                                 $insRoll->execute([
                                     ':code' => $childRollCode,
@@ -10444,6 +10473,9 @@ final class ProductionService
                                     ':meters' => $meters > 0 ? $meters : null,
                                     ':parent' => $rollIdPost > 0 ? $rollIdPost : null,
                                     ':wo_id' => $workerOtId > 0 ? $workerOtId : null,
+                                    ':stage' => $childStage,
+                                    ':grams' => (float)($sourceTraceRoll['microns'] ?? $itemSel['item_reg_gsm'] ?? 0) ?: null,
+                                    ':color' => $sourceTraceRoll['color'] ?? $itemSel['colordesc'] ?? null,
                                 ]);
                                 $childRollId = (int)$this->trzPdo->lastInsertId();
 
@@ -10491,6 +10523,8 @@ final class ProductionService
                                         'width_mm' => $widthMm,
                                         'meters' => $meters,
                                         'dest_type' => $destType,
+                                        'cut_before_printing' => $cutBeforePrinting,
+                                        'process_stage' => $childStage,
                                         'target_product_sku' => $targetProductSku,
                                         'target_product_title' => $targetProductTitle,
                                         'order_number' => $orderNum,
@@ -10967,6 +11001,9 @@ final class ProductionService
                         t1.item_reg_width = :w";
             if ($colorId > 0) {
                 $sql .= " AND t4.com_id = 17 AND t4.val_id = {$colorId}";
+            }
+            if (str_starts_with(strtoupper((string)($baseItem['item_number_prod'] ?? '')), 'TEL')) {
+                $sql .= " AND t1.item_number_prod LIKE 'TEL%'";
             }
             $sql .= " ORDER BY t1.id DESC LIMIT 1";
             $stmt = $this->erpPdo->prepare($sql);
@@ -11648,7 +11685,7 @@ final class ProductionService
                     $isPrinted = ($row['process_stage'] === 'PRINTED'
                         || str_starts_with($rCode, 'RP-')
                         || str_starts_with($rCode, 'ROLL-SE-')
-                        || ($row['process_stage'] !== 'CUT' && !empty($row['source_work_order_id']))
+                        || (!in_array($row['process_stage'], ['RAW', 'CUT'], true) && !empty($row['source_work_order_id']))
                         || stripos($rDesc, 'IMPRES') !== false);
 
                     if ($unprintedOnly && $isPrinted) {
@@ -12199,7 +12236,7 @@ final class ProductionService
                 $isPrinted = ($roll['process_stage'] === 'PRINTED'
                     || str_starts_with((string)$roll['roll_code'], 'RP-')
                     || str_starts_with((string)$roll['roll_code'], 'ROLL-SE-')
-                    || !empty($roll['source_work_order_id']));
+                    || (!in_array($roll['process_stage'], ['RAW', 'CUT'], true) && !empty($roll['source_work_order_id'])));
                 if ($isPrinted && $isFlexoSeriPulpo) {
                     return [
                         'ok' => false,
@@ -12298,7 +12335,3 @@ final class ProductionService
         return ['ok' => false, 'error' => 'Identificador de bobina no válido.'];
     }
 }
-
-
-
-

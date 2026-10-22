@@ -1146,6 +1146,9 @@ function unibagOutputDashboardWasteDetailExcel(ReceptionService $service): void
     $top10 = is_array($details['top10'] ?? null) ? $details['top10'] : [];
 
     $filename = 'detalle-merma-dashboard-' . date('Ymd-His') . '.xlsx';
+    $machineShareTotal = $wasteUnitsTotal > 0
+        ? $wasteUnitsTotal
+        : array_sum(array_map(static fn(array $row): float => (float)($row['waste_units'] ?? 0), $byMachine));
     ob_start();
 
     echo '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">';
@@ -3439,6 +3442,16 @@ function unibagRenderMachineStaffReportPage(ReceptionService $service): void
     $equipos = $report['equipos'];
     $assignments = $report['assignments'];
     $incidents = $report['incidents'];
+    $totalAssignments = count($assignments);
+    $exportParams = http_build_query(array_filter([
+        'filter_type' => $defaultFilterType,
+        'period' => $periodYm,
+        'start_date' => $rangeStartInput,
+        'end_date' => $rangeEndInput,
+        'planta_id' => $plantaId,
+        'equipo_type_id' => $equipoTypeId,
+        'equipo_id' => $equipoId,
+    ], static fn($value): bool => $value !== null && $value !== '' && $value !== 0));
 
     // Auto-set planta if not provided
     if ($plantaId === null && !empty($plantas)) {

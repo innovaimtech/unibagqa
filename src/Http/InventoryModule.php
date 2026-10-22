@@ -1089,6 +1089,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $preDesc = trim((string)($_GET['desc'] ?? ''));
     $preUnit = trim((string)($_GET['unit'] ?? 'UNID')) ?: 'UNID';
     $initialQuery = trim((string)($_GET['q'] ?? ($_GET['filter'] ?? '')));
+    $err = trim((string)($_GET['error'] ?? ''));
 
     // Obtener catálogo de artículos disponibles en esta bodega para autocompletar (SOLO con stock pendiente de etiquetar > 0)
     $items = [];
@@ -1193,7 +1194,6 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $groupedRecentEntries = array_values($groupedRecentEntries);
     $suggestedCode = $service->generateTraceabilityCode('PRODUCT');
     $msg = trim((string)($_GET['msg'] ?? ''));
-    $err = trim((string)($_GET['error'] ?? ''));
 
     // Si viene de guardar lote de bultos, preparar etiquetas automáticas para imprimir
     $printCodesParam = trim((string)($_GET['print_codes'] ?? ''));
@@ -2834,7 +2834,11 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '      <strong>traspaso directo entre bodegas</strong> cuando todavía no exista máquina ni OT definidas.';
     $body .= '    </p>';
     $body .= '  </div>';
+    $isJavierUser = unibagIsUserJavier() || (stripos($currentOperatorName, 'JAVIER') !== false);
     $body .= '  <div style="display:flex;align-items:center;gap:8px">';
+    if ($isJavierUser) {
+        $body .= '    <a href="/stock/bajas" class="btn" style="background:#7c3aed;color:#fff;font-size:13px;font-weight:700;padding:8px 14px;border-radius:6px;text-decoration:none" title="Módulo exclusivo Javier Perozo">🗑️ Baja de Bobinas (Javier)</a>';
+    }
     $body .= '    <a href="/stock" class="btn secondary" style="font-size:13px;padding:8px 14px">📦 Consulta de Stock</a>';
     $body .= '    <a href="/stock/traceability" class="btn secondary" style="font-size:13px;padding:8px 14px">Trazabilidad</a>';
     $body .= '  </div>';
@@ -3010,6 +3014,11 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '  <button type="button" class="tab-btn" id="btn_tab_historial" onclick="switchTransferTab(\'historial\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
     $body .= '    📜 Historial & Trazabilidad <span style="background:#e2e8f0;color:#334155;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($history) . '</span>';
     $body .= '  </button>';
+    if ($isJavierUser) {
+        $body .= '  <button type="button" class="tab-btn" onclick="window.location.href=\'/stock/bajas\'" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#7c3aed;margin-bottom:-2px" title="Módulo exclusivo Javier Perozo">';
+        $body .= '    🗑️ Baja de Bobinas (Exclusivo Javier)';
+        $body .= '  </button>';
+    }
     $body .= '</div>';
 
     // =========================================================================
@@ -4228,10 +4237,928 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
 }
 
 /**
+ * Pantalla de Baja y Descuento de Bobinas Ocupadas (Exclusivo Javier Perozo).
+ * Permite seleccionar con checkboxes o pegar/pistolear códigos para darlos de baja
+ * retirándolos de bodega (traceability_warehouse_entries) y marcando estado CONSUMED.
+ */
+function unibagRenderRollsDecommissionPage(ReceptionService $service, ?ProductionService $prodService, string $currentOperatorName): void
+{
+    $isJavier = unibagIsUserJavier() || (stripos($currentOperatorName, 'JAVIER') !== false);
+    if (!$isJavier) {
+        $body = '<div style="max-width:620px;margin:50px auto;padding:32px;background:#ffffff;border-radius:14px;border:1px solid #fee2e2;border-left:6px solid #ef4444;box-shadow:0 10px 25px -5px rgba(239,68,68,0.12);font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
+        $body .= '  <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">';
+        $body .= '    <span style="font-size:36px">⛔</span>';
+        $body .= '    <div>';
+        $body .= '      <h2 style="margin:0;font-size:20px;font-weight:800;color:#991b1b">Acceso Restringido</h2>';
+        $body .= '      <div style="font-size:13px;color:#dc2626;font-weight:600">Autorización exclusiva requerida</div>';
+        $body .= '    </div>';
+        $body .= '  </div>';
+        $body .= '  <p style="color:#475569;font-size:14px;line-height:1.6;margin-bottom:20px">';
+        $body .= '    El módulo de <strong>Baja y Descuento de Bobinas Ocupadas</strong> realiza modificaciones directas sobre el inventario y está reservado exclusivamente para <strong>Javier Perozo</strong>.';
+        $body .= '  </p>';
+        $body .= '  <div style="display:flex;gap:10px;flex-wrap:wrap">';
+        $body .= '    <a href="/stock/transfers" class="btn" style="background:#0f172a;color:#fff;font-size:13px;padding:9px 18px;border-radius:8px;text-decoration:none">← Ir a Traspasos</a>';
+        $body .= '    <a href="/stock" class="btn secondary" style="font-size:13px;padding:9px 18px;border-radius:8px;text-decoration:none">📦 Consulta de Stock</a>';
+        $body .= '  </div>';
+        $body .= '</div>';
+        render('Acceso Restringido - Baja de Bobinas', $body);
+        return;
+    }
+
+    $allAvailableRolls = $service->listAllRollsForWarehouseTransfer(null, 3000);
+    $history = $service->listDecommissionedRollsHistory(60);
+
+    $isDone = isset($_GET['done']) && (string)$_GET['done'] === '1';
+    $doneCount = (int)($_GET['count'] ?? 0);
+    $doneFail = (int)($_GET['fail'] ?? 0);
+    $doneWeight = (float)($_GET['weight'] ?? 0);
+    $doneTraceOnly = isset($_GET['trace_only']) && (string)$_GET['trace_only'] === '1';
+    $doneReason = trim((string)($_GET['reason'] ?? ''));
+    $bulkErrors = trim((string)($_GET['bulk_errors'] ?? ''));
+    $errorMessage = trim((string)($_GET['error'] ?? ''));
+    $activeTab = trim((string)($_GET['tab'] ?? ($isDone ? 'bajas' : 'masivo')));
+
+    $originWhCounts = [];
+    $totalKgAvailable = 0.0;
+    $countChildRolls = 0;
+    foreach ($allAvailableRolls as $r) {
+        $wId = (int)$r['warehouse_id'];
+        $wName = trim((string)($r['wh_name'] ?? ''));
+        $wCode = trim((string)($r['wh_code'] ?? ''));
+        $displayName = $wCode !== '' ? "{$wCode} - {$wName}" : $wName;
+        if (!isset($originWhCounts[$wId])) {
+            $originWhCounts[$wId] = ['id' => $wId, 'name' => $displayName, 'count' => 0];
+        }
+        $originWhCounts[$wId]['count']++;
+        $totalKgAvailable += (float)($r['weight_kg'] ?? 0);
+        $isChild = !empty($r['parent_roll_id']) || stripos((string)$r['roll_code'], 'ROLL-') === 0 || ($r['process_stage'] ?? '') === 'CUT';
+        if ($isChild) {
+            $countChildRolls++;
+        }
+    }
+    uasort($originWhCounts, static fn(array $a, array $b): int => $b['count'] <=> $a['count']);
+
+    $body = '<div class="decom-shell" style="max-width:1320px;margin:0 auto;padding:14px 18px 45px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
+
+    // Encabezado
+    $body .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e2e8f0">';
+    $body .= '  <div>';
+    $body .= '    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
+    $body .= '      <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;letter-spacing:-0.5px">🗑️ Baja y Descuento de Bobinas Ocupadas</h1>';
+    $body .= '      <span style="background:#f3e8ff;color:#7e22ce;font-size:12px;font-weight:800;padding:3px 10px;border-radius:12px;border:1px solid #e9d5ff">🔒 Exclusivo Javier Perozo</span>';
+    $body .= '    </div>';
+    $body .= '    <p style="margin:6px 0 0;font-size:13.5px;color:#64748b;max-width:860px">';
+    $body .= '      Módulo administrativo para dar de baja códigos de trazabilidad que <strong>ya fueron ocupados o consumidos en planta</strong> y retirarlos del inventario activo de bodega. Puede marcar bobinas con checkboxes o pegar una lista de códigos.';
+    $body .= '    </p>';
+    $body .= '  </div>';
+    $body .= '  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+    $body .= '    <a href="/stock/transfers" class="btn secondary" style="font-size:13px;padding:8px 14px;text-decoration:none">🔄 Traspasos de Bodega</a>';
+    $body .= '    <a href="/stock" class="btn secondary" style="font-size:13px;padding:8px 14px;text-decoration:none">📦 Consulta de Stock</a>';
+    $body .= '    <a href="/stock/traceability" class="btn secondary" style="font-size:13px;padding:8px 14px;text-decoration:none">🌳 Trazabilidad 360°</a>';
+    $body .= '  </div>';
+    $body .= '</div>';
+
+    // Banner de error si existe
+    if ($errorMessage !== '') {
+        $body .= '<div style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px 16px;border-radius:8px;margin-bottom:18px;display:flex;align-items:center;gap:10px">';
+        $body .= '  <span style="font-size:20px">⚠️</span>';
+        $body .= '  <div style="font-weight:600">' . h($errorMessage) . '</div>';
+        $body .= '</div>';
+    }
+
+    // Banner de éxito si acaba de dar de baja
+    if ($isDone) {
+        $body .= '<div style="background:linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);border:1px solid #86efac;border-radius:12px;padding:18px 22px;margin-bottom:22px;box-shadow:0 4px 12px rgba(22,101,52,0.08)">';
+        $body .= '  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px">';
+        $body .= '    <div>';
+        $body .= '      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
+        $body .= '        <span style="font-size:22px">✅</span>';
+        $body .= '        <span style="font-size:17px;font-weight:800;color:#166534">¡Baja de bobinas procesada exitosamente!</span>';
+        $body .= '      </div>';
+        $body .= '      <div style="font-size:13.5px;color:#14532d;line-height:1.6">';
+        $body .= '        Se dieron de baja y descontaron <strong>' . $doneCount . ' bobinas</strong> por un peso total de <strong>' . number_format($doneWeight, 2, ',', '.') . ' kg</strong>.<br>';
+        $body .= '        Modo aplicado: ' . ($doneTraceOnly ? '<span style="background:#fef08a;color:#854d0e;padding:2px 7px;border-radius:4px;font-weight:700">Solo Trazabilidad (sin mover inventario contable ERP)</span>' : '<span style="background:#bbf7d0;color:#166534;padding:2px 7px;border-radius:4px;font-weight:700">Trazabilidad + Descuento contable en ERP</span>');
+        if ($doneFail > 0) {
+            $body .= '<br><span style="color:#b91c1c;font-weight:700">⚠️ ' . $doneFail . ' bobina(s) presentaron inconvenientes. ' . h($bulkErrors) . '</span>';
+        }
+        $body .= '      </div>';
+        $body .= '    </div>';
+        $body .= '    <a href="/stock/bajas" class="btn" style="background:#166534;color:#fff;padding:8px 14px;font-size:13px;border-radius:6px;text-decoration:none">✓ Aceptar</a>';
+        $body .= '  </div>';
+        $body .= '</div>';
+    }
+
+    // Mini KPIs informativos
+    $body .= '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(210px, 1fr));gap:14px;margin-bottom:20px">';
+    $body .= '  <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,0.04)">';
+    $body .= '    <div style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase">Bobinas Disponibles</div>';
+    $body .= '    <div style="font-size:24px;font-weight:800;color:#0f172a;margin-top:4px">' . number_format(count($allAvailableRolls), 0, ',', '.') . '</div>';
+    $body .= '    <div style="font-size:12px;color:#94a3b8;margin-top:2px">Listas para regularizar</div>';
+    $body .= '  </div>';
+    $body .= '  <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,0.04)">';
+    $body .= '    <div style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase">Peso Total Disponible</div>';
+    $body .= '    <div style="font-size:24px;font-weight:800;color:#0f172a;margin-top:4px">' . number_format($totalKgAvailable, 2, ',', '.') . ' <span style="font-size:14px;font-weight:600;color:#64748b">kg</span></div>';
+    $body .= '    <div style="font-size:12px;color:#94a3b8;margin-top:2px">Todas las bodegas activas</div>';
+    $body .= '  </div>';
+    $body .= '  <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,0.04)">';
+    $body .= '    <div style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase">Bobinas Hijas / Cortes</div>';
+    $body .= '    <div style="font-size:24px;font-weight:800;color:#0284c7;margin-top:4px">' . number_format($countChildRolls, 0, ',', '.') . '</div>';
+    $body .= '    <div style="font-size:12px;color:#94a3b8;margin-top:2px">Cortes ROLL-MAN / BOL</div>';
+    $body .= '  </div>';
+    $body .= '  <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,0.04)">';
+    $body .= '    <div style="font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase">Historial de Bajas</div>';
+    $body .= '    <div style="font-size:24px;font-weight:800;color:#7c3aed;margin-top:4px">' . count($history) . '</div>';
+    $body .= '    <div style="font-size:12px;color:#94a3b8;margin-top:2px">Bajas auditadas registradas</div>';
+    $body .= '  </div>';
+    $body .= '</div>';
+
+    // Tabs de navegación
+    $body .= '<div style="display:flex;gap:4px;border-bottom:2px solid #e2e8f0;margin-bottom:20px">';
+    $body .= '  <button type="button" class="tab-btn" id="btn_tab_decom_masivo" onclick="switchDecomTab(\'masivo\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid #dc2626;color:#0f172a;margin-bottom:-2px">';
+    $body .= '    ⚡ Baja Rápida Masiva <span style="background:#fee2e2;color:#991b1b;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($allAvailableRolls) . '</span>';
+    $body .= '  </button>';
+    $body .= '  <button type="button" class="tab-btn" id="btn_tab_decom_pistolear" onclick="switchDecomTab(\'pistolear\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
+    $body .= '    📋 Pistolear / Pegar Códigos';
+    $body .= '  </button>';
+    $body .= '  <button type="button" class="tab-btn" id="btn_tab_decom_historial" onclick="switchDecomTab(\'historial\')" style="padding:10px 18px;font-size:14px;font-weight:700;border:none;background:none;cursor:pointer;border-bottom:3px solid transparent;color:#64748b;margin-bottom:-2px">';
+    $body .= '    📜 Historial Auditado <span style="background:#e2e8f0;color:#334155;font-size:11px;padding:2px 7px;border-radius:10px;margin-left:4px">' . count($history) . '</span>';
+    $body .= '  </button>';
+    $body .= '</div>';
+
+    // =========================================================================
+    // TAB 1: FORMULARIO DE BAJA MASIVA
+    // =========================================================================
+    $body .= '<div id="panel_tab_decom_masivo" class="decom-panel">';
+    $body .= '  <form method="post" action="/stock/bajas" id="form_decommission" onsubmit="return validateDecommissionForm()">';
+    $body .= '    <input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+    $body .= '    <input type="hidden" name="action_mode" value="decommission_rolls">';
+    $body .= '    <input type="hidden" name="operator_name" value="' . h($currentOperatorName) . '">';
+
+    // Barra de Acción Adherente (Sticky Bar)
+    $body .= '    <div style="position:sticky;top:10px;z-index:40;background:#ffffff;border:2px solid #dc2626;border-radius:12px;padding:16px 20px;margin-bottom:18px;box-shadow:0 10px 25px -5px rgba(220,38,38,0.22)">';
+    $body .= '      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #fee2e2">';
+    $body .= '        <div style="display:flex;align-items:center;gap:12px">';
+    $body .= '          <span style="font-size:26px">🗑️</span>';
+    $body .= '          <div>';
+    $body .= '            <div style="font-size:16px;font-weight:800;color:#991b1b" id="lbl_decom_summary">0 bobina(s) seleccionada(s) (0,00 kg)</div>';
+    $body .= '            <div style="font-size:12px;color:#64748b" id="lbl_decom_subtext">Marque las bobinas en la tabla o use la pestaña "Pistolear / Pegar Códigos" para cargarlas.</div>';
+    $body .= '          </div>';
+    $body .= '        </div>';
+    $body .= '        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+    $body .= '          <button type="button" class="btn secondary" onclick="decomSelectVisibleOnly(true)" style="font-size:12px;padding:6px 12px;background:#f8fafc">✓ Marcar visibles</button>';
+    $body .= '          <button type="button" class="btn secondary" onclick="decomSelectVisibleOnly(false)" style="font-size:12px;padding:6px 12px;background:#f8fafc">✕ Desmarcar visibles</button>';
+    $body .= '          <button type="button" class="btn secondary" onclick="decomDeselectAll()" style="font-size:12px;padding:6px 12px;background:#f8fafc;color:#ef4444">Limpiar todo</button>';
+    $body .= '        </div>';
+    $body .= '      </div>';
+
+    $body .= '      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(240px, 1fr));gap:14px;align-items:flex-end">';
+    $body .= '        <div>';
+    $body .= '          <label style="display:block;font-size:12px;font-weight:800;color:#0f172a;margin-bottom:5px">Motivo de la Baja / Consumo <span style="color:#ef4444">*</span></label>';
+    $body .= '          <select name="reason" id="sel_decom_reason" style="width:100%;height:40px;padding:6px 10px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:13px;font-weight:700;color:#0f172a;background:#fff">';
+    $body .= '            <option value="CONSUMED_IN_PRODUCTION" selected>✅ Ya ocupada en producción (Consumo directo)</option>';
+    $body .= '            <option value="MACHINE_CONSUMED">✂️ Bobina consumida / agotada en máquina</option>';
+    $body .= '            <option value="SCRAP_DISCARD">⚠️ Descarte / Merma de producción</option>';
+    $body .= '            <option value="INVENTORY_ADJUSTMENT">📝 Ajuste manual de inventario</option>';
+    $body .= '            <option value="DUPLICATE_REGULARIZATION">🔄 Código duplicado / regularización</option>';
+    $body .= '          </select>';
+    $body .= '        </div>';
+
+    $body .= '        <div>';
+    $body .= '          <label style="display:block;font-size:12px;font-weight:800;color:#0f172a;margin-bottom:5px">Observación / OT / Detalle (Opcional)</label>';
+    $body .= '          <input type="text" name="notes" id="inp_decom_notes" placeholder="Ej: Ocupada en OT 10542 / Descarte en máquina / Turno noche" style="width:100%;height:40px;padding:6px 12px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:13px;box-sizing:border-box">';
+    $body .= '        </div>';
+
+    $body .= '        <div>';
+    $body .= '          <label style="display:inline-flex;align-items:center;gap:8px;background:#fef3c7;padding:9px 12px;border-radius:8px;border:1.5px solid #fde68a;font-size:12.5px;font-weight:700;color:#92400e;cursor:pointer;width:100%;box-sizing:border-box" title="Si está marcado, solo retira la bobina del sistema de trazabilidad (TRZ). Si desmarca, también ajusta/descuenta el inventario contable en el ERP.">';
+    $body .= '            <input type="checkbox" name="traceability_only" value="1" id="chk_decom_trace_only" checked style="width:18px;height:18px;cursor:pointer">';
+    $body .= '            <span>🏷️ Solo dar de baja en Trazabilidad (sin mover ERP)</span>';
+    $body .= '          </label>';
+    $body .= '        </div>';
+
+    $body .= '        <div>';
+    $body .= '          <button type="submit" id="btn_submit_decom" class="btn" style="width:100%;height:40px;background:#dc2626;color:#fff;font-size:13.5px;font-weight:800;border-radius:8px;border:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 4px 12px rgba(220,38,38,0.35);transition:all 0.15s ease">';
+    $body .= '            <span>🗑️ Dar de Baja Bobinas Seleccionadas</span>';
+    $body .= '          </button>';
+    $body .= '        </div>';
+    $body .= '      </div>';
+    $body .= '    </div>';
+
+    // Barra de Búsqueda y Filtros en Tiempo Real
+    $body .= '    <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $body .= '      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));gap:12px;align-items:flex-end">';
+    $body .= '        <div>';
+    $body .= '          <label style="display:block;font-size:12px;font-weight:800;color:#0f172a;margin-bottom:4px">🔍 Búsqueda Rápida (SKU o Código de Bobina)</label>';
+    $body .= '          <input type="text" id="decom_search_input" oninput="applyDecomFilter()" placeholder="Escriba SKU, ROLL-MAN, BOB, descripción..." style="width:100%;height:38px;padding:6px 12px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:13px;box-sizing:border-box">';
+    $body .= '        </div>';
+
+    $body .= '        <div>';
+    $body .= '          <label style="display:block;font-size:12px;font-weight:800;color:#0f172a;margin-bottom:4px">Filtrar por Bodega Actual</label>';
+    $body .= '          <select id="decom_filter_wh" onchange="applyDecomFilter()" style="width:100%;height:38px;padding:6px 10px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:13px;color:#0f172a;background:#fff">';
+    $body .= '            <option value="">-- Todas las Bodegas (' . count($allAvailableRolls) . ' bobinas) --</option>';
+    foreach ($originWhCounts as $owh) {
+        $body .= '          <option value="' . (int)$owh['id'] . '">' . h($owh['name']) . ' (' . (int)$owh['count'] . ')</option>';
+    }
+    $body .= '          </select>';
+    $body .= '        </div>';
+
+    $body .= '        <div>';
+    $body .= '          <label style="display:block;font-size:12px;font-weight:800;color:#0f172a;margin-bottom:4px">Tipo / Etapa de Proceso</label>';
+    $body .= '          <select id="decom_filter_stage" onchange="applyDecomFilter()" style="width:100%;height:38px;padding:6px 10px;border:1.5px solid #cbd5e1;border-radius:8px;font-size:13px;color:#0f172a;background:#fff">';
+    $body .= '            <option value="">-- Todos los tipos --</option>';
+    $body .= '            <option value="child">👶 Bobinas Hijas / Cortes (ROLL-MAN / BOL)</option>';
+    $body .= '            <option value="mother">📦 Bobinas Madres / MP</option>';
+    $body .= '            <option value="PRINTED">🖨️ Impresas (PRINTED)</option>';
+    $body .= '            <option value="CUT">✂️ Corte (CUT)</option>';
+    $body .= '            <option value="RAW">🌱 Materia Prima (RAW)</option>';
+    $body .= '            <option value="splice">🔗 Empalmes</option>';
+    $body .= '          </select>';
+    $body .= '        </div>';
+
+    $body .= '        <div style="display:flex;gap:6px">';
+    $body .= '          <button type="button" class="btn secondary" onclick="resetDecomFilters()" style="height:38px;padding:0 14px;font-size:13px;border-radius:8px">✕ Limpiar Filtros</button>';
+    $body .= '        </div>';
+    $body .= '      </div>';
+
+    // Chips de Acceso Rápido
+    $body .= '      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:12px;padding-top:10px;border-top:1px solid #f1f5f9">';
+    $body .= '        <span style="font-size:11.5px;font-weight:700;color:#64748b">Filtros rápidos:</span>';
+    $body .= '        <button type="button" onclick="setDecomQuickFilter(\'all\', \'\')" class="btn secondary" style="font-size:11.5px;padding:3px 9px;border-radius:14px;background:#f8fafc">✨ Todas (<span id="lbl_decom_quick_count">' . count($allAvailableRolls) . '</span>)</button>';
+    $body .= '        <button type="button" onclick="setDecomQuickFilter(\'child\', \'\')" class="btn secondary" style="font-size:11.5px;padding:3px 9px;border-radius:14px;background:#e0f2fe;color:#0369a1;border-color:#bae6fd">👶 Solo Hijas / Cortes (' . $countChildRolls . ')</button>';
+    if (isset($originWhCounts[58])) {
+        $body .= '      <button type="button" onclick="setDecomQuickFilter(\'wh\', \'58\')" class="btn secondary" style="font-size:11.5px;padding:3px 9px;border-radius:14px;background:#fef3c7;color:#92400e;border-color:#fde68a">🏭 Bodega 3000 Planta (' . (int)$originWhCounts[58]['count'] . ')</button>';
+    }
+    if (isset($originWhCounts[1])) {
+        $body .= '      <button type="button" onclick="setDecomQuickFilter(\'wh\', \'1\')" class="btn secondary" style="font-size:11.5px;padding:3px 9px;border-radius:14px;background:#f1f5f9">🏢 Bodega Central (' . (int)$originWhCounts[1]['count'] . ')</button>';
+    }
+    $body .= '        <div style="margin-left:auto;font-size:12.5px;color:#64748b">';
+    $body .= '          Mostrando <strong id="lbl_decom_visible_count">' . count($allAvailableRolls) . '</strong> bobinas (<strong id="lbl_decom_visible_kg">' . number_format($totalKgAvailable, 2, ',', '.') . '</strong> kg)';
+    $body .= '        </div>';
+    $body .= '      </div>';
+    $body .= '    </div>';
+
+    // Tabla de Bobinas con Checkboxes
+    $body .= '    <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $body .= '      <div style="overflow-x:auto;max-height:680px;overflow-y:auto">';
+    $body .= '        <table id="table_decom_rolls" class="data-table" style="width:100%;border-collapse:collapse;font-size:12.5px">';
+    $body .= '          <thead style="position:sticky;top:0;z-index:10;background:#f8fafc;border-bottom:2px solid #cbd5e1">';
+    $body .= '            <tr>';
+    $body .= '              <th style="padding:10px 12px;text-align:center;width:44px">';
+    $body .= '                <input type="checkbox" id="chk_decom_master" onclick="toggleDecomSelectAll(this)" title="Marcar/desmarcar visibles" style="width:18px;height:18px;cursor:pointer">';
+    $body .= '              </th>';
+    $body .= '              <th style="padding:10px 12px;text-align:left">Código Bobina</th>';
+    $body .= '              <th style="padding:10px 12px;text-align:left">Tipo / Genealogía</th>';
+    $body .= '              <th style="padding:10px 12px;text-align:left">SKU / Material</th>';
+    $body .= '              <th style="padding:10px 12px;text-align:left">Bodega Actual</th>';
+    $body .= '              <th style="padding:10px 12px;text-align:right">Peso (Kg)</th>';
+    $body .= '              <th style="padding:10px 12px;text-align:right">Metros / Ancho</th>';
+    $body .= '              <th style="padding:10px 12px;text-align:center">Etapa</th>';
+    $body .= '              <th style="padding:10px 12px;text-align:center">Acciones</th>';
+    $body .= '            </tr>';
+    $body .= '          </thead>';
+    $body .= '          <tbody>';
+
+    if (empty($allAvailableRolls)) {
+        $body .= '          <tr>';
+        $body .= '            <td colspan="9" style="text-align:center;padding:40px 20px;color:#94a3b8">';
+        $body .= '              <div style="font-size:32px;margin-bottom:8px">📦</div>';
+        $body .= '              <div style="font-size:15px;font-weight:700;color:#475569">No se encontraron bobinas activas disponibles.</div>';
+        $body .= '            </td>';
+        $body .= '          </tr>';
+    } else {
+        foreach ($allAvailableRolls as $r) {
+            $rId = (int)$r['id'];
+            $rCode = (string)$r['roll_code'];
+            $rSku = (string)$r['sku_code'];
+            $rSkuDesc = (string)($r['sku_description'] ?? '');
+            $rWeight = (float)$r['weight_kg'];
+            $rMeters = (float)($r['meters'] ?? 0);
+            $rWidth = (int)($r['width_mm'] ?? 0);
+            $rStage = (string)($r['process_stage'] ?? 'RAW');
+            $rWhId = (int)$r['warehouse_id'];
+            $rWhName = (string)($r['wh_name'] ?? '');
+            $rWhCode = (string)($r['wh_code'] ?? '');
+            $pId = !empty($r['parent_roll_id']) ? (int)$r['parent_roll_id'] : null;
+            $pCode = (string)($r['parent_roll_code'] ?? '');
+
+            $isChild = $pId !== null || stripos($rCode, 'ROLL-MAN-') === 0 || stripos($rCode, 'ROLL-BOL-') === 0 || $rStage === 'CUT';
+            $isSplice = stripos($rCode, 'ROLL-EMP-') === 0;
+
+            $searchBlob = strtolower("{$rCode} {$rSku} {$rSkuDesc} {$rWhName} {$rWhCode} {$pCode} {$rStage}");
+
+            $body .= '          <tr class="decom-roll-row"';
+            $body .= '              data-roll-id="' . $rId . '"';
+            $body .= '              data-roll-code="' . h($rCode) . '"';
+            $body .= '              data-wh-id="' . $rWhId . '"';
+            $body .= '              data-stage="' . h($rStage) . '"';
+            $body .= '              data-is-child="' . ($isChild ? '1' : '0') . '"';
+            $body .= '              data-is-splice="' . ($isSplice ? '1' : '0') . '"';
+            $body .= '              data-kg="' . $rWeight . '"';
+            $body .= '              data-search="' . h($searchBlob) . '"';
+            $body .= '              style="border-bottom:1px solid #f1f5f9;transition:background 0.1s ease">';
+
+            // Checkbox
+            $body .= '            <td style="padding:8px 12px;text-align:center" onclick="event.stopPropagation()">';
+            $body .= '              <input type="checkbox" name="selected_rolls[]" value="' . $rId . '" class="decom-roll-chk" data-kg="' . $rWeight . '" data-code="' . h($rCode) . '" onchange="onDecomRowCheckChange(this)" style="width:18px;height:18px;cursor:pointer">';
+            $body .= '            </td>';
+
+            // Código
+            $body .= '            <td style="padding:8px 12px;font-family:monospace;font-weight:700;font-size:12.5px" onclick="onDecomRowClick(event, this.parentElement)">';
+            $body .= '              <a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" onclick="event.stopPropagation()" style="color:#0f172a;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Ver trazabilidad 360°">';
+            $body .= '                <span>' . h($rCode) . '</span>';
+            $body .= '                <span style="font-size:10px;color:#94a3b8">↗</span>';
+            $body .= '              </a>';
+            $body .= '            </td>';
+
+            // Tipo / Genealogía
+            $body .= '            <td style="padding:8px 12px" onclick="onDecomRowClick(event, this.parentElement)">';
+            if ($isSplice) {
+                $body .= '              <span style="background:#fef3c7;color:#92400e;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px">🔗 Empalme</span>';
+            } elseif ($isChild) {
+                $body .= '              <span style="background:#e0f2fe;color:#0369a1;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px" title="Bobina hija de corte">👶 Hija / Corte</span>';
+                if ($pCode !== '') {
+                    $body .= '              <div style="font-size:10.5px;color:#64748b;margin-top:2px">Madre: <a href="/stock/traceability?q=' . urlencode($pCode) . '" target="_blank" onclick="event.stopPropagation()" style="color:#475569;text-decoration:underline">' . h($pCode) . '</a></div>';
+                }
+            } else {
+                $body .= '              <span style="background:#f1f5f9;color:#475569;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px">📦 Madre / MP</span>';
+            }
+            $body .= '            </td>';
+
+            // SKU
+            $body .= '            <td style="padding:8px 12px" onclick="onDecomRowClick(event, this.parentElement)">';
+            $body .= '              <div style="font-weight:700;color:#0f172a">' . h($rSku) . '</div>';
+            if ($rSkuDesc !== '') {
+                $body .= '              <div style="font-size:11px;color:#64748b;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' . h($rSkuDesc) . '">' . h($rSkuDesc) . '</div>';
+            }
+            $body .= '            </td>';
+
+            // Bodega Actual
+            $body .= '            <td style="padding:8px 12px" onclick="onDecomRowClick(event, this.parentElement)">';
+            $body .= '              <span style="background:#f8fafc;border:1px solid #e2e8f0;color:#1e293b;font-size:11.5px;font-weight:700;padding:2px 7px;border-radius:4px">';
+            $body .= h($rWhCode !== '' ? "{$rWhCode} - {$rWhName}" : $rWhName);
+            $body .= '              </span>';
+            $body .= '            </td>';
+
+            // Peso
+            $body .= '            <td style="padding:8px 12px;text-align:right;font-weight:800;color:#0f172a" onclick="onDecomRowClick(event, this.parentElement)">';
+            $body .= number_format($rWeight, 2, ',', '.') . ' kg';
+            $body .= '            </td>';
+
+            // Metros / Ancho
+            $body .= '            <td style="padding:8px 12px;text-align:right;color:#475569" onclick="onDecomRowClick(event, this.parentElement)">';
+            $body .= ($rMeters > 0 ? number_format($rMeters, 0, ',', '.') . ' m' : '-');
+            if ($rWidth > 0) {
+                $body .= ' · ' . $rWidth . ' mm';
+            }
+            $body .= '            </td>';
+
+            // Etapa
+            $body .= '            <td style="padding:8px 12px;text-align:center" onclick="onDecomRowClick(event, this.parentElement)">';
+            $stageColor = '#475569';
+            $stageBg = '#f1f5f9';
+            if ($rStage === 'CUT') {
+                $stageColor = '#0284c7';
+                $stageBg = '#e0f2fe';
+            } elseif ($rStage === 'PRINTED') {
+                $stageColor = '#7c3aed';
+                $stageBg = '#f3e8ff';
+            }
+            $body .= '              <span style="background:' . $stageBg . ';color:' . $stageColor . ';font-size:10.5px;font-weight:800;padding:2px 6px;border-radius:4px">' . h($rStage) . '</span>';
+            $body .= '            </td>';
+
+            // Acciones
+            $body .= '            <td style="padding:8px 12px;text-align:center;white-space:nowrap" onclick="event.stopPropagation()">';
+            $body .= '              <a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" class="btn secondary" style="font-size:11px;padding:3px 7px" title="Ver árbol de trazabilidad 360°">🌳 Árbol</a>';
+            $body .= '            </td>';
+            $body .= '          </tr>';
+        }
+    }
+
+    $body .= '            <tr id="decom_no_results_row" style="display:none">';
+    $body .= '              <td colspan="9" style="text-align:center;padding:40px 20px;color:#94a3b8">';
+    $body .= '                <div style="font-size:28px;margin-bottom:6px">🔍</div>';
+    $body .= '                <div style="font-size:14px;font-weight:700;color:#475569">No hay bobinas que coincidan con los filtros aplicados.</div>';
+    $body .= '                <button type="button" class="btn secondary" onclick="resetDecomFilters()" style="margin-top:10px;font-size:12px;padding:4px 12px">✕ Limpiar Filtros</button>';
+    $body .= '              </td>';
+    $body .= '            </tr>';
+
+    $body .= '          </tbody>';
+    $body .= '        </table>';
+    $body .= '      </div>';
+    $body .= '    </div>';
+    $body .= '  </form>';
+    $body .= '</div>'; // Fin panel masivo
+
+    // =========================================================================
+    // TAB 2: PISTOLEAR / PEGAR CÓDIGOS
+    // =========================================================================
+    $body .= '<div id="panel_tab_decom_pistolear" class="decom-panel" style="display:none">';
+    $body .= '  <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:22px;box-shadow:0 1px 3px rgba(0,0,0,0.05);max-width:900px;margin:0 auto">';
+    $body .= '    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">';
+    $body .= '      <span style="font-size:28px">📋</span>';
+    $body .= '      <div>';
+    $body .= '        <h2 style="margin:0;font-size:18px;font-weight:800;color:#0f172a">Pistolear o Pegar Lista de Códigos de Bobinas</h2>';
+    $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Pegue una columna de Excel, mensajes de texto o escanee con la pistola de códigos. Se marcarán automáticamente en la lista de baja.</p>';
+    $body .= '      </div>';
+    $body .= '    </div>';
+
+    $body .= '    <div style="margin-bottom:14px">';
+    $body .= '      <textarea id="txt_paste_codes" placeholder="Pegue aquí los códigos de bobina (uno por línea o separados por coma o espacio):&#10;ROLL-MAN-01034&#10;ROLL-MAN-01035&#10;ROLL-BOL-00501&#10;BOB-00123" style="width:100%;height:160px;padding:12px 14px;border:1.5px solid #cbd5e1;border-radius:8px;font-family:monospace;font-size:13px;box-sizing:border-box"></textarea>';
+    $body .= '    </div>';
+
+    $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
+    $body .= '      <button type="button" class="btn" onclick="selectPastedCodes()" style="background:#4f46e5;color:#fff;font-size:13.5px;font-weight:800;padding:10px 20px;border-radius:8px;border:none;cursor:pointer;display:inline-flex;align-items:center;gap:8px;box-shadow:0 4px 12px rgba(79,70,229,0.3)">';
+    $body .= '        <span>🔍 Buscar y Seleccionar en la Lista</span>';
+    $body .= '      </button>';
+    $body .= '      <div id="lbl_paste_status" style="font-size:13px;font-weight:700"></div>';
+    $body .= '    </div>';
+    $body .= '  </div>';
+    $body .= '</div>';
+
+    // =========================================================================
+    // TAB 3: HISTORIAL AUDITADO DE BAJAS
+    // =========================================================================
+    $body .= '<div id="panel_tab_decom_historial" class="decom-panel" style="display:none">';
+    $body .= '  <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
+    $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
+    $body .= '      <div>';
+    $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📜 Historial de Bobinas Dadas de Baja (Auditado)</h2>';
+    $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Registro auditado de bobinas retiradas de stock por Javier Perozo, motivo de consumo y peso.</p>';
+    $body .= '      </div>';
+    $body .= '      <span style="background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px">' . count($history) . ' registros</span>';
+    $body .= '    </div>';
+
+    if (empty($history)) {
+        $body .= '    <div style="text-align:center;padding:40px 20px;color:#94a3b8">';
+        $body .= '      <div style="font-size:32px;margin-bottom:8px">📋</div>';
+        $body .= '      <div style="font-size:15px;font-weight:700;color:#475569">Aún no se registran bajas manuales de bobinas en este módulo.</div>';
+        $body .= '    </div>';
+    } else {
+        $body .= '    <div style="overflow-x:auto">';
+        $body .= '      <table class="data-table" style="width:100%;border-collapse:collapse;font-size:13px">';
+        $body .= '        <thead>';
+        $body .= '          <tr style="background:#f8fafc;border-bottom:2px solid #e2e8f0;text-align:left">';
+        $body .= '            <th style="padding:10px 12px">Fecha / Hora</th>';
+        $body .= '            <th style="padding:10px 12px">Código Bobina</th>';
+        $body .= '            <th style="padding:10px 12px">SKU / Material</th>';
+        $body .= '            <th style="padding:10px 12px">Bodega de Origen</th>';
+        $body .= '            <th style="padding:10px 12px">Peso</th>';
+        $body .= '            <th style="padding:10px 12px">Motivo de Baja</th>';
+        $body .= '            <th style="padding:10px 12px">Observación / OT</th>';
+        $body .= '            <th style="padding:10px 12px">Operador</th>';
+        $body .= '            <th style="padding:10px 12px">Modo</th>';
+        $body .= '            <th style="padding:10px 12px;text-align:center">Trazabilidad</th>';
+        $body .= '          </tr>';
+        $body .= '        </thead>';
+        $body .= '        <tbody>';
+        foreach ($history as $h) {
+            $rCode = (string)$h['roll_code'];
+            $rSku = (string)$h['sku_code'];
+            $rWeight = (float)$h['weight_kg'];
+            $whName = (string)($h['wh_name'] ?? '');
+            $whCode = (string)($h['wh_code'] ?? '');
+            $dt = (string)$h['decommissioned_at'];
+            $payload = json_decode((string)($h['movement_payload'] ?? '{}'), true) ?: [];
+            $reason = (string)($payload['reason'] ?? 'CONSUMED');
+            $notes = (string)($payload['notes'] ?? '');
+            $op = (string)($payload['operator_name'] ?? 'Javier Perozo');
+            $traceOnly = !empty($payload['traceability_only']);
+
+            $reasonMap = [
+                'CONSUMED_IN_PRODUCTION' => '✅ Ocupada en producción',
+                'MACHINE_CONSUMED' => '✂️ Consumida en máquina',
+                'SCRAP_DISCARD' => '⚠️ Descarte / Merma',
+                'INVENTORY_ADJUSTMENT' => '📝 Ajuste de inventario',
+                'DUPLICATE_REGULARIZATION' => '🔄 Regularización duplicado',
+            ];
+            $reasonLabel = $reasonMap[$reason] ?? $reason;
+
+            $body .= '          <tr style="border-bottom:1px solid #f1f5f9">';
+            $body .= '            <td style="padding:10px 12px;font-size:12px;color:#64748b;white-space:nowrap">' . h($dt) . '</td>';
+            $body .= '            <td style="padding:10px 12px;font-family:monospace;font-weight:700">' . h($rCode) . '</td>';
+            $body .= '            <td style="padding:10px 12px;font-weight:600">' . h($rSku) . '</td>';
+            $body .= '            <td style="padding:10px 12px">' . h($whCode !== '' ? "{$whCode} - {$whName}" : $whName) . '</td>';
+            $body .= '            <td style="padding:10px 12px;font-weight:700">' . number_format($rWeight, 2, ',', '.') . ' kg</td>';
+            $body .= '            <td style="padding:10px 12px"><span style="background:#fee2e2;color:#991b1b;font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px">' . h($reasonLabel) . '</span></td>';
+            $body .= '            <td style="padding:10px 12px;color:#475569">' . h($notes ?: '-') . '</td>';
+            $body .= '            <td style="padding:10px 12px;font-weight:700;color:#0f172a">' . h($op) . '</td>';
+            $body .= '            <td style="padding:10px 12px">';
+            $body .= $traceOnly
+                ? '<span style="background:#fef08a;color:#854d0e;font-size:10.5px;font-weight:700;padding:2px 6px;border-radius:4px">Solo TRZ</span>'
+                : '<span style="background:#bbf7d0;color:#166534;font-size:10.5px;font-weight:700;padding:2px 6px;border-radius:4px">TRZ + ERP</span>';
+            $body .= '            </td>';
+            $body .= '            <td style="padding:10px 12px;text-align:center">';
+            $body .= '              <a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" class="btn secondary" style="font-size:11px;padding:3px 7px">🌳 Árbol</a>';
+            $body .= '            </td>';
+            $body .= '          </tr>';
+        }
+        $body .= '        </tbody>';
+        $body .= '      </table>';
+        $body .= '    </div>';
+    }
+    $body .= '  </div>';
+    $body .= '</div>';
+
+    // JavaScript interactivo
+    $body .= '<script>
+      function switchDecomTab(tab) {
+        var panels = {
+          "masivo": document.getElementById("panel_tab_decom_masivo"),
+          "pistolear": document.getElementById("panel_tab_decom_pistolear"),
+          "historial": document.getElementById("panel_tab_decom_historial")
+        };
+        for (var key in panels) {
+          if (panels[key]) {
+            panels[key].style.display = key === tab ? "block" : "none";
+          }
+          var btn = document.getElementById("btn_tab_decom_" + key);
+          if (btn) {
+            if (key === tab) {
+              btn.style.color = "#0f172a";
+              btn.style.borderBottomColor = "#dc2626";
+            } else {
+              btn.style.color = "#64748b";
+              btn.style.borderBottomColor = "transparent";
+            }
+          }
+        }
+      }
+
+      function applyDecomFilter() {
+        var searchInput = document.getElementById("decom_search_input");
+        var query = searchInput ? (searchInput.value || "").trim().toLowerCase() : "";
+        var whSelect = document.getElementById("decom_filter_wh");
+        var whFilter = whSelect ? whSelect.value : "";
+        var stageSelect = document.getElementById("decom_filter_stage");
+        var stageFilter = stageSelect ? stageSelect.value : "";
+
+        var tokens = query ? query.split(/\\s+/).filter(Boolean) : [];
+        var rows = document.querySelectorAll(".decom-roll-row");
+        var visibleCount = 0;
+        var visibleKg = 0;
+
+        for (var i = 0; i < rows.length; i++) {
+          var row = rows[i];
+          var searchBlob = row.getAttribute("data-search") || "";
+          var rowWh = row.getAttribute("data-wh-id") || "";
+          var rowStage = row.getAttribute("data-stage") || "";
+          var isChild = row.getAttribute("data-is-child") === "1";
+          var isSplice = row.getAttribute("data-is-splice") === "1";
+          var rowKg = parseFloat(row.getAttribute("data-kg") || "0");
+
+          var matchesText = true;
+          for (var t = 0; t < tokens.length; t++) {
+            if (searchBlob.indexOf(tokens[t]) === -1) {
+              matchesText = false;
+              break;
+            }
+          }
+
+          var matchesWh = !whFilter || rowWh === whFilter;
+
+          var matchesStage = true;
+          if (stageFilter === "child") {
+            matchesStage = isChild;
+          } else if (stageFilter === "mother") {
+            matchesStage = !isChild;
+          } else if (stageFilter === "splice") {
+            matchesStage = isSplice;
+          } else if (stageFilter) {
+            matchesStage = rowStage === stageFilter;
+          }
+
+          if (matchesText && matchesWh && matchesStage) {
+            row.style.display = "";
+            visibleCount++;
+            visibleKg += rowKg;
+          } else {
+            row.style.display = "none";
+          }
+        }
+
+        var noResRow = document.getElementById("decom_no_results_row");
+        if (noResRow) {
+          noResRow.style.display = visibleCount === 0 ? "" : "none";
+        }
+
+        var lblCount = document.getElementById("lbl_decom_visible_count");
+        if (lblCount) lblCount.textContent = visibleCount;
+        var lblQuick = document.getElementById("lbl_decom_quick_count");
+        if (lblQuick) lblQuick.textContent = visibleCount;
+        var lblKg = document.getElementById("lbl_decom_visible_kg");
+        if (lblKg) lblKg.textContent = visibleKg.toLocaleString("es-CL", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+        syncDecomMasterCheckbox();
+      }
+
+      function onDecomRowClick(event, row) {
+        if (!row) return;
+        var chk = row.querySelector(".decom-roll-chk");
+        if (chk) {
+          chk.checked = !chk.checked;
+          onDecomRowCheckChange(chk);
+        }
+      }
+
+      function onDecomRowCheckChange(chk) {
+        if (!chk) return;
+        var row = chk.closest(".decom-roll-row");
+        if (row) {
+          row.style.backgroundColor = chk.checked ? "#fee2e2" : "";
+        }
+        updateDecomSelectionSummary();
+        syncDecomMasterCheckbox();
+      }
+
+      function toggleDecomSelectAll(masterChk) {
+        var state = masterChk.checked;
+        var rows = document.querySelectorAll(".decom-roll-row");
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].style.display !== "none") {
+            var chk = rows[i].querySelector(".decom-roll-chk");
+            if (chk) {
+              chk.checked = state;
+              rows[i].style.backgroundColor = state ? "#fee2e2" : "";
+            }
+          }
+        }
+        updateDecomSelectionSummary();
+      }
+
+      function decomSelectVisibleOnly(state) {
+        var rows = document.querySelectorAll(".decom-roll-row");
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].style.display !== "none") {
+            var chk = rows[i].querySelector(".decom-roll-chk");
+            if (chk) {
+              chk.checked = state;
+              rows[i].style.backgroundColor = state ? "#fee2e2" : "";
+            }
+          }
+        }
+        updateDecomSelectionSummary();
+        syncDecomMasterCheckbox();
+      }
+
+      function decomDeselectAll() {
+        var chks = document.querySelectorAll(".decom-roll-chk");
+        for (var i = 0; i < chks.length; i++) {
+          chks[i].checked = false;
+          var row = chks[i].closest(".decom-roll-row");
+          if (row) row.style.backgroundColor = "";
+        }
+        updateDecomSelectionSummary();
+        syncDecomMasterCheckbox();
+      }
+
+      function syncDecomMasterCheckbox() {
+        var master = document.getElementById("chk_decom_master");
+        if (!master) return;
+        var rows = document.querySelectorAll(".decom-roll-row");
+        var visibleCount = 0;
+        var checkedVisibleCount = 0;
+        for (var i = 0; i < rows.length; i++) {
+          if (rows[i].style.display !== "none") {
+            visibleCount++;
+            var chk = rows[i].querySelector(".decom-roll-chk");
+            if (chk && chk.checked) {
+              checkedVisibleCount++;
+            }
+          }
+        }
+        if (visibleCount === 0) {
+          master.checked = false;
+          master.indeterminate = false;
+        } else if (checkedVisibleCount === visibleCount) {
+          master.checked = true;
+          master.indeterminate = false;
+        } else if (checkedVisibleCount > 0) {
+          master.checked = false;
+          master.indeterminate = true;
+        } else {
+          master.checked = false;
+          master.indeterminate = false;
+        }
+      }
+
+      function updateDecomSelectionSummary() {
+        var chks = document.querySelectorAll(".decom-roll-chk:checked");
+        var totalCount = chks.length;
+        var totalKg = 0;
+        for (var i = 0; i < chks.length; i++) {
+          totalKg += parseFloat(chks[i].getAttribute("data-kg") || "0");
+        }
+
+        var summaryLbl = document.getElementById("lbl_decom_summary");
+        var subtextLbl = document.getElementById("lbl_decom_subtext");
+        var submitBtn = document.getElementById("btn_submit_decom");
+
+        if (summaryLbl) {
+          summaryLbl.textContent = totalCount + " bobina(s) seleccionada(s) (" + totalKg.toLocaleString("es-CL", {minimumFractionDigits: 2, maximumFractionDigits: 2}) + " kg)";
+        }
+        if (subtextLbl) {
+          subtextLbl.textContent = totalCount > 0
+            ? "Listo para procesar la baja. Revise el motivo y confirme la acción."
+            : "Marque las bobinas en la tabla o pegue una lista de códigos para darlas de baja.";
+        }
+        if (submitBtn) {
+          submitBtn.innerHTML = totalCount > 0
+            ? "<span>🗑️ Dar de Baja " + totalCount + " Bobinas (" + totalKg.toFixed(1) + " kg)</span>"
+            : "<span>🗑️ Dar de Baja Bobinas Seleccionadas</span>";
+        }
+      }
+
+      function setDecomQuickFilter(type, value) {
+        var searchInput = document.getElementById("decom_search_input");
+        var whSelect = document.getElementById("decom_filter_wh");
+        var stageSelect = document.getElementById("decom_filter_stage");
+
+        if (type === "all") {
+          if (searchInput) searchInput.value = "";
+          if (whSelect) whSelect.value = "";
+          if (stageSelect) stageSelect.value = "";
+        } else if (type === "child") {
+          if (stageSelect) stageSelect.value = "child";
+        } else if (type === "wh") {
+          if (whSelect) whSelect.value = value;
+        }
+        applyDecomFilter();
+      }
+
+      function resetDecomFilters() {
+        var searchInput = document.getElementById("decom_search_input");
+        var whSelect = document.getElementById("decom_filter_wh");
+        var stageSelect = document.getElementById("decom_filter_stage");
+        if (searchInput) searchInput.value = "";
+        if (whSelect) whSelect.value = "";
+        if (stageSelect) stageSelect.value = "";
+        applyDecomFilter();
+      }
+
+      function selectPastedCodes() {
+        var txtArea = document.getElementById("txt_paste_codes");
+        var txt = txtArea ? (txtArea.value || "").trim() : "";
+        if (!txt) {
+          alert("Pegue o escanee al menos un código de bobina en el área de texto.");
+          if (txtArea) txtArea.focus();
+          return;
+        }
+
+        var lines = txt.split(/[\\r\\n,;\\t\\s]+/);
+        var targetCodes = {};
+        for (var i = 0; i < lines.length; i++) {
+          var clean = lines[i].trim().toUpperCase();
+          if (clean) {
+            targetCodes[clean] = true;
+          }
+        }
+
+        var rows = document.querySelectorAll(".decom-roll-row");
+        var foundCount = 0;
+        var notFound = [];
+        var codeToRow = {};
+        for (var j = 0; j < rows.length; j++) {
+          var rCode = (rows[j].getAttribute("data-roll-code") || "").toUpperCase();
+          if (rCode) {
+            codeToRow[rCode] = rows[j];
+          }
+        }
+
+        for (var codeKey in targetCodes) {
+          if (codeToRow[codeKey]) {
+            var rowEl = codeToRow[codeKey];
+            var chkEl = rowEl.querySelector(".decom-roll-chk");
+            if (chkEl) {
+              chkEl.checked = true;
+              rowEl.style.backgroundColor = "#fee2e2";
+              foundCount++;
+            }
+          } else {
+            notFound.push(codeKey);
+          }
+        }
+
+        updateDecomSelectionSummary();
+        syncDecomMasterCheckbox();
+
+        var statusEl = document.getElementById("lbl_paste_status");
+        if (statusEl) {
+          var msg = "<span style=\'color:#166534\'>✓ Se encontraron y marcaron " + foundCount + " bobina(s).</span>";
+          if (notFound.length > 0) {
+            msg += "<br><span style=\'color:#dc2626\'>⚠️ No encontradas (o ya consumidas): " + notFound.slice(0, 5).join(", ") + (notFound.length > 5 ? " y " + (notFound.length - 5) + " más" : "") + "</span>";
+          }
+          statusEl.innerHTML = msg;
+        }
+
+        // Cambiar a la pestaña de lista para que Javier revise la selección
+        switchDecomTab("masivo");
+      }
+
+      function validateDecommissionForm() {
+        var chks = document.querySelectorAll(".decom-roll-chk:checked");
+        if (chks.length === 0) {
+          alert("Debe seleccionar al menos una bobina para procesar la baja.");
+          return false;
+        }
+
+        var selReason = document.getElementById("sel_decom_reason");
+        var reasonText = selReason ? selReason.options[selReason.selectedIndex].text.trim() : "Consumo en producción";
+        var traceChk = document.getElementById("chk_decom_trace_only");
+        var traceOnly = traceChk ? traceChk.checked : false;
+
+        var totalKg = 0;
+        for (var i = 0; i < chks.length; i++) {
+          totalKg += parseFloat(chks[i].getAttribute("data-kg") || "0");
+        }
+
+        var modeMsg = traceOnly
+          ? "⚠️ MODO SOLO TRAZABILIDAD (da de baja en TRZ sin modificar stock contable ERP)"
+          : "📦 DESCUENTO TOTAL (da de baja en TRZ y descuenta inventario ERP)";
+
+        var confirmMsg = "¿Confirma DAR DE BAJA Y DESCONTAR " + chks.length + " bobina(s) (" + totalKg.toFixed(2) + " kg)?\n\n"
+          + "Motivo: " + reasonText + "\n"
+          + modeMsg + "\n\n"
+          + "Esta acción marcará las bobinas como CONSUMIDAS y las retirará del stock activo de bodega.";
+
+        if (!confirm(confirmMsg)) {
+          return false;
+        }
+
+        var submitBtn = document.getElementById("btn_submit_decom");
+        if (submitBtn) {
+          submitBtn.disabled = true;
+          submitBtn.innerHTML = "<span>⏳ Procesando baja de bobinas...</span>";
+        }
+        return true;
+      }
+
+      // Inicializar
+      switchDecomTab("' . h($activeTab) . '");
+      applyDecomFilter();
+      updateDecomSelectionSummary();
+    </script>';
+
+    $body .= '</div>'; // Fin decom-shell
+
+    render('Baja de Bobinas - Exclusivo Javier', $body);
+}
+
+/**
  * Router de rutas de inventario.
  */
 function handleInventoryRoutes(string $path, string $method, ReceptionService $service, string $currentOperatorName, ?ProductionService $prodService = null): bool
 {
+    // GET: Módulo rápido exclusivo Javier para dar de baja / descontar bobinas ocupadas
+    if (($path === '/stock/bajas' || $path === '/stock/consume' || $path === '/stock/decommission') && $method === 'GET') {
+        unibagRenderRollsDecommissionPage($service, $prodService, $currentOperatorName);
+        return true;
+    }
+
+    // POST: Procesar baja de bobinas ocupadas (Exclusivo Javier)
+    if (($path === '/stock/bajas' || $path === '/stock/consume' || $path === '/stock/decommission') && $method === 'POST') {
+        requireCsrf();
+        $isJavier = unibagIsUserJavier() || (stripos($currentOperatorName, 'JAVIER') !== false);
+        if (!$isJavier) {
+            redirectResponse('/stock/transfers?error=' . rawurlencode('Acceso denegado: solo Javier puede realizar bajas de bobinas.'));
+            return true;
+        }
+
+        try {
+            $selectedRollIds = array_map('intval', (array)($_POST['selected_rolls'] ?? []));
+            $selectedRollIds = array_values(array_filter($selectedRollIds, static fn(int $id): bool => $id > 0));
+            $reason = trim((string)($_POST['reason'] ?? 'CONSUMED_IN_PRODUCTION'));
+            $notes = trim((string)($_POST['notes'] ?? ''));
+            $traceabilityOnly = !empty($_POST['traceability_only']);
+            $operatorName = trim((string)($_POST['operator_name'] ?? $currentOperatorName));
+            if ($operatorName === '') {
+                $operatorName = 'Javier Perozo';
+            }
+
+            if (empty($selectedRollIds)) {
+                redirectResponse('/stock/bajas?error=' . rawurlencode('No seleccionó ninguna bobina para dar de baja.'));
+                return true;
+            }
+
+            $result = $service->decommissionRollsBulk($selectedRollIds, $operatorName, $reason, $notes, $traceabilityOnly);
+            $params = [
+                'tab' => 'bajas',
+                'done' => 1,
+                'count' => (int)($result['success_count'] ?? 0),
+                'fail' => (int)($result['fail_count'] ?? 0),
+                'weight' => (float)($result['total_weight'] ?? 0),
+                'trace_only' => $traceabilityOnly ? 1 : 0,
+                'reason' => $reason,
+            ];
+            if (!empty($result['errors'])) {
+                $params['bulk_errors'] = implode(' | ', array_slice((array)$result['errors'], 0, 5));
+            }
+            redirectResponse('/stock/bajas?' . http_build_query($params));
+            return true;
+        } catch (Throwable $e) {
+            redirectResponse('/stock/bajas?error=' . rawurlencode('Error al procesar la baja de bobinas: ' . $e->getMessage()));
+            return true;
+        }
+    }
+
     // GET: Pantalla completa de Traspasos a Bodega 3000 (Planta)
     if (($path === '/stock/transfers' || $path === '/stock/traspasos') && $method === 'GET') {
         unibagRenderWarehouseTransfersPage($service, $prodService, $currentOperatorName);
