@@ -477,9 +477,48 @@ function handleProductionRoutes(
         $eventId = (int)($_REQUEST['refid'] ?? 0);
         $overrideEmbalaje = (int)($_REQUEST['overrideembalaje'] ?? 0);
         $comments = trim((string)($_REQUEST['evt_comments'] ?? ''));
+        $operatingContext = $prodService->getWorkOrderOperatingContext($agId, $workerId, $plantaId);
+        if ((int)($operatingContext['worker_ot']['id'] ?? 0) !== $workerOtId) {
+            redirectResponse('/production/work-orders/active?error=' . rawurlencode('La OT no corresponde al operador conectado.'));
+            return true;
+        }
+        $machine = $operatingContext['machine_init'] ?? [];
+        if ((int)($machine['type_createstock_act'] ?? 0) === 1) $overrideEmbalaje = 1;
+        $isCysPhase = (int)($machine['equipo_type_id'] ?? 0) === 8
+            || stripos((string)($machine['type_ant_title'] ?? ''), 'selladora') !== false;
+        $phaseActor = ($isCysPhase || $overrideEmbalaje === 1) ? [
+            'worker_id' => $workerId,
+            'name' => $currentOperatorName,
+            'receiver_worker_id' => (int)($_POST['phase_receiver_worker_id'] ?? 0),
+        ] : [];
+        if (!empty($_POST['cys_packing_save'])) {
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error='
+                . rawurlencode('El cierre cambio: registra el embalaje por separado y vuelve a abrir Corte y Sellado.'));
+            return true;
+        }
+        if ($eventId > 0) {
+            $event = $prodService->getEventById($eventId, $workerOtId);
+            if ($event === null || (int)$event['evt_prod_worker_otid'] !== $workerOtId) {
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error=' . rawurlencode('El evento no corresponde a esta OT.'));
+                return true;
+            }
+            $overrideEmbalaje = (int)($machine['type_createstock_act'] ?? 0) === 1
+                ? 1 : (int)($event['overrideembalaje_act'] ?? 0);
+        }
 
         // Caso 1: Inicio de Tiraje de Producción (arranque de máquina)
         if ($actionType === 'start' || $submode === 'start' || ($eventId <= 0 && $submode !== 'end' && empty($_REQUEST['prod_amount']))) {
+            if ($overrideEmbalaje === 1) {
+                foreach ($prodService->getWorkOrderEvents($workerOtId) as $activeEvent) {
+                    if ((int)($activeEvent['overrideembalaje_act'] ?? 0) === 1
+                        && (int)$activeEvent['evt_prod_worker_otid'] === $workerOtId
+                        && (int)$activeEvent['evt_status'] === 1 && (int)($activeEvent['evt_enddat'] ?? 0) === 0
+                        && (string)$activeEvent['evt_type'] === 'prod') {
+                        redirectResponse('/production/work-orders/operate?agid=' . $agId);
+                        return true;
+                    }
+                }
+            }
             $alisCheck = $prodService->getWorkOrderAlistamientoStatus($workerOtId);
             $machineInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
             if ($machineInit === null && $agId > 0) {
@@ -491,7 +530,7 @@ function handleProductionRoutes(
                 || stripos((string)($machineInit['type_ant_title'] ?? ''), 'rebobin') !== false
                 || stripos((string)($machineInit['equipo_name'] ?? ''), 'rebob') !== false;
 
-            if (!$isRebob && empty($alisCheck['has_alis'])) {
+            if ($overrideEmbalaje !== 1 && !$isRebob && empty($alisCheck['has_alis'])) {
                 redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error=' . rawurlencode('No puede iniciar producción sin haber terminado el alistamiento de la máquina.'));
                 return true;
             }
@@ -505,11 +544,18 @@ function handleProductionRoutes(
                 0,
                 0,
                 $mtype,
-                $comments !== '' ? $comments : 'Inicio de tiraje de producción',
+                $comments !== '' ? $comments : ($overrideEmbalaje === 1 ? 'Inicio de embalaje' : 'Inicio de produccion'),
                 null,
                 false,
-                $overrideEmbalaje
+                $overrideEmbalaje,
+                [], [], 0.0, 0.0, [], $phaseActor
             );
+            if (empty($res['ok'])) {
+                redirectResponse('/production/work-orders/operate?agid=' . $agId
+                    . '&mode=production&overrideembalaje=' . $overrideEmbalaje . '&action=start&error='
+                    . rawurlencode((string)($res['error'] ?? 'No se pudo iniciar la produccion.')));
+                return true;
+            }
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&prod_started=1');
             return true;
         }
@@ -698,7 +744,26 @@ function handleProductionRoutes(
             }
         }
 
-        $prodService->recordEventProduction(
+        $packagingDetail = null;
+        $packagingPdo = null;
+        try {
+            if ($overrideEmbalaje === 1) {
+                $packagingDetail = ProductionService::normalizePackagingDetail($_REQUEST);
+                $amount = (float)$packagingDetail['total_units'];
+                $amount2 = $bobinaKg = $amountFrente = $amountDorso = 0;
+                $mmaq = $mlin = 0;
+                $mtype = '';
+                $mermas = $repairs = [];
+                $summary = 'Embalaje: ' . $packagingDetail['req_embalaje_cajas_completas_amt'] . ' cajas completas, '
+                    . $packagingDetail['req_embalaje_caja_final'] . ' unidades en caja final, '
+                    . $packagingDetail['req_embalaje_bolsas_sobrantes_amt'] . ' sobrantes y '
+                    . $packagingDetail['req_embalaje_showroom'] . ' para showroom. Total: ' . $packagingDetail['total_units'] . ' unidades.';
+                $comments = preg_replace('/^Embalaje: .*?Total: \\d+ unidades\\.\\s*(?:Observacion:\\s*)?/s', '', $comments) ?? $comments;
+                $comments = $summary . ($comments !== '' ? ' Observacion: ' . $comments : '');
+                $packagingPdo = Db::erpPdo();
+                $packagingPdo->beginTransaction();
+            }
+        $productionResult = $prodService->recordEventProduction(
             $workerOtId,
             $amount,
             $amount2,
@@ -713,8 +778,24 @@ function handleProductionRoutes(
             $mermas,
             $repairs,
             $amountFrente,
-            $amountDorso
+            $amountDorso,
+            [],
+            $phaseActor
         );
+            if (empty($productionResult['ok'])) {
+                throw new RuntimeException((string)($productionResult['error'] ?? 'No se pudo guardar la produccion.'));
+            }
+            if ($packagingDetail !== null) {
+                $prodService->savePackagingEventDetail((int)$productionResult['event_id'], $workerOtId, $packagingDetail,
+                    (string)($_REQUEST['pack_supervisor_user'] ?? ''), (string)($_REQUEST['pack_supervisor_pass'] ?? ''));
+                $packagingPdo->commit();
+            }
+        } catch (Throwable $e) {
+            if ($packagingPdo !== null && $packagingPdo->inTransaction()) $packagingPdo->rollBack();
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=production&refid=' . $eventId
+                . '&overrideembalaje=' . $overrideEmbalaje . '&error=' . rawurlencode($e->getMessage()));
+            return true;
+        }
 
         $prodService->syncPulpoAgendaStats($agId);
 
@@ -771,6 +852,13 @@ function handleProductionRoutes(
         $submode = trim((string)($_REQUEST['submode'] ?? ''));
         $eventId = (int)($_REQUEST['refid'] ?? 0);
 
+        try {
+            $prodService->validateCysSetupMeasuresForAgenda($agId,$medFrom,$medTo);
+        } catch (RuntimeException $e) {
+            redirectResponse('/production/work-orders/operate?agid='.$agId.'&mode=apertura&error='.rawurlencode($e->getMessage()));
+            return true;
+        }
+
         if ($workerOtId <= 0 && $agId > 0) {
             $openOt = $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
             if ($openOt !== null) {
@@ -798,6 +886,11 @@ function handleProductionRoutes(
         }
 
         if ($eventId > 0 && $isEndingAlis) {
+            $result = $prodService->recordEventApertura($workerOtId, $medFrom, $medTo, $comments, $eventId, true, $idAyudante);
+            if (empty($result['ok'])) {
+                redirectResponse('/production/work-orders/operate?agid='.$agId.'&mode=apertura&refid='.$eventId.'&error='.rawurlencode($result['error']??'No se pudo guardar el alistamiento.'));
+                return true;
+            }
             $selectedPoints = [];
             if (isset($_POST['baseacids']) && is_array($_POST['baseacids'])) {
                 foreach ($_POST['baseacids'] as $baseacid) {
@@ -814,15 +907,21 @@ function handleProductionRoutes(
                 $prodService->sendAutocontrolToSupervisor($workerOtId, $selectedPoints, (int)($_SESSION['user_id'] ?? 0));
             }
 
-            $prodService->recordEventApertura($workerOtId, $medFrom, $medTo, $comments, $eventId, true, $idAyudante);
-
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=autocontrol&alis_finished=1');
             return true;
         } elseif ($eventId > 0) {
-            $prodService->recordEventApertura($workerOtId, $medFrom, $medTo, $comments, $eventId, false, $idAyudante);
+            $result = $prodService->recordEventApertura($workerOtId, $medFrom, $medTo, $comments, $eventId, false, $idAyudante);
+            if (empty($result['ok'])) {
+                redirectResponse('/production/work-orders/operate?agid='.$agId.'&mode=apertura&refid='.$eventId.'&error='.rawurlencode($result['error']??'No se pudo guardar el alistamiento.'));
+                return true;
+            }
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&alis_updated=1');
         } else {
-            $prodService->recordEventApertura($workerOtId, $medFrom, $medTo, $comments, null, false, $idAyudante);
+            $result = $prodService->recordEventApertura($workerOtId, $medFrom, $medTo, $comments, null, false, $idAyudante);
+            if (empty($result['ok'])) {
+                redirectResponse('/production/work-orders/operate?agid='.$agId.'&mode=apertura&error='.rawurlencode($result['error']??'No se pudo guardar el alistamiento.'));
+                return true;
+            }
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&alis_started=1');
         }
         return true;
@@ -887,6 +986,12 @@ function handleProductionRoutes(
         $userId = (int)($_SESSION['user_id'] ?? 0);
         $submode = trim((string)($_REQUEST['submode'] ?? ''));
 
+        $measureStatus = $prodService->getCysSetupMeasuresStatus($workerOtId);
+        if ($measureStatus['required'] && !$measureStatus['complete']) {
+            redirectResponse('/production/work-orders/operate?agid='.$agId.'&error='.rawurlencode('Selecciona De Medida y A Medida antes de confirmar el autocontrol.'));
+            return true;
+        }
+
         $selectedPoints = [];
         if (isset($_POST['baseacids']) && is_array($_POST['baseacids'])) {
             foreach ($_POST['baseacids'] as $baseacid) {
@@ -899,8 +1004,11 @@ function handleProductionRoutes(
             $selectedPoints = array_map('intval', $_POST['autocontrol_points']);
         }
 
-        // Asegurar cierre de evento de alistamiento
-        $prodService->closeOpenAperturaEvent($workerOtId);
+        // Only explicit confirmation finishes setup, not saving a draft.
+        // Solo la confirmacion finaliza el alistamiento, no guardar un borrador.
+        if (in_array($submode, ['close', 'close2'], true)) {
+            $prodService->closeOpenAperturaEvent($workerOtId);
+        }
 
         if ($submode === 'close') {
             $prodService->sendAutocontrolToSupervisor($workerOtId, $selectedPoints, $userId);
@@ -1162,16 +1270,9 @@ function handleProductionRoutes(
                 }
             }
         } elseif (!empty($rollIds)) {
-            $res = $prodService->requestRollsForWorkOrder(
-                $workerOtId,
-                $rollIds,
-                $comments,
-                $currentOperatorName,
-                $supUser,
-                $supPass,
-                $requiresSupervisor,
-                $rollQuantities
-            );
+            redirectResponse('/production/materials/request?agid=' . $agId
+                . '&error=' . rawurlencode('Solicita materiales de Bodega 100 o 200 desde esta pantalla. El despacho lo registra bodega.'));
+            return true;
         } else {
             $matType = trim((string)($_REQUEST['material_type'] ?? 'Insumo / Material Serigrafía'));
             $matQty = (float)str_replace(',', '.', (string)($_REQUEST['material_qty'] ?? 0));
@@ -1362,6 +1463,70 @@ function handleProductionRoutes(
     }
 
     // Registro de Desmontaje y Salida de Bobina (Peso Bobina, mermas por tipo, sobrante trazable)
+    if ($path === '/production/work-orders/handles/manage' && $method === 'POST') {
+        requireCsrf();
+        $agId = (int)($_POST['agid'] ?? 0);
+        $otId = (int)($_POST['worker_ot_id'] ?? 0);
+        $base = '/production/work-orders/operate?agid=' . $agId . '&mode=materiales';
+        try {
+            $handles = new HandleConsumptionService(Db::erpPdo(), Db::trzPdo());
+            $handleContext = $handles->operatorContext($otId, $workerId, $plantaId);
+            if ((int)$handleContext['ag_id'] !== $agId) throw new RuntimeException('La OT no corresponde a esta agenda.');
+            $action = (string)($_POST['handle_action'] ?? '');
+            $key = (string)($_POST['operation_key'] ?? '');
+            $userId = (int)($_SESSION['user_id'] ?? 0);
+            if ($userId <= 0) throw new RuntimeException('La sesion no tiene un usuario ERP valido.');
+            if ($action === 'scan') {
+                $code = trim((string)($_POST['handle_code'] ?? ''));
+                $scanned = $handles->scan($otId, $workerId, $plantaId, $code);
+                $key = bin2hex(random_bytes(16));
+                $confirmations = (array)($_SESSION['cys_handle_confirmations'] ?? []);
+                $confirmations[$key] = ['ot_id' => $otId, 'code' => $code, 'worker_id' => $workerId,
+                    'weight_kg' => (float)$scanned['weight_kg'], 'received_qty' => (float)$scanned['received_qty'], 'time' => time()];
+                $_SESSION['cys_handle_confirmations'] = array_slice($confirmations, -50, null, true);
+                redirectResponse($base . '&handle_confirm=' . $key);
+                return true;
+            }
+            if ($action === 'consume') {
+                $confirmation = $_SESSION['cys_handle_confirmations'][$key] ?? null;
+                if (!$confirmation || (int)$confirmation['ot_id'] !== $otId
+                    || (int)$confirmation['worker_id'] !== $workerId || time() - (int)$confirmation['time'] > 7200) {
+                    throw new RuntimeException('La confirmacion vencio. Escanea nuevamente las manillas.');
+                }
+                $mode = (string)($_POST['handle_mode'] ?? '');
+                if (!in_array($mode, ['full', 'partial'], true)) throw new RuntimeException('Selecciona el tipo de consumo.');
+                $leftoverText = str_replace(',', '.', trim((string)($_POST['handle_leftover_kg'] ?? '')));
+                if ($mode === 'partial' && (!is_numeric($leftoverText) || (float)$leftoverText < 0.001)) {
+                    throw new RuntimeException('Para consumo parcial indica el peso sobrante mayor que cero.');
+                }
+                $handles->consume($otId, $workerId, $plantaId, $userId, $currentOperatorName,
+                    $key, $confirmation['code'], $mode === 'full' ? 0 : (float)$leftoverText,
+                    !empty($_POST['accept_other_product']), $confirmation);
+            } elseif ($action === 'resume') {
+                $handles->resume($otId, $workerId, $plantaId, $key);
+            } elseif ($action === 'reverse' || $action === 'cancel') {
+                $supervisor = trim((string)($_POST['handle_supervisor'] ?? ''));
+                if (!$prodService->validateSupervisor($supervisor,
+                    (string)($_POST['handle_password'] ?? ''))) {
+                    throw new RuntimeException('Las credenciales del supervisor no son validas.');
+                }
+                $reason = trim((string)($_POST['handle_reason'] ?? ''));
+                if ($action === 'reverse') {
+                    $handles->reverse($otId, $workerId, $plantaId, $userId, $currentOperatorName,
+                        $key, (string)($_POST['original_key'] ?? ''), $reason, $supervisor);
+                } else {
+                    $handles->cancelPending($otId, $workerId, $plantaId, $key, $reason, $supervisor);
+                }
+            } else {
+                throw new RuntimeException('Accion de manillas no valida.');
+            }
+            redirectResponse($base . '&handles_saved=1');
+        } catch (Throwable $e) {
+            redirectResponse($base . '&handle_error=' . rawurlencode($e->getMessage()));
+        }
+        return true;
+    }
+
     if ($path === '/production/work-orders/materials/consume' && $method === 'POST') {
         requireCsrf();
         $agId = (int)($_REQUEST['agid'] ?? 0);
@@ -1774,7 +1939,7 @@ function handleProductionRoutes(
     }
 
     if ($path === '/production/work-orders/history' && $method === 'GET') {
-        $historyList = $prodService->listHistoryOrders($plantaId, 60);
+        $historyList = $prodService->listOperatorEventHistory($workerId, $plantaId, 100);
         renderProductionHistoryScreen($historyList, $currentOperatorName, $plantaName);
         return true;
     }
@@ -2241,6 +2406,9 @@ function renderProdwrkShell(
         <div style="cursor:pointer;font-size:14px;padding-left:25px;color:<?=$mid === 5 ? '#FFFFFF' : '#B8D5D3'?>;background-color:<?=$mid === 5 ? '#115452' : 'transparent'?>;padding-top:10px;padding-bottom:10px"
              onclick="location.href='/production/work-orders/active';">
             <i class="fa fa-fw fa-circle" style="font-size:12px;color:<?=$mid === 5 ? '#00A85A' : '#7FA8A5'?>"></i> En cursos
+        </div>
+        <div style="padding:10px 25px;background:<?=$mid === 3 ? '#115452' : 'transparent'?>">
+            <a href="/production/work-orders/history" style="color:white;text-decoration:none">Histórico</a>
         </div>
         <div style="cursor:pointer;font-size:14px;padding-left:25px;color:<?=$mid === 7 ? '#FFFFFF' : '#B8D5D3'?>;background-color:<?=$mid === 7 ? '#115452' : 'transparent'?>;padding-top:10px;padding-bottom:10px"
              onclick="location.href='/production/materials/request';">
@@ -2767,6 +2935,409 @@ function renderSerigrafiaInkConsumptionSection(array $ctx, string $returnTo = ''
 // CONSOLA DEL OPERARIO (Recreación exacta de editxid.php)
 // =============================================================================
 
+function renderStartPackagingButton(int $agId, int $workerOtId, string $style): void
+{
+    echo '<a href="/production/work-orders/operate?agid=' . $agId . '&amp;mode=production&amp;overrideembalaje=1&amp;action=start"'
+        . ' class="btngrey" style="text-decoration:none;' . htmlspecialchars($style, ENT_QUOTES, 'UTF-8') . '">Embalaje</a>';
+}
+
+function renderProductionReceiverField(array $receivers, array $saved): void
+{
+    echo '<tr><td class="tdleft">Recibe produccion</td><td class="tdnrm">';
+    if ($saved !== []) {
+        echo '<b>' . htmlspecialchars((string)$saved['receiver_name'], ENT_QUOTES, 'UTF-8') . '</b>';
+    } else {
+        echo '<select name="phase_receiver_worker_id" class="inptxt" style="width:100%" required>'
+            . '<option value="">Seleccionar</option>';
+        foreach ($receivers as $receiver) {
+            echo '<option value="' . (int)$receiver['id'] . '">'
+                . htmlspecialchars(trim($receiver['wrk_firstname'] . ' ' . $receiver['wrk_lastname']), ENT_QUOTES, 'UTF-8')
+                . '</option>';
+        }
+        echo '</select>';
+    }
+    echo '</td></tr>';
+}
+
+function renderPackagingProductionFields(array $agenda, array $saved, array $closureTypes): void
+{
+    $escape = static fn($v): string => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    $fields = [
+        'req_embalaje_medidas_caja' => 'Medida de caja',
+        'req_embalaje_bolsas_por_caja_amt' => 'Unidades por caja',
+        'req_embalaje_cajas_por_pallet_amt' => 'Cajas por pallet',
+        'req_embalaje_pallets_completos_amt' => 'Pallets completos',
+        'req_embalaje_palletcajas_incompletos_amt' => 'Cajas en pallet incompleto',
+        'req_embalaje_cajas_completas_amt' => 'Cajas completas',
+        'req_embalaje_caja_final' => 'Unidades en caja final',
+        'req_embalaje_bolsas_sobrantes_amt' => 'Unidades sobrantes',
+        'req_embalaje_showroom' => 'Unidades para showroom',
+    ];
+    echo '<style>
+        .pack-close-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(280px,1fr);gap:16px;align-items:start}
+        .pack-close-block{border:1px solid #cbd5e1;border-radius:8px;overflow:hidden;background:white}
+        .pack-close-title{background:#165552;color:white;font-size:14px;font-weight:800;padding:10px 12px}
+        .pack-close-table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:13px}
+        .pack-close-table th,.pack-close-table td{padding:7px 10px;border-bottom:1px solid #e2e8f0;text-align:left;overflow-wrap:anywhere}
+        .pack-close-table th{background:#f1f5f9}
+        .pack-close-table input,.pack-close-auth input,.pack-close-auth select,.pack-close-auth textarea{width:100%!important;box-sizing:border-box;min-width:0;max-width:100%;height:34px}
+        .pack-close-auth{padding:12px;display:grid;gap:10px}
+        .pack-close-auth label{display:grid;gap:5px;font-weight:700;font-size:13px}
+        .pack-close-auth textarea{height:65px}
+        .pack-close-total{padding:12px;background:#ecfdf5;border-bottom:1px solid #cbd5e1}
+        .pack-close-total input{width:100%;box-sizing:border-box;font-size:24px;font-weight:800;background:white;color:#165552}
+        .pack-close-credentials{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+        @media(max-width:950px){.pack-close-grid{grid-template-columns:1fr}}
+    </style><div class="pack-close-grid"><section class="pack-close-block"><div class="pack-close-title">Cantidades de embalaje</div>'
+        . '<table class="pack-close-table"><colgroup><col style="width:42%"><col style="width:28%"><col style="width:30%"></colgroup><tr><th>Dato</th><th>Pedido</th><th>Registrado</th></tr>';
+    foreach ($fields as $field => $label) {
+        $isText = $field === 'req_embalaje_medidas_caja';
+        $value = $saved[$field] ?? (in_array($field, ['req_embalaje_medidas_caja', 'req_embalaje_bolsas_por_caja_amt', 'req_embalaje_cajas_por_pallet_amt'], true) ? ($agenda[$field] ?? ($isText ? '' : 0)) : 0);
+        echo '<tr><td>' . $escape($label) . '</td><td>' . $escape($agenda[$field] ?? '-') . '</td><td>'
+            . '<input class="inptxt" name="' . $field . '" type="' . ($isText ? 'text' : 'number') . '" '
+            . ($isText ? 'maxlength="255"' : 'min="0" step="1"') . ' value="' . $escape($value) . '" required oninput="calculatePackagingUnits(this.form, this.name)"></td></tr>';
+    }
+    echo '</table></section><section class="pack-close-block"><div class="pack-close-title">Resumen y autorizacion</div>'
+        . '<div class="pack-close-total"><b>Total de unidades</b><input class="inptxt" name="prod_amount" id="pack_total_units" type="number" min="1" readonly required>'
+        . '<small>Cajas completas &times; unidades por caja + caja final + sobrantes + showroom</small></div><div class="pack-close-auth">';
+    echo '<label>Bodega de destino<select name="req_id_bodega" class="inptxt" required><option value="">Seleccionar</option>';
+    foreach (Db::erpPdo()->query('SELECT id, st_name FROM company_shops_storehouses ORDER BY st_name')->fetchAll(PDO::FETCH_ASSOC) as $warehouse) {
+        echo '<option value="' . (int)$warehouse['id'] . '" ' . ((int)($saved['req_id_bodega'] ?? 0) === (int)$warehouse['id'] ? 'selected' : '') . '>' . $escape($warehouse['st_name']) . '</option>';
+    }
+    echo '</select></label><label>Clasificacion de cierre<select name="req_codigo_cierre" class="inptxt" required><option value="">Seleccionar</option>';
+    foreach ($closureTypes as $type) {
+        echo '<option value="' . $escape($type['codigo']) . '" ' . ((string)($saved['req_codigo_cierre'] ?? '') === (string)$type['codigo'] ? 'selected' : '') . '>' . $escape($type['descripcion']) . '</option>';
+    }
+    echo '</select></label><div class="pack-close-credentials"><label>Usuario supervisor<input name="pack_supervisor_user" class="inptxt" autocomplete="off" required></label>'
+        . '<label>Clave supervisor<input type="password" name="pack_supervisor_pass" class="inptxt" autocomplete="new-password" required></label></div>';
+    echo '<label>Observacion del supervisor<textarea name="req_observacion" class="inptxt">' . $escape($saved['req_observacion'] ?? '') . '</textarea></label></div></section></div>';
+    echo '<script>
+        function calculatePackagingUnits(form, changedField) {
+            function n(key) { return Math.max(0, Number(form.elements[key].value) || 0); }
+            form.elements.prod_amount.value = n("req_embalaje_cajas_completas_amt") * n("req_embalaje_bolsas_por_caja_amt")
+                + n("req_embalaje_caja_final") + n("req_embalaje_bolsas_sobrantes_amt") + n("req_embalaje_showroom");
+            if (["req_embalaje_cajas_completas_amt", "req_embalaje_caja_final", "req_embalaje_cajas_por_pallet_amt"].indexOf(changedField) !== -1) {
+                var boxes = n("req_embalaje_cajas_completas_amt") + (n("req_embalaje_caja_final") > 0 ? 1 : 0);
+                var perPallet = n("req_embalaje_cajas_por_pallet_amt");
+                if (perPallet > 0) {
+                    form.elements.req_embalaje_pallets_completos_amt.value = Math.floor(boxes / perPallet);
+                    form.elements.req_embalaje_palletcajas_incompletos_amt.value = boxes % perPallet;
+                }
+            }
+        }
+        calculatePackagingUnits(document.getElementById("pack_total_units").form);
+    </script>';
+}
+
+function renderSimpleProductionComment(string $comment): string
+{
+    // Display only: keep stored technical text intact for traceability.
+    // Solo visualizacion: conservar el texto tecnico original en trazabilidad.
+    $comment = trim(preg_replace('/\\[TRZ-MAN:[a-f0-9]{32}\\]/', '', $comment) ?? $comment);
+    $comment = preg_replace_callback('/\\[SERI_COUNTERS:\\s*(.*?)\\]/', static function ($match): string {
+        $parts = [];
+        if (preg_match_all('/C\\d+:([^=,|]+)=(\\d+)/', $match[1], $counters, PREG_SET_ORDER)) {
+            foreach ($counters as $counter) $parts[] = trim($counter[1]) . ': ' . $counter[2];
+        }
+        if (preg_match('/img\\/bast=(\\d+)/', $match[1], $factor)) $parts[] = $factor[1] . ' imagenes por bastidor';
+        return 'Contadores de impresion: ' . implode(', ', $parts) . '.';
+    }, $comment) ?? $comment;
+    $comment = strtr($comment, [
+        'Inicio de tiraje de producción' => 'Inicio de produccion',
+        'Bobina Semielaborada' => 'Bobina procesada',
+        'ROLL_RETURNED_TO_WAREHOUSE' => 'Bobina devuelta a bodega',
+        'ROLL_DISMOUNTED' => 'Bobina desmontada',
+        'ROLL_MOUNTED' => 'Bobina montada',
+        'ROLL-CUT' => 'Rollo cortado',
+        'Override' => 'Embalaje', 'overrideembalaje' => 'embalaje',
+        'Kg/m' => 'kg por metro', 'Obs:' => 'Observacion:',
+        '->' => ' pasa a ', ' | ' => '. ',
+        'erp_item_id' => 'Articulo', 'sku_id' => 'Producto',
+        'warehouse_id' => 'Bodega', 'roll_id' => 'Bobina',
+        'evt_amount' => 'Cantidad', 'worker_ot_id' => 'OT',
+    ]);
+    return $comment;
+}
+
+function renderInternalFabricationNoteRow(array $agenda, int $labelColumns = 1, int $valueColumns = 3): void
+{
+    $note = trim((string)($agenda['req_desc_intern'] ?? ''));
+    $noteHtml = $note !== ''
+        ? nl2br(htmlspecialchars($note, ENT_QUOTES, 'UTF-8'))
+        : '<span style="color:#999">-</span>';
+    echo '<tr><td class="tdleft" colspan="' . $labelColumns . '" style="font-size:15px;font-weight:800;color:#0f172a">Observación interna</td>'
+        . '<td class="tdnrm" colspan="' . $valueColumns . '" style="white-space:normal;overflow-wrap:anywhere;line-height:1.6;font-size:15px;font-weight:800;color:#111827">'
+        . $noteHtml . '</td></tr>';
+}
+
+function renderMachineFabricationExtras(array $agenda, bool $showPackaging): void
+{
+    $escape = static fn($value): string => htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    echo '<table width="100%" cellpadding="6" cellspacing="0" style="background:white;border-top:1px solid #ddd">';
+    renderInternalFabricationNoteRow($agenda);
+    if ($showPackaging) {
+        echo '<tr><td colspan="4" class="tdleft" style="background:#1AAAA4;color:white;font-weight:800">Datos Embalaje</td></tr>';
+        $fields = [
+            'Mezcla' => $agenda['reqnum_mezcla_1'] ?? 'Sin Mezcla',
+            'Medida de caja' => $agenda['req_embalaje_medidas_caja'] ?? '-',
+            'Logotipo empresa' => $agenda['req_caja_impresa'] ?? '-',
+            'Cajas por pallet' => $agenda['req_embalaje_cajas_por_pallet_amt'] ?? 0,
+            'Cajas a utilizar' => $agenda['req_embalaje_cajas_completas_amt'] ?? 0,
+            'Unidades por caja' => $agenda['req_embalaje_bolsas_por_caja_amt'] ?? 0,
+            'Unidades caja final' => $agenda['req_embalaje_caja_final'] ?? 0,
+            'Total pedido' => $agenda['ag_amount'] ?? 0,
+        ];
+        $index = 0;
+        foreach ($fields as $label => $value) {
+            if ($index % 2 === 0) echo '<tr>';
+            echo '<td class="tdleft">' . $escape($label) . '</td><td class="tdnrm"><b>'
+                . $escape(is_numeric($value) ? number_format((float)$value, 0, ',', '.') : $value) . '</b></td>';
+            if ($index++ % 2 === 1) echo '</tr>';
+        }
+    }
+    echo '</table>';
+}
+
+function renderCysHandleMaterials(int $agId, int $otId, string $operator): void
+{
+    $escape = static fn($value): string => htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+    $base = '/production/work-orders/operate?agid=' . $agId . '&mode=materiales';
+    $workerId = (int)($_SESSION['wrk_id'] ?? 0);
+    $plantId = (int)($_SESSION['user_planta_id'] ?? 0);
+    echo '<section style="background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:16px;margin-bottom:16px">'
+        . '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">'
+        . '<h3 style="color:#165552;margin:0">Manillas</h3>'
+        . '<button type="button" class="btnblue" onclick="document.getElementById(\'cys_handle_scan\').showModal()">Escanear</button></div>';
+    if (isset($_GET['handles_saved'])) echo '<p style="color:#166534;font-weight:700">Operacion registrada. Revisa el saldo y estado en el historial de manillas.</p>';
+    if (!empty($_GET['handle_error'])) echo '<p style="color:#b91c1c">' . $escape($_GET['handle_error']) . '</p>';
+    $scanned = null;
+    $confirmation = null;
+    $confirmKey = trim((string)($_GET['handle_confirm'] ?? ''));
+    try {
+        $service = new HandleConsumptionService(Db::erpPdo(), Db::trzPdo());
+        $service->operatorContext($otId, $workerId, $plantId);
+        $history = $service->history($otId);
+        if ($confirmKey !== '') {
+            $confirmation = $_SESSION['cys_handle_confirmations'][$confirmKey] ?? null;
+            if (!$confirmation || (int)$confirmation['ot_id'] !== $otId
+                || (int)$confirmation['worker_id'] !== $workerId || time() - (int)$confirmation['time'] > 7200) {
+                throw new RuntimeException('La confirmacion vencio. Escanea nuevamente.');
+            }
+            $scanned = $service->scan($otId, $workerId, $plantId, $confirmation['code']);
+            if (abs((float)$scanned['weight_kg'] - (float)$confirmation['weight_kg']) > 0.0001
+                || abs((float)$scanned['received_qty'] - (float)$confirmation['received_qty']) > 0.0001) {
+                $scanned = null;
+                throw new RuntimeException('El saldo cambio desde el escaneo. Escanea nuevamente.');
+            }
+        }
+    } catch (Throwable $e) {
+        $history = $history ?? [];
+        echo '<p style="color:#b91c1c">' . $escape($e->getMessage()) . '</p>';
+    }
+    echo '<style>.cys-handle-dialog{border:1px solid #cbd5e1;border-radius:10px;padding:22px;width:min(640px,90vw);max-height:85vh;overflow:auto;color:#0f172a}'
+        . '.cys-handle-dialog::backdrop{background:rgba(15,23,42,.65)}'
+        . '.cys-handle-dialog label{display:block;margin:12px 0;font-weight:700}'
+        . '.cys-handle-dialog [hidden]{display:none!important}'
+        . '.cys-handle-dialog input:not([type=checkbox]),.cys-handle-dialog select,.cys-handle-dialog textarea{display:block;width:100%;box-sizing:border-box;margin-top:5px;padding:8px}'
+        . '.cys-handle-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}</style>';
+    $hidden = '<input type="hidden" name="_csrf" value="' . $escape(csrfToken()) . '">'
+        . '<input type="hidden" name="agid" value="' . $agId . '">'
+        . '<input type="hidden" name="worker_ot_id" value="' . $otId . '">';
+    echo '<dialog id="cys_handle_scan" class="cys-handle-dialog"><h2>Escanear manillas</h2>'
+        . '<form method="post" action="/production/work-orders/handles/manage">' . $hidden
+        . '<input type="hidden" name="handle_action" value="scan">'
+        . '<label>Codigo de trazabilidad<input name="handle_code" required autocomplete="off" autofocus placeholder="ROLL-MAN-XXXXX"></label>'
+        . '<div class="cys-handle-actions"><button type="button" class="btngrey" onclick="this.closest(\'dialog\').close()">Volver</button>'
+        . '<button class="btngreen" type="submit">Continuar</button></div></form></dialog>';
+    if ($scanned && $confirmation) {
+        echo '<dialog id="cys_handle_consume" class="cys-handle-dialog"><h2>Consumir manillas</h2>'
+            . '<div style="font-size:22px;font-weight:800">' . $escape($scanned['roll_code']) . '</div>'
+            . '<p><b>' . $escape($scanned['color'] ?? '-') . '</b> · Ancho: ' . number_format((float)($scanned['width_mm'] ?? 0) / 10, 2, ',', '.') . ' cm'
+            . '<br>' . $escape($scanned['warehouse_name']) . '</p>'
+            . '<p>Peso disponible: <b>' . number_format((float)$scanned['weight_kg'], 3, ',', '.') . ' kg</b>'
+            . '<br>Metros disponibles: <b>' . ($scanned['meters'] === null ? '-' : number_format((float)$scanned['meters'], 2, ',', '.')) . '</b></p>'
+            . '<form method="post" action="/production/work-orders/handles/manage">' . $hidden
+            . '<input type="hidden" name="handle_action" value="consume"><input type="hidden" name="operation_key" value="' . $escape($confirmKey) . '">'
+            . '<label>Tipo de consumo<select name="handle_mode" id="cys_handle_mode" onchange="updateCysHandleBalance()"><option value="full">Completo</option><option value="partial">Parcial</option></select></label>'
+            . '<label id="cys_handle_leftover_wrap" hidden>Peso sobrante (kg)<input type="number" name="handle_leftover_kg" id="cys_handle_leftover" step="0.001" min="0.001" max="'
+            . $escape(max(0, (float)$scanned['weight_kg'] - 0.001)) . '" oninput="updateCysHandleBalance()"></label>'
+            . '<div style="background:#ecfdf5;padding:12px;border-radius:6px"><b id="cys_handle_total"></b>'
+            . '<br><small>Consumo = peso disponible - sobrante. Los metros y la fraccion de rollo se ajustan proporcionalmente.</small></div>';
+        if ($scanned['product_warning']) {
+            echo '<label style="color:#b45309"><input type="checkbox" name="accept_other_product" value="1" required> Confirmo usar estas manillas, preparadas para otro producto.</label>';
+        }
+        echo '<div class="cys-handle-actions"><a class="btngrey" style="text-decoration:none" href="' . $escape($base) . '">Volver</a>'
+            . '<button type="submit" class="btngreen">Consumir</button></div></form></dialog>';
+        echo '<script>function updateCysHandleBalance(){const kg=' . json_encode((float)$scanned['weight_kg']) . ';'
+            . 'const partial=document.getElementById("cys_handle_mode").value==="partial";const input=document.getElementById("cys_handle_leftover");'
+            . 'document.getElementById("cys_handle_leftover_wrap").hidden=!partial;input.required=partial;input.disabled=!partial;'
+            . 'const left=partial?Number(input.value):0;document.getElementById("cys_handle_total").textContent="Consumo: "+Math.max(0,kg-left).toLocaleString("es-CL",{minimumFractionDigits:3,maximumFractionDigits:3})+" kg";}'
+            . 'updateCysHandleBalance();document.getElementById("cys_handle_consume").showModal();</script>';
+    }
+    echo '<div style="overflow:auto;max-height:300px;margin-top:14px"><table width="100%" cellpadding="8" cellspacing="0"><thead><tr>';
+    foreach (['Codigo', 'Fecha', 'Operacion', 'Consumo kg', 'Saldo kg', 'Estado', 'Opciones'] as $label) echo '<th class="tdheader">' . $escape($label) . '</th>';
+    echo '</tr></thead><tbody>';
+    $dialogs = '';
+    foreach ($history as $index => $op) {
+        $detail = $op['detail'];
+        $stateLabel = ['DONE' => 'Confirmado', 'PENDING' => 'Pendiente', 'REVERSED' => 'Devuelto', 'CANCELLED' => 'Cancelado'][$op['state']] ?? $op['state'];
+        echo '<tr><td class="tdnrm"><b>' . $escape($detail['code']) . '</b></td>'
+            . '<td class="tdnrm">' . date('d/m/Y H:i', (int)$op['created_at']) . '</td>'
+            . '<td class="tdnrm">' . ($op['action'] === 'CONSUME' ? 'Consumo' : 'Devolucion') . '</td>'
+            . '<td class="tdnrm">' . number_format((float)$detail['after']['used_kg'], 3, ',', '.') . '</td>'
+            . '<td class="tdnrm">' . number_format((float)$detail['after']['weight_kg'], 3, ',', '.') . '</td>'
+            . '<td class="tdnrm">' . $escape($stateLabel) . '</td><td class="tdnrm">';
+        if ($op['state'] === 'PENDING') {
+            echo '<form method="post" action="/production/work-orders/handles/manage" style="display:inline">' . $hidden
+                . '<input type="hidden" name="handle_action" value="resume"><input type="hidden" name="operation_key" value="' . $escape($op['operation_key']) . '">'
+                . '<button type="submit" class="btnblue">Reintentar</button></form> ';
+        }
+        $canReverse = $op['state'] === 'DONE' && $op['action'] === 'CONSUME';
+        if ($canReverse || $op['state'] === 'PENDING') {
+            $id = 'cys_handle_return_' . $index;
+            $action = $canReverse ? 'reverse' : 'cancel';
+            echo '<button type="button" class="btngrey" onclick="document.getElementById(\'' . $id . '\').showModal()">' . ($canReverse ? 'Devolver' : 'Cancelar') . '</button>';
+            $dialogs .= '<dialog id="' . $id . '" class="cys-handle-dialog"><h2>' . ($canReverse ? 'Devolver a Bodega 3000' : 'Cancelar pendiente') . '</h2>'
+                . '<b>' . $escape($detail['code']) . '</b><p>' . ($canReverse ? 'Solo confirmar si el material utilizado se recupero fisicamente. Se restauraran stock y saldo del codigo.'
+                    : 'Solo se puede cancelar si ERP aun no registro el movimiento. Si ya lo registro, reintenta primero.') . '</p>'
+                . '<form method="post" action="/production/work-orders/handles/manage">' . $hidden
+                . '<input type="hidden" name="handle_action" value="' . $action . '">'
+                . '<input type="hidden" name="operation_key" value="' . ($canReverse ? bin2hex(random_bytes(16)) : $escape($op['operation_key'])) . '">'
+                . '<input type="hidden" name="original_key" value="' . $escape($op['operation_key']) . '">'
+                . '<label>Motivo<textarea name="handle_reason" required></textarea></label>'
+                . '<label>Usuario supervisor<input name="handle_supervisor" required autocomplete="off"></label>'
+                . '<label>Clave supervisor<input type="password" name="handle_password" required autocomplete="new-password"></label>'
+                . '<div class="cys-handle-actions"><button type="button" class="btngrey" onclick="this.closest(\'dialog\').close()">Volver</button>'
+                . '<button type="submit" class="btnorange">Confirmar</button></div></form></dialog>';
+        }
+        echo '</td></tr>';
+    }
+    if ($history === []) echo '<tr><td colspan="7" class="tdnrm">No hay consumos de manillas en esta OT.</td></tr>';
+    echo '</tbody></table></div>' . $dialogs . '</section>';
+}
+
+function renderMachineAutocontrolFabrication(array $agenda, array $machine, array $transcomInfos, float $cutMeters): void
+{
+    $typeId = (int)($machine['equipo_type_id'] ?? 0);
+    $machineName = mb_strtolower((string)($machine['equipo_name'] ?? '') . ' ' . (string)($machine['type_ant_title'] ?? ''));
+    $isSealing = $typeId === 8 || str_contains($machineName, 'sell');
+    $isSerigraphy = in_array($typeId, [11, 22], true) || (int)($machine['equipo_prod_isprinter_seri'] ?? 0) === 1;
+    $isRebo = $typeId === 12;
+    $fields = [
+        'N° O.T.' => $agenda['prd_number'] ?? '',
+        'Cliente' => $agenda['cust_name'] ?? '',
+        'N° C.C.' => $agenda['req_number'] ?? '',
+        'Producto' => $agenda['item_title'] ?? '',
+        'Materialidad' => $agenda['fab_type'] ?? '',
+        'Color de tela' => $agenda['fabric_color'] ?? '-',
+        'Gramaje' => $agenda['fab_mat_gramms'] ?? '-',
+        'Ancho' => $agenda['fab_med_width'] ?? '-',
+        'Alto (Tiro)' => $transcomInfos['alto_tiro'] ?? $agenda['fab_med_height'] ?? '-',
+        'Alto (Retiro)' => $transcomInfos['alto_retiro'] ?? $agenda['fab_med_height'] ?? '-',
+        'Fuelle' => $agenda['fab_med_fuelle'] ?? '-',
+    ];
+    if ($isSealing) {
+        $fields += [
+            'Corte de Bolsa' => number_format($cutMeters, 4, ',', '.') . ' m',
+            'Doblez superior' => $transcomInfos['doblez_superior'] ?? '3',
+            'Dado de Manillas' => $agenda['req_infoaddprd_dado_manillas'] ?? '-',
+            'Cabezal' => $agenda['req_infoaddprd_cabezal_act'] ?? '-',
+            'Código' => $agenda['item_sellprice_barcodenumber'] ?? '-',
+            'Color Manillas' => $agenda['manilla_color'] ?? '-',
+            'Medida Manillas' => $agenda['fab_manilla_length'] ?? '-',
+        ];
+    }
+    if ($isSerigraphy) {
+        $fields += [
+            'Impresión' => $agenda['fab_printtype'] ?? '-',
+            'Imágenes por bastidor' => $agenda['req_operador_bastidoramt'] ?? '-',
+            'Dispositivo' => $agenda['fab_mat_dispositivo'] ?? '-',
+        ];
+        for ($colorIndex = 1; $colorIndex <= 10; $colorIndex++) {
+            if ((int)($agenda["fab_print_colors_front_{$colorIndex}"] ?? 0) > 0
+                || (int)($agenda["fab_print_colors_back_{$colorIndex}"] ?? 0) > 0) {
+                $fields["Color {$colorIndex}"] = $agenda["fab_print_colordesc_{$colorIndex}"] ?? '-';
+            }
+        }
+    }
+    echo '<div style="background:white;border:1px solid #ccc;border-radius:4px;overflow:hidden;margin-bottom:12px">';
+    echo '<div class="unibag-collapse-header" onclick="toggleCollapseSection(\'sec_autoctrl_machine_fab\', \'icon_autoctrl_machine_fab\')">'
+        . '<span>Información de Fabricación</span><span id="icon_autoctrl_machine_fab">Expandir / Minimizar</span></div>';
+    echo '<div id="sec_autoctrl_machine_fab"><table width="100%" cellpadding="6" cellspacing="0">';
+    foreach ($fields as $label => $value) {
+        echo '<tr><td class="tdleft" width="180">' . htmlspecialchars($label) . '</td><td class="tdnrm">'
+            . htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8') . '</td></tr>';
+    }
+    echo '</table>';
+    renderMachineFabricationExtras($agenda, !$isSerigraphy && !$isRebo);
+    echo '</div></div>';
+}
+
+/** Mandatory CyS setup capture before displaying any operation controls.
+ *  Captura obligatoria de medidas CyS antes de mostrar controles operativos. */
+function renderCysSetupMeasuresGate(array $ctx, array $status, array $medidas, array $helpers, string $name, string $plant): void
+{
+    $agenda = $ctx['agenda'];
+    $event = $status['event'] ?? [];
+    $agId = (int)$agenda['id'];
+    $otId = (int)($ctx['worker_ot']['id'] ?? 0);
+    $escape = static fn($value) => htmlspecialchars((string)$value,ENT_QUOTES,'UTF-8');
+    ob_start();
+    ?>
+    <style>
+    #cys_setup_measures{width:min(900px,94vw);max-height:92vh;overflow:auto;border:1px solid #cbd5e1;border-radius:10px;padding:24px;box-sizing:border-box}
+    #cys_setup_measures::backdrop{background:rgba(15,23,42,.65)}
+    #cys_setup_measures label{display:block;font-weight:bold;margin:14px 0 6px}
+    #cys_setup_measures select,#cys_setup_measures textarea{width:100%;box-sizing:border-box;padding:10px;font-size:16px}
+    .cys-measure-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+    </style>
+    <dialog id="cys_setup_measures" oncancel="event.preventDefault()">
+        <h2>De Medida a Medida</h2>
+        <p><b><?=$escape($ctx['machine_init']['equipo_name'] ?? $agenda['equipo_name'] ?? 'Corte y Sellado')?> |
+            OT <?=$escape($agenda['prd_number'] ?? $agId)?></b></p>
+        <p>Selecciona la medida actual y la medida para esta OT. Si no cambia la configuracion, selecciona la misma medida en ambos campos.</p>
+        <?php if (!empty($_GET['error'])): ?><p style="color:#991b1b"><?=$escape($_GET['error'])?></p><?php endif; ?>
+        <form method="post" action="/production/work-orders/events/apertura">
+            <input type="hidden" name="_csrf" value="<?=$escape(csrfToken())?>">
+            <input type="hidden" name="agid" value="<?=$agId?>">
+            <input type="hidden" name="worker_ot_id" value="<?=$otId?>">
+            <input type="hidden" name="refid" value="<?=(int)($event['id'] ?? 0)?>">
+            <input type="hidden" name="submode" value="<?=!empty($event['id'])?'update':'start'?>">
+            <?php foreach (['from'=>'De Medida','to'=>'A Medida'] as $side=>$label): ?>
+            <label for="cys_measure_<?=$side?>"><?=$label?> *</label>
+            <select id="cys_measure_<?=$side?>" name="evt_medida_<?=$side?>id" required onchange="updateCysMeasureChange()">
+                <option value="">Seleccione medida...</option>
+                <?php foreach ($medidas as $m): ?>
+                <option value="<?=(int)$m['id']?>" <?=(int)($event['evt_medida_'.$side.'id']??0)===(int)$m['id']?'selected':''?>><?=$escape($m['med_name'])?></option>
+                <?php endforeach; ?>
+            </select>
+            <?php endforeach; ?>
+            <p id="cys_measure_change" style="background:#f1f5f9;padding:12px;font-weight:bold"></p>
+            <label>Ayudante</label>
+            <select name="evt_idayudante"><option value="0">Sin ayudante</option>
+                <?php foreach ($helpers as $h): ?><option value="<?=(int)$h['id']?>" <?=(int)($event['evt_idayudante']??0)===(int)$h['id']?'selected':''?>><?=$escape($h['ayudantes'])?></option><?php endforeach; ?>
+            </select>
+            <label>Comentarios</label><textarea name="evt_comments" rows="3"><?=$escape($event['evt_comments']??'')?></textarea>
+            <?php if (!$medidas): ?><p style="color:#991b1b">No hay medidas disponibles en el catalogo ERP.</p><?php endif; ?>
+            <div class="cys-measure-actions">
+                <a class="btngrey" href="/production/work-orders/active">Volver</a>
+                <button type="submit" class="btngreen" <?=$medidas?'':'disabled'?>>Guardar</button>
+            </div>
+        </form>
+    </dialog>
+    <script>
+    function updateCysMeasureChange(){
+        const from=document.getElementById('cys_measure_from').value;
+        const to=document.getElementById('cys_measure_to').value;
+        document.getElementById('cys_measure_change').textContent=!from||!to?'Selecciona ambas medidas.'
+            :(from===to?'Sin cambio de configuracion':'Cambio de configuracion');
+    }
+    document.getElementById('cys_setup_measures').showModal();updateCysMeasureChange();
+    </script>
+    <?php
+    renderProdwrkShell('De Medida a Medida',ob_get_clean(),2,$name,$plant);
+}
+
 function renderProductionOperatorConsole(
     array $ctx,
     array $events,
@@ -2817,10 +3388,17 @@ function renderProductionOperatorConsole(
     $mode = trim((string)($_GET['mode'] ?? ''));
     $refId = (int)($_GET['refid'] ?? 0);
     $overrideEmbalaje = (int)($_GET['overrideembalaje'] ?? 0);
+    if ($refId > 0) {
+        $selectedEvent = (new ProductionService(Db::erpPdo(), Db::trzPdo()))->getEventById($refId, $workerOtId);
+        if ($selectedEvent !== null && (int)$selectedEvent['evt_prod_worker_otid'] === $workerOtId) {
+            $overrideEmbalaje = (int)($selectedEvent['overrideembalaje_act'] ?? 0);
+        }
+    }
+    if ((int)($machineInit['type_createstock_act'] ?? 0) === 1) $overrideEmbalaje = 1;
 
     // Tipos de máquina
     $equipoTypeId = (int)($machineInit['equipo_type_id'] ?? 0);
-    $isFlexo = (int)($machineInit['equipo_prod_isprinter_flexo'] ?? 0) === 1;
+    $isFlexo = $equipoTypeId === 7 || (int)($machineInit['equipo_prod_isprinter_flexo'] ?? 0) === 1;
     $isSeri = (int)($machineInit['equipo_prod_isprinter_seri'] ?? 0) === 1
         || ($equipoTypeId === 11)
         || ($equipoTypeId === 22)
@@ -2830,7 +3408,21 @@ function renderProductionOperatorConsole(
         && (stripos((string)($machineInit['equipo_name'] ?? ''), 'pulpo') !== false || (int)($machineInit['win_equipoid'] ?? 0) === 36);
     $isSeriPlana = $isSeri && !$isSeriPulpo;
     $isPrinter = $isFlexo || $isSeri;
-    $isSelladora = stripos((string)($machineInit['type_ant_title'] ?? ''), 'selladora') !== false;
+    $isSelladora = $equipoTypeId === 8 || stripos((string)($machineInit['type_ant_title'] ?? ''), 'selladora') !== false;
+    if ($isSelladora && $workerOtId > 0) {
+        $setupService = $ctx['prod_service'] ?? new ProductionService(Db::erpPdo(),Db::trzPdo());
+        $setupStatus = $setupService->getCysSetupMeasuresStatus($workerOtId);
+        if (!$setupStatus['complete']) {
+            renderCysSetupMeasuresGate($ctx,$setupStatus,$medidas,$helpers,$currentOperatorName,$plantaName);
+            return;
+        }
+    }
+    // Legacy packaging URLs lead to confirmation, never to box generation in CyS.
+    // Las URLs antiguas de embalaje llevan a confirmar, no a generar cajas en CyS.
+    if ($isSelladora && $mode === 'embalaje') {
+        redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=production&overrideembalaje=1&action=start');
+        return;
+    }
     $isRebobinadora = ($equipoTypeId === 12)
         || stripos((string)($machineInit['type_ant_title'] ?? ''), 'rebobin') !== false
         || stripos((string)($machineInit['equipo_name'] ?? ''), 'rebob') !== false;
@@ -2850,6 +3442,10 @@ function renderProductionOperatorConsole(
     } catch (\Throwable) {}
 
     $prodService = $ctx['prod_service'] ?? new ProductionService(Db::erpPdo(), Db::trzPdo());
+    $phaseResponsibilities = ($isSelladora || $isEmbalaje)
+        ? $prodService->getProductionPhaseResponsibilities($workerOtId) : [];
+    $phaseReceivers = ($mode === 'production' && ($isSelladora || $isEmbalaje || $overrideEmbalaje === 1))
+        ? $prodService->listProductionReceivers() : [];
 
     // Bobinas asignadas a la orden de trabajo (para selección en Embalaje y Semielaborado)
     $assignedRolls = [];
@@ -2928,17 +3524,10 @@ function renderProductionOperatorConsole(
         }
     }
 
-    if (isset($_GET['end_alis']) || $mode === 'autocontrol') {
-        if ($workerOtId > 0) {
-            $prodServiceInstance = new ProductionService(Db::erpPdo(), Db::trzPdo());
-            $prodServiceInstance->closeOpenAperturaEvent($workerOtId);
-            $hasAlis = true;
-            $alisStatus['has_alis'] = true;
-        }
-    }
-
     $hasApertura = !empty($alisStatus['has_apertura']);
-    $hasAlis = !empty($alisStatus['has_alis']) || isset($_GET['end_alis']) || ($mode === 'autocontrol');
+    // Opening the confirmation screen must not finish the setup event.
+    // Abrir la confirmacion no finaliza el evento de alistamiento.
+    $hasAlis = !empty($alisStatus['has_alis']);
     $superInputs = (int)($autoctrlStatus['super_inputs'] ?? 0);
     $superPending = !empty($autoctrlStatus['super_pending']);
     $superApproved = !empty($autoctrlStatus['super_approved']);
@@ -2981,16 +3570,13 @@ function renderProductionOperatorConsole(
     $isExclusiveAutocontrol = (!$isRebobinadora && ($gotoAutocontrol || $mode === 'autocontrol') && !in_array($mode, ['materiales', 'cargar', 'tintas', 'mantencion', 'pause', 'terminarot'], true));
 
     // Detectar evento de producción abierto
-    $openProdEvent = null;
-    foreach ($events as $ev) {
-        if ($ev['evt_type'] === 'prod' && (int)($ev['evt_enddat'] ?? 0) === 0) {
-            $openProdEvent = $ev;
-            break;
-        }
-    }
+    $openProdEvent = ProductionService::findOpenProductionPhase($events, $workerOtId, 0);
+    $openPackagingEvent = ProductionService::findOpenProductionPhase($events, $workerOtId, 1);
+    if ($isEmbalaje) $openProdEvent = $openPackagingEvent;
     $openProdId = $openProdEvent !== null ? (int)$openProdEvent['id'] : 0;
-    if ($mode === 'production' && $refId <= 0 && $openProdId > 0) {
-        $refId = $openProdId;
+    if ($mode === 'production' && $refId <= 0) {
+        $phaseOpen = $overrideEmbalaje === 1 ? $openPackagingEvent : $openProdEvent;
+        if ($phaseOpen !== null) $refId = (int)$phaseOpen['id'];
     }
 
     // Detectar evento de pausa abierto
@@ -3017,12 +3603,6 @@ function renderProductionOperatorConsole(
         if ($blankIfNull && ($formatted === '0' || $formatted === '')) return '&nbsp;';
         return $formatted;
     };
-    $internalFabricationNote = trim((string)($agenda['req_desc_intern'] ?? ''));
-    $internalFabricationNoteHtml = $internalFabricationNote !== ''
-        ? nl2br(htmlspecialchars($internalFabricationNote))
-        : '<span style="color:#999">-</span>';
-    $internalFabricationNoteLabelStyle = 'font-size:15px;font-weight:800;color:#0f172a';
-    $internalFabricationNoteValueStyle = 'white-space:normal;line-height:1.6;font-size:15px;font-weight:800;color:#111827';
 
     // Cálculos de desarrollo, corte, metros y kg
     $corte_m2 = 0.0;
@@ -3245,6 +3825,9 @@ function renderProductionOperatorConsole(
     <?php endif; ?>
 
     <?php if ($isExclusiveAutocontrol): ?>
+        <?php if (!$hasAlis): ?>
+            <a href="/production/work-orders/operate?agid=<?=$agId?>" class="btngrey" style="display:inline-block;margin-bottom:12px;text-decoration:none">Volver al alistamiento</a>
+        <?php endif; ?>
         <!-- ============================================================== -->
         <!-- PANTALLA EXCLUSIVA DE AUTOCONTROL (autocontrol.form.php)       -->
         <!-- Se muestra únicamente cuando el alistamiento ha terminado y    -->
@@ -3501,10 +4084,7 @@ function renderProductionOperatorConsole(
                         </tr>
                         <?php endif; ?>
                     <?php endfor; ?>
-                    <tr>
-                        <td class="tdleft" colspan="2" style="<?=$internalFabricationNoteLabelStyle?>">Observación interna</td>
-                        <td class="tdnrm" colspan="2" style="<?=$internalFabricationNoteValueStyle?>"><?=$internalFabricationNoteHtml?></td>
-                    </tr>
+                    <?php renderInternalFabricationNoteRow($agenda, 2, 2); ?>
                     </table>
                 </div>
             </div>
@@ -3653,7 +4233,7 @@ function renderProductionOperatorConsole(
                     </table>
                 </div>
             </div>
-        <?php else: ?>
+        <?php elseif ($isFlexo): ?>
             <!-- Tarjeta 1: Información Cliente y Diseño para Autocontrol -->
             <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
                 <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_autoctrl_info_cliente', 'icon_autoctrl_info_cliente')">
@@ -3904,13 +4484,12 @@ function renderProductionOperatorConsole(
                         <td class="tdleft">&nbsp;</td>
                         <td class="tdnrm">&nbsp;</td>
                     </tr>
-                    <tr>
-                        <td class="tdleft" style="<?=$internalFabricationNoteLabelStyle?>">Observación interna</td>
-                        <td class="tdnrm" colspan="3" style="<?=$internalFabricationNoteValueStyle?>"><?=$internalFabricationNoteHtml?></td>
-                    </tr>
+                    <?php renderInternalFabricationNoteRow($agenda); ?>
                     </table>
                 </div>
             </div>
+        <?php else: ?>
+            <?php renderMachineAutocontrolFabrication($agenda, $machineInit, $transcomInfos, $corte_m2); ?>
         <?php endif; ?>
 
         <!-- Tarjeta 2: AUTOCONTROL / APROBACIÓN LÍDER DE ÁREA O SUPERVISOR -->
@@ -4915,10 +5494,7 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">&nbsp;</td>
                     <td class="tdnrm">&nbsp;</td>
                 </tr>
-                <tr>
-                    <td class="tdleft" style="<?=$internalFabricationNoteLabelStyle?>">Observación interna</td>
-                    <td class="tdnrm" colspan="3" style="<?=$internalFabricationNoteValueStyle?>"><?=$internalFabricationNoteHtml?></td>
-                </tr>
+                <?php renderInternalFabricationNoteRow($agenda); ?>
                 </table>
             </div>
         </div>
@@ -5978,8 +6554,7 @@ function renderProductionOperatorConsole(
                     </div>
                 <?php endif; ?>
                 <div style="margin-bottom:12px;background:#F8FAFC;border:1px solid #CBD5E1;border-radius:4px;padding:10px 12px">
-                    <div class="tdleft" style="margin-bottom:4px;<?=$internalFabricationNoteLabelStyle?>">Observación interna</div>
-                    <div class="tdnrm" style="<?=$internalFabricationNoteValueStyle?>"><?=$internalFabricationNoteHtml?></div>
+                    <?php renderMachineFabricationExtras($agenda, false); ?>
                 </div>
                 <form method="post" action="/production/work-orders/events/pulpo-fabricacion">
                     <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
@@ -6408,10 +6983,7 @@ function renderProductionOperatorConsole(
                     </tr>
                     <?php endif; ?>
                 <?php endfor; ?>
-                <tr>
-                    <td class="tdleft" colspan="2" style="<?=$internalFabricationNoteLabelStyle?>">Observación interna</td>
-                    <td class="tdnrm" colspan="2" style="<?=$internalFabricationNoteValueStyle?>"><?=$internalFabricationNoteHtml?></td>
-                </tr>
+                <?php renderInternalFabricationNoteRow($agenda, 2, 2); ?>
                 </table>
             </div>
         </div>
@@ -6508,6 +7080,7 @@ function renderProductionOperatorConsole(
                     </td>
                 </tr>
                 </table>
+                <?php renderMachineFabricationExtras($agenda, false); ?>
             </div>
         </div>
 
@@ -7065,6 +7638,7 @@ function renderProductionOperatorConsole(
                     <?php endif; ?>
                     </table>
                 <?php endif; ?>
+                <?php renderMachineFabricationExtras($agenda, !$isRebobinadora); ?>
             </div>
         </div>
     <?php endif; ?>
@@ -7104,11 +7678,11 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">Máquina</td>
                     <td class="tdnrm"><b><?=htmlspecialchars((string)($machineInit['equipo_name'] ?? $agenda['equipo_name'] ?? '-'))?></b></td>
                 </tr>
-                <?php if (!empty($machineInit['type_ant_inpmedidas_act'])): ?>
+                <?php if ($isSelladora || !empty($machineInit['type_ant_inpmedidas_act'])): ?>
                     <tr>
                         <td class="tdleft">De Medida *</td>
                         <td class="tdnrm">
-                            <select name="evt_medida_fromid" class="inptxt" style="width:350px;background:#fff">
+                            <select name="evt_medida_fromid" required class="inptxt" style="width:350px;background:#fff">
                                 <option value="">&lt; Seleccione medida actual &gt;</option>
                                 <?php foreach ($medidas as $m): ?>
                                     <option value="<?=$m['id']?>"><?=htmlspecialchars((string)$m['med_name'])?></option>
@@ -7119,7 +7693,7 @@ function renderProductionOperatorConsole(
                     <tr>
                         <td class="tdleft">A Medida *</td>
                         <td class="tdnrm">
-                            <select name="evt_medida_toid" class="inptxt" style="width:350px;background:#fff">
+                            <select name="evt_medida_toid" required class="inptxt" style="width:350px;background:#fff">
                                 <option value="">&lt; Seleccione nueva medida &gt;</option>
                                 <?php foreach ($medidas as $m): ?>
                                     <option value="<?=$m['id']?>"><?=htmlspecialchars((string)$m['med_name'])?></option>
@@ -7160,6 +7734,8 @@ function renderProductionOperatorConsole(
     <?php elseif ($mode === 'production'): ?>
         <!-- SUBFORMULARIO: Registrar Producción (form.production.php) -->
         <?php
+        $openProdEvent = ProductionService::findOpenProductionPhase($events, $workerOtId, $overrideEmbalaje);
+        if ($refId <= 0 && $openProdEvent !== null) $refId = (int)$openProdEvent['id'];
         $currentRefEvt = null;
         if ($refId > 0) {
             foreach ($events as $ev) {
@@ -7171,11 +7747,11 @@ function renderProductionOperatorConsole(
         }
         $isEvtOpen = ($currentRefEvt !== null && (int)($currentRefEvt['evt_enddat'] ?? 0) === 0);
         $isStarting = ($openProdEvent === null && ($refId <= 0 || ($_GET['action'] ?? '') === 'start') && ($_GET['submode'] ?? '') !== 'end');
-        if ($isStarting && !$hasAlis && !$isRebobinadora) {
+        if ($isStarting && $overrideEmbalaje !== 1 && !$hasAlis && !$isRebobinadora) {
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error=' . rawurlencode('Debe iniciar y terminar el alistamiento antes de iniciar la producción.'));
             return;
         }
-        $prodServiceInstance = new ProductionService(Db::erpPdo(), Db::trzPdo());
+        $prodServiceInstance = $prodService;
         $defectUnits = ($refId > 0) ? $prodServiceInstance->getEventDefectUnits($refId) : [];
         $mermaMap = [];
         $repairMap = [];
@@ -7322,17 +7898,21 @@ function renderProductionOperatorConsole(
             <!-- ============================================================== -->
             <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:24px">
                 <div style="font-size:17px;font-weight:bold;color:#00A85A;margin-bottom:15px;display:flex;align-items:center;gap:8px">
-                    <i class="fa fa-play-circle" style="font-size:22px"></i> Iniciar Tiraje de Producción
-                    <?=($overrideEmbalaje === 1 ? ' [Modo Embalaje]' : '')?>
+                    <i class="fa fa-play-circle" style="font-size:22px"></i> <?=$overrideEmbalaje === 1 ? 'Confirmar inicio de embalaje' : 'Iniciar Tiraje de Producción'?>
                 </div>
 
                 <div style="background:#F0FDF4;border:1.5px solid #86EFAC;border-radius:6px;padding:16px;margin-bottom:20px;color:#166534">
                     <div style="font-size:14px;font-weight:bold;margin-bottom:6px">
-                        <i class="fa fa-info-circle"></i> Arranque de Producción
+                        <i class="fa fa-info-circle"></i> <?=$overrideEmbalaje === 1 ? 'Inicio de produccion de embalaje' : 'Arranque de Producción'?>
                     </div>
                     <div style="font-size:13px;line-height:1.5">
-                        Al presionar <b>Comenzar Producción</b>, la máquina pasará a estado <b>EN PRODUCCIÓN ACTIVA</b> y comenzará a registrar el tiempo del tiraje.
-                        Las unidades o metros fabricados y el registro de mermas se ingresarán al <b>Finalizar Producción</b> al concluir la tirada o cambiar de turno.
+                        <?php if ($overrideEmbalaje === 1): ?>
+                            Al presionar <b>Iniciar</b>, se registrara el inicio del embalaje y volvera a la consola de la OT.
+                            Las cantidades de cajas, pallets y unidades se ingresaran al <b>Finalizar embalaje</b>.
+                        <?php else: ?>
+                            Al presionar <b>Comenzar Producción</b>, la máquina pasará a estado <b>EN PRODUCCIÓN ACTIVA</b> y comenzará a registrar el tiempo del tiraje.
+                            Las unidades o metros fabricados y el registro de mermas se ingresarán al <b>Finalizar Producción</b> al concluir la tirada o cambiar de turno.
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -7366,11 +7946,14 @@ function renderProductionOperatorConsole(
                         <td class="tdleft">Operador Responsable</td>
                         <td class="tdnrm"><b><?=htmlspecialchars($currentOperatorName)?></b></td>
                     </tr>
+                    <?php if ($isSelladora || $overrideEmbalaje === 1): ?>
+                        <?php renderProductionReceiverField($phaseReceivers, []); ?>
+                    <?php endif; ?>
                     <tr>
                         <td class="tdleft">Hora de Inicio</td>
                         <td class="tdnrm"><b style="color:#059669"><i class="fa fa-clock"></i> <?=date('d.m.Y H:i')?></b></td>
                     </tr>
-                    <?php if ($isFlexo): ?>
+                    <?php if ($isFlexo && $overrideEmbalaje !== 1): ?>
                         <input type="hidden" name="evt_metrotype" value="metros_lineales">
                     <?php endif; ?>
                     <tr>
@@ -7395,15 +7978,15 @@ function renderProductionOperatorConsole(
             <!-- ============================================================== -->
             <!-- PANTALLA 2: FINALIZAR PRODUCCIÓN O MODIFICAR REGISTRO          -->
             <!-- ============================================================== -->
-            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
+            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;<?=$overrideEmbalaje === 1 ? 'max-width:1180px;margin:0 auto' : ''?>">
                 <div style="font-size:16px;font-weight:bold;color:#115452;margin-bottom:15px">
-                    <i class="fa fa-fw fa-flag-checkered"></i> <?=($refId > 0 ? ($isEvtOpen ? 'Finalizar / Registrar Avance de Producción' : 'Detalle de Producción') : 'Cierre de Producción')?>
-                    <?=($overrideEmbalaje === 1 ? ' [Modo Embalaje]' : '')?>
+                    <i class="fa fa-fw fa-flag-checkered"></i> <?=$overrideEmbalaje === 1 ? ($isEvtOpen ? 'Finalizar embalaje' : 'Detalle de embalaje') : ($refId > 0 ? ($isEvtOpen ? 'Finalizar / Registrar Avance de Producción' : 'Detalle de Producción') : 'Cierre de Producción')?>
                 </div>
 
                 <?php if ($isEvtOpen && $currentRefEvt !== null): ?>
                     <div style="background:#EFF6FF;border:1px solid #93C5FD;border-radius:4px;padding:12px 16px;margin-bottom:18px;color:#1E40AF">
-                        <i class="fa fa-stopwatch"></i> Tiraje en curso iniciado el <b><?=date('d.m.Y H:i:s', (int)$currentRefEvt['evt_crtdat'])?></b>. Ingrese a continuación las bolsas/metros terminados y mermas para cerrar el evento.
+                        <i class="fa fa-stopwatch"></i> <?=$overrideEmbalaje === 1 ? 'Embalaje iniciado el' : 'Tiraje en curso iniciado el'?> <b><?=date('d/m/Y H:i:s', (int)$currentRefEvt['evt_crtdat'])?></b>.
+                        <?=$overrideEmbalaje === 1 ? 'Registre las cantidades embaladas y solicite la autorizacion del supervisor.' : ($isSelladora ? 'Ingrese los contadores, mermas y reparaciones de Corte y Sellado.' : 'Ingrese las bolsas/metros terminados y mermas para cerrar el evento.')?>
                     </div>
                 <?php endif; ?>
 
@@ -7419,13 +8002,15 @@ function renderProductionOperatorConsole(
                     <colgroup><col width="220"><col></colgroup>
                     <tr>
                         <td class="tdleft">Tipo</td>
-                        <td class="tdnrm"><b><?=htmlspecialchars((string)($machineInit['type_ant_title'] ?? $agenda['type_ant_title'] ?? '-'))?></b></td>
+                        <td class="tdnrm"><b><?=$overrideEmbalaje === 1 ? 'Embalaje' : htmlspecialchars((string)($machineInit['type_ant_title'] ?? $agenda['type_ant_title'] ?? '-'))?></b></td>
                     </tr>
                     <tr>
                         <td class="tdleft">Máquina</td>
                         <td class="tdnrm"><b><?=htmlspecialchars((string)($machineInit['equipo_name'] ?? $agenda['equipo_name'] ?? '-'))?></b></td>
                     </tr>
-                    <?php if ($isFlexo): ?>
+                    <?php if ($overrideEmbalaje === 1): ?>
+                        <tr><td colspan="2"><?php renderPackagingProductionFields($agenda, $prodService->getPackagingEventDetail($refId, $workerOtId), $prodService->listPackagingClosureTypes((int)$agenda['ag_reqid'])); ?></td></tr>
+                    <?php elseif ($isFlexo): ?>
                         <input type="hidden" name="evt_metrotype" value="metros_lineales">
                         <input type="hidden" name="evt_amount_metros_maquina" value="<?=$valMmaq?>">
                         <?php if (!empty($printedRollsSummary['rolls_count']) && $printedRollsSummary['rolls_count'] > 0): ?>
@@ -7586,6 +8171,15 @@ function renderProductionOperatorConsole(
                                 <input type="number" step="1" min="0" name="prod_amount" id="idx_seri_amount" class="inptxt" style="width:200px;font-weight:bold;background:#F8FAFC" value="<?=$valAmount > 0 ? (int)$valAmount : ''?>" placeholder="0" required> unidades
                             </td>
                         </tr>
+                    <?php elseif ($isSelladora): ?>
+                        <tr>
+                            <td class="tdleft">Contador Tablero Principal *</td>
+                            <td class="tdnrm"><input type="number" step="1" min="0" name="prod_amount" id="cys_counter_main" class="inptxt" style="width:200px" value="<?=$valAmount > 0 ? (int)$valAmount : ''?>" placeholder="0" required> unidades</td>
+                        </tr>
+                        <tr>
+                            <td class="tdleft">Contador Módulo Recibidor *</td>
+                            <td class="tdnrm"><input type="number" step="1" min="0" name="prod_amount2" id="cys_counter_receiver" class="inptxt" style="width:200px" value="<?=$valAmount2 > 0 ? (int)$valAmount2 : '0'?>" placeholder="0" required> unidades</td>
+                        </tr>
                     <?php else: ?>
                         <tr>
                             <td class="tdleft">Contador Principal / Bolsas *</td>
@@ -7597,7 +8191,7 @@ function renderProductionOperatorConsole(
                         <td class="tdnrm"><textarea name="evt_comments" class="inptxt" style="width:100%;height:55px" placeholder="Observaciones de producción..."><?=htmlspecialchars($valComments)?></textarea></td>
                     </tr>
 
-                    <?php if (!empty($mermatypes)): ?>
+                    <?php if ($overrideEmbalaje !== 1 && !empty($mermatypes)): ?>
                         <!-- TABLA DE MERMAS (editxid.php líneas 850-915 y form.production.php 990-1010) -->
                         <tr>
                             <td colspan="2" style="padding-top:15px">
@@ -7612,11 +8206,11 @@ function renderProductionOperatorConsole(
                                     <col width="220">
                                     <col width="120">
                                     <col width="120">
-                                    <col width="120">
+                                    <?php if (!$isSelladora): ?><col width="120"><?php endif; ?>
                                     <col>
                                 </colgroup>
                                 <tr>
-                                    <td colspan="5" class="tdleft" style="background-color:#E8F0FE;color:#1A73E8;font-weight:bold">
+                                    <td colspan="<?=$isSelladora ? 4 : 5?>" class="tdleft" style="background-color:#E8F0FE;color:#1A73E8;font-weight:bold">
                                         <i class="fa fa-fw fa-exclamation-triangle"></i> Registro de Mermas por Tipo
                                     </td>
                                 </tr>
@@ -7624,7 +8218,7 @@ function renderProductionOperatorConsole(
                                     <td class="tdheader">Tipo / Causa</td>
                                     <td class="tdheader" align="center">Bolsas / Unid.</td>
                                     <td class="tdheader" align="center">Kilos</td>
-                                    <td class="tdheader" align="center">Metros</td>
+                                    <?php if (!$isSelladora): ?><td class="tdheader" align="center">Metros</td><?php endif; ?>
                                     <td class="tdheader">Comentarios</td>
                                 </tr>
                                 <?php foreach ($mermatypes as $mt):
@@ -7641,6 +8235,13 @@ function renderProductionOperatorConsole(
                                 <tr <?=$fromDismount ? 'style="background:#F0FDF4"' : ($fromAlis ? 'style="background:#FEF9C3"' : '')?>>
                                     <td class="tdnrm">
                                         <b><?=htmlspecialchars((string)$mt['merma_title'])?></b>
+                                        <?php if ($isSelladora): ?>
+                                            <input type="hidden" name="merma_mts_<?=$mtId?>" value="<?=$mMts?>">
+                                        <?php endif; ?>
+                                        <?php if ($isSelladora): ?><br><select name="merma_unit_<?=$mtId?>" id="merma_unit_<?=$mtId?>" class="inptxt" onchange="syncCysDefectUnit('merma',<?=$mtId?>)" style="margin-top:5px">
+                                            <option value="kgs" <?=$mKgs>0?'selected':''?>>Kilos</option>
+                                            <option value="amount" <?=$mKgs<=0&&$mAmt>0?'selected':''?>>Unidad</option>
+                                        </select><?php endif; ?>
                                         <?php if ($fromDismount && $dismountKgs > 0): ?>
                                             <span style="font-size:11px;background:#059669;color:#FFFFFF;padding:2px 7px;border-radius:4px;margin-left:6px;font-weight:bold" title="Cargado automáticamente desde el desmontaje de bobinas">
                                                 <i class="fa fa-dolly"></i> Desmontaje: <?=number_format($dismountKgs, 2, ',', '.')?> kg
@@ -7655,9 +8256,11 @@ function renderProductionOperatorConsole(
                                     <td class="tdnrm" align="center">
                                         <input type="number" step="0.01" min="0" name="merma_kgs_<?=$mtId?>" id="merma_kgs_<?=$mtId?>" class="inptxt" style="width:90px;text-align:center;<?=$fromDismount ? 'background:#DCFCE7;font-weight:bold;color:#166534' : ($fromAlis ? 'background:#FFFBEB;font-weight:bold;color:#92400E' : '')?>" value="<?=$mKgs > 0 ? $mKgs : ''?>" oninput="syncMermaRow(<?=$mtId?>, 'kgs')">
                                     </td>
+                                    <?php if (!$isSelladora): ?>
                                     <td class="tdnrm" align="center">
                                         <input type="number" step="1" min="0" name="merma_mts_<?=$mtId?>" id="merma_mts_<?=$mtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$mMts > 0 ? $mMts : ''?>" oninput="syncMermaRow(<?=$mtId?>, 'mts')">
                                     </td>
+                                    <?php endif; ?>
                                     <td class="tdnrm">
                                         <input type="text" name="merma_comments_<?=$mtId?>" class="inptxt" style="width:100%" value="<?=htmlspecialchars($mComm)?>" placeholder="Detalle...">
                                     </td>
@@ -7668,7 +8271,7 @@ function renderProductionOperatorConsole(
                         </tr>
                     <?php endif; ?>
 
-                    <?php if ($isSelladora && !empty($repairtypes)): ?>
+                    <?php if ($overrideEmbalaje !== 1 && $isSelladora && !empty($repairtypes)): ?>
                         <!-- TABLA DE REPARACIONES (editxid.php líneas 916-960) -->
                         <tr>
                             <td colspan="2" style="padding-top:15px">
@@ -7698,12 +8301,17 @@ function renderProductionOperatorConsole(
                                     $rComm = (string)($existR['evt_comments'] ?? '');
                                 ?>
                                 <tr>
-                                    <td class="tdnrm"><b><?=htmlspecialchars((string)$rt['repair_title'])?></b></td>
-                                    <td class="tdnrm" align="center">
-                                        <input type="number" step="1" name="repair_amount_<?=$rtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$rAmt > 0 ? (int)$rAmt : ''?>">
+                                    <td class="tdnrm"><b><?=htmlspecialchars((string)$rt['repair_title'])?></b>
+                                        <br><select name="repair_unit_<?=$rtId?>" id="repair_unit_<?=$rtId?>" class="inptxt" onchange="syncCysDefectUnit('repair',<?=$rtId?>)" style="margin-top:5px">
+                                            <option value="kgs" <?=$rKgs>0?'selected':''?>>Kilos</option>
+                                            <option value="amount" <?=$rKgs<=0&&$rAmt>0?'selected':''?>>Unidad</option>
+                                        </select>
                                     </td>
                                     <td class="tdnrm" align="center">
-                                        <input type="number" step="0.1" name="repair_kgs_<?=$rtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$rKgs > 0 ? $rKgs : ''?>">
+                                        <input type="number" step="1" min="0" name="repair_amount_<?=$rtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$rAmt > 0 ? (int)$rAmt : ''?>" oninput="syncCysDefectUnit('repair',<?=$rtId?>,'amount')">
+                                    </td>
+                                    <td class="tdnrm" align="center">
+                                        <input type="number" step="0.01" min="0" name="repair_kgs_<?=$rtId?>" class="inptxt" style="width:90px;text-align:center" value="<?=$rKgs > 0 ? $rKgs : ''?>" oninput="syncCysDefectUnit('repair',<?=$rtId?>,'kgs')">
                                     </td>
                                     <td class="tdnrm">
                                         <input type="text" name="repair_comments_<?=$rtId?>" class="inptxt" style="width:100%" value="<?=htmlspecialchars($rComm)?>" placeholder="Detalle...">
@@ -7715,6 +8323,9 @@ function renderProductionOperatorConsole(
                         </tr>
                     <?php endif; ?>
 
+                    <?php if ($isSelladora || $overrideEmbalaje === 1): ?>
+                        <?php renderProductionReceiverField($phaseReceivers, $phaseResponsibilities[$refId] ?? []); ?>
+                    <?php endif; ?>
                     <tr>
                         <td class="tdleft">&nbsp;</td>
                         <td class="tdnrm" style="padding-top:15px">
@@ -7831,6 +8442,10 @@ function renderProductionOperatorConsole(
                 }
 
                 function syncMermaRow(id, field) {
+                    if (document.getElementById('merma_unit_'+id)) {
+                        syncCysDefectUnit('merma',id,field);
+                        return;
+                    }
                     var amtInp = document.getElementById('merma_amt_' + id);
                     var kgsInp = document.getElementById('merma_kgs_' + id);
                     var mtsInp = document.getElementById('merma_mts_' + id);
@@ -7854,6 +8469,20 @@ function renderProductionOperatorConsole(
                         } else if (!IS_FLEXO && PROD_UNIT_WEIGHT_KG > 0 && (!amt || amt === 0)) {
                             amtInp.value = Math.round(kgs / PROD_UNIT_WEIGHT_KG);
                         }
+                    }
+                }
+
+                function syncCysDefectUnit(prefix,id,field){
+                    const unit=document.getElementById(prefix+'_unit_'+id);
+                    if (!unit) return;
+                    const form=unit.form;
+                    const amount=form.elements[prefix+'_amount_'+id];
+                    const kgs=form.elements[prefix+'_kgs_'+id];
+                    if (!amount||!kgs) return;
+                    if (field==='amount'||field==='kgs') unit.value=field;
+                    if (PROD_UNIT_WEIGHT_KG>0) {
+                        if (unit.value==='amount') kgs.value=((Number(amount.value)||0)*PROD_UNIT_WEIGHT_KG).toFixed(2);
+                        else amount.value=Math.round((Number(kgs.value)||0)/PROD_UNIT_WEIGHT_KG);
                     }
                 }
 
@@ -7911,11 +8540,11 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">Máquina</td>
                     <td class="tdnrm"><b><?=htmlspecialchars((string)($machineInit['equipo_name'] ?? $agenda['equipo_name'] ?? '-'))?></b></td>
                 </tr>
-                <?php if (!empty($machineInit['type_ant_inpmedidas_act'])): ?>
+                <?php if ($isSelladora || !empty($machineInit['type_ant_inpmedidas_act'])): ?>
                     <tr>
                         <td class="tdleft">De Medida</td>
                         <td class="tdnrm">
-                            <select name="evt_medida_fromid" class="inptxt" style="width:300px;background:#fff">
+                            <select name="evt_medida_fromid" required class="inptxt" style="width:300px;background:#fff">
                                 <option value="">Seleccione medida actual...</option>
                                 <?php foreach ($medidas as $m): ?>
                                     <option value="<?=$m['id']?>" <?=$savedMedFrom === (int)$m['id'] ? 'selected' : ''?>><?=htmlspecialchars((string)$m['med_name'])?></option>
@@ -7926,7 +8555,7 @@ function renderProductionOperatorConsole(
                     <tr>
                         <td class="tdleft">A Medida</td>
                         <td class="tdnrm">
-                            <select name="evt_medida_toid" class="inptxt" style="width:300px;background:#fff">
+                            <select name="evt_medida_toid" required class="inptxt" style="width:300px;background:#fff">
                                 <option value="">Seleccione nueva medida...</option>
                                 <?php foreach ($medidas as $m): ?>
                                     <option value="<?=$m['id']?>" <?=$savedMedTo === (int)$m['id'] ? 'selected' : ''?>><?=htmlspecialchars((string)$m['med_name'])?></option>
@@ -7965,11 +8594,11 @@ function renderProductionOperatorConsole(
                                 <div class="btnorange" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=autocontrol&end_alis=1';" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 16px;font-weight:bold;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16)">
                                     <i class="fa fa-fw fa-stop" style="color:white;"></i> Terminar
                                 </div>
-                                <div class="btngrey" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').submit();" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 14px">
+                                <div class="btngrey" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').requestSubmit();" style="margin-left:5px;float:right;cursor:pointer;text-align:center;padding:8px 14px">
                                     <i class="fa fa-fw fa-save" style="color:white;"></i> Guardar
                                 </div>
                             <?php else: ?>
-                                <div class="btngreen" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').submit();" style="width:40%;cursor:pointer;text-align:center">
+                                <div class="btngreen" onclick="document.getElementById('ap_submode').value='update';document.getElementById('form_apertura_edit').requestSubmit();" style="width:40%;cursor:pointer;text-align:center">
                                     <i class="fa fa-fw fa-save" style="color:white;"></i> Guardar&nbsp;
                                 </div>
                             <?php endif; ?>
@@ -7977,7 +8606,7 @@ function renderProductionOperatorConsole(
                     </tr>
                     </table>
                 <?php else: ?>
-                    <div class="btngreen" onclick="document.getElementById('ap_submode').value='start';document.getElementById('form_apertura_edit').submit();" style="cursor:pointer;display:inline-block">
+                    <div class="btngreen" onclick="document.getElementById('ap_submode').value='start';document.getElementById('form_apertura_edit').requestSubmit();" style="cursor:pointer;display:inline-block">
                         <i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar&nbsp;
                     </div>
                 <?php endif; ?>
@@ -8388,6 +9017,9 @@ function renderProductionOperatorConsole(
 
     <?php elseif ($mode === 'materiales'): ?>
         <!-- SUBFORMULARIO: Materiales y Bobinas con Trazabilidad -->
+        <?php if ($isSelladora): ?>
+            <?php renderCysHandleMaterials($agId, $workerOtId, $currentOperatorName); ?>
+        <?php endif; ?>
         <?php
         $materialQuota = $ctx['material_quota'] ?? [];
         $assignedRolls = $materialQuota['assigned_rolls'] ?? [];
@@ -11302,7 +11934,22 @@ function renderProductionOperatorConsole(
 
     <?php elseif ($mode === 'embalaje'): ?>
         <!-- SUBFORMULARIO: Embalaje, Generación de Cajas y Pallet (Selladora / Confección) -->
+        <?php
+        $packagingActiveEvent = null;
+        foreach ($events as $packagingEvent) {
+            if ((int)($packagingEvent['overrideembalaje_act'] ?? 0) === 1 && (int)$packagingEvent['evt_status'] === 1
+                && (int)$packagingEvent['evt_prod_worker_otid'] === $workerOtId
+                && (int)($packagingEvent['evt_enddat'] ?? 0) === 0 && (string)$packagingEvent['evt_type'] === 'prod') {
+                $packagingActiveEvent = $packagingEvent;
+                break;
+            }
+        }
+        ?>
         <div style="margin-bottom:15px">
+            <?php if ($packagingActiveEvent !== null): ?>
+                <a class="btnorange" style="display:inline-block;text-decoration:none;margin-right:8px" href="/production/work-orders/operate?agid=<?=$agId?>&mode=production&overrideembalaje=1&refid=<?=(int)$packagingActiveEvent['id']?>&submode=end">Finalizar embalaje</a>
+                <span style="font-weight:700;color:#165552">Embalaje en curso desde <?=date('d/m/Y H:i', (int)$packagingActiveEvent['evt_crtdat'])?></span>
+            <?php endif; ?>
             <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
                 <i class="fa fa-fw fa-arrow-left"></i> Volver a la Consola de OT
             </div>
@@ -11859,7 +12506,7 @@ function renderProductionOperatorConsole(
 
     <?php elseif ($mode === 'terminarot'): ?>
         <!-- SUBFORMULARIO: Cierre de OT con Supervisor (fancy.embalaje.termot.php) -->
-        <?php $useCloseSupervisorModal = ($isFlexo || $isSeri || $isSeriPulpo); ?>
+        <?php $useCloseSupervisorModal = true; ?>
         <?php if (!$useCloseSupervisorModal): ?>
             <div style="margin-bottom:15px">
                 <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
@@ -11918,6 +12565,7 @@ function renderProductionOperatorConsole(
 
             <?php
             // Balance general de producción y mermas de la OT al cierre
+            $reboCloseMoves = $isRebobinadora ? $prodService->getReboFinishedMoves($agId) : [];
             $otSummaryProduced = 0.0;
             $otSummaryMlin = 0.0;
             $otSummaryKg = 0.0;
@@ -12218,6 +12866,21 @@ function renderProductionOperatorConsole(
                                 <?php else: ?>
                                     <div style="font-size:12.5px;color:#64748B">No hay registros de producción acumulada para mostrar en esta OT.</div>
                                 <?php endif; ?>
+                                <?php if ($isRebobinadora && $reboCloseMoves !== []): ?>
+                                    <table width="100%" cellpadding="6" style="font-size:12.5px">
+                                        <tr><th>Bobina de entrada</th><th>Producto de salida</th><th>Rollos</th><th>Kg por rollo</th></tr>
+                                        <?php foreach ($reboCloseMoves as $move): ?>
+                                            <?php foreach ($move['moveins'] ?? [] as $output): ?>
+                                                <tr>
+                                                    <td><?=htmlspecialchars((string)$move['item_number_prod'])?></td>
+                                                    <td><?=htmlspecialchars((string)$output['item_number_prod'] . ' - ' . (string)$output['item_title'])?></td>
+                                                    <td><?=number_format((float)($output['item_reboprod_amt'] ?? $output['item_amount']), 0, ',', '.')?></td>
+                                                    <td><?=number_format((float)($output['item_reboprod_unitkg'] ?? 0), 2, ',', '.')?></td>
+                                                </tr>
+                                            <?php endforeach; ?>
+                                        <?php endforeach; ?>
+                                    </table>
+                                <?php endif; ?>
                             </div>
 
                             <div style="background:#FFFFFF;border:1px solid #FECACA;border-radius:8px;padding:14px 18px;margin-bottom:16px">
@@ -12302,6 +12965,7 @@ function renderProductionOperatorConsole(
                     window.closeCloseOtSupervisorModal = function () {
                         if (!modal) return;
                         modal.style.display = 'none';
+                        window.location.href = '/production/work-orders/operate?agid=<?=$agId?>';
                     };
                     window.addEventListener('keydown', function (event) {
                         if (event.key === 'Escape' && modal && modal.style.display === 'flex') {
@@ -12380,6 +13044,23 @@ function renderProductionOperatorConsole(
                         <nobr><i class="fa fa-fw fa-cogs" style="color:white;"></i> Rebobinado&nbsp;</nobr>
                     </div>
                 </td>
+            <?php elseif ($isSelladora && $hasAlis): ?>
+                <?php foreach ([0 => ['Corte y Sellado', $openProdEvent], 1 => ['Embalaje', $openPackagingEvent]] as $phaseKind => [$phaseLabel, $phaseEvent]): ?>
+                    <td style="padding-right:4px">
+                        <a class="<?=$phaseEvent === null ? 'btngreen' : 'btnorange'?>" style="text-decoration:none;<?=$actionBtnBaseStyle?>"
+                           href="/production/work-orders/operate?agid=<?=$agId?>&amp;mode=production&amp;overrideembalaje=<?=$phaseKind?><?=$phaseEvent === null ? '&amp;action=start' : '&amp;refid=' . (int)$phaseEvent['id'] . '&amp;submode=end'?>">
+                            <i class="fa fa-fw <?=$phaseEvent === null ? 'fa-play' : 'fa-stop'?>"></i>
+                            <?=$phaseEvent === null ? 'Iniciar ' : 'Finalizar '?><?=$phaseLabel?>
+                        </a>
+                        <?php if ($phaseEvent !== null): ?>
+                            <div style="font-size:12px;padding-top:5px">
+                                Desde <?=date('H:i:s', (int)$phaseEvent['evt_crtdat'])?>
+                                <?php $phaseReceiver = $phaseResponsibilities[(int)$phaseEvent['id']]['receiver_name'] ?? ''; ?>
+                                <?php if ($phaseReceiver !== ''): ?><br>Recibe: <?=htmlspecialchars($phaseReceiver)?><?php endif; ?>
+                            </div>
+                        <?php endif; ?>
+                    </td>
+                <?php endforeach; ?>
             <?php elseif ($openProdId > 0): ?>
                 <td style="padding-right:4px">
                     <div class="btnorange" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=production&refid=<?=$openProdId?>&submode=end'">
@@ -12394,9 +13075,7 @@ function renderProductionOperatorConsole(
                 </td>
                 <?php if ($isSelladora): ?>
                     <td style="padding-right:4px">
-                        <div class="btngrey" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=embalaje'">
-                            <nobr><i class="fa fa-fw fa-box" style="color:white;"></i> Embalaje&nbsp;</nobr>
-                        </div>
+                        <?php renderStartPackagingButton($agId, $workerOtId, $actionBtnBaseStyle); ?>
                     </td>
                 <?php endif; ?>
             <?php endif; ?>
@@ -12411,14 +13090,6 @@ function renderProductionOperatorConsole(
                 <td style="<?=$isBarExpanded ? 'padding-right:4px;padding-left:4px' : 'padding:0 2px;width:20%'?>">
                     <div class="btnblue" style="<?=$actionBtnBlockStyle?>;background-color:#1D4ED8" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=tintas'">
                         <nobr><i class="fa fa-fw fa-tint" style="color:white;"></i> Tintas&nbsp;</nobr>
-                    </div>
-                </td>
-            <?php endif; ?>
-
-            <?php if (!$isPrinter && $hasAlis && !$isRebobinadora): ?>
-                <td style="padding-right:4px;padding-left:4px">
-                    <div class="btnorange" style="<?=$actionBtnBaseStyle?>" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=apertura'">
-                        <nobr><i class="fa fa-fw fa-wrench" style="color:white;"></i> Apertura&nbsp;</nobr>
                     </div>
                 </td>
             <?php endif; ?>
@@ -12499,7 +13170,7 @@ function renderProductionOperatorConsole(
                 <?php foreach ($events as $ev): ?>
                     <?php
                     $evttype = match($ev['evt_type']) {
-                        'prod', 'prodsericolor' => ((int)($ev['overrideembalaje_act'] ?? 0) === 1 ? 'Prod. Embalaje' : 'Producción'),
+                        'prod', 'prodsericolor' => ((int)($ev['overrideembalaje_act'] ?? 0) === 1 ? 'Prod. Embalaje' : ($isSelladora ? 'Corte y Sellado' : 'Producción')),
                         'apertura' => 'Alistamiento',
                         'merma' => 'Merma de Bobina',
                         'mantencion' => !empty($ev['repair_name']) ? 'Mantención: ' . htmlspecialchars((string)$ev['repair_name']) : 'Mantención',
@@ -12568,6 +13239,14 @@ function renderProductionOperatorConsole(
                         <td class="tdnrm" align="center"><?=$isDurational ? ($hours . 'h ' . $mins . 'm') : '-'?></td>
                         <td class="tdnrm" align="center"><b><?=$amtStr?></b></td>
                         <td class="tdnrm">
+                            <?php $phaseResponsible = $phaseResponsibilities[(int)$ev['id']] ?? []; ?>
+                            <?php if ($phaseResponsible !== []): ?>
+                                <b>Recibe: <?=htmlspecialchars((string)$phaseResponsible['receiver_name'])?></b><br>
+                                Inicio: <?=htmlspecialchars((string)$phaseResponsible['started_by_name'])?><br>
+                                <?php if ((int)$phaseResponsible['ended_by_worker_id'] > 0): ?>
+                                    Finalizo: <?=htmlspecialchars((string)$phaseResponsible['ended_by_name'])?><br>
+                                <?php endif; ?>
+                            <?php endif; ?>
                             <?php if ($ev['evt_type'] === 'apertura'): ?>
                                 <?php
                                 $mFrom = (int)($ev['evt_medida_fromid'] ?? 0);
@@ -12584,7 +13263,7 @@ function renderProductionOperatorConsole(
                                     <span style="color:#555"><i class="fa fa-user-friends"></i> Ayudante: <?=htmlspecialchars($ayudanteName)?></span><br>
                                 <?php endif; ?>
                             <?php endif; ?>
-                            <?=htmlspecialchars((string)($ev['evt_comments'] ?? ''))?>
+                            <?=htmlspecialchars(renderSimpleProductionComment((string)($ev['evt_comments'] ?? '')))?>
                         </td>
                         <td class="tdnrm" align="center">
                             <?php if (!$isCompleted): ?>
@@ -13146,6 +13825,97 @@ function renderDesignPreviewModal(): string
 HTML;
 }
 
+function productionWorkOrderTableProcess(array $machine): string
+{
+    $typeId = (int)($machine['equipo_type_id'] ?? 0);
+    $name = (string)($machine['equipo_name'] ?? '');
+    $typeName = (string)($machine['type_ant_title'] ?? '');
+    if (stripos($name, 'pulpo') !== false || (int)($machine['win_equipoid'] ?? 0) === 36) return 'pulpo';
+    if ($typeId === 15 || stripos($name, 'embalaje') !== false || stripos($typeName, 'embalaje') !== false) return 'embalaje';
+    if ($typeId === 8 || stripos($name, 'sellad') !== false || stripos($typeName, 'corte') !== false) return 'cys';
+    return '';
+}
+
+function renderMachineWorkOrderTable(array $orders, string $view, string $process): void
+{
+    $orders = (new ProductionService(Db::erpPdo()))->attachWorkOrderFabricationDetails($orders);
+    $escape = static fn($v): string => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    $headers = ['N° C.C.', 'N° O.T.', 'Cliente', 'Diseño', 'Material'];
+    if ($process === 'cys') $headers[] = 'Manillas';
+    array_push($headers, 'Producto', 'Medidas');
+    if ($process === 'pulpo') $headers[] = 'Colores';
+    if ($process === 'embalaje') array_push($headers, 'Embalaje', 'Und. Por Caja');
+    array_push($headers, 'Cantidad Bolsas', 'Imagen', 'Opciones');
+    echo '<div style="overflow-x:auto"><table width="100%" cellpadding="8" cellspacing="0" style="min-width:1150px">';
+    echo '<thead><tr>';
+    foreach ($headers as $header) {
+        echo '<th class="tdheader" style="text-align:left">' . $escape($header) . '</th>';
+    }
+    echo '</tr></thead><tbody>';
+    if ($orders === []) echo '<tr><td class="tdnrm" colspan="' . count($headers) . '" style="text-align:center;padding:25px">No hay OTs para mostrar.</td></tr>';
+    foreach ($orders as $order) {
+        $agId = (int)($order['ag_id'] ?? 0);
+        $prdId = (int)($order['prd_id'] ?? 0);
+        $design = trim((string)($order['fab_design_name'] ?? '')) ?: (string)($order['item_title'] ?? '-');
+        $height = $order['alto_tiro'] ?? $order['fab_med_height'] ?? '-';
+        $backHeight = $order['alto_retiro'] ?? $order['fab_med_height'] ?? '-';
+        $dimensions = (string)($order['ancho'] ?? $order['fab_med_width'] ?? '-') . ' x ' . $height . ' x ' . (string)($order['fab_med_fuelle'] ?? 0) . ' cm';
+        $material = $escape($order['fab_type'] ?? '-') . '<br><b>' . $escape($order['fabric_color'] ?? '-') . '</b>'
+            . '<br><small>' . $escape($order['req_operador_tela_width'] ?? '-') . ' cm · ' . $escape($order['fab_mat_gramms'] ?? '-') . ' gr</small>';
+        $handles = '<b>' . $escape($order['manilla_color'] ?? '-') . '</b><br><small>Ancho: ' . $escape($order['ancho_manillas'] ?? '-')
+            . ' cm<br>Largo: ' . $escape($order['fab_manilla_length'] ?? '-') . ' cm</small>';
+        echo '<tr onmouseover="this.style.backgroundColor=\'#F0F7F6\'" onmouseout="this.style.backgroundColor=\'transparent\'">';
+        foreach ([$order['req_number'] ?? '-', $order['prd_number'] ?? '-', $order['cust_name'] ?? '-'] as $value) {
+            echo '<td class="tdnrm"><b>' . $escape($value) . '</b></td>';
+        }
+        echo '<td class="tdnrm" style="max-width:220px;font-size:12px;overflow-wrap:anywhere">' . $escape($design) . '</td>';
+        echo '<td class="tdnrm">' . $material . '</td>';
+        if ($process === 'cys') echo '<td class="tdnrm">' . $handles . '</td>';
+        echo '<td class="tdnrm">' . $escape($order['bag_type'] ?? '-') . '</td>';
+        echo '<td class="tdnrm" style="white-space:nowrap"><b>' . $escape($dimensions) . '</b><br><small>Retiro: ' . $escape($backHeight)
+            . ' cm<br>Doblez: ' . $escape($order['doblez_superior'] ?? '-') . ' cm</small></td>';
+        if ($process === 'pulpo') {
+            echo '<td class="tdnrm">';
+            $colors = [];
+            for ($i = 1; $i <= 6; $i++) {
+                $color = trim((string)($order['fab_print_colordesc_' . $i] ?? ''));
+                if ($color !== '') $colors[] = '<div style="font-size:11px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:3px;padding:2px 5px;margin-bottom:2px"><b>' . $i . ':</b> ' . $escape($color) . '</div>';
+            }
+            echo ($colors === [] ? '<span style="color:#94a3b8">Sin colores</span>' : implode('', $colors)) . '</td>';
+        }
+        if ($process === 'embalaje') {
+            echo '<td class="tdnrm">' . $escape($order['req_embalaje_medidas_caja'] ?? '-') . '</td>';
+            echo '<td class="tdnrm" style="text-align:right"><b>' . number_format((float)($order['req_embalaje_bolsas_por_caja_amt'] ?? 0), 0, ',', '.') . '</b></td>';
+        }
+        echo '<td class="tdnrm" style="text-align:right"><b>' . number_format((float)($order['ag_amount'] ?? $order['item_amount'] ?? 0), 0, ',', '.') . '</b></td>';
+        $hash = trim((string)($order['fab_design_imagehash'] ?? ''));
+        if ($hash === '' || $hash === 'dummy') $hash = trim((string)($order['item_img_hash'] ?? ''));
+        echo '<td class="tdnrm" style="text-align:center">';
+        if ($hash !== '' && $hash !== 'dummy') {
+            $url = '/production/design-image?folder=docs.order&hash=' . rawurlencode($hash);
+            $args = [$url, (string)($order['prd_number'] ?? ''), (string)($order['cust_name'] ?? ''), $design, $dimensions];
+            $jsArgs = implode(',', array_map(static fn($v) => json_encode($v, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP), $args));
+            echo '<button type="button" style="border:0;background:transparent;cursor:pointer" onclick="' . $escape('openDesignModal(' . $jsArgs . ')') . '" title="Ver diseño">'
+                . '<img src="' . $escape($url) . '" alt="Diseño" style="width:36px;height:36px;object-fit:contain;border:1px solid #cbd5e1;border-radius:4px"></button>';
+        } else {
+            echo '<span style="color:#94a3b8;font-size:12px">Sin foto</span>';
+        }
+        echo '</td><td class="tdnrm"><div style="display:flex;gap:6px;flex-wrap:wrap">';
+        if ($view === 'active') {
+            echo '<a class="btngreen" style="padding:6px 12px;text-decoration:none" href="/production/work-orders/operate?agid=' . $agId . '">Operar OT</a>';
+        } else {
+            $unscheduled = $view === 'unscheduled';
+            echo '<form method="post" action="/production/work-orders/' . ($unscheduled ? 'init-unscheduled' : 'init') . '" style="margin:0">'
+                . '<input type="hidden" name="_csrf" value="' . $escape(csrfToken()) . '">'
+                . '<input type="hidden" name="' . ($unscheduled ? 'prd_id' : 'ag_id') . '" value="' . ($unscheduled ? $prdId : $agId) . '">'
+                . '<button type="submit" class="btngreen" style="padding:6px 12px"' . ($unscheduled ? ' onclick="return confirm(\'¿Confirmas iniciar esta OT fuera de planificación?\')"' : '') . '>Iniciar OT</button></form>';
+        }
+        echo '<a class="btnblue" style="padding:6px 10px;text-decoration:none;font-size:11px" href="/production/materials/request?'
+            . ($view === 'unscheduled' ? 'prd_id=' . $prdId : 'agid=' . $agId) . '">Bobinas</a></div></td></tr>';
+    }
+    echo '</tbody></table></div>';
+}
+
 function renderProductionNewWorkOrderScreen(
     array $activeInit,
     array $scheduledOrders,
@@ -13160,6 +13930,7 @@ function renderProductionNewWorkOrderScreen(
 ): void {
     $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
     $isRebobinadora = ($equipoTypeId === 12 || stripos((string)($activeInit['type_ant_title'] ?? ''), 'rebobin') !== false || stripos((string)($activeInit['equipo_name'] ?? ''), 'rebobin') !== false);
+    $tableProcess = productionWorkOrderTableProcess($activeInit);
     $isFlexo = ($equipoTypeId === 7
         || (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
         || stripos((string)($activeInit['type_ant_title'] ?? ''), 'flexo') !== false
@@ -13293,6 +14064,9 @@ function renderProductionNewWorkOrderScreen(
                 </div>
             </div>
 
+            <?php if ($tableProcess !== ''): ?>
+                <?php renderMachineWorkOrderTable($unscheduledOrders, 'unscheduled', $tableProcess); ?>
+            <?php else: ?>
             <table border="0" width="100%" cellpadding="8" cellspacing="0" style="min-width:1100px">
             <colgroup>
                 <col width="90">
@@ -13436,7 +14210,7 @@ function renderProductionNewWorkOrderScreen(
                             </td>
                             <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($contador, 0, ',', '.')?></b></td>
                         <?php elseif ($isRebobinadora): ?>
-                            <td class="tdnrm"><span style="color:#0F766E;font-weight:600;font-size:12.5px"><i class="fa fa-cut"></i> <?=htmlspecialchars($actividad)?></span></td>
+                            <td class="tdnrm"><span style="color:#0F766E;font-weight:600;font-size:12.5px"><i class="fa fa-cut"></i> <?=htmlspecialchars($actividad)?></span><div style="font-weight:800">Color: <?=htmlspecialchars((string)($uo['fabric_color'] ?? '-'))?></div></td>
                             <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
                         <?php else: ?>
                             <td class="tdnrm"><?=htmlspecialchars((string)$uo['fab_printtype'])?></td>
@@ -13472,6 +14246,7 @@ function renderProductionNewWorkOrderScreen(
             <?php endif; ?>
             </tbody>
             </table>
+            <?php endif; ?>
         </div>
     <?php else: ?>
         <!-- ============================================================== -->
@@ -13582,6 +14357,7 @@ function renderProductionNewWorkOrderScreen(
                             </td>
                             <td class="tdnrm" align="center">
                                 <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
+                                <div style="font-weight:800;margin-top:5px">Color: <?=htmlspecialchars((string)($so['fabric_color'] ?? '-'))?></div>
                             </td>
                             <td class="tdnrm">
                                 <span style="color:#0F766E;font-weight:600;font-size:12.5px"><i class="fa fa-cut"></i> <?=htmlspecialchars($actividad)?></span>
@@ -13782,7 +14558,7 @@ function renderProductionNewWorkOrderScreen(
                 </tbody>
                 </table>
             </div>
-        <?php elseif ($isSeri): ?>
+        <?php elseif ($isSeri && $tableProcess !== 'pulpo'): ?>
             <!-- DISEÑO SERIGRAFÍA: OTs Programadas -->
             <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px">
@@ -13964,6 +14740,8 @@ function renderProductionNewWorkOrderScreen(
                 </div>
                 <?php if (empty($scheduledOrders)): ?>
                     <b class="msg_save_err" style="color:#C00"><i class="fa fa-fw fa-exclamation-triangle"></i> No existen OT's planificadas para esta fecha (<?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?>).</b>
+                <?php elseif ($tableProcess !== ''): ?>
+                    <?php renderMachineWorkOrderTable($scheduledOrders, 'scheduled', $tableProcess); ?>
                 <?php else: ?>
                     <table border="0" width="100%" cellpadding="6" cellspacing="0">
                     <colgroup>
@@ -14057,6 +14835,7 @@ function renderProductionActiveOrdersScreen(
     ?string $dateFilter = null
 ): void {
     $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
+    $tableProcess = productionWorkOrderTableProcess($activeInit ?? []);
     $isRebobinadora = ($equipoTypeId === 12 || stripos((string)($activeInit['type_ant_title'] ?? ''), 'rebobin') !== false || stripos((string)($activeInit['equipo_name'] ?? ''), 'rebobin') !== false);
     $isFlexo = ($equipoTypeId === 7
         || (int)($activeInit['equipo_prod_isprinter_flexo'] ?? 0) === 1
@@ -14158,6 +14937,7 @@ function renderProductionActiveOrdersScreen(
                         </td>
                         <td class="tdnrm" align="center">
                             <span style="background:#F1F5F9;color:#334155;padding:3px 8px;border-radius:4px;font-size:12px;font-weight:600"><?=htmlspecialchars($mat)?></span>
+                            <div style="font-weight:800;margin-top:5px">Color: <?=htmlspecialchars((string)($row['fabric_color'] ?? '-'))?></div>
                         </td>
                         <td class="tdnrm">
                             <span style="color:#0F766E;font-weight:600;font-size:12.5px"><i class="fa fa-cut"></i> <?=htmlspecialchars($actividad)?></span>
@@ -14389,7 +15169,7 @@ function renderProductionActiveOrdersScreen(
             </tbody>
             </table>
         </div>
-    <?php elseif ($isSeri): ?>
+    <?php elseif ($isSeri && $tableProcess !== 'pulpo'): ?>
         <!-- ============================================================== -->
         <!-- DISEÑO ESPECÍFICO SERIGRAFÍA: En curso                         -->
         <!-- ============================================================== -->
@@ -14675,6 +15455,8 @@ function renderProductionActiveOrdersScreen(
             </div>
             <?php if (empty($activeList)): ?>
                 <b class="msg_save_err" style="color:#C00"><i class="fa fa-fw fa-exclamation-triangle"></i> No existen OT's en curso para esta fecha (<?=htmlspecialchars($dateFilter ?: date('d.m.Y'))?>).</b>
+            <?php elseif ($tableProcess !== ''): ?>
+                <?php renderMachineWorkOrderTable($activeList, 'active', $tableProcess); ?>
             <?php else: ?>
                 <table border="0" width="100%" cellpadding="6" cellspacing="0">
                 <colgroup>
@@ -14757,42 +15539,49 @@ function renderProductionHistoryScreen(array $historyList, string $operatorName,
         <td style="background-color:#FFFFFF;padding:12px 15px;color:#666666;font-size:14px;border-radius:5px;border:1px solid #DDDDDD">
             <i class="fa fa-fw fa-calendar-alt"></i> Ordenes de trabajo
             <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
-            <b>Historico</b> de órdenes finalizadas
+            <b>Histórico</b> de mis últimos 100 registros
         </td>
     </tr>
     </table>
 
     <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px">
         <table border="0" width="100%" cellpadding="8" cellspacing="0">
-        <colgroup><col width="90"><col width="90"><col width="160"><col><col width="160"><col width="140"><col width="100"></colgroup>
         <thead>
             <tr>
                 <td class="tdheader">N° OT</td>
                 <td class="tdheader">N° CC</td>
                 <td class="tdheader">Máquina</td>
-                <td class="tdheader">Operario</td>
                 <td class="tdheader">Cliente / Producto</td>
-                <td class="tdheader">Fecha Cierre</td>
-                <td class="tdheader" align="center">Ver</td>
+                <td class="tdheader">Fecha</td>
+                <td class="tdheader">Evento / Descripción</td>
+                <td class="tdheader">Cantidad / Metros</td>
+                <td class="tdheader">Tiempo</td>
             </tr>
         </thead>
         <tbody>
         <?php if (empty($historyList)): ?>
-            <tr><td colspan="7" class="tdnrm" style="text-align:center;padding:25px;color:#999">No hay órdenes en el historial reciente.</td></tr>
+            <tr><td colspan="8" class="tdnrm" style="text-align:center;padding:25px;color:#999">No hay registros en tu historial.</td></tr>
         <?php else: ?>
             <?php foreach ($historyList as $row): ?>
                 <tr>
                     <td class="tdnrm"><b><?=htmlspecialchars((string)$row['prd_number'])?></b></td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$row['req_number'])?></td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$row['equipo_name'])?></td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)$row['wrk_firstname'])?> <?=htmlspecialchars((string)$row['wrk_lastname'])?></td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$row['cust_name'])?> · <?=htmlspecialchars((string)$row['item_title'])?></td>
-                    <td class="tdnrm"><?=date('d.m.Y H:i', (int)$row['wok_enddat'])?></td>
-                    <td class="tdnrm" align="center">
-                        <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btngrey" style="padding:4px 10px;text-decoration:none">
-                            <i class="fa fa-eye"></i> Detalle
-                        </a>
+                    <td class="tdnrm"><?=date('d/m/Y H:i', (int)$row['evt_crtdat'])?></td>
+                    <td class="tdnrm">
+                        <b><?=htmlspecialchars(match ((string)$row['evt_type']) {
+                            'prod', 'prodsericolor' => 'Producción', 'apertura' => 'Alistamiento',
+                            'pause' => 'Pausa', 'mantencion' => 'Mantención', 'materiales' => 'Materiales',
+                            default => (string)$row['evt_type'],
+                        })?></b><br><?=nl2br(htmlspecialchars(renderSimpleProductionComment(trim((string)$row['cause_title'] . ' ' . (string)($row['evt_comments'] ?? '')))))?>
+                        <?php foreach ($row['defects'] ?? [] as $defect): ?>
+                            <div><b><?=htmlspecialchars((string)$defect['cause_title'])?></b>: <?=number_format((float)$defect['evt_amount'], 0, ',', '.')?> unid. / <?=number_format((float)($defect['evt_kgstounits'] ?? 0), 2, ',', '.')?> kg</div>
+                        <?php endforeach; ?>
                     </td>
+                    <td class="tdnrm"><?=number_format((float)$row['evt_amount'], 0, ',', '.')?> unid.<br><?=number_format((float)($row['evt_amount_metros_lineales'] ?? 0), 0, ',', '.')?> m</td>
+                    <?php $minutes = (int)floor(max(0, ((int)($row['evt_enddat'] ?: time()) - (int)$row['evt_crtdat'])) / 60); ?>
+                    <td class="tdnrm"><?=intdiv($minutes, 60)?>h <?=$minutes % 60?>m</td>
                 </tr>
             <?php endforeach; ?>
         <?php endif; ?>

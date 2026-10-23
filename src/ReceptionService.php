@@ -59,6 +59,7 @@ require_once __DIR__ . '/RollReceptionService.php';
  */
 final class ReceptionService
 {
+    public const MAX_WAREHOUSE_TRACEABILITY_LABELS = 100;
     private const RECEPTION_SCHEMA_VERSION = 'reception_v10';
     private const PRODUCTION_WAREHOUSE_SYNC_VERSION = 'production_warehouse_sync_v1';
     private const ROLL_WAREHOUSE_TRACEABILITY_SYNC_VERSION = 'roll_warehouse_traceability_sync_v1';
@@ -23954,7 +23955,7 @@ SQL;
     public function registerWarehouseTraceabilityEntry(array $data): array
     {
         $this->ensureTraceabilityWarehouseEntriesTable();
-        $maxLabelsPerBatch = 50;
+        $maxLabelsPerBatch = self::MAX_WAREHOUSE_TRACEABILITY_LABELS;
 
         $code = strtoupper(trim((string)($data['traceability_code'] ?? '')));
         $entityType = strtoupper(trim((string)($data['entity_type'] ?? 'PRODUCT')));
@@ -23997,7 +23998,15 @@ SQL;
         }
 
         if ($packageCount > $maxLabelsPerBatch) {
-            return ['ok' => false, 'error' => 'Por estabilidad del sistema, el maximo permitido es de 50 etiquetas por vez. Divida el ingreso en tandas mas pequenas.'];
+            return ['ok' => false, 'error' => 'El maximo permitido es de ' . $maxLabelsPerBatch . ' etiquetas por vez. Divida el ingreso en tandas mas pequenas.'];
+        }
+        // Keep identifiers separate from descriptions; never truncate a SKU.
+        // Separar identificadores y descripciones; nunca recortar un SKU.
+        if (mb_strlen($itemCode, 'UTF-8') > 60) {
+            return ['ok'=>false, 'error'=>'El codigo o SKU admite hasta 60 caracteres. La descripcion se ingresa por separado.'];
+        }
+        if (mb_strlen($itemDesc, 'UTF-8') > 255) {
+            return ['ok'=>false, 'error'=>'La descripcion del producto admite hasta 255 caracteres.'];
         }
 
         $unitName = trim((string)($data['unit_name'] ?? 'UNID')) ?: 'UNID';
@@ -24110,7 +24119,7 @@ SQL;
                     ');
                     $stmtPallet->execute([
                         ':code' => $entryCode,
-                        ':sku' => $itemCode . ' - ' . $itemDesc,
+                        ':sku' => $itemCode,
                         ':wh' => $localWarehouseId,
                         ':boxes' => $boxCount ?: (int)$qty,
                         ':ord' => $orderRef !== '' ? $orderRef : null,
@@ -24126,7 +24135,7 @@ SQL;
                     ');
                     $stmtBox->execute([
                         ':code' => $entryCode,
-                        ':sku' => $itemCode . ' - ' . $itemDesc,
+                        ':sku' => $itemCode,
                         ':qty' => $qty,
                         ':wh' => $localWarehouseId,
                         ':ord' => $orderRef !== '' ? $orderRef : null,

@@ -522,6 +522,7 @@ final class ProductionService
                                t2.company_short, t3.shop_name, t4.cust_name,
                                t2x.item_number_prod, t2x.item_title, t2x.item_prodcalc_fuelle_act, t1x.item_amount,
                                t1x.fab_printtype, t1x.fab_type, t1x.fab_med_width, t1x.fab_med_height,
+                               (SELECT cv.add_name FROM tran_comments_vals cv WHERE cv.id = t1x.fab_mat_fabric_color LIMIT 1) AS fabric_color,
                                t1x.fab_med_fuelle, t1x.fab_design_imagehash, t1x.fab_design_name, t1x.item_img_hash,
                                t1x.fab_print_colordesc_1, t1x.fab_print_colordesc_2, t1x.fab_print_colordesc_3,
                                t1x.fab_print_colordesc_4, t1x.fab_print_colordesc_5, t1x.fab_print_colordesc_6,
@@ -663,6 +664,7 @@ final class ProductionService
                                    t2.company_short, t3.shop_name, t4.cust_name,
                                    t2x.item_number_prod, t2x.item_title, t2x.item_prodcalc_fuelle_act, t1x.item_amount,
                                    t1x.fab_printtype, t1x.fab_type, t1x.fab_med_width, t1x.fab_med_height,
+                                   (SELECT cv.add_name FROM tran_comments_vals cv WHERE cv.id = t1x.fab_mat_fabric_color LIMIT 1) AS fabric_color,
                                    t1x.fab_med_fuelle, t1x.fab_design_imagehash, t1x.fab_design_name, t1x.item_img_hash,
                                    t1x.fab_print_colordesc_1, t1x.fab_print_colordesc_2, t1x.fab_print_colordesc_3,
                                    t1x.fab_print_colordesc_4, t1x.fab_print_colordesc_5, t1x.fab_print_colordesc_6,
@@ -1537,6 +1539,7 @@ final class ProductionService
         $totKilosThis = 0.0;
         $totPulpoFrenteThis = 0.0;
         $totPulpoDorsoThis = 0.0;
+        $statsPackaging = !empty($openInit['type_createstock_act']) ? 1 : 0;
         if ($workerOt !== null) {
             $stmtTot = $this->erpPdo->prepare(
                 "SELECT SUM(evt_amount) AS tot_amt,
@@ -1547,10 +1550,11 @@ final class ProductionService
                  FROM prod_worker_ot_events
                  WHERE evt_prod_worker_otid = :ot_id
                    AND evt_type = 'prod'
+                   AND overrideembalaje_act = :phase
                    AND evt_status > 0
                    AND (evt_comments IS NULL OR (evt_comments NOT LIKE '%Bobina Semielaborada%' AND evt_comments NOT LIKE '%ROLL-SE-%'))"
             );
-            $stmtTot->execute([':ot_id' => (int)$workerOt['id']]);
+            $stmtTot->execute([':ot_id' => (int)$workerOt['id'], ':phase' => $statsPackaging]);
             $tRow = $stmtTot->fetch();
             if (is_array($tRow)) {
                 $totProducedThis = (float)($tRow['tot_amt'] ?? 0);
@@ -1575,10 +1579,11 @@ final class ProductionService
                  INNER JOIN prod_worker_ot_events t3 ON t3.evt_prod_worker_otid = t2.id
                  WHERE t2.wok_ag_id = :ag_id
                    AND t3.evt_type = 'prod'
+                   AND t3.overrideembalaje_act = :phase
                    AND t3.evt_status > 0
                    AND (t3.evt_comments IS NULL OR (t3.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t3.evt_comments NOT LIKE '%ROLL-SE-%'))"
             );
-            $stmtAgTot->execute([':ag_id' => $agId]);
+            $stmtAgTot->execute([':ag_id' => $agId, ':phase' => $statsPackaging]);
             $agRow = $stmtAgTot->fetch();
             if (is_array($agRow)) {
                 $totProducedAll = (float)($agRow['tot_all'] ?? 0);
@@ -1923,6 +1928,65 @@ final class ProductionService
     // SECCIÓN 4: REGISTRO DE EVENTOS OPERATIVOS (prod_worker_ot_events)
     // =========================================================================
 
+    /** CyS always captures both legacy measure IDs, including unchanged setups.
+     *  CyS siempre registra ambos IDs de medida, incluso cuando no hay cambio. */
+    public function validateCysSetupMeasuresForAgenda(int $agId, int $fromId, int $toId): void
+    {
+        $stmt = $this->erpPdo->prepare('SELECT eq.equipo_type_id, t.type_ant_title
+            FROM prod_agenda ag JOIN equipo eq ON eq.id=ag.ag_equipo_id
+            LEFT JOIN equipo_type t ON t.id=eq.equipo_type_id WHERE ag.id=?');
+        $stmt->execute([$agId]);
+        $machine = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$machine) throw new RuntimeException('No se encontro la maquina de la OT.');
+        if (!$this->isCysSetupMachine($machine)) return;
+        $this->validateCysMeasureIds($fromId, $toId);
+    }
+
+    private function isCysSetupMachine(array $machine): bool
+    {
+        $title = (string)($machine['type_ant_title'] ?? '');
+        return (int)($machine['equipo_type_id'] ?? 0) === 8
+            || stripos($title, 'sellad') !== false || stripos($title, 'corte') !== false;
+    }
+
+    private function validateCysMeasureIds(int $fromId, int $toId): void
+    {
+        if ($fromId <= 0 || $toId <= 0) {
+            throw new RuntimeException('En Corte y Sellado debes seleccionar De Medida y A Medida.');
+        }
+        $stmt = $this->erpPdo->prepare('SELECT id FROM prod_medidas WHERE id IN (?,?) AND med_status>0');
+        $stmt->execute([$fromId,$toId]);
+        $ids = array_map('intval',$stmt->fetchAll(PDO::FETCH_COLUMN));
+        if (!in_array($fromId,$ids,true) || !in_array($toId,$ids,true)) {
+            throw new RuntimeException('Selecciona medidas vigentes del catalogo ERP.');
+        }
+    }
+
+    public function getCysSetupMeasuresStatus(int $workerOtId): array
+    {
+        $stmt = $this->erpPdo->prepare('SELECT ot.wok_ag_id, eq.equipo_type_id, t.type_ant_title
+            FROM prod_worker_ot ot JOIN prod_worker_init wi ON wi.id=ot.wok_init_id
+            JOIN equipo eq ON eq.id=wi.win_equipoid LEFT JOIN equipo_type t ON t.id=eq.equipo_type_id
+            WHERE ot.id=?');
+        $stmt->execute([$workerOtId]);
+        $machine = $stmt->fetch(PDO::FETCH_ASSOC);
+        $required = $machine && $this->isCysSetupMachine($machine);
+        if (!$required) return ['required'=>false,'complete'=>true,'event'=>null];
+        $stmt = $this->erpPdo->prepare("SELECT ev.*, m1.med_name AS from_med_name, m2.med_name AS to_med_name
+            FROM prod_worker_ot_events ev
+            LEFT JOIN prod_medidas m1 ON m1.id=ev.evt_medida_fromid
+            LEFT JOIN prod_medidas m2 ON m2.id=ev.evt_medida_toid
+            WHERE ev.evt_prod_worker_otid=? AND ev.evt_type='apertura' AND ev.evt_status>0
+            ORDER BY ev.evt_crtdat DESC,ev.id DESC LIMIT 1");
+        $stmt->execute([$workerOtId]);
+        $event = $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+        // Historical measures can be inactive; retain valid historical references.
+        // Las medidas historicas pueden estar inactivas; conservar sus referencias validas.
+        $complete = $event && (int)$event['evt_medida_fromid']>0 && (int)$event['evt_medida_toid']>0
+            && $event['from_med_name'] !== null && $event['to_med_name'] !== null;
+        return ['required'=>true,'complete'=>(bool)$complete,'event'=>$event];
+    }
+
     /**
      * Registra o finaliza evento de Apertura / Preparación de máquina (`evt_type = 'apertura'`).
      */
@@ -1948,6 +2012,33 @@ final class ProductionService
 
         if ($workerOtId <= 0 && ($refId === null || $refId <= 0)) {
             return ['ok' => false, 'error' => 'ID de OT inválido.'];
+        }
+
+        $measureStatus = $this->getCysSetupMeasuresStatus($workerOtId);
+        if ($measureStatus['required']) {
+            try {
+                $this->validateCysMeasureIds($medidaFromId,$medidaToId);
+                if ($refId !== null && $refId > 0) {
+                    $event = $this->getEventById($refId,$workerOtId);
+                    if (!$event || $event['evt_type'] !== 'apertura') {
+                        throw new RuntimeException('El alistamiento no pertenece a esta OT.');
+                    }
+                } elseif ($measureStatus['event'] !== null) {
+                    // Retry initial capture without inserting another setup event.
+                    // Reintentar captura inicial sin crear otro evento de alistamiento.
+                    $existing = $measureStatus['event'];
+                    if ($measureStatus['complete']) {
+                        if ((int)$existing['evt_medida_fromid'] !== $medidaFromId
+                            || (int)$existing['evt_medida_toid'] !== $medidaToId) {
+                            throw new RuntimeException('La OT ya tiene medidas. Actualiza su alistamiento existente.');
+                        }
+                        return ['ok'=>true,'event_id'=>(int)$existing['id']];
+                    }
+                    $refId = (int)$existing['id'];
+                }
+            } catch (RuntimeException $e) {
+                return ['ok'=>false,'error'=>$e->getMessage()];
+            }
         }
 
         $now = time();
@@ -2007,9 +2098,267 @@ final class ProductionService
         return ['ok' => true, 'event_id' => (int)$this->erpPdo->lastInsertId()];
     }
 
-    /**
-     * Registra o finaliza evento de Producción (`evt_type = 'prod'`).
-     */
+    /** Recupera el detalle de embalaje del evento, sin crear stock ni etiquetas. */
+    public function getPackagingEventDetail(int $eventId, int $workerOtId): array
+    {
+        $stmt = $this->erpPdo->prepare('SELECT * FROM prod_worker_embalajes WHERE req_v2refid = :event AND evt_prod_worker_otid = :ot ORDER BY id DESC LIMIT 1');
+        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId]);
+        return $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    }
+
+    public function getEventById(int $eventId, int $workerOtId): ?array
+    {
+        $stmt = $this->erpPdo->prepare('SELECT * FROM prod_worker_ot_events WHERE id = :event AND evt_prod_worker_otid = :ot AND evt_status > 0');
+        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId]);
+        return $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    public function listPackagingClosureTypes(int $requestId): array
+    {
+        $stmt = $this->erpPdo->prepare("SELECT codigo, descripcion FROM parametros
+            WHERE tabla = 'CIERRES P' AND (valor1 = 0 OR valor1 = (
+                SELECT CASE WHEN req_id_cc_m1 > 0 OR req_id_cc_m2 > 0 OR req_id_cc_m3 > 0 THEN 2 ELSE 1 END FROM orders WHERE id = :request
+            )) ORDER BY descripcion");
+        $stmt->execute([':request' => $requestId]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
+
+    /** CyS records packing quantities, not supervisor-authorized packaging closure.
+     *  CyS registra cantidades de embalaje, no el cierre autorizado por supervisor. */
+    public static function normalizeCysProductionPacking(array $input): array
+    {
+        $detail = ['req_embalaje_medidas_caja'=>trim((string)($input['req_embalaje_medidas_caja']??''))];
+        if (strlen($detail['req_embalaje_medidas_caja']) > 255) throw new RuntimeException('Medida de caja demasiado larga.');
+        foreach (['req_embalaje_bolsas_por_caja_amt','req_embalaje_cajas_por_pallet_amt',
+            'req_embalaje_pallets_completos_amt','req_embalaje_palletcajas_incompletos_amt',
+            'req_embalaje_cajas_completas_amt','req_embalaje_caja_final',
+            'req_embalaje_bolsas_sobrantes_amt','req_embalaje_showroom'] as $field) {
+            $value = filter_var($input[$field] ?? 0,FILTER_VALIDATE_INT);
+            if ($value === false || $value<0 || $value>100000000) {
+                throw new RuntimeException('Las cantidades de embalaje deben ser enteros positivos o cero.');
+            }
+            $detail[$field] = $value;
+        }
+        if ($detail['req_embalaje_cajas_completas_amt']>0 && $detail['req_embalaje_bolsas_por_caja_amt']<=0) {
+            throw new RuntimeException('Indica la cantidad de bolsas por caja.');
+        }
+        $total = $detail['req_embalaje_cajas_completas_amt']*$detail['req_embalaje_bolsas_por_caja_amt']
+            +$detail['req_embalaje_caja_final']+$detail['req_embalaje_bolsas_sobrantes_amt']+$detail['req_embalaje_showroom'];
+        if ($total>2147483647) throw new RuntimeException('Cantidad total de bolsas demasiado grande.');
+        return $detail;
+    }
+
+    public function saveCysProductionPacking(int $eventId, int $workerOtId, array $input): void
+    {
+        $detail = self::normalizeCysProductionPacking($input);
+        if (!$this->getCysSetupMeasuresStatus($workerOtId)['required']) throw new RuntimeException('El detalle corresponde solo a Corte y Sellado.');
+        $stmt = $this->erpPdo->prepare("SELECT a.ag_reqid FROM prod_worker_ot_events e
+            JOIN prod_worker_ot ot ON ot.id=e.evt_prod_worker_otid JOIN prod_agenda a ON a.id=ot.wok_ag_id
+            WHERE e.id=? AND ot.id=? AND e.evt_type='prod' AND e.overrideembalaje_act=0");
+        $stmt->execute([$eventId,$workerOtId]);
+        $requestId = (int)$stmt->fetchColumn();
+        if ($requestId<=0) throw new RuntimeException('El detalle no pertenece a la produccion de esta OT.');
+        $data = $detail + ['evt_prod_worker_otid'=>$workerOtId,'evt_reqid'=>$requestId,
+            'evt_crtdat'=>time(),'req_v2refid'=>$eventId];
+        $existing = $this->getPackagingEventDetail($eventId,$workerOtId);
+        if (!$existing) $data += ['req_codigo_cierre'=>'','req_observacion'=>''];
+        $params = [];
+        foreach ($data as $field=>$value) $params[':'.$field]=$value;
+        if ($existing) {
+            $params[':id']=(int)$existing['id'];
+            $sql='UPDATE prod_worker_embalajes SET '.implode(',',array_map(static fn($f)=>"$f=:$f",array_keys($data))).' WHERE id=:id';
+        } else {
+            $sql='INSERT INTO prod_worker_embalajes ('.implode(',',array_keys($data)).') VALUES ('.implode(',',array_keys($params)).')';
+        }
+        $this->erpPdo->prepare($sql)->execute($params);
+    }
+
+    public static function normalizePackagingDetail(array $input): array
+    {
+        $detail = [];
+        foreach (['req_embalaje_bolsas_por_caja_amt', 'req_embalaje_cajas_por_pallet_amt',
+            'req_embalaje_pallets_completos_amt', 'req_embalaje_palletcajas_incompletos_amt',
+            'req_embalaje_cajas_completas_amt', 'req_embalaje_caja_final',
+            'req_embalaje_bolsas_sobrantes_amt', 'req_embalaje_showroom', 'req_id_bodega'] as $field) {
+            $value = filter_var($input[$field] ?? 0, FILTER_VALIDATE_INT);
+            if ($value === false || $value < 0 || $value > 100000000) {
+                throw new RuntimeException('Las cantidades de embalaje deben ser numeros enteros positivos o cero.');
+            }
+            $detail[$field] = $value;
+        }
+        if ($detail['req_embalaje_bolsas_por_caja_amt'] <= 0 || $detail['req_embalaje_cajas_por_pallet_amt'] <= 0 || $detail['req_id_bodega'] <= 0) {
+            throw new RuntimeException('Indique unidades por caja, cajas por pallet y bodega de destino.');
+        }
+        if ($detail['req_embalaje_caja_final'] >= $detail['req_embalaje_bolsas_por_caja_amt']) {
+            throw new RuntimeException('La caja final debe tener menos unidades que una caja completa.');
+        }
+        if ($detail['req_embalaje_palletcajas_incompletos_amt'] >= $detail['req_embalaje_cajas_por_pallet_amt']
+            || $detail['req_embalaje_pallets_completos_amt'] * $detail['req_embalaje_cajas_por_pallet_amt']
+                + $detail['req_embalaje_palletcajas_incompletos_amt'] !== $detail['req_embalaje_cajas_completas_amt'] + ($detail['req_embalaje_caja_final'] > 0 ? 1 : 0)) {
+            throw new RuntimeException('El reparto de pallets debe coincidir con las cajas completas y la caja final.');
+        }
+        foreach (['req_embalaje_medidas_caja', 'req_codigo_cierre', 'req_observacion'] as $field) {
+            $detail[$field] = trim((string)($input[$field] ?? ''));
+        }
+        if ($detail['req_embalaje_medidas_caja'] === '' || strlen($detail['req_embalaje_medidas_caja']) > 255 || $detail['req_codigo_cierre'] === '') {
+            throw new RuntimeException('Indique medida de caja y clasificacion de cierre.');
+        }
+        $detail['total_units'] = $detail['req_embalaje_cajas_completas_amt'] * $detail['req_embalaje_bolsas_por_caja_amt']
+            + $detail['req_embalaje_caja_final'] + $detail['req_embalaje_bolsas_sobrantes_amt'] + $detail['req_embalaje_showroom'];
+        if ($detail['total_units'] <= 0) {
+            throw new RuntimeException('Debe registrar al menos una unidad embalada.');
+        }
+        if ($detail['total_units'] > 2147483647) {
+            throw new RuntimeException('La cantidad total de unidades es demasiado grande.');
+        }
+        return $detail;
+    }
+
+    public function savePackagingEventDetail(int $eventId, int $workerOtId, array $detail, string $supervisor, string $password): void
+    {
+        $detail = self::normalizePackagingDetail($detail);
+        if (!$this->validateSupervisor($supervisor, $password)) {
+            throw new RuntimeException('Las credenciales del supervisor no son validas.');
+        }
+        $stmt = $this->erpPdo->prepare('SELECT a.ag_reqid FROM prod_worker_ot_events e JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid JOIN prod_agenda a ON a.id = ot.wok_ag_id WHERE e.id = :event AND ot.id = :ot AND e.overrideembalaje_act = 1');
+        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId]);
+        $requestId = (int)$stmt->fetchColumn();
+        if ($requestId <= 0 || !in_array($detail['req_codigo_cierre'], array_map('strval', array_column($this->listPackagingClosureTypes($requestId), 'codigo')), true)) {
+            throw new RuntimeException('La clasificacion de cierre no corresponde al pedido.');
+        }
+        $warehouse = $this->erpPdo->prepare('SELECT id FROM company_shops_storehouses WHERE id = :id');
+        $warehouse->execute([':id' => $detail['req_id_bodega']]);
+        if (!$warehouse->fetchColumn()) throw new RuntimeException('Bodega de destino no valida.');
+        $user = $this->erpPdo->prepare('SELECT id FROM user WHERE user_login = :login AND user_status = 1 LIMIT 1');
+        $user->execute([':login' => trim($supervisor)]);
+        unset($detail['total_units']);
+        $data = $detail + ['evt_prod_worker_otid' => $workerOtId, 'evt_reqid' => $requestId,
+            'evt_crtdat' => time(), 'req_id_supervisor' => (int)$user->fetchColumn(), 'req_v2refid' => $eventId];
+        $existing = $this->getPackagingEventDetail($eventId, $workerOtId);
+        $params = [];
+        foreach ($data as $field => $value) $params[':' . $field] = $value;
+        if ($existing !== []) {
+            $params[':id'] = (int)$existing['id'];
+            $sql = 'UPDATE prod_worker_embalajes SET ' . implode(', ', array_map(static fn($f) => "$f = :$f", array_keys($data))) . ' WHERE id = :id';
+        } else {
+            $sql = 'INSERT INTO prod_worker_embalajes (' . implode(',', array_keys($data)) . ') VALUES (' . implode(',', array_keys($params)) . ')';
+        }
+        $this->erpPdo->prepare($sql)->execute($params);
+    }
+
+    /** Registra o finaliza un evento de produccion o embalaje. */
+    /** Match the phase and owning OT, never the first unrelated production.
+     *  Buscar por proceso y OT, nunca tomar la primera produccion ajena. */
+    public static function findOpenProductionPhase(array $events, int $workerOtId, int $packaging): ?array
+    {
+        foreach ($events as $event) {
+            if (in_array((string)$event['evt_type'], ['prod', 'prodsericolor'], true)
+                && (int)$event['evt_prod_worker_otid'] === $workerOtId
+                && (int)$event['evt_status'] === 1 && (int)($event['evt_enddat'] ?? 0) === 0
+                && (int)($event['overrideembalaje_act'] ?? 0) === $packaging) {
+                return $event;
+            }
+        }
+        return null;
+    }
+
+    public function assertNoOpenProductionPhases(int $workerOtId): void
+    {
+        $isCys = $this->getCysSetupMeasuresStatus($workerOtId)['required'];
+        $stmt = $this->erpPdo->prepare("SELECT COUNT(*) FROM prod_worker_ot_events
+            WHERE (evt_prod_worker_otid=:ot OR (overrideembalaje_act=1
+                AND overrideembalaje_selladora_evtrefid=:linked_ot))
+            AND (:is_cys=1 OR overrideembalaje_act=1)
+            AND evt_type IN ('prod','prodsericolor') AND evt_status=1 AND evt_enddat=0");
+        $stmt->execute([':ot'=>$workerOtId, ':linked_ot'=>$workerOtId, ':is_cys'=>$isCys ? 1 : 0]);
+        if ((int)$stmt->fetchColumn() > 0) {
+            throw new RuntimeException('Finaliza las producciones en curso, incluido Embalaje, antes de terminar la OT.');
+        }
+    }
+
+    private function ensureProductionPhaseSchema(): void
+    {
+        if ($this->trzPdo === null) {
+            throw new RuntimeException('No hay conexion de trazabilidad para registrar responsables.');
+        }
+        $this->trzPdo->exec("CREATE TABLE IF NOT EXISTS production_phase_responsibility (
+            event_id BIGINT NOT NULL PRIMARY KEY,
+            worker_ot_id BIGINT NOT NULL,
+            packaging INTEGER NOT NULL,
+            receiver_worker_id BIGINT NOT NULL,
+            receiver_name VARCHAR(200) NOT NULL,
+            started_by_worker_id BIGINT NOT NULL,
+            started_by_name VARCHAR(200) NOT NULL,
+            ended_by_worker_id BIGINT NOT NULL DEFAULT 0,
+            ended_by_name VARCHAR(200) NOT NULL DEFAULT ''
+        )" . ($this->trzPdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql'
+            ? ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4' : ''));
+    }
+
+    public function getProductionPhaseResponsibilities(int $workerOtId): array
+    {
+        if ($this->trzPdo === null) return [];
+        try {
+            $stmt = $this->trzPdo->prepare('SELECT * FROM production_phase_responsibility WHERE worker_ot_id=?');
+            $stmt->execute([$workerOtId]);
+            $result = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $result[(int)$row['event_id']] = $row;
+            }
+            return $result;
+        } catch (PDOException $e) {
+            // Old installations have no phase records until the first explicit capture.
+            // Instalaciones anteriores no tienen registros hasta la primera captura.
+            if ((string)$e->getCode() === '42S02'
+                || ((string)$e->getCode() === 'HY000' && strpos($e->getMessage(), 'no such table') !== false)) return [];
+            throw $e;
+        }
+    }
+
+    public function listProductionReceivers(): array
+    {
+        return $this->erpPdo->query('SELECT id, wrk_firstname, wrk_lastname FROM workers
+            WHERE wrk_status>0 ORDER BY wrk_firstname, wrk_lastname')->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    private function validateProductionPhaseActor(array $actor, int $workerOtId, ?int $refId): array
+    {
+        if ((int)($actor['worker_id'] ?? 0) <= 0 || trim((string)($actor['name'] ?? '')) === '') {
+            throw new RuntimeException('No se pudo identificar al operador conectado.');
+        }
+        $existing = $refId ? ($this->getProductionPhaseResponsibilities($workerOtId)[$refId] ?? null) : null;
+        if ($existing !== null) {
+            $actor['receiver_worker_id'] = (int)$existing['receiver_worker_id'];
+            $actor['receiver_name'] = (string)$existing['receiver_name'];
+        } else {
+            $stmt = $this->erpPdo->prepare('SELECT wrk_firstname, wrk_lastname FROM workers WHERE id=? AND wrk_status>0');
+            $stmt->execute([(int)($actor['receiver_worker_id'] ?? 0)]);
+            $receiver = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$receiver) throw new RuntimeException('Selecciona quien recibe esta produccion.');
+            $actor['receiver_name'] = trim($receiver['wrk_firstname'] . ' ' . $receiver['wrk_lastname']);
+        }
+        $this->ensureProductionPhaseSchema();
+        return $actor;
+    }
+
+    private function saveProductionPhaseActor(int $eventId, int $workerOtId, int $packaging, array $actor, bool $isEnd): void
+    {
+        $existing = $this->getProductionPhaseResponsibilities($workerOtId)[$eventId] ?? null;
+        if ($existing === null) {
+            $stmt = $this->trzPdo->prepare('INSERT INTO production_phase_responsibility
+                (event_id, worker_ot_id, packaging, receiver_worker_id, receiver_name,
+                 started_by_worker_id, started_by_name) VALUES (?,?,?,?,?,?,?)');
+            $stmt->execute([$eventId, $workerOtId, $packaging, $actor['receiver_worker_id'],
+                $actor['receiver_name'], $actor['starting'] ? $actor['worker_id'] : 0,
+                $actor['starting'] ? $actor['name'] : 'No registrado']);
+        }
+        if ($isEnd) {
+            $stmt = $this->trzPdo->prepare('UPDATE production_phase_responsibility
+                SET ended_by_worker_id=?, ended_by_name=? WHERE event_id=? AND ended_by_worker_id=0');
+            $stmt->execute([$actor['worker_id'], $actor['name'], $eventId]);
+        }
+    }
+
     public function recordEventProduction(
         int $workerOtId,
         float $amount,
@@ -2025,10 +2374,30 @@ final class ProductionService
         array $mermas = [],
         array $repairs = [],
         float $amountPulpoFrente = 0.0,
-        float $amountPulpoDorso = 0.0
+        float $amountPulpoDorso = 0.0,
+        array $cysPackingDetail = [],
+        array $phaseActor = []
     ): array {
         if ($workerOtId <= 0) {
             return ['ok' => false, 'error' => 'ID de OT inválido.'];
+        }
+
+        if ($cysPackingDetail !== [] || !in_array($overrideEmbalaje, [0, 1], true)) {
+            return ['ok'=>false, 'error'=>'Las cantidades de embalaje se registran solo en su cierre separado.'];
+        }
+        if ($refId !== null && $refId > 0) {
+            $event = $this->getEventById($refId, $workerOtId);
+            if (!$event || !in_array((string)$event['evt_type'], ['prod', 'prodsericolor'], true)
+                || (int)$event['overrideembalaje_act'] !== $overrideEmbalaje) {
+                return ['ok'=>false, 'error'=>'El evento no corresponde a este proceso y OT.'];
+            }
+        }
+
+        if ($overrideEmbalaje === 0 && ($refId === null || $refId <= 0)) {
+            $measureStatus = $this->getCysSetupMeasuresStatus($workerOtId);
+            if ($measureStatus['required'] && !$measureStatus['complete']) {
+                return ['ok'=>false,'error'=>'Antes de iniciar produccion, registra De Medida y A Medida en Corte y Sellado.'];
+            }
         }
 
         $now = time();
@@ -2036,23 +2405,36 @@ final class ProductionService
 
         // Si no viene refId y se trata de un inicio de tiraje (amount = 0), comprobar si ya existe un evento 'prod' abierto
         if ($refId === null || $refId <= 0) {
-            if ($amount <= 0.0) {
+            if (!$isEnd && $amount <= 0.0) {
                 $stmtActiveProd = $this->erpPdo->prepare("
                     SELECT id FROM prod_worker_ot_events
                     WHERE evt_prod_worker_otid = :ot_id 
                       AND evt_type = 'prod'
-                      AND evt_status = 1
+                      AND evt_status = 1 AND evt_enddat = 0 AND overrideembalaje_act = :packaging
                     ORDER BY id DESC LIMIT 1
                 ");
-                $stmtActiveProd->execute([':ot_id' => $workerOtId]);
+                $stmtActiveProd->execute([':ot_id' => $workerOtId, ':packaging' => $overrideEmbalaje]);
                 $activeProdId = (int)$stmtActiveProd->fetchColumn();
                 if ($activeProdId > 0) {
-                    $refId = $activeProdId;
+                    // Repeated starts must not reset counters or the original start time.
+                    // Repetir inicio no borra contadores ni modifica la hora original.
+                    return ['ok'=>true, 'event_id'=>$activeProdId];
                 }
             }
         }
+        if ($phaseActor !== []) {
+            try {
+                if ($isEnd && ($refId === null || $refId <= 0)) {
+                    throw new RuntimeException('Inicia este proceso antes de finalizar su produccion.');
+                }
+                $phaseActor = $this->validateProductionPhaseActor($phaseActor, $workerOtId, $refId);
+                $phaseActor['starting'] = $refId === null || $refId <= 0;
+            } catch (Throwable $e) {
+                return ['ok'=>false, 'error'=>$e->getMessage()];
+            }
+        }
         // Automatización de Bobinas Impresas: Si no vinieron kilos o metros, autocompletar con la suma de bobinas impresas producidas
-        if ($workerOtId > 0 && ($bobinaKg <= 0.0 || $metrosLineales <= 0)) {
+        if ($overrideEmbalaje !== 1 && $workerOtId > 0 && ($bobinaKg <= 0.0 || $metrosLineales <= 0)) {
             $prSummary = $this->getPrintedRollsSummary($workerOtId);
             if (!empty($prSummary['rolls_count']) && $prSummary['rolls_count'] > 0) {
                 if ($bobinaKg <= 0.0) {
@@ -2109,7 +2491,7 @@ final class ProductionService
 
         if ($refId !== null && $refId > 0) {
             $eventId = $refId;
-            $endDat = $isEnd ? $now : null;
+            $endDat = $isEnd ? ((int)($event['evt_enddat'] ?? 0) > 0 ? (int)$event['evt_enddat'] : $now) : null;
             $sql = "UPDATE prod_worker_ot_events
                     SET evt_amount = :amt, evt_amount2 = :amt2, prod_bobina_kg = :kg,
                         evt_comments = :comments, evt_amount_metros_maquina = :mmaq,
@@ -2168,9 +2550,13 @@ final class ProductionService
             $eventId = (int)$this->erpPdo->lastInsertId();
         }
 
+        if ($phaseActor !== []) {
+            $this->saveProductionPhaseActor($eventId, $workerOtId, $overrideEmbalaje, $phaseActor, $isEnd);
+        }
+
         // Consolidación de mermas de desmontaje de bobinas:
         // Si el evento final no trae alguna merma de desmontaje previamente registrada, cargarla automáticamente
-        if ($workerOtId > 0) {
+        if ($overrideEmbalaje !== 1 && $workerOtId > 0) {
             $dismount = $this->getRollDismountMermas($workerOtId);
             foreach ($dismount as $dtid => $dinfo) {
                 if (empty($mermas[$dtid]) || ((float)($mermas[$dtid]['amount'] ?? 0) <= 0 && (float)($mermas[$dtid]['kgs'] ?? 0) <= 0 && (int)($mermas[$dtid]['mts'] ?? 0) <= 0)) {
@@ -2189,7 +2575,7 @@ final class ProductionService
         }
 
         // Desactivar registros intermedios de 'merma' de desmontaje para no duplicar en reportes
-        if ($workerOtId > 0 && $eventId > 0) {
+        if ($overrideEmbalaje !== 1 && $workerOtId > 0 && $eventId > 0) {
             try {
                 $stCleanDefects = $this->erpPdo->prepare("
                     UPDATE prod_worker_ot_defectunits d
@@ -2212,7 +2598,7 @@ final class ProductionService
         }
 
         // Consolidar y cerrar eventos intermedios de bobina semielaborada para no duplicar kilos ni metros en reportes
-        if ($workerOtId > 0 && $eventId > 0) {
+        if ($overrideEmbalaje !== 1 && $workerOtId > 0 && $eventId > 0) {
             $prSummary = $this->getPrintedRollsSummary($workerOtId);
             if (!empty($prSummary['rolls_count']) && $prSummary['rolls_count'] > 0) {
                 try {
@@ -5619,6 +6005,10 @@ final class ProductionService
             $stmtDirectPallets->execute([':rid' => (int)$roll['id']]);
             $result['pallets'] = $stmtDirectPallets->fetchAll();
 
+            require_once __DIR__ . '/MaterialSupplyService.php';
+            $result['supply_chain'] = (new MaterialSupplyService($this->erpPdo, $this->trzPdo))
+                ->chainForRoll((int)$roll['id']);
+
             return $result;
         }
 
@@ -6837,6 +7227,23 @@ final class ProductionService
             return ['ok' => false, 'error' => 'Usuario o contraseña de supervisor errónea.'];
         }
 
+        try {
+            $this->assertNoOpenProductionPhases($workerOtId);
+        } catch (Throwable $e) {
+            return ['ok'=>false, 'error'=>$e->getMessage()];
+        }
+
+        if ($this->trzPdo !== null) {
+            try {
+                require_once __DIR__ . '/HandleConsumptionService.php';
+                (new HandleConsumptionService($this->erpPdo, $this->trzPdo))->assertNoPendingForWorkOrder($workerOtId);
+                require_once __DIR__ . '/MaterialSupplyService.php';
+                (new MaterialSupplyService($this->erpPdo, $this->trzPdo))->assertNoOutstandingReceipts($workerOtId);
+            } catch (Throwable $e) {
+                return ['ok' => false, 'error' => $e->getMessage()];
+            }
+        }
+
         $now = time();
         $stmt = $this->erpPdo->prepare(
             "UPDATE prod_worker_ot
@@ -6849,7 +7256,7 @@ final class ProductionService
             // Consolidar mermas de desmontaje en el evento de producción si aún no se vincularon
             $stmtLastProd = $this->erpPdo->prepare("
                 SELECT id FROM prod_worker_ot_events
-                WHERE evt_prod_worker_otid = :ot_id AND evt_type = 'prod'
+                WHERE evt_prod_worker_otid = :ot_id AND evt_type = 'prod' AND overrideembalaje_act = 0
                 ORDER BY id DESC LIMIT 1
             ");
             $stmtLastProd->execute([':ot_id' => $workerOtId]);
@@ -7023,6 +7430,7 @@ final class ProductionService
                        t5.req_infoaddprd_cliche_ubicacion, t5.req_infoaddprd_cliche_codigo,
                        t5.req_operador_mermaperc, t5.req_operador_bastidoramt, t5.req_solic_devprints_poltype,
                        t1x.item_amount, t1x.fab_type, t1x.fab_med_width, t1x.fab_med_height, t1x.fab_med_fuelle,
+                       (SELECT cv.add_name FROM tran_comments_vals cv WHERE cv.id = t1x.fab_mat_fabric_color LIMIT 1) AS fabric_color,
                        t1x.fab_printtype, t1x.fab_design_imagehash, t1x.fab_design_name, t1x.item_img_hash,
                        t1x.fab_print_colordesc_1, t1x.fab_print_colordesc_2, t1x.fab_print_colordesc_3,
                        t1x.fab_print_colordesc_4, t1x.fab_print_colordesc_5, t1x.fab_print_colordesc_6,
@@ -7106,6 +7514,103 @@ final class ProductionService
         } catch (Throwable) {
             return [];
         }
+    }
+
+    public function attachWorkOrderFabricationDetails(array $orders): array
+    {
+        $requestIds = array_values(array_unique(array_filter(array_map('intval', array_column($orders, 'req_id')))));
+        if ($requestIds === []) return $orders;
+        // One batch lookup uses the same product attributes as the machine panel.
+        // Una consulta por lote utiliza los mismos atributos del panel de maquina.
+        $stmt = $this->erpPdo->prepare("
+            SELECT oi.req_id, i.item_number_prod, oi.fab_mat_gramms, oi.fab_manilla_length,
+                   o.req_embalaje_medidas_caja, o.req_embalaje_bolsas_por_caja_amt,
+                   fabric.add_name AS fabric_color, handle.add_name AS manilla_color,
+                   (SELECT v.add_name FROM tran_comments_item_vals c JOIN tran_comments_vals v ON v.id = c.val_id WHERE c.item_id = i.id AND c.com_id = 20 ORDER BY c.val_id LIMIT 1) AS bag_type,
+                   (SELECT v.add_name FROM tran_comments_item_vals c JOIN tran_comments_vals v ON v.id = c.val_id WHERE c.item_id = i.id AND c.com_id = 31 ORDER BY c.val_id LIMIT 1) AS ancho,
+                   (SELECT v.add_name FROM tran_comments_item_vals c JOIN tran_comments_vals v ON v.id = c.val_id WHERE c.item_id = i.id AND c.com_id = 39 ORDER BY c.val_id LIMIT 1) AS alto_tiro,
+                   (SELECT v.add_name FROM tran_comments_item_vals c JOIN tran_comments_vals v ON v.id = c.val_id WHERE c.item_id = i.id AND c.com_id = 40 ORDER BY c.val_id LIMIT 1) AS alto_retiro,
+                   (SELECT v.add_name FROM tran_comments_item_vals c JOIN tran_comments_vals v ON v.id = c.val_id WHERE c.item_id = i.id AND c.com_id = 41 ORDER BY c.val_id LIMIT 1) AS doblez_superior,
+                   (SELECT v.add_name FROM tran_comments_item_vals c JOIN tran_comments_vals v ON v.id = c.val_id WHERE c.item_id = i.id AND c.com_id = 49 ORDER BY c.val_id LIMIT 1) AS ancho_manillas
+            FROM orders_items oi
+            JOIN orders o ON o.id = oi.req_id
+            JOIN item i ON i.id = oi.item_id
+            LEFT JOIN tran_comments_vals fabric ON fabric.id = oi.fab_mat_fabric_color
+            LEFT JOIN tran_comments_vals handle ON handle.id = oi.fab_mat_manilla_color
+            WHERE oi.req_id IN (" . implode(',', array_fill(0, count($requestIds), '?')) . ")
+            ORDER BY oi.req_id, oi.item_pos
+        ");
+        $stmt->execute($requestIds);
+        $details = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $detail) {
+            $key = (int)$detail['req_id'] . '|' . (string)$detail['item_number_prod'];
+            if (!isset($details[$key])) $details[$key] = $detail;
+        }
+        foreach ($orders as &$order) {
+            $key = (int)($order['req_id'] ?? 0) . '|' . (string)($order['item_number_prod'] ?? '');
+            $order = array_replace($order, $details[$key] ?? []);
+        }
+        unset($order);
+        return $orders;
+    }
+
+    public function listOperatorEventHistory(int $workerId, int $plantaId, int $limit = 100): array
+    {
+        if ($workerId <= 0) {
+            return [];
+        }
+        // Plant zero means no plant selected; worker isolation remains mandatory.
+        // Planta cero significa sin seleccion; el filtro personal es obligatorio.
+        $wherePlant = $plantaId > 0 ? 'AND wi.win_plantaid = :plant' : '';
+        $stmt = $this->erpPdo->prepare("
+            SELECT e.*, a.id AS ag_id, p.prd_number, o.req_number, c.cust_name,
+                   eq.equipo_name, i.item_number_prod, i.item_title,
+                   COALESCE(pt.pause_name, mt.mant_title, '') AS cause_title
+            FROM prod_worker_ot_events e
+            JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid
+            JOIN prod_worker_init wi ON wi.id = ot.wok_init_id
+            JOIN prod_agenda a ON a.id = ot.wok_ag_id
+            JOIN prod_header p ON p.id = a.ag_prdid
+            JOIN orders o ON o.id = a.ag_reqid
+            LEFT JOIN customer c ON c.id = o.req_cust_id
+            LEFT JOIN equipo eq ON eq.id = wi.win_equipoid
+            LEFT JOIN item i ON i.id = (
+                SELECT oi.item_id FROM orders_items oi
+                WHERE oi.req_id = o.id ORDER BY oi.item_pos, oi.item_id LIMIT 1
+            )
+            LEFT JOIN prod_pause_types pt ON pt.id = e.evt_pause_id
+            LEFT JOIN equipo_manttype mt ON mt.id = e.evt_equipo_mantid
+            WHERE wi.win_wrkid = :worker {$wherePlant}
+              AND e.evt_status > 0 AND ot.wok_status > 0
+            ORDER BY e.evt_crtdat DESC, e.id DESC LIMIT :lim
+        ");
+        $stmt->bindValue(':worker', $workerId, PDO::PARAM_INT);
+        if ($plantaId > 0) {
+            $stmt->bindValue(':plant', $plantaId, PDO::PARAM_INT);
+        }
+        $stmt->bindValue(':lim', max(1, min(200, $limit)), PDO::PARAM_INT);
+        $stmt->execute();
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        if ($rows !== []) {
+            $ids = array_map('intval', array_column($rows, 'id'));
+            $defects = $this->erpPdo->query("
+                SELECT d.*, COALESCE(m.merma_title, r.repair_title, 'No conformidad') AS cause_title
+                FROM prod_worker_ot_defectunits d
+                LEFT JOIN prod_mermatypes m ON m.id = d.evt_merma_typeid
+                LEFT JOIN prod_repairtypes r ON r.id = d.evt_repair_typeid
+                WHERE d.evt_status > 0 AND d.evt_refid IN (" . implode(',', $ids) . ")
+                ORDER BY d.id
+            ")->fetchAll(PDO::FETCH_ASSOC);
+            $byEvent = [];
+            foreach ($defects as $defect) {
+                $byEvent[(int)$defect['evt_refid']][] = $defect;
+            }
+            foreach ($rows as &$row) {
+                $row['defects'] = $byEvent[(int)$row['id']] ?? [];
+            }
+            unset($row);
+        }
+        return $rows;
     }
 
     /**

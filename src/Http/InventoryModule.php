@@ -1062,6 +1062,7 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
 function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $currentOperatorName): void
 {
     $service->ensureTraceabilityWarehouseEntriesTable();
+    $maxLabelsPerBatch = ReceptionService::MAX_WAREHOUSE_TRACEABILITY_LABELS;
     $canEdit = true;
     $storehouses = $service->listErpStorehouses();
     $requestedWhId = isset($_GET['bodega']) ? (int)$_GET['bodega'] : 0;
@@ -1391,7 +1392,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div class="trz-fields-2col">';
     $body .= '<div class="form-group">';
     $body .= '<label>Código / SKU *</label>';
-    $body .= '<input type="text" name="item_code" id="input_item_code" class="form-control" value="' . h($preSku) . '" placeholder="Ej: POL-BL-80" required>';
+    $body .= '<input type="text" name="item_code" id="input_item_code" class="form-control" maxlength="60" value="' . h($preSku) . '" placeholder="Ej: POL-BL-80" required>';
     $body .= '</div>';
     $body .= '<div class="form-group">';
     $body .= '<label>Unidad Medida</label>';
@@ -1401,15 +1402,15 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
     $body .= '<div class="form-group">';
     $body .= '<label>Descripción del Producto *</label>';
-    $body .= '<input type="text" name="item_description" id="input_item_desc" class="form-control" value="' . h($preDesc) . '" placeholder="Nombre o descripción completa del producto..." required>';
+    $body .= '<input type="text" name="item_description" id="input_item_desc" class="form-control" maxlength="255" value="' . h($preDesc) . '" placeholder="Nombre o descripción completa del producto..." required>';
     $body .= '</div>';
 
     // SECCIÓN CANTIDAD EN MODO UNITARIO (1 etiqueta por cada producto)
     $body .= '<div id="sec_mode_unitary">';
     $body .= '<div class="form-group">';
     $body .= '<label id="lbl_unitary_count">Cantidad de Productos / Bultos a Rotular (Etiquetas a Imprimir) *</label>';
-    $body .= '<input type="number" min="1" max="50" name="package_count" id="input_package_count" class="form-control" value="1" required oninput="calcTotals()">';
-    $body .= '<div class="muted" style="font-size:11.5px;margin-top:4px;color:#0f766e;font-weight:600">👉 Se generará una etiqueta física individual con código único para CADA producto/bulto físico. Máximo 50 etiquetas por vez.</div>';
+    $body .= '<input type="number" min="1" max="' . $maxLabelsPerBatch . '" name="package_count" id="input_package_count" class="form-control" value="1" required oninput="calcTotals()">';
+    $body .= '<div class="muted" style="font-size:11.5px;margin-top:4px;color:#0f766e;font-weight:600">👉 Se generará una etiqueta física individual con código único para CADA producto/bulto físico. Máximo ' . $maxLabelsPerBatch . ' etiquetas por vez.</div>';
     $body .= '</div>';
     $body .= '</div>';
 
@@ -1418,8 +1419,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div class="trz-fields-2col">';
     $body .= '<div class="form-group">';
     $body .= '<label>1. Cantidad de Bultos (Etiquetas a Imprimir) *</label>';
-    $body .= '<input type="number" min="1" max="50" id="input_package_count_pack" class="form-control" value="1" oninput="calcTotals()">';
-    $body .= '<div class="muted" style="font-size:11px;margin-top:3px">Número de pallets, cajas o bultos físicos a rotular. Máximo 50 etiquetas por vez.</div>';
+    $body .= '<input type="number" min="1" max="' . $maxLabelsPerBatch . '" id="input_package_count_pack" class="form-control" value="1" oninput="calcTotals()">';
+    $body .= '<div class="muted" style="font-size:11px;margin-top:3px">Número de pallets, cajas o bultos físicos a rotular. Máximo ' . $maxLabelsPerBatch . ' etiquetas por vez.</div>';
     $body .= '</div>';
     $body .= '<div class="form-group">';
     $body .= '<label>2. Unidades de Producto por Bulto *</label>';
@@ -1651,7 +1652,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         var currentEntryForSplit = null;
         var currentSameSkuEntries = [];
         var currentPrintSourceEntry = null;
-        var MAX_TRACEABILITY_LABELS = 50;
+        var MAX_TRACEABILITY_LABELS = ' . $maxLabelsPerBatch . ';
 
         function normalizeSku(value) {
             return String(value || "").trim().toUpperCase();
@@ -2108,10 +2109,9 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
         function renderLabelList(list) {
             var container = document.getElementById("printableArea");
-            container.innerHTML = "";
-            list.forEach(function(data, idx) {
-                container.innerHTML += buildLabelCardHtml(data, idx, list.length);
-            });
+            container.innerHTML = list.map(function(data, idx) {
+                return buildLabelCardHtml(data, idx, list.length);
+            }).join("");
             var count = list.length;
             document.getElementById("lbl_modal_label_count").textContent = count > 1 ? (" (" + count + " etiquetas)") : " (1 etiqueta)";
         }
@@ -2639,6 +2639,22 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
         }
         $html .= '</div>';
         $html .= '</div>';
+    }
+
+    if (!empty($treeData['supply_chain'])) {
+        $html .= '<div class="trz-card" style="padding:16px;background:#fff"><h3>Solicitud, Entrega y Recepcion</h3>';
+        $html .= '<div style="overflow:auto"><table style="width:100%;font-size:13px"><thead><tr>';
+        $html .= '<th>Solicitud / Traspaso ERP</th><th>Solicitado por</th><th>Entregado por</th><th>Recibido por</th></tr></thead><tbody>';
+        foreach ($treeData['supply_chain'] as $delivery) {
+            $html .= '<tr><td>' . h(substr($delivery['request_key'], 0, 8)) . ' / ' . h((string)($delivery['erp_transfer_id'] ?? '-')) . '</td>';
+            foreach (['requested_by', 'delivered_by', 'received_by'] as $field) {
+                $actor = json_decode((string)($delivery[$field] ?? '{}'), true) ?: [];
+                $dateField = $field === 'received_by' ? 'received_at' : ($field === 'delivered_by' ? 'delivered_at' : 'requested_at');
+                $html .= '<td>' . h((string)($actor['name'] ?? 'Pendiente')) . '<br>' . $fmtDate($delivery[$dateField] ?? null) . '</td>';
+            }
+            $html .= '</tr>';
+        }
+        $html .= '</tbody></table></div></div>';
     }
 
     $html .= '</div>'; // Fin flex column
@@ -3509,10 +3525,16 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     // TAB 2: SOLICITUDES Y AGENDA DE PLANTA
     // =========================================================================
     $body .= '<div id="panel_tab_solicitudes" class="transfer-panel" style="display:none">';
+    if (function_exists('renderSupplyRequestHistory')) {
+        $supply = new MaterialSupplyService(Db::erpPdo(), Db::trzPdo());
+        ob_start();
+        renderSupplyRequestHistory($supply, $supply->requests(), 0, true);
+        $body .= ob_get_clean();
+    }
     $body .= '  <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
     $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
     $body .= '      <div>';
-    $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📥 Solicitudes de Materiales y OTs Programadas en Planta</h2>';
+    $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📥 Agenda y Registros Anteriores</h2>';
     $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Haga clic en <strong>⚡ Despachar Material</strong> para auto-completar el formulario de traspaso con los datos de la máquina y la OT.</p>';
     $body .= '      </div>';
     $body .= '      <span style="background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px">' . count($pendingRequests) . ' solicitudes</span>';

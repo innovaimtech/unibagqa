@@ -56,7 +56,9 @@ require_once __DIR__ . '/../src/Http/ErpReportsModule.php';
 require_once __DIR__ . '/../src/Http/WarehousesModule.php';
 require_once __DIR__ . '/../src/MonthlyPresentationService.php';
 require_once __DIR__ . '/../src/ProductionService.php';
+require_once __DIR__ . '/../src/HandleConsumptionService.php';
 require_once __DIR__ . '/../src/Http/ProductionModule.php';
+require_once __DIR__ . '/../src/Http/MaterialSupplyModule.php';
 require_once __DIR__ . '/../src/Http/OperatorLunchModule.php';
 
 Env::load(__DIR__ . '/../.env');
@@ -457,6 +459,10 @@ function unibagPrinterProfileQuery(string $profile): string
 }
 
 if (handleApiRoutes($path, $method, $service, $scale, $printer, $currentOperatorName)) {
+    exit;
+}
+
+if (handleMaterialSupplyRoutes($path, $method, $prodService, $currentOperatorName)) {
     exit;
 }
 
