@@ -60,6 +60,10 @@ require_once __DIR__ . '/RollReceptionService.php';
 final class ReceptionService
 {
     public const MAX_WAREHOUSE_TRACEABILITY_LABELS = 100;
+    private const LABEL_BATCH_FIELDS = [
+        'warehouse_id', 'item_code', 'item_description', 'entity_type', 'operator_name',
+        'unit_name', 'total_packages', 'quantity', 'lot_number', 'location_ref', 'order_ref',
+    ];
     private const RECEPTION_SCHEMA_VERSION = 'reception_v10';
     private const PRODUCTION_WAREHOUSE_SYNC_VERSION = 'production_warehouse_sync_v1';
     private const ROLL_WAREHOUSE_TRACEABILITY_SYNC_VERSION = 'roll_warehouse_traceability_sync_v1';
@@ -23802,6 +23806,7 @@ SQL;
                 CREATE TABLE IF NOT EXISTS traceability_warehouse_entries (
                     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                     traceability_code VARCHAR(60) NOT NULL,
+                    batch_id VARCHAR(32) NULL,
                     entity_type ENUM('PALLET', 'BOX', 'ROLL', 'PRODUCT') NOT NULL DEFAULT 'PRODUCT',
                     entity_id BIGINT UNSIGNED NULL,
                     warehouse_id INT UNSIGNED NOT NULL,
@@ -23826,11 +23831,13 @@ SQL;
                     UNIQUE KEY uq_code (traceability_code),
                     INDEX idx_wh (warehouse_id),
                     INDEX idx_sku (item_code),
-                    INDEX idx_created (created_at)
+                    INDEX idx_created (created_at),
+                    INDEX idx_label_batch (warehouse_id, batch_id, id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             ");
             // Asegurar columnas y enum por si la tabla ya existía previamente en la base de datos
             $colsToAdd = [
+                'batch_id' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN batch_id VARCHAR(32) NULL AFTER traceability_code",
                 'entity_id' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN entity_id BIGINT UNSIGNED NULL AFTER entity_type",
                 'package_number' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN package_number INT UNSIGNED NULL DEFAULT 1 AFTER box_count",
                 'total_packages' => "ALTER TABLE traceability_warehouse_entries ADD COLUMN total_packages INT UNSIGNED NULL DEFAULT 1 AFTER package_number",
@@ -23844,6 +23851,14 @@ SQL;
                     try { @$this->pdo->exec($sql); } catch (Throwable) {}
                 }
             }
+            try {
+                $stmtIndex = $this->pdo->query("SELECT COUNT(*) FROM information_schema.STATISTICS
+                    WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='traceability_warehouse_entries'
+                    AND INDEX_NAME='idx_label_batch'");
+                if ((int)$stmtIndex->fetchColumn() === 0) {
+                    $this->pdo->exec('CREATE INDEX idx_label_batch ON traceability_warehouse_entries (warehouse_id,batch_id,id)');
+                }
+            } catch (Throwable) {}
             try {
                 @$this->pdo->exec("ALTER TABLE traceability_warehouse_entries MODIFY COLUMN entity_type ENUM('PALLET', 'BOX', 'ROLL', 'PRODUCT') NOT NULL DEFAULT 'PRODUCT'");
             } catch (Throwable) {}
@@ -24098,6 +24113,7 @@ SQL;
         $this->pdo->beginTransaction();
         try {
             $createdEntries = [];
+            $batchId = bin2hex(random_bytes(16));
 
             for ($i = 0; $i < $packageCount; $i++) {
                 if ($packageCount === 1 && $code !== '') {
@@ -24179,6 +24195,7 @@ SQL;
                     'unit' => $unitName,
                     'package_number' => $packageNumber,
                     'total_packages' => $packageCount,
+                    'batch_id' => $batchId,
                     'operator' => $operatorName,
                     'comments' => $comments,
                 ], JSON_UNESCAPED_UNICODE);
@@ -24194,16 +24211,17 @@ SQL;
                 // 3. Registrar entrada detallada en traceability_warehouse_entries
                 $stmtEntry = $this->pdo->prepare('
                     INSERT INTO traceability_warehouse_entries 
-                    (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name, item_id, item_code, item_description, 
+                    (traceability_code, batch_id, entity_type, entity_id, warehouse_id, warehouse_name, item_id, item_code, item_description,
                      quantity, unit_name, box_count, package_number, total_packages, weight_kg, width_mm, microns, meters, lot_number, location_ref, order_ref, 
                      operator_name, comments, status, created_at)
                     VALUES 
-                    (:code, :etype, :eid, :wh, :whname, :itemid, :itemcode, :itemdesc,
+                    (:code, :batch, :etype, :eid, :wh, :whname, :itemid, :itemcode, :itemdesc,
                      :qty, :unit, :boxcnt, :pkgnum, :totpkg, :wkg, :wmm, :mic, :met, :lot, :loc, :ord,
                      :op, :comments, :st, NOW())
                 ');
                 $stmtEntry->execute([
                     ':code' => $entryCode,
+                    ':batch' => $batchId,
                     ':etype' => $entityType,
                     ':eid' => $entityId,
                     ':wh' => $warehouseId,
@@ -24232,6 +24250,7 @@ SQL;
 
                 $createdEntries[] = [
                     'entry_id' => $entryId,
+                    'batch_id' => $batchId,
                     'code' => $entryCode,
                     'traceability_code' => $entryCode,
                     'entity_type' => $entityType,
@@ -24253,6 +24272,7 @@ SQL;
             return [
                 'ok' => true,
                 'count' => count($createdEntries),
+                'batch_id' => $batchId,
                 'entry_id' => $createdEntries[0]['entry_id'] ?? 0,
                 'code' => $createdEntries[0]['code'] ?? $code,
                 'codes' => array_column($createdEntries, 'code'),
@@ -24391,6 +24411,76 @@ SQL;
         } catch (Throwable) {
             return [];
         }
+    }
+
+    /** Legacy batches require consecutive row IDs and package numbering.
+     *  Lotes anteriores: solo agrupar IDs y numeracion consecutivos, sin adivinar por fecha. */
+    private static function legacyLabelBatchStartSql(): string
+    {
+        return '(id - CASE WHEN package_number > 0 THEN package_number ELSE 1 END + 1)';
+    }
+
+    public function listWarehouseTraceabilityBatches(int $warehouseId, string $search = '', int $page = 1, int $pageSize = 25): array
+    {
+        $this->ensureTraceabilityWarehouseEntriesTable();
+        if ($warehouseId <= 0) return [];
+        $pageSize = max(1, min(50, $pageSize));
+        $offset = (max(1, $page) - 1) * $pageSize;
+        $batchStart = "CASE WHEN COALESCE(batch_id,'')='' THEN " . self::legacyLabelBatchStartSql() . " ELSE 0 END";
+        $groupFields = implode(',', self::LABEL_BATCH_FIELDS);
+        $params = [$warehouseId];
+        $having = '';
+        if (trim($search) !== '') {
+            $having = ' HAVING MAX(CASE WHEN item_code LIKE ? OR item_description LIKE ?
+                OR operator_name LIKE ? OR traceability_code LIKE ? OR order_ref LIKE ? THEN 1 ELSE 0 END)=1';
+            $params = array_merge($params, array_fill(0, 5, '%' . trim($search) . '%'));
+        }
+        $stmt = $this->pdo->prepare("SELECT MIN(id) AS anchor_id, MAX(id) AS latest_id, $batchStart AS legacy_start,
+            MAX(batch_id) AS batch_id, MIN(created_at) AS created_at, MAX(item_code) AS item_code,
+            MAX(item_description) AS item_description, MAX(operator_name) AS operator_name,
+            MAX(entity_type) AS entity_type, COUNT(*) AS label_count, MAX(total_packages) AS expected_count,
+            MIN(package_number) AS first_number, MAX(package_number) AS last_number,
+            MIN(traceability_code) AS first_code
+            FROM traceability_warehouse_entries WHERE warehouse_id=?
+            GROUP BY COALESCE(batch_id,''), $batchStart, $groupFields $having
+            ORDER BY latest_id DESC LIMIT " . ($pageSize + 1) . " OFFSET " . $offset);
+        $stmt->execute($params);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    }
+
+    public function getWarehouseTraceabilityBatchEntries(int $warehouseId, int $anchorId): array
+    {
+        $this->ensureTraceabilityWarehouseEntriesTable();
+        if ($warehouseId <= 0 || $anchorId <= 0) return [];
+        $stmt = $this->pdo->prepare('SELECT * FROM traceability_warehouse_entries WHERE id=? AND warehouse_id=?');
+        $stmt->execute([$anchorId, $warehouseId]);
+        $anchor = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$anchor) return [];
+        $batchId = trim((string)($anchor['batch_id'] ?? ''));
+        if ($batchId !== '') {
+            $stmt = $this->pdo->prepare('SELECT * FROM traceability_warehouse_entries
+                WHERE warehouse_id=? AND batch_id=? ORDER BY package_number,id');
+            $stmt->execute([$warehouseId, $batchId]);
+        } else {
+            $start = (int)$anchor['id'] - max(1, (int)$anchor['package_number']) + 1;
+            $where = ["COALESCE(batch_id,'')=''", self::legacyLabelBatchStartSql() . '=?'];
+            $params = [$start];
+            foreach (self::LABEL_BATCH_FIELDS as $field) {
+                if ($anchor[$field] === null) {
+                    $where[] = "$field IS NULL";
+                } else {
+                    $where[] = "$field=?";
+                    $params[] = $anchor[$field];
+                }
+            }
+            $stmt = $this->pdo->prepare('SELECT * FROM traceability_warehouse_entries WHERE '
+                . implode(' AND ', $where) . ' ORDER BY package_number,id');
+            foreach ($params as $index => $value) {
+                $stmt->bindValue($index + 1, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+            }
+            $stmt->execute();
+        }
+        return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
 
     /**

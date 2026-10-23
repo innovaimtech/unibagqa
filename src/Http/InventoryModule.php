@@ -1056,6 +1056,43 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
     render('Toma de Inventario · ERP', $body);
 }
 
+function unibagRenderTraceabilityBatchesModal(array $batches, int $warehouseId, string $query, int $page, bool $hasNext): string
+{
+    $base = '/stock/traceability-entry?bodega=' . $warehouseId . '&show_batches=1&batch_q=' . rawurlencode($query);
+    $html = '<div class="print-modal open" id="traceabilityBatchesModal" onclick="if(event.target===this)this.classList.remove(&quot;open&quot;)">'
+        . '<div class="print-card" style="width:min(1200px,96vw);max-height:94vh">'
+        . '<div style="display:flex;justify-content:space-between;align-items:center"><h3>Lotes de etiquetas</h3>'
+        . '<button type="button" class="btn secondary" onclick="document.getElementById(&quot;traceabilityBatchesModal&quot;).classList.remove(&quot;open&quot;)">Cerrar</button></div>'
+        . '<form method="get" action="/stock/traceability-entry" style="display:flex;gap:8px;margin:12px 0">'
+        . '<input type="hidden" name="bodega" value="' . $warehouseId . '"><input type="hidden" name="show_batches" value="1">'
+        . '<input class="form-control" name="batch_q" value="' . h($query) . '" placeholder="SKU, descripcion, operador o codigo de etiqueta">'
+        . '<button class="btn secondary" type="submit">Buscar</button></form>'
+        . '<div style="overflow:auto"><table style="width:100%;border-collapse:collapse" cellpadding="9">'
+        . '<thead><tr><th>Lote</th><th>Fecha</th><th>SKU</th><th>Etiquetas</th><th>Operador</th><th></th></tr></thead><tbody>';
+    foreach ($batches as $batch) {
+        $count = (int)$batch['label_count'];
+        $expected = max(1, (int)$batch['expected_count']);
+        $complete = $count === $expected && (int)$batch['first_number'] === 1 && (int)$batch['last_number'] === $expected;
+        $date = strtotime((string)$batch['created_at']);
+        $identifier = empty($batch['batch_id']) ? '#' . (int)$batch['legacy_start']
+            : strtoupper(substr((string)$batch['batch_id'], 0, 8));
+        $html .= '<tr style="border-top:1px solid #e2e8f0"><td><b>Lote ' . h($identifier) . '</b>'
+            . (empty($batch['batch_id']) ? '<div style="font-size:11px;color:#64748b">Anterior</div>' : '')
+            . '</td><td style="white-space:nowrap">' . ($date ? date('d/m/Y H:i:s', $date) : '-') . '</td>'
+            . '<td><b>' . h($batch['item_code']) . '</b><div style="font-size:11px;color:#64748b">' . h($batch['entity_type']) . '</div></td>'
+            . '<td style="white-space:nowrap"><b>' . $count . '</b>'
+            . (!$complete ? '<div style="font-size:11px;color:#b45309">' . $count . ' de ' . $expected . ' disponibles</div>' : '')
+            . '</td><td>' . h($batch['operator_name']) . '</td><td>'
+            . '<a class="btn secondary" href="' . h($base . '&batch_page=' . $page . '&print_batch=' . (int)$batch['anchor_id']) . '">Reimprimir</a></td></tr>';
+    }
+    if ($batches === []) $html .= '<tr><td colspan="6">No hay lotes registrados para esta busqueda.</td></tr>';
+    $html .= '</tbody></table></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">';
+    if ($page > 1) $html .= '<a class="btn secondary" href="' . h($base . '&batch_page=' . ($page - 1)) . '">Anterior</a>';
+    $html .= '<span>Pagina ' . $page . '</span>';
+    if ($hasNext) $html .= '<a class="btn secondary" href="' . h($base . '&batch_page=' . ($page + 1)) . '">Siguiente</a>';
+    return $html . '</div></div></div>';
+}
+
 /**
  * Renderiza la pantalla de ingreso de productos a bodega con código de trazabilidad.
  */
@@ -1195,11 +1232,35 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $groupedRecentEntries = array_values($groupedRecentEntries);
     $suggestedCode = $service->generateTraceabilityCode('PRODUCT');
     $msg = trim((string)($_GET['msg'] ?? ''));
+    $batchAnchorId = max(0, (int)($_GET['print_batch'] ?? 0));
+    $showBatches = !empty($_GET['show_batches']);
+    $batchPage = max(1, min(100000, (int)($_GET['batch_page'] ?? 1)));
+    $batchQuery = trim((string)($_GET['batch_q'] ?? ''));
+    $labelBatches = [];
+    $batchError = '';
+    if ($showBatches) {
+        try {
+            $labelBatches = $service->listWarehouseTraceabilityBatches($storehouseId, $batchQuery, $batchPage);
+        } catch (Throwable $e) {
+            $batchError = 'No se pudieron consultar los lotes de etiquetas.';
+            error_log('Traceability batches: ' . $e->getMessage());
+        }
+    }
+    $hasNextBatchPage = count($labelBatches) > 25;
+    $labelBatches = array_slice($labelBatches, 0, 25);
 
     // Si viene de guardar lote de bultos, preparar etiquetas automáticas para imprimir
     $printCodesParam = trim((string)($_GET['print_codes'] ?? ''));
     $autoPrintEntries = [];
-    if ($printCodesParam !== '') {
+    if ($batchAnchorId > 0) {
+        try {
+            $autoPrintEntries = $service->getWarehouseTraceabilityBatchEntries($storehouseId, $batchAnchorId);
+            if ($autoPrintEntries === []) $batchError = 'El lote no existe en esta bodega o sus etiquetas fueron eliminadas.';
+        } catch (Throwable $e) {
+            $batchError = 'No se pudieron recuperar las etiquetas del lote.';
+            error_log('Traceability batch reprint: ' . $e->getMessage());
+        }
+    } elseif ($printCodesParam !== '') {
         $codesToPrint = array_values(array_filter(array_map('trim', explode(',', $printCodesParam))));
         if ($codesToPrint !== []) {
             $autoPrintEntries = $service->getWarehouseTraceabilityEntriesByCodes($codesToPrint);
@@ -1291,6 +1352,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<a class="btn secondary" href="/stock?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">← Volver a Stock</a>';
     $body .= '<a class="btn secondary" href="/stock/inventory-counts?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">Toma de Inventario</a>';
     $body .= '<a class="btn" href="/stock/traceability?bodega=' . $storehouseId . '" style="background:#0f766e;display:inline-flex;align-items:center;gap:6px">Trazabilidad</a>';
+    $body .= '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&show_batches=1">Lotes</a>';
     $body .= '</div>';
     $body .= '</div>';
 
@@ -1301,6 +1363,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     if ($err !== '') {
         $body .= '<div class="err" style="margin-bottom:16px;padding:12px 16px;border-radius:10px;font-weight:700">⚠️ ' . h($err) . '</div>';
     }
+    if ($batchError !== '') $body .= '<div class="err" style="margin-bottom:16px">' . h($batchError) . '</div>';
 
     $body .= '<div class="trz-grid">';
 
@@ -1551,6 +1614,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         $body .= '</td>';
         $body .= '<td style="padding:10px 12px;text-align:center;white-space:nowrap">';
         $body .= '<button type="button" class="btn secondary" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#f8fafc;border:1px solid #cbd5e1;color:#334155" onclick="openPrintLabel(' . h(json_encode($gEntries, JSON_HEX_APOS | JSON_HEX_QUOT)) . ')">🖨️ Ver etiquetas</button>';
+        $body .= ' <a class="btn secondary" style="padding:5px 9px;font-size:11.5px" href="/stock/traceability-entry?bodega=' . $storehouseId . '&show_batches=1&batch_q=' . rawurlencode($gSku) . '">Lotes</a>';
         $body .= ' <button type="button" class="btn" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#fee2e2;border:1px solid #fca5a5;color:#b91c1c;margin-left:4px;cursor:pointer" onclick="deleteGroupedSku(' . h(json_encode($gSku)) . ', ' . $gCount . ')" title="Eliminar todas las etiquetas agrupadas de este código">🗑️ Borrar grupo</button>';
         $body .= '</td>';
         $body .= '</tr>';
@@ -1570,6 +1634,10 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<input type="hidden" name="delete_sku" id="delete_sku" value="">';
     $body .= '</form>';
 
+    if ($showBatches) {
+        $body .= unibagRenderTraceabilityBatchesModal($labelBatches, $storehouseId, $batchQuery, $batchPage, $hasNextBatchPage);
+    }
+
     // MODAL DE IMPRESIÓN DE ETIQUETA
     $body .= '<div class="print-modal" id="printLabelModal" onclick="if(event.target===this)closePrintLabel()">';
     $body .= '<div class="print-card">';
@@ -1579,6 +1647,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '</div>';
 
     // Barra de opciones de impresión múltiple (si se abrió para un registro con cantidad > 1)
+    $body .= '<div id="print_batch_notice" style="display:none;background:#f0fdfa;padding:10px;margin-bottom:12px"></div>';
+    $body .= '<div id="print_popup_error" style="display:none;color:#b91c1c;margin-bottom:12px"></div>';
     $body .= '<div id="multi_label_toolbar" style="display:none;background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:10px 14px;margin-bottom:14px">';
     $body .= '<div style="font-size:12px;font-weight:700;color:#0f766e;margin-bottom:6px">⚙️ Opciones de impresión:</div>';
     $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
@@ -1653,6 +1723,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         var currentSameSkuEntries = [];
         var currentPrintSourceEntry = null;
         var MAX_TRACEABILITY_LABELS = ' . $maxLabelsPerBatch . ';
+        var reprintBatchAnchorId = ' . $batchAnchorId . ';
+        var returnToLabelBatches = false;
 
         function normalizeSku(value) {
             return String(value || "").trim().toUpperCase();
@@ -2116,9 +2188,11 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             document.getElementById("lbl_modal_label_count").textContent = count > 1 ? (" (" + count + " etiquetas)") : " (1 etiqueta)";
         }
 
-        function openPrintLabel(dataOrList) {
+        function openPrintLabel(dataOrList, exactBatch) {
             var list = Array.isArray(dataOrList) ? dataOrList : [dataOrList];
             if (list.length === 0) return;
+            document.getElementById("print_batch_notice").style.display = "none";
+            document.getElementById("print_popup_error").style.display = "none";
 
             var toolbar = document.getElementById("multi_label_toolbar");
             currentEntryForSplit = null;
@@ -2128,7 +2202,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             setupSameSkuToolbar(sameSkuInList ? (list[0] || null) : null);
 
             // Si es un solo registro pero tiene quantity > 1 (ej: 10 bobinas), dar la opción de imprimir 1 etiqueta por cada unidad
-            if (list.length === 1 && parseFloat(list[0].quantity) > 1.0001) {
+            if (!exactBatch && list.length === 1 && parseFloat(list[0].quantity) > 1.0001) {
                 currentEntryForSplit = list[0];
                 var nUnits = Math.round(parseFloat(list[0].quantity));
                 document.getElementById("lbl_split_count").textContent = nUnits;
@@ -2140,6 +2214,21 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                 renderLabelList(list);
             }
 
+            if (exactBatch) {
+                var batchesModal = document.getElementById("traceabilityBatchesModal");
+                returnToLabelBatches = !!batchesModal && batchesModal.classList.contains("open");
+                if (batchesModal) batchesModal.classList.remove("open");
+                document.getElementById("same_sku_toolbar").style.display = "none";
+                document.getElementById("delete_label_toolbar").style.display = "none";
+                var expected = Math.max(1, Number(list[0].total_packages) || 1);
+                var batchNotice = document.getElementById("print_batch_notice");
+                var batchIdentifier = list[0].batch_id ? String(list[0].batch_id).slice(0, 8).toUpperCase()
+                    : "#" + (Number(list[0].id) - Math.max(1, Number(list[0].package_number) || 1) + 1);
+                batchNotice.textContent = "Lote " + batchIdentifier + ": " + list.length
+                    + " etiquetas con sus codigos originales. No genera un nuevo ingreso."
+                    + (list.length !== expected ? " Solo hay " + list.length + " de " + expected + " etiquetas disponibles." : "");
+                batchNotice.style.display = "block";
+            }
             document.getElementById("printLabelModal").classList.add("open");
         }
 
@@ -2173,6 +2262,10 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
         function closePrintLabel() {
             document.getElementById("printLabelModal").classList.remove("open");
+            if (returnToLabelBatches) {
+                document.getElementById("traceabilityBatchesModal").classList.add("open");
+                returnToLabelBatches = false;
+            }
             currentSameSkuEntries = [];
             currentPrintSourceEntry = null;
             setDeleteToolbarVisibility(false);
@@ -2181,6 +2274,12 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         function printLabelNow() {
             var printable = document.getElementById("printableArea").innerHTML;
             var win = window.open("", "_blank", "width=520,height=700");
+            var popupError = document.getElementById("print_popup_error");
+            popupError.style.display = win ? "none" : "block";
+            if (!win) {
+                popupError.textContent = "El navegador bloqueo la ventana de impresion. Habilita las ventanas emergentes y vuelve a imprimir; las etiquetas siguen disponibles.";
+                return;
+            }
             win.document.write("<!doctype html><html><head><title>Imprimir Etiquetas</title><style>" +
                 "@page { size: 100mm 70mm; margin: 0; }" +
                 "* { box-sizing: border-box; }" +
@@ -2239,7 +2338,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
         // Si se generaron etiquetas en esta petición, abrir modal automáticamente
         if (autoPrintData && autoPrintData.length > 0) {
-            setTimeout(function() { openPrintLabel(autoPrintData); }, 250);
+            setTimeout(function() { openPrintLabel(autoPrintData, reprintBatchAnchorId > 0); }, 250);
         }
     </script>';
 
