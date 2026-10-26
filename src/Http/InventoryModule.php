@@ -1316,6 +1316,9 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         .print-modal { display: none; position: fixed; inset: 0; background: rgba(15,23,42,.6); backdrop-filter: blur(4px); z-index: 99999; align-items: center; justify-content: center; padding: 14px; }
         .print-modal.open { display: flex; }
         .print-card { background: #fff; border-radius: 16px; width: min(560px, 96vw); max-height: 90vh; overflow-y: auto; padding: 22px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.3); }
+        #printLabelModal .print-card { display:flex; flex-direction:column; overflow:hidden; }
+        #printLabelModal .print-card > :not(#printableArea) { flex-shrink:0; }
+        #printableArea { min-height:0; overflow:auto; flex:1; }
         .printable-label { background: #fff; border: 2px solid #000; border-radius: 8px; padding: 10px 12px; text-align: center; color: #000; margin-bottom: 16px; font-family: Arial, sans-serif; }
         .barcode-svg-wrap { width: 94%; margin: 6px auto 4px auto; }
         .barcode-svg-wrap svg { display: block; width: 100%; height: 48px; }
@@ -2225,7 +2228,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                 var batchIdentifier = list[0].batch_id ? String(list[0].batch_id).slice(0, 8).toUpperCase()
                     : "#" + (Number(list[0].id) - Math.max(1, Number(list[0].package_number) || 1) + 1);
                 batchNotice.textContent = "Lote " + batchIdentifier + ": " + list.length
-                    + " etiquetas con sus codigos originales. No genera un nuevo ingreso."
+                    + (list.length === 1 ? " etiqueta con su codigo original." : " etiquetas con sus codigos originales.")
+                    + " No genera un nuevo ingreso."
                     + (list.length !== expected ? " Solo hay " + list.length + " de " + expected + " etiquetas disponibles." : "");
                 batchNotice.style.display = "block";
             }

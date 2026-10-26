@@ -72,7 +72,8 @@ function handleProductionRoutes(
         if ($activeInit !== null) {
             $activeStandby = $prodService->getActiveMachineStandby((int)$activeInit['win_equipoid'], (int)$activeInit['id']);
         }
-        renderProductionMachinesScreen($machines, $activeInit, $currentOperatorName, $plantaName, $activeStandby);
+        $activeLunch = $receptionService->getActiveOperatorLunchBreak($workerId, (int)($activeInit['id'] ?? 0), $currentOperatorName);
+        renderProductionMachinesScreen($machines, $activeInit, $currentOperatorName, $plantaName, $activeStandby, $activeLunch);
         return true;
     }
 
@@ -134,7 +135,7 @@ function handleProductionRoutes(
             } else {
                 redirectResponse($redirectTo . $sep . 'error=' . rawurlencode((string)($res['error'] ?? 'Error al iniciar colación.')));
             }
-        } else {
+        } elseif ($action === 'end') {
             $lunchId = (int)($_POST['lunch_id'] ?? 0);
             $res = $receptionService->endOperatorLunchBreak(
                 $lunchId,
@@ -149,6 +150,8 @@ function handleProductionRoutes(
             } else {
                 redirectResponse($redirectTo . $sep . 'error=' . rawurlencode((string)($res['error'] ?? 'Error al finalizar colación.')));
             }
+        } else {
+            redirectResponse($redirectTo . $sep . 'error=' . rawurlencode('Accion de colacion no valida.'));
         }
         return true;
     }
@@ -247,7 +250,8 @@ function handleProductionRoutes(
             $dateFilter,
             $unscheduledOrders,
             $activeTab,
-            $searchQuery
+            $searchQuery,
+            $receptionService->getActiveOperatorLunchBreak($workerId, (int)$activeInit['id'], $currentOperatorName)
         );
         return true;
     }
@@ -1833,6 +1837,9 @@ function handleProductionRoutes(
         $ctx['colormode'] = $colorMode;
         $ctx['has_back_colors'] = $hasBackColors;
         $ctx['prod_service'] = $prodService;
+        $ctx['active_lunch'] = $receptionService->getActiveOperatorLunchBreak(
+            $workerId, (int)($ctx['machine_init']['id'] ?? 0), $currentOperatorName
+        );
         $activeInitForInk = (isset($activeInit) && is_array($activeInit)) ? $activeInit : [];
         $isFlexoContext = (int)($activeInitForInk['equipo_prod_isprinter_flexo'] ?? ($ctx['agenda']['equipo_prod_isprinter_flexo'] ?? 0)) === 1;
         $eqTypeIdForInk = (int)($activeInitForInk['equipo_type_id'] ?? ($ctx['agenda']['equipo_type_id'] ?? 0));
@@ -1934,7 +1941,8 @@ function handleProductionRoutes(
 
         $activeList = $prodService->listActiveOrdersInCourse($plantaId, $filterEquipoId, $dateFilter);
         $activeStandby = ($activeInit !== null) ? $prodService->getActiveMachineStandby((int)$activeInit['win_equipoid'], (int)$activeInit['id']) : null;
-        renderProductionActiveOrdersScreen($activeList, $currentOperatorName, $plantaName, $activeInit, $activeStandby, $dateFilter);
+        $activeLunch = $receptionService->getActiveOperatorLunchBreak($workerId, (int)($activeInit['id'] ?? 0), $currentOperatorName);
+        renderProductionActiveOrdersScreen($activeList, $currentOperatorName, $plantaName, $activeInit, $activeStandby, $dateFilter, $activeLunch);
         return true;
     }
 
@@ -3430,16 +3438,7 @@ function renderProductionOperatorConsole(
     $materialsMachineProcessTitle = $isFlexo ? 'Flexografía' : ($isSeriPulpo ? 'Serigrafía Pulpo' : ($isSeri ? 'Serigrafía' : ($isSelladora ? 'Selladora' : ($isRebobinadora ? 'Rebobinadora' : (!empty($machineInit['equipo_name']) ? (string)$machineInit['equipo_name'] : 'Producción')))));
     $activeStandby = $ctx['active_standby'] ?? null;
 
-    $activeLunch = null;
-    try {
-        global $container;
-        $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
-        if ($recSvc) {
-            $wrkId = (int)($machineInit['win_wrkid'] ?? $machineInit['wrk_id'] ?? 0);
-            $initId = (int)($machineInit['id'] ?? 0);
-            $activeLunch = $recSvc->getActiveOperatorLunchBreak($wrkId, $initId, $currentOperatorName);
-        }
-    } catch (\Throwable) {}
+    $activeLunch = $ctx['active_lunch'] ?? null;
 
     $prodService = $ctx['prod_service'] ?? new ProductionService(Db::erpPdo(), Db::trzPdo());
     $phaseResponsibilities = ($isSelladora || $isEmbalaje)
@@ -8743,8 +8742,8 @@ function renderProductionOperatorConsole(
                             <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer" onclick="document.getElementById('pause_submode').value='start'">
                                 <i class="fa fa-fw fa-play"></i> Iniciar Pausa
                             </button>
-                            <button type="button" class="btnblue" style="font-size:14px;padding:10px 20px;border:none;cursor:pointer;background:#0284C7;margin-left:10px" onclick="openLunchModal()" title="Registrar horario oficial de colación">
-                                <i class="fa fa-coffee"></i> Registrar Horario de Colación
+                            <button type="button" class="btnblue" style="font-size:14px;padding:10px 20px;border:none;cursor:pointer;background:<?=$activeLunch !== null ? '#D97706' : '#0284C7'?>;margin-left:10px" onclick="openLunchModal()" title="Colación">
+                                <i class="fa fa-coffee"></i> <?=$activeLunch !== null ? 'Terminar Colación' : 'Colación'?>
                             </button>
                         <?php elseif (!$isPauseEnded): ?>
                             <button type="submit" class="btnorange" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer" onclick="document.getElementById('pause_submode').value='end'">
@@ -13370,17 +13369,6 @@ function renderProductionOperatorConsole(
 
 function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, string $operatorName, string $redirectTo = '', ?array $activeLunch = null): void
 {
-    if ($activeLunch === null) {
-        try {
-            global $container;
-            $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
-            if ($recSvc) {
-                $wrkId = (int)($activeInit['win_wrkid'] ?? $activeInit['wrk_id'] ?? 0);
-                $initId = (int)($activeInit['id'] ?? 0);
-                $activeLunch = $recSvc->getActiveOperatorLunchBreak($wrkId, $initId, $operatorName);
-            }
-        } catch (\Throwable) {}
-    }
     $isLunchActive = ($activeLunch !== null);
     $lunchStartTime = $isLunchActive ? date('H:i', strtotime((string)$activeLunch['start_time'])) : '';
 ?>
@@ -13569,7 +13557,7 @@ function renderStandbyAndLunchModals(?array $activeStandby, ?array $activeInit, 
 // OTRAS PANTALLAS: ASIGNACIÓN, NUEVA OT, ACTIVAS, HISTÓRICO
 // =============================================================================
 
-function renderProductionMachinesScreen(array $machines, ?array $activeInit, string $operatorName, string $plantaName, ?array $activeStandby = null): void
+function renderProductionMachinesScreen(array $machines, ?array $activeInit, string $operatorName, string $plantaName, ?array $activeStandby = null, ?array $activeLunch = null): void
 {
     ob_start();
     ?>
@@ -13595,19 +13583,6 @@ function renderProductionMachinesScreen(array $machines, ?array $activeInit, str
         <div style="background:#FEF2F2;border:1px solid #FCA5A5;color:#991B1B;padding:12px 18px;border-radius:5px;margin-bottom:15px;font-size:13.5px">
             <i class="fa fa-exclamation-circle" style="color:#DC2626;font-size:16px"></i> <?=htmlspecialchars((string)$_GET['error'])?>
         </div>
-    <?php endif; ?>
-
-    <?php if ($activeInit !== null): ?>
-        <?php
-        $activeLunch = null;
-        try {
-            global $container;
-            $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
-            if ($recSvc) {
-                $activeLunch = $recSvc->getActiveOperatorLunchBreak((int)($activeInit['win_wrkid'] ?? 0), (int)($activeInit['id'] ?? 0), $operatorName);
-            }
-        } catch (\Throwable) {}
-        ?>
     <?php endif; ?>
 
     <?php if ($activeStandby !== null): ?>
@@ -13741,7 +13716,7 @@ function renderProductionMachinesScreen(array $machines, ?array $activeInit, str
     </div>
 
     <?php
-    renderStandbyAndLunchModals($activeStandby, $activeInit, $operatorName, '/production/machines');
+    renderStandbyAndLunchModals($activeStandby, $activeInit, $operatorName, '/production/machines', $activeLunch);
     $content = ob_get_clean();
     renderProdwrkShell('Asignación de Máquina', $content, 0, $operatorName, $plantaName);
 }
@@ -13926,7 +13901,8 @@ function renderProductionNewWorkOrderScreen(
     ?string $dateFilter = null,
     array $unscheduledOrders = [],
     string $activeTab = 'scheduled',
-    ?string $searchQuery = null
+    ?string $searchQuery = null,
+    ?array $activeLunch = null
 ): void {
     $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
     $isRebobinadora = ($equipoTypeId === 12 || stripos((string)($activeInit['type_ant_title'] ?? ''), 'rebobin') !== false || stripos((string)($activeInit['equipo_name'] ?? ''), 'rebobin') !== false);
@@ -13985,16 +13961,6 @@ function renderProductionNewWorkOrderScreen(
                     <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
                         <i class="fa fa-dolly"></i> Solicitar Bobinas
                     </a>
-                    <?php
-                    $activeLunch = null;
-                    try {
-                        global $container;
-                        $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
-                        if ($recSvc) {
-                            $activeLunch = $recSvc->getActiveOperatorLunchBreak((int)($activeInit['win_wrkid'] ?? 0), (int)($activeInit['id'] ?? 0), $operatorName);
-                        }
-                    } catch (\Throwable) {}
-                    ?>
                     <?php if (!empty($activeLunch)): ?>
                         <button type="button" class="btnorange" style="background:#D97706;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px;font-weight:bold" onclick="openLunchModal()" title="Colación activa">
                             <i class="fa fa-coffee"></i> EN COLACIÓN (desde <?=date('H:i', strtotime($activeLunch['start_time']))?>) &mdash; Terminar
@@ -14821,7 +14787,7 @@ function renderProductionNewWorkOrderScreen(
 
     <?php
     echo renderDesignPreviewModal();
-    renderStandbyAndLunchModals($activeStandby, $activeInit, $operatorName, '/production/work-orders/new');
+    renderStandbyAndLunchModals($activeStandby, $activeInit, $operatorName, '/production/work-orders/new', $activeLunch);
     $content = ob_get_clean();
     renderProdwrkShell('Iniciar nueva OT', $content, 1, $operatorName, $plantaName);
 }
@@ -14832,7 +14798,8 @@ function renderProductionActiveOrdersScreen(
     string $plantaName,
     ?array $activeInit = null,
     ?array $activeStandby = null,
-    ?string $dateFilter = null
+    ?string $dateFilter = null,
+    ?array $activeLunch = null
 ): void {
     $equipoTypeId = (int)($activeInit['equipo_type_id'] ?? 0);
     $tableProcess = productionWorkOrderTableProcess($activeInit ?? []);
@@ -15366,16 +15333,6 @@ function renderProductionActiveOrdersScreen(
         <div style="clear:both;height:10px"></div>
 
         <?php if (!empty($activeInit['id'])): ?>
-        <?php
-        $activeLunch = null;
-        try {
-            global $container;
-            $recSvc = $container ? $container->get(\App\ReceptionService::class) : null;
-            if ($recSvc) {
-                $activeLunch = $recSvc->getActiveOperatorLunchBreak((int)($activeInit['win_wrkid'] ?? 0), (int)($activeInit['id'] ?? 0), $operatorName);
-            }
-        } catch (\Throwable) {}
-        ?>
         <table border="0" width="100%" cellpadding="0" cellspacing="0">
         <tr>
             <td style="background-color:#FFFFFF;border:1px solid #EEEEEE;border-radius:5px;padding:20px">
@@ -15524,7 +15481,7 @@ function renderProductionActiveOrdersScreen(
     <?php endif; ?>
     <?php
     echo renderDesignPreviewModal();
-    renderStandbyAndLunchModals($activeStandby, $activeInit, $operatorName, '/production/work-orders/active');
+    renderStandbyAndLunchModals($activeStandby, $activeInit, $operatorName, '/production/work-orders/active', $activeLunch);
     $content = ob_get_clean();
     renderProdwrkShell('En cursos', $content, 5, $operatorName, $plantaName);
 }

@@ -8486,6 +8486,7 @@ function unibagOutputOperatorWasteExcel(ReceptionService $service): void
     echo '</tbody></table></body></html>';
 
     $html = ob_get_clean();
+    SimpleXlsx::streamHtml($filename, $html, 'Merma por Operador');
 }
 
 // =============================================================================

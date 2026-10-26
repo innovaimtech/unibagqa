@@ -47,6 +47,10 @@ require_once __DIR__ . '/../src/Env.php';
 require_once __DIR__ . '/../src/Db.php';
 require_once __DIR__ . '/../src/SimpleXlsx.php';
 require_once __DIR__ . '/../src/ReceptionService.php';
+require_once __DIR__ . '/../src/BonusConfigurationService.php';
+require_once __DIR__ . '/../src/Http/BonusConfigurationModule.php';
+require_once __DIR__ . '/../src/Http/HelperBonusModule.php';
+require_once __DIR__ . '/../src/Http/HelperBonusExportModule.php';
 require_once __DIR__ . '/../src/ScaleService.php';
 require_once __DIR__ . '/../src/PrintService.php';
 require_once __DIR__ . '/../src/Http/AuthModule.php';
@@ -10191,6 +10195,29 @@ if ($path === '/waste/compactadora' && $method === 'GET') {
 // Nota: el cálculo de período 26–25 y la consulta ERP para Flexo están encapsulados en
 // ReceptionService (getBonusPeriodByMonthFinal / listErpFlexoProductionForBonusPeriod).
 // =============================================================================
+if (str_starts_with($path, '/bonificaciones/config/') && $method === 'POST') {
+    requireBonusConfigurationEditAccess();
+}
+if ($path === '/bonificaciones/config/helper-save' && $method === 'POST') {
+    handleHelperBonusConfiguration($service, new BonusConfigurationService($trzPdo));
+}
+if ($path === '/bonificaciones/config/helper-recipients-save' && $method === 'POST') {
+    handleHelperBonusRecipients($service, new BonusConfigurationService($trzPdo));
+}
+if ($path === '/bonificaciones/ayudante/evaluation-save' && $method === 'POST') {
+    handleHelperBonusEvaluationSave($service);
+}
+if ($path === '/bonificaciones/ayudante/export-xls' && $method === 'GET') {
+    handleHelperBonusExcelExport($service);
+}
+if (in_array($path, [
+    '/bonificaciones/config/bonus-policy',
+    '/bonificaciones/config/bonus-measure',
+    '/bonificaciones/config/bonus-measure-disable',
+], true)) {
+    handleBonusConfigurationRoutes($path, $method, new BonusConfigurationService($trzPdo));
+}
+
 if ($path === '/bonificaciones' && $method === 'GET') {
     $body = '<style>
         .erp-filter-card { width: 100%; box-sizing: border-box; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 20px 24px; box-shadow: 0 4px 16px rgba(15,23,42,.04); display: flex; flex-direction: column; gap: 16px; margin-bottom: 16px; }
@@ -10243,6 +10270,25 @@ if ($path === '/bonificaciones' && $method === 'GET') {
             'bonoayudante' => 'Bono ayudante',
         ];
         $selectedLabel = (string)($bonusLabels[$bonusCode] ?? $bonusCode);
+        $canEditBonuses = canEditBonusConfiguration();
+        $body .= '<div id="bonus-config-page"><style>
+            #bonus-config-page .card,#bonus-config-page .legacy-sheet-card{border:1px solid #e2e8f0;border-radius:14px;background:#fff;box-shadow:0 4px 16px rgba(15,23,42,.04);overflow:hidden}
+            #bonus-config-page .legacy-sheet-table{border-collapse:collapse;width:100%;font-size:13px}
+            #bonus-config-page .legacy-sheet-table th{background:#f1f5f9;color:#334155;padding:12px 16px;font-weight:800;border-color:#e2e8f0}
+            #bonus-config-page .legacy-sheet-table td{border-color:#e2e8f0;padding:10px 14px}
+            #bonus-config-page .legacy-sheet-table input,#bonus-config-page .legacy-sheet-table select{border-radius:8px!important;padding:9px 12px!important}
+            #bonus-config-page input:disabled,#bonus-config-page select:disabled{background:#f1f5f9;color:#64748b}
+            #bonus-config-page button:disabled{opacity:.5;cursor:not-allowed}
+        </style>';
+        if (in_array($bonusCode, ['bonoseri','bonocys','bonoayudante'], true)) {
+            $bonusConfigMonth = BonusConfigurationService::monthForDate(date('Y-m-d'), date('Y-m'));
+            $requestedBonusMonth = trim((string)($_GET['month'] ?? $bonusConfigMonth));
+            if (preg_match('/^(\d{4})-(\d{2})$/', $requestedBonusMonth, $bonusMonthParts)
+                && checkdate((int)$bonusMonthParts[2], 1, (int)$bonusMonthParts[1])) {
+                $bonusConfigMonth = $requestedBonusMonth;
+            }
+            $bonusConfig = new BonusConfigurationService($trzPdo);
+        }
 
         // Tarifas por unidad (si aplican para el bono seleccionado).
         $unitRates = $service->getBonusUnitRates($bonusCode);
@@ -10277,7 +10323,7 @@ if ($path === '/bonificaciones' && $method === 'GET') {
 
         $body .= '<div class="card" style="margin-bottom:12px">';
         $body .= '<div style="font-weight:900;margin-bottom:8px">Configuración de bonificaciones</div>';
-        $body .= '<div class="muted" style="margin-bottom:10px">Define tramos por unidades y su monto. Selecciona el bono a configurar.</div>';
+        $body .= '<div class="muted" style="margin-bottom:10px">Selecciona el proceso y configura sus bonos.</div>';
         $body .= '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">';
         $body .= '<div style="min-width:240px"><div class="muted" style="margin-bottom:4px">Bono</div>';
         $body .= '<select id="bonus-config-select" style="width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box">';
@@ -10287,8 +10333,21 @@ if ($path === '/bonificaciones' && $method === 'GET') {
         }
         $body .= '</select></div>';
         $body .= '<div class="muted" style="font-size:12px">Vista: <strong>' . h($selectedLabel) . '</strong></div>';
+        $body .= '<div style="margin-left:auto;font-size:12px;font-weight:700;color:' . ($canEditBonuses ? '#166534' : '#64748b') . '">' . ($canEditBonuses ? 'Edición habilitada' : 'Solo lectura') . '</div>';
         $body .= '</div>';
         $body .= '</div>';
+
+        if (in_array($bonusCode, ['bonoseri','bonocys'], true)) {
+            $predefinedBonusMeasures = $bonusCode === 'bonocys' && $erpPdo instanceof PDO
+                ? (new ProductionService($erpPdo))->listMedidas() : [];
+            $body .= renderBonusProcessConfiguration($bonusConfig, $bonusCode, $bonusConfigMonth, $service->listErpWorkerNames(), $predefinedBonusMeasures);
+        }
+        if ($bonusCode === 'bonoayudante') {
+            $body .= renderHelperBonusConfiguration($bonusConfigMonth, $service->listErpWorkerNames(),
+                $service->getBonusHelperSettings($bonusConfigMonth),
+                $service->listBonusHelperMonthlyRows($bonusConfigMonth),
+                $bonusConfig->listHistory($bonusConfigMonth, 'bonoayudante'));
+        }
 
         if ($bonusCode === 'bonoseri') {
             // Serigrafía: bono por unidad con 2 tiers (menor a 3000 / 3000 o más).
@@ -10544,7 +10603,11 @@ if ($path === '/bonificaciones' && $method === 'GET') {
         }
 
         $body .= '<script>(function(){var sel=document.getElementById("bonus-config-select");if(!sel)return;sel.addEventListener("change",function(){var v=sel.value||"bonoflexo";window.location.href="/bonificaciones?view=configuracion&bonus="+encodeURIComponent(v);});})();</script>';
+        if (!$canEditBonuses) {
+            $body .= '<script>document.querySelectorAll("#bonus-config-page form[method=post]").forEach(function(form){Array.from(form.elements).forEach(function(field){field.disabled=true;});});</script>';
+        }
         $body .= '<script>(function(){if(window.__wmBound)return;window.__wmBound=true;function openWm(id){var m=document.querySelector("[data-wm-modal=\\x27"+id+"\\x27]");if(m){m.classList.add("is-open");m.style.display="flex";document.body.style.overflow="hidden";}}function closeWm(id){var m=document.querySelector("[data-wm-modal=\\x27"+id+"\\x27]");if(m){m.classList.remove("is-open");m.style.display="none";document.body.style.overflow="";}}document.addEventListener("click",function(e){var t=e.target;var openr=t.closest&&t.closest("[data-wm-open]");if(openr){e.preventDefault();openWm(openr.getAttribute("data-wm-open"));return;}var closer=t.closest&&t.closest("[data-wm-close]");if(closer){e.preventDefault();closeWm(closer.getAttribute("data-wm-close"));return;}if(t.classList&&t.classList.contains("wm-modal-backdrop")&&t.getAttribute("data-wm-modal")){if(t===e.target){closeWm(t.getAttribute("data-wm-modal"));}}});})();</script>';
+        $body .= '</div>';
     } elseif ($view === 'bonocys') {
         $defaultMonthKey = date('Y-m');
         $today = new DateTimeImmutable('now', new DateTimeZone(date_default_timezone_get()));
@@ -10651,9 +10714,11 @@ if ($path === '/bonificaciones' && $method === 'GET') {
         );
         if (($preview['ok'] ?? false) === true) {
             $rowsPreview = (array)($preview['rows'] ?? []);
+            $cysBonusConfig = new BonusConfigurationService($trzPdo);
+            $rowsPreview = array_map(static fn(array $row): array => $cysBonusConfig->applyMeasureRule($row, $monthKey), $rowsPreview);
             if ($rowsPreview !== []) {
                 $body .= '<div class="legacy-sheet-card" style="margin-top:12px"><div class="table-wrap"><table class="legacy-sheet-table legacy-setup-event-table" style="margin:0"><thead><tr>';
-                $body .= '<th>Fecha</th><th>N° CC</th><th>Cliente</th><th>Selladora</th><th>Tipo</th><th>Unidades</th><th>Operador</th>';
+                $body .= '<th>Fecha</th><th>N° CC</th><th>Cliente</th><th>Selladora</th><th>Tipo</th><th>Medidas bonos</th><th>Unidades</th><th>Operador</th>';
                 $body .= '</tr></thead><tbody>';
                 foreach (array_slice($rowsPreview, 0, 12) as $r) {
                     $cysPreviewBag = strtoupper(trim((string)($r['bag_type'] ?? '')));
@@ -10674,12 +10739,20 @@ if ($path === '/bonificaciones' && $method === 'GET') {
                     ) {
                         $cysPreviewType = 'SAC';
                     }
+                    if (isset($r['bonus_category'])) {
+                        $cysPreviewType = BonusConfigurationService::CATEGORIES[$r['bonus_category']] ?? $cysPreviewType;
+                    }
                     $body .= '<tr>';
                     $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['event_date'] ?? '')) . '</td>';
                     $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['cost_center'] ?? '')) . '</td>';
                     $body .= '<td class="legacy-value-cell">' . h((string)($r['client_label'] ?? '')) . '</td>';
                     $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['printer_no'] ?? '')) . '</td>';
                     $body .= '<td class="legacy-value-cell" style="text-align:center">' . h($cysPreviewType) . '</td>';
+                    $previewBonusMeasure = (string)($r['measure_cm'] ?? '');
+                    if (isset($r['bonus_original_measure'])) {
+                        $previewBonusMeasure = $r['bonus_original_measure'] . ' -> ' . $previewBonusMeasure;
+                    }
+                    $body .= '<td class="legacy-value-cell" style="text-align:center">' . h($previewBonusMeasure) . '</td>';
                     $body .= '<td class="legacy-value-cell" style="text-align:right;font-weight:800">' . h(number_format((float)($r['produced_units'] ?? 0), 0, ',', '.')) . '</td>';
                     $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)($r['operator_name'] ?? '')) . '</td>';
                     $body .= '</tr>';
@@ -10982,9 +11055,11 @@ if ($path === '/bonificaciones' && $method === 'GET') {
 
         $body .= '</div>';
     } elseif ($view === 'bonoayudante') {
-        $monthKey = trim((string)($_GET['month'] ?? date('Y-m')));
-        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
-            $monthKey = date('Y-m');
+        $defaultHelperMonth = BonusConfigurationService::monthForDate(date('Y-m-d'), date('Y-m'));
+        $monthKey = trim((string)($_GET['month'] ?? $defaultHelperMonth));
+        if (!preg_match('/^(\d{4})-(\d{2})$/', $monthKey, $helperMonthParts)
+            || !checkdate((int)$helperMonthParts[2], 1, (int)$helperMonthParts[1])) {
+            $monthKey = $defaultHelperMonth;
         }
         $flashMessage = null;
         $flashIsError = false;
@@ -10998,116 +11073,9 @@ if ($path === '/bonificaciones' && $method === 'GET') {
             $body .= '<div class="' . ($flashIsError ? 'err' : 'ok') . '" style="margin-bottom:12px">' . h($flashMessage) . '</div>';
         }
 
-        $personnelNames = $service->listProductionPersonnelNames();
-        $activeHelpers = $service->listActiveBonusHelpers();
-        $activeHelperSet = array_fill_keys($activeHelpers, true);
         $rows = $service->listBonusHelperMonthlyRows($monthKey);
-
-        $body .= '<div class="card" style="margin-bottom:12px">';
-        $body .= '<div style="font-weight:900;margin-bottom:8px">Bono ayudante</div>';
-        $body .= '<div class="muted" style="margin-bottom:10px">Selecciona ayudantes y registra puntajes y montos del mes.</div>';
-        $body .= '<form method="get" action="/bonificaciones" style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:0">';
-        $body .= '<input type="hidden" name="view" value="bonoayudante">';
-        $body .= '<div><div class="muted" style="margin-bottom:4px">Mes</div><input type="month" name="month" value="' . h($monthKey) . '" style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></div>';
-        $body .= '<div><button class="btn secondary" type="submit" style="min-width:140px">Ver mes</button></div>';
-        $body .= '</form>';
-        $body .= '</div>';
-
-        $body .= '<div class="legacy-sheet-card" style="margin-bottom:12px"><table class="legacy-sheet-table"><thead><tr><th colspan="2">Ayudantes seleccionados</th></tr></thead><tbody>';
-        $body .= '<tr><td class="legacy-label-cell" style="width:30%">Operadores</td><td class="legacy-value-cell">';
-        $body .= '<form method="post" action="/bonificaciones/ayudante/helpers-save" style="margin:0">';
-        $body .= '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
-        $body .= '<input type="hidden" name="month" value="' . h($monthKey) . '">';
-        $body .= '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;max-height:220px;overflow:auto;padding:8px;border:1px solid #e5e7eb;border-radius:8px;box-sizing:border-box;background:#fff">';
-        foreach ($personnelNames as $name) {
-            $checked = isset($activeHelperSet[$name]) ? ' checked' : '';
-            $body .= '<label style="display:flex;gap:8px;align-items:center;font-size:13px;line-height:1.2">';
-            $body .= '<input type="checkbox" name="helpers[]" value="' . h($name) . '"' . $checked . '>';
-            $body .= '<span>' . h($name) . '</span>';
-            $body .= '</label>';
-        }
-        $body .= '</div>';
-        $body .= '<div style="display:flex;justify-content:flex-end;margin-top:10px">';
-        $body .= '<button class="btn" type="submit" style="min-width:160px">Guardar ayudantes</button>';
-        $body .= '</div>';
-        $body .= '</form>';
-        $body .= '</td></tr></tbody></table></div>';
-
-        $body .= '<div class="legacy-sheet-card"><div class="table-wrap"><table class="legacy-sheet-table legacy-setup-event-table" style="margin:0"><thead>';
-        $body .= '<tr><th rowspan="2">Mes</th><th rowspan="2">Operador</th><th colspan="3">Puntuación</th><th colspan="3">% por puntuación</th><th colspan="3">Matriz de bono</th><th colspan="3">Bono por medición</th><th rowspan="2">Variable</th><th rowspan="2">Fijo</th><th rowspan="2">Incentivo adicional</th><th rowspan="2">Total a pagar</th><th rowspan="2">Observaciones</th></tr>';
-        $body .= '<tr><th>Proactividad</th><th>Eficiencia</th><th>Multitarea</th><th>Proactividad</th><th>Eficiencia</th><th>Multitarea</th><th>Proactividad</th><th>Eficiencia</th><th>Multitarea</th><th>Proactividad</th><th>Eficiencia</th><th>Multitarea</th></tr>';
-        $body .= '</thead><tbody>';
-
-        if ($rows === []) {
-            $body .= '<tr><td colspan="20" class="legacy-value-cell" style="text-align:center"><span class="muted">Selecciona ayudantes para este bono.</span></td></tr>';
-        } else {
-            $body .= '<tr><td colspan="20" class="legacy-value-cell" style="padding:0">';
-            $body .= '<form method="post" action="/bonificaciones/ayudante/month-save" style="margin:0">';
-            $body .= '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
-            $body .= '<input type="hidden" name="month" value="' . h($monthKey) . '">';
-            $body .= '<table class="legacy-sheet-table legacy-setup-event-table" style="margin:0;width:100%"><tbody>';
-            foreach ($rows as $idx => $r) {
-                $op = (string)($r['operator_name'] ?? '');
-                $pScore = max(0, min(10, (int)($r['proactividad_score'] ?? 0)));
-                $eScore = max(0, min(10, (int)($r['eficiencia_score'] ?? 0)));
-                $mScore = max(0, min(10, (int)($r['multitarea_score'] ?? 0)));
-                $pPct = $pScore * 10;
-                $ePct = $eScore * 10;
-                $mPct = $mScore * 10;
-                $pMatrix = (float)($r['matrix_proactividad_clp'] ?? 0.0);
-                $eMatrix = (float)($r['matrix_eficiencia_clp'] ?? 0.0);
-                $mMatrix = (float)($r['matrix_multitarea_clp'] ?? 0.0);
-                $pMeas = $pMatrix * ($pPct / 100);
-                $eMeas = $eMatrix * ($ePct / 100);
-                $mMeas = $mMatrix * ($mPct / 100);
-                $variable = $pMeas + $eMeas + $mMeas;
-                $fixed = (float)($r['fixed_clp'] ?? 0.0);
-                $add = (float)($r['additional_clp'] ?? 0.0);
-                $total = $variable + $fixed + $add;
-                $obs = (string)($r['observations'] ?? '');
-
-                $body .= '<tr>';
-                $body .= '<td class="legacy-value-cell">' . h($monthKey) . '<input type="hidden" name="operators[]" value="' . h($op) . '"></td>';
-                $body .= '<td class="legacy-value-cell" style="min-width:160px">' . h($op) . '</td>';
-
-                $body .= '<td class="legacy-value-cell"><select name="p_score[]" style="width:72px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box">';
-                for ($i = 0; $i <= 10; $i++) { $body .= '<option value="' . $i . '"' . ($i === $pScore ? ' selected' : '') . '>' . $i . '</option>'; }
-                $body .= '</select></td>';
-                $body .= '<td class="legacy-value-cell"><select name="e_score[]" style="width:72px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box">';
-                for ($i = 0; $i <= 10; $i++) { $body .= '<option value="' . $i . '"' . ($i === $eScore ? ' selected' : '') . '>' . $i . '</option>'; }
-                $body .= '</select></td>';
-                $body .= '<td class="legacy-value-cell"><select name="m_score[]" style="width:72px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box">';
-                for ($i = 0; $i <= 10; $i++) { $body .= '<option value="' . $i . '"' . ($i === $mScore ? ' selected' : '') . '>' . $i . '</option>'; }
-                $body .= '</select></td>';
-
-                $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)$pPct) . '%</td>';
-                $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)$ePct) . '%</td>';
-                $body .= '<td class="legacy-value-cell" style="text-align:center">' . h((string)$mPct) . '%</td>';
-
-                $body .= '<td class="legacy-value-cell"><input type="number" name="p_matrix[]" min="0" step="1" value="' . h((string)(int)$pMatrix) . '" style="width:110px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></td>';
-                $body .= '<td class="legacy-value-cell"><input type="number" name="e_matrix[]" min="0" step="1" value="' . h((string)(int)$eMatrix) . '" style="width:110px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></td>';
-                $body .= '<td class="legacy-value-cell"><input type="number" name="m_matrix[]" min="0" step="1" value="' . h((string)(int)$mMatrix) . '" style="width:110px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></td>';
-
-                $body .= '<td class="legacy-value-cell">$ ' . h(number_format($pMeas, 0, ',', '.')) . '</td>';
-                $body .= '<td class="legacy-value-cell">$ ' . h(number_format($eMeas, 0, ',', '.')) . '</td>';
-                $body .= '<td class="legacy-value-cell">$ ' . h(number_format($mMeas, 0, ',', '.')) . '</td>';
-
-                $body .= '<td class="legacy-value-cell">$ ' . h(number_format($variable, 0, ',', '.')) . '</td>';
-                $body .= '<td class="legacy-value-cell"><input type="number" name="fixed[]" min="0" step="1" value="' . h((string)(int)$fixed) . '" style="width:120px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></td>';
-                $body .= '<td class="legacy-value-cell"><input type="number" name="additional[]" min="0" step="1" value="' . h((string)(int)$add) . '" style="width:140px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></td>';
-                $body .= '<td class="legacy-value-cell">$ ' . h(number_format($total, 0, ',', '.')) . '</td>';
-                $body .= '<td class="legacy-value-cell"><input type="text" name="obs[]" value="' . h($obs) . '" style="width:280px;padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box"></td>';
-                $body .= '</tr>';
-            }
-            $body .= '</tbody></table>';
-            $body .= '<div style="display:flex;justify-content:flex-end;padding:12px;border-top:1px solid #e5e7eb">';
-            $body .= '<button class="btn" type="submit" style="min-width:160px">Guardar mes</button>';
-            $body .= '</div>';
-            $body .= '</form>';
-            $body .= '</td></tr>';
-        }
-
-        $body .= '</tbody></table></div></div>';
+        $body .= renderHelperBonusEvaluation($monthKey, $rows, $service->listErpWorkerNames(),
+            $service->getBonusHelperSettings($monthKey));
     } else {
         $body .= '<div class="card" style="margin-bottom:12px">';
         $body .= '<div style="font-weight:900;margin-bottom:8px">' . h($viewLabel) . '</div>';
@@ -11190,6 +11158,8 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
     $rows = (array)($result['rows'] ?? []);
 
     #region debug-point cys-export-snapshot
+    $cysBonusConfig = new BonusConfigurationService($trzPdo);
+    $rows = array_map(static fn(array $row): array => $cysBonusConfig->applyMeasureRule($row, $monthKey), $rows);
     $debugEnvPath = __DIR__ . '/../.dbg/cys-totals-mismatch.env';
     $debugUrl = '';
     if (is_file($debugEnvPath)) {
@@ -11569,10 +11539,11 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
                 $typeDef = $normalizeCysProductType($bagType, $productType, $erpDesc, $itemTitle);
                 $typeLabel = (string)($typeDef['label'] ?? '');
                 $typeCode = (string)($typeDef['code'] ?? $typeLabel);
-                $category = $resolveCysCategory($erpDesc, $typeCode, $measureLabel);
+                $category = (string)($r['bonus_category'] ?? $resolveCysCategory($erpDesc, $typeCode, $measureLabel));
                 $rate = $resolveCysRate($effectiveRates, $category);
-                $rowAmount = $produced > 0 ? ($produced * $rate) : 0.0;
-                $bonificacionLabel = 'PAGO';
+                $productionFactor = $cysBonusConfig->factor('bonocys', (string)$operatorLabel, (string)($r['event_date'] ?? ''), $monthKey);
+                $rowAmount = $produced > 0 ? ($produced * $rate * $productionFactor) : 0.0;
+                $bonificacionLabel = 'PAGO (' . (int)round($productionFactor * 100) . '%)';
 
                 $dayUnits += $produced > 0 ? $produced : 0.0;
                 $dayAmount += $rowAmount;
@@ -11589,7 +11560,7 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
                 echo '<td>' . h((string)($r['client_label'] ?? '')) . '</td>';
                 echo '<td class="center">' . h((string)($r['printer_no'] ?? '')) . '</td>';
                 echo '<td class="center">' . h($typeLabel) . '</td>';
-                echo '<td class="center">' . h($measureLabel) . '</td>';
+                echo '<td class="center">' . h(isset($r['bonus_original_measure']) ? $r['bonus_original_measure'] . ' -> ' . $measureLabel : $measureLabel) . '</td>';
                 echo '<td class="center">' . h($formatMultiplier((float)$rate)) . '</td>';
                 echo '<td class="right" style="font-weight:800">' . h($moneyRow((float)$rowAmount)) . '</td>';
                 echo '<td class="center">' . h($formatVariation($variation)) . '</td>';
@@ -11669,9 +11640,9 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         $measureLabel = (string)($r['measure_cm'] ?? '');
         $typeDef = $normalizeCysProductType($bagType, $productType, $erpDesc, $itemTitle);
         $typeCode = (string)($typeDef['code'] ?? (string)($typeDef['label'] ?? ''));
-        $category = $resolveCysCategory($erpDesc, $typeCode, $measureLabel);
+        $category = (string)($r['bonus_category'] ?? $resolveCysCategory($erpDesc, $typeCode, $measureLabel));
         $rate = $resolveCysRate($effectiveRates, $category);
-        $amount = $units * $rate;
+        $amount = $units * $rate * $cysBonusConfig->factor('bonocys', $opName, (string)($r['event_date'] ?? ''), $monthKey);
 
         $opBase[$opLabel] = (float)($opBase[$opLabel] ?? 0.0) + $amount;
         if ($category === 'sacos') {
@@ -12290,6 +12261,7 @@ if ($path === '/bonificaciones/seri/export-xls' && $method === 'GET') {
         'sacos' => ['LT_3000' => 8.0, 'GTE_3000' => 6.0],
     ];
     $effectiveRates = $service->getBonusUnitRates('bonoseri');
+    $seriBonusConfig = new BonusConfigurationService($trzPdo);
     if (!is_array($effectiveRates) || $effectiveRates === []) {
         $effectiveRates = $defaultRates;
     }
@@ -12384,7 +12356,8 @@ if ($path === '/bonificaciones/seri/export-xls' && $method === 'GET') {
             $desarrollo = $parseSeriDesarrollo((array)$r, $allEquipoParams);
             $desVal = (float)($desarrollo !== '' ? str_replace(',', '.', $desarrollo) : '0');
             $rate = $resolveSeriRate($effectiveRates, $ccTotal, $ccReq, $desVal, (string)($r['erp_desc'] ?? ''), $normalizedType);
-            $bonus = $u > 0 ? ($u * $rate) : 0.0;
+            $productionFactor = $seriBonusConfig->factor('bonoseri', (string)$operatorLabel, (string)($r['event_date'] ?? ''), $monthKey);
+            $bonus = $u > 0 ? ($u * $rate * $productionFactor) : 0.0;
             if ($u > 0) {
                 $sumUnits += $u;
             }
@@ -12460,7 +12433,9 @@ if ($path === '/bonificaciones/seri/export-xls' && $method === 'GET') {
             $ccReq = (float)($maxReqByCc[$ccKey] ?? $req);
 
             $rate = $resolveSeriRate($effectiveRates, $ccTotal, $ccReq, $desarrolloVal, (string)($r['erp_desc'] ?? ''), $normalizedType);
-            $bonusAmount = $bonificacionLabel === 'PAGO' ? ($units > 0 ? ($units * $rate) : 0.0) : 0.0;
+            $productionFactor = $seriBonusConfig->factor('bonoseri', (string)$operatorLabel, (string)($r['event_date'] ?? ''), $monthKey);
+            $bonusAmount = $bonificacionLabel === 'PAGO' ? ($units > 0 ? ($units * $rate * $productionFactor) : 0.0) : 0.0;
+            $bonificacionLabel .= ' (' . (int)round($productionFactor * 100) . '%)';
             $sumBonus += $bonusAmount > 0 ? $bonusAmount : 0.0;
 
             echo '<tr>';
@@ -13084,62 +13059,46 @@ if ($path === '/bonificaciones/config/save-flexo-factors' && $method === 'POST')
 }
 
 if ($path === '/bonificaciones/ayudante/helpers-save' && $method === 'POST') {
-    denyErpProductionWriteAccess();
+    requireBonusConfigurationEditAccess();
     requireCsrf();
     $monthKey = trim((string)($_POST['month'] ?? date('Y-m')));
-    if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
-        $monthKey = date('Y-m');
-    }
-    $helpers = $_POST['helpers'] ?? [];
-    $result = $service->saveActiveBonusHelpers(is_array($helpers) ? $helpers : []);
-    if (($result['ok'] ?? false) === true) {
-        header('Location: /bonificaciones?view=bonoayudante&month=' . rawurlencode($monthKey) . '&saved=1');
-        exit;
-    }
-    $errList = $result['errors'] ?? [];
-    $error = $errList !== [] ? trim((string)reset($errList)) : '';
-    header('Location: /bonificaciones?view=bonoayudante&month=' . rawurlencode($monthKey) . '&error=' . rawurlencode($error !== '' ? $error : 'No se pudo guardar ayudantes.'));
+    // Old forms must not change the global roster behind monthly configuration.
+    // Los formularios antiguos ya no alteran el listado global entre meses.
+    header('Location: /bonificaciones?view=configuracion&bonus=bonoayudante&month=' . rawurlencode($monthKey));
     exit;
 }
 
 if ($path === '/bonificaciones/ayudante/month-save' && $method === 'POST') {
-    denyErpProductionWriteAccess();
+    requireBonusConfigurationEditAccess();
     requireCsrf();
     $monthKey = trim((string)($_POST['month'] ?? date('Y-m')));
-    if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
-        $monthKey = date('Y-m');
-    }
-
     $operators = $_POST['operators'] ?? [];
     $pScore = $_POST['p_score'] ?? [];
     $eScore = $_POST['e_score'] ?? [];
     $mScore = $_POST['m_score'] ?? [];
-    $pMatrix = $_POST['p_matrix'] ?? [];
-    $eMatrix = $_POST['e_matrix'] ?? [];
-    $mMatrix = $_POST['m_matrix'] ?? [];
-    $fixed = $_POST['fixed'] ?? [];
     $additional = $_POST['additional'] ?? [];
     $obs = $_POST['obs'] ?? [];
 
     $rows = [];
-    if (is_array($operators)) {
+    $validForm = is_array($operators) && $operators !== [];
+    foreach ([$pScore,$eScore,$mScore,$additional,$obs] as $values) {
+        if (!is_array($values) || !is_array($operators) || array_keys($values) !== array_keys($operators)) $validForm = false;
+    }
+    if ($validForm) {
         foreach ($operators as $i => $op) {
             $rows[] = [
                 'operator_name' => (string)$op,
-                'proactividad_score' => is_array($pScore) && array_key_exists($i, $pScore) ? (int)$pScore[$i] : 0,
-                'eficiencia_score' => is_array($eScore) && array_key_exists($i, $eScore) ? (int)$eScore[$i] : 0,
-                'multitarea_score' => is_array($mScore) && array_key_exists($i, $mScore) ? (int)$mScore[$i] : 0,
-                'matrix_proactividad_clp' => is_array($pMatrix) && array_key_exists($i, $pMatrix) ? (float)$pMatrix[$i] : 0.0,
-                'matrix_eficiencia_clp' => is_array($eMatrix) && array_key_exists($i, $eMatrix) ? (float)$eMatrix[$i] : 0.0,
-                'matrix_multitarea_clp' => is_array($mMatrix) && array_key_exists($i, $mMatrix) ? (float)$mMatrix[$i] : 0.0,
-                'fixed_clp' => is_array($fixed) && array_key_exists($i, $fixed) ? (float)$fixed[$i] : 0.0,
-                'additional_clp' => is_array($additional) && array_key_exists($i, $additional) ? (float)$additional[$i] : 0.0,
-                'observations' => is_array($obs) && array_key_exists($i, $obs) ? (string)$obs[$i] : '',
+                'proactividad_score' => $pScore[$i],
+                'eficiencia_score' => $eScore[$i],
+                'multitarea_score' => $mScore[$i],
+                'additional_clp' => $additional[$i],
+                'observations' => (string)$obs[$i],
             ];
         }
     }
 
-    $result = $service->saveBonusHelperMonthlyRows($monthKey, $rows);
+    $result = $validForm ? $service->saveBonusHelperMonthlyRows($monthKey, $rows, bonusConfigurationActor())
+        : ['ok'=>false,'errors'=>['Formulario incompleto. Recarga el mes antes de guardar.']];
     if (($result['ok'] ?? false) === true) {
         header('Location: /bonificaciones?view=bonoayudante&month=' . rawurlencode($monthKey) . '&saved=1');
         exit;

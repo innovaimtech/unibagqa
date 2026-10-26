@@ -43,6 +43,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/InventoryCountService.php';
 require_once __DIR__ . '/RollReceptionService.php';
+require_once __DIR__ . '/BonusConfigurationService.php';
 
 /**
  * Servicio principal de acceso a datos y operaciones del dominio.
@@ -59,7 +60,7 @@ require_once __DIR__ . '/RollReceptionService.php';
  */
 final class ReceptionService
 {
-    public const MAX_WAREHOUSE_TRACEABILITY_LABELS = 100;
+    public const MAX_WAREHOUSE_TRACEABILITY_LABELS = 50;
     private const LABEL_BATCH_FIELDS = [
         'warehouse_id', 'item_code', 'item_description', 'entity_type', 'operator_name',
         'unit_name', 'total_packages', 'quantity', 'lot_number', 'location_ref', 'order_ref',
@@ -71,6 +72,7 @@ final class ReceptionService
     private static bool $schemaEnsured = false;
     private bool $erpWarehousesSynced = false;
     private bool $erpProductionPlanSynced = false;
+    private bool $helperScoreSchemaReady = false;
     private ?PDO $legacyErpPdo = null;
     private ?string $legacyErpConnectionError = null;
 
@@ -1034,9 +1036,9 @@ final class ReceptionService
                 id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
                 month_key CHAR(7) NOT NULL,
                 operator_name VARCHAR(120) NOT NULL,
-                proactividad_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
-                eficiencia_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
-                multitarea_score TINYINT UNSIGNED NOT NULL DEFAULT 0,
+                proactividad_score DECIMAL(4,2) UNSIGNED NOT NULL DEFAULT 0,
+                eficiencia_score DECIMAL(4,2) UNSIGNED NOT NULL DEFAULT 0,
+                multitarea_score DECIMAL(4,2) UNSIGNED NOT NULL DEFAULT 0,
                 matrix_proactividad_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
                 matrix_eficiencia_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
                 matrix_multitarea_clp DECIMAL(12,2) NOT NULL DEFAULT 0.00,
@@ -19608,13 +19610,66 @@ SQL;
         }
     }
 
+    /** Keep legacy amounts as a baseline; effective settings take precedence.
+     * Conservar montos heredados como base; la configuracion vigente tiene prioridad. */
+    public function getBonusHelperSettings(string $monthKey): array
+    {
+        $settings = [];
+        $empty = ['active'=>true,'matrix_proactividad_clp'=>0,'matrix_eficiencia_clp'=>0,
+            'matrix_multitarea_clp'=>0,'fixed_clp'=>0,'instructions'=>'','effective_from'=>''];
+        foreach ($this->listActiveBonusHelpers() as $name) $settings[$name] = $empty;
+        $stmt = $this->pdo->prepare('SELECT month_key,operator_name,matrix_proactividad_clp,
+            matrix_eficiencia_clp,matrix_multitarea_clp,fixed_clp FROM bonus_helper_monthly
+            WHERE month_key<=? ORDER BY month_key ASC');
+        $stmt->execute([$monthKey]);
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $name = trim((string)$row['operator_name']);
+            if ($name === '') continue;
+            $settings[$name] = $empty;
+            foreach (['matrix_proactividad_clp','matrix_eficiencia_clp','matrix_multitarea_clp','fixed_clp'] as $field) {
+                $settings[$name][$field] = (float)$row[$field];
+            }
+            $settings[$name]['effective_from'] = $row['month_key'];
+        }
+        $effective = (new BonusConfigurationService($this->pdo))->getHelperConfiguration($monthKey) ?? [];
+        return array_replace($settings, $effective);
+    }
+
+    private function ensureHelperScorePrecision(): void
+    {
+        if ($this->helperScoreSchemaReady) return;
+        if ($this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME)==='mysql') {
+            $changes = [];
+            foreach ($this->pdo->query('SHOW COLUMNS FROM bonus_helper_monthly')->fetchAll(PDO::FETCH_ASSOC) as $column) {
+                if (in_array($column['Field'],['proactividad_score','eficiencia_score','multitarea_score'],true)
+                    && preg_match('/^(?:tinyint|smallint|mediumint|int|bigint)\b/i',$column['Type'])) {
+                    $changes[] = 'MODIFY `'.$column['Field'].'` DECIMAL(4,2) UNSIGNED NOT NULL DEFAULT 0';
+                }
+            }
+            // TRZ only; preserve existing grades instead of truncating decimal inputs.
+            // Solo TRZ: conservar notas existentes y evitar truncar las nuevas.
+            if ($changes) $this->pdo->exec('ALTER TABLE bonus_helper_monthly '.implode(', ',$changes));
+        }
+        $this->helperScoreSchemaReady = true;
+    }
+
     public function listBonusHelperMonthlyRows(string $monthKey): array
     {
         $monthKey = trim($monthKey);
-        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+        if (!preg_match('/^(\d{4})-(\d{2})$/', $monthKey, $monthParts)
+            || !checkdate((int)$monthParts[2], 1, (int)$monthParts[1])) {
             return [];
         }
-        $helpers = $this->listActiveBonusHelpers();
+        $this->ensureHelperScorePrecision();
+        $configuration = $this->getBonusHelperSettings($monthKey);
+        $erpNames = array_fill_keys($this->listErpWorkerNames(), true);
+        $helperSet = [];
+        foreach ($configuration as $name => $settings) {
+            if (isset($erpNames[$name]) && !empty($settings['active'])) $helperSet[$name] = true;
+            else unset($helperSet[$name]);
+        }
+        $helpers = array_keys($helperSet);
+        sort($helpers, SORT_NATURAL | SORT_FLAG_CASE);
         if ($helpers === []) {
             return [];
         }
@@ -19648,32 +19703,63 @@ SQL;
             $r = $map[$name] ?? null;
             $out[] = [
                 'operator_name' => $name,
-                'proactividad_score' => (int)($r['proactividad_score'] ?? 0),
-                'eficiencia_score' => (int)($r['eficiencia_score'] ?? 0),
-                'multitarea_score' => (int)($r['multitarea_score'] ?? 0),
+                'proactividad_score' => (float)($r['proactividad_score'] ?? 0),
+                'eficiencia_score' => (float)($r['eficiencia_score'] ?? 0),
+                'multitarea_score' => (float)($r['multitarea_score'] ?? 0),
                 'matrix_proactividad_clp' => (float)($r['matrix_proactividad_clp'] ?? 0.0),
                 'matrix_eficiencia_clp' => (float)($r['matrix_eficiencia_clp'] ?? 0.0),
                 'matrix_multitarea_clp' => (float)($r['matrix_multitarea_clp'] ?? 0.0),
                 'fixed_clp' => (float)($r['fixed_clp'] ?? 0.0),
                 'additional_clp' => (float)($r['additional_clp'] ?? 0.0),
                 'observations' => (string)($r['observations'] ?? ''),
+                'instructions' => (string)($configuration[$name]['instructions'] ?? ''),
+                'has_evaluation' => $r !== null,
             ];
+            if (isset($configuration[$name])) {
+                $last = count($out) - 1;
+                foreach (['matrix_proactividad_clp','matrix_eficiencia_clp','matrix_multitarea_clp','fixed_clp'] as $field) {
+                    $out[$last][$field] = (float)$configuration[$name][$field];
+                }
+            }
         }
         return $out;
     }
 
-    public function saveBonusHelperMonthlyRows(string $monthKey, array $rows): array
+    public function saveBonusHelperMonthlyRows(string $monthKey, array $rows, string $actor = 'Sistema'): array
     {
         $monthKey = trim($monthKey);
-        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
+        if (!preg_match('/^(\d{4})-(\d{2})$/', $monthKey, $monthParts)
+            || !checkdate((int)$monthParts[2], 1, (int)$monthParts[1])) {
             return ['ok' => false, 'errors' => ['Mes inválido.']];
         }
-        $helpers = $this->listActiveBonusHelpers();
-        if ($helpers === []) {
+        $configuredRows = $this->listBonusHelperMonthlyRows($monthKey);
+        if ($configuredRows === []) {
             return ['ok' => false, 'errors' => ['No hay ayudantes seleccionados.']];
         }
-        $helperSet = array_fill_keys($helpers, true);
+        $helperSet = array_column($configuredRows, null, 'operator_name');
+        $seen = [];
+        foreach ($rows as $row) {
+            $name = trim((string)($row['operator_name'] ?? ''));
+            if (!isset($helperSet[$name]) || isset($seen[$name])) {
+                return ['ok'=>false,'errors'=>['El listado de ayudantes cambio. Recarga el mes.']];
+            }
+            $seen[$name] = true;
+            foreach (['proactividad_score','eficiencia_score','multitarea_score'] as $field) {
+                try {
+                    BonusConfigurationService::helperScore($row[$field] ?? null);
+                } catch (RuntimeException $e) {
+                    return ['ok'=>false,'errors'=>[$e->getMessage()]];
+                }
+            }
+            $additional = $row['additional_clp'] ?? 0;
+            if (!is_numeric($additional) || !is_finite((float)$additional) || (float)$additional < 0 || (float)$additional > 9999999999.99) {
+                return ['ok'=>false,'errors'=>['Incentivo adicional no valido.']];
+            }
+        }
+        if (!$rows) return ['ok'=>false,'errors'=>['No hay evaluaciones para guardar.']];
 
+        $bonusConfig = new BonusConfigurationService($this->pdo);
+        $bonusConfig->getHelperConfiguration($monthKey);
         $this->pdo->beginTransaction();
         try {
             $upsert = $this->pdo->prepare(
@@ -19705,13 +19791,15 @@ SQL;
                 if ($name === '' || !isset($helperSet[$name])) {
                     continue;
                 }
-                $p = max(0, min(10, (int)($r['proactividad_score'] ?? 0)));
-                $e = max(0, min(10, (int)($r['eficiencia_score'] ?? 0)));
-                $m = max(0, min(10, (int)($r['multitarea_score'] ?? 0)));
-                $mp = max(0.0, (float)($r['matrix_proactividad_clp'] ?? 0.0));
-                $me = max(0.0, (float)($r['matrix_eficiencia_clp'] ?? 0.0));
-                $mm = max(0.0, (float)($r['matrix_multitarea_clp'] ?? 0.0));
-                $fixed = max(0.0, (float)($r['fixed_clp'] ?? 0.0));
+                $p = BonusConfigurationService::helperScore($r['proactividad_score']);
+                $e = BonusConfigurationService::helperScore($r['eficiencia_score']);
+                $m = BonusConfigurationService::helperScore($r['multitarea_score']);
+                // Never accept payment limits from the evaluation form.
+                // Los topes se leen de TRZ, nunca del formulario de notas.
+                $mp = (float)$helperSet[$name]['matrix_proactividad_clp'];
+                $me = (float)$helperSet[$name]['matrix_eficiencia_clp'];
+                $mm = (float)$helperSet[$name]['matrix_multitarea_clp'];
+                $fixed = (float)$helperSet[$name]['fixed_clp'];
                 $add = max(0.0, (float)($r['additional_clp'] ?? 0.0));
                 $obs = trim((string)($r['observations'] ?? ''));
                 if (mb_strlen($obs) > 255) {
@@ -19731,6 +19819,15 @@ SQL;
                     ':additional_clp' => $add,
                     ':observations' => $obs !== '' ? $obs : null,
                 ]);
+                $fields = ['proactividad_score'=>$p,'eficiencia_score'=>$e,'multitarea_score'=>$m,
+                    'matrix_proactividad_clp'=>$mp,'matrix_eficiencia_clp'=>$me,'matrix_multitarea_clp'=>$mm,
+                    'fixed_clp'=>$fixed,'additional_clp'=>$add,'observations'=>$obs];
+                $before = null;
+                if (!empty($helperSet[$name]['has_evaluation'])) {
+                    $before = ['operator'=>$name];
+                    foreach ($fields as $key=>$value) $before[$key] = $helperSet[$name][$key];
+                }
+                $bonusConfig->recordHelperEvaluation($monthKey, $before, ['operator'=>$name]+$fields, $actor);
             }
 
             $this->pdo->commit();
@@ -20047,73 +20144,136 @@ SQL;
             && $this->erpColumnExists('parametros', 'codigo')
             && $this->erpColumnExists('parametros', 'valor1')
             && $this->erpColumnExists('parametros', 'valor2');
-        $countExpr = $this->erpColumnExists('prod_worker_ot_events', 'id') ? 'COUNT(DISTINCT e.id)' : 'COUNT(*)';
-        $aplicaJoinSql = '';
+        $hasEventId = $this->erpColumnExists('prod_worker_ot_events', 'id');
+        $eventIdExpr = $hasEventId ? 'e.id' : '0';
+        $eventOrder = $hasEventId ? ', e.id' : '';
+        $validStatusSql = '';
+        if ($this->erpColumnExists('prod_worker_ot_events', 'evt_status')) {
+            $validStatusSql .= ' AND e.evt_status > 0';
+        }
+        if ($this->erpColumnExists('prod_worker_ot', 'wok_status')) {
+            $validStatusSql .= ' AND pwo.wok_status > 0';
+        }
+        $aplicaFilterSql = '';
+        $validMeasuresSql = '';
         if ($canApplyRule) {
-            $countExpr = <<<SQL
-SUM(
-    CASE
-        WHEN COALESCE(p_from.valor2, 0) = 1 AND COALESCE(p_to.valor2, 0) = 1 THEN 1
-        WHEN (COALESCE(p_from.valor2, 0) = 0 OR COALESCE(p_to.valor2, 0) = 0) AND COALESCE(p_from.valor1, '') <> COALESCE(p_to.valor1, '') THEN 1
-        ELSE 0
-    END
-)
+            // EXISTS checks eligibility without multiplying events through catalog joins.
+            // EXISTS valida el pago sin multiplicar eventos por coincidencias del catalogo.
+            // Missing product rules must not become a payable change through NULL defaults.
+            // Una regla inexistente no debe convertirse en un cambio pagable.
+            $aplicaFilterSql = <<<SQL
+ AND EXISTS (
+    SELECT 1
+    FROM prod_medidas m_from
+    CROSS JOIN prod_medidas m_to
+    INNER JOIN parametros p_from ON p_from.tabla = 'TIPOPRODUCTO' AND p_from.codigo = CAST(m_from.med_tipoproducto AS CHAR)
+    INNER JOIN parametros p_to ON p_to.tabla = 'TIPOPRODUCTO' AND p_to.codigo = CAST(m_to.med_tipoproducto AS CHAR)
+    WHERE m_from.id = e.evt_medida_fromid
+      AND m_to.id = e.evt_medida_toid
+      AND (
+        (COALESCE(p_from.valor2, 0) = 1 AND COALESCE(p_to.valor2, 0) = 1)
+        OR ((COALESCE(p_from.valor2, 0) = 0 OR COALESCE(p_to.valor2, 0) = 0)
+            AND COALESCE(p_from.valor1, '') <> COALESCE(p_to.valor1, ''))
+      )
+ )
 SQL;
-            $aplicaJoinSql = <<<SQL
-LEFT JOIN prod_medidas m_from ON m_from.id = e.evt_medida_fromid
-LEFT JOIN prod_medidas m_to ON m_to.id = e.evt_medida_toid
-LEFT JOIN parametros p_from ON p_from.tabla = 'TIPOPRODUCTO' AND p_from.codigo = CAST(m_from.med_tipoproducto AS CHAR)
-LEFT JOIN parametros p_to ON p_to.tabla = 'TIPOPRODUCTO' AND p_to.codigo = CAST(m_to.med_tipoproducto AS CHAR)
+            // No-change placeholders without a product rule do not reset machine state.
+            // Los comodines sin regla de producto no reinician la configuracion fisica.
+            $validMeasuresSql = <<<SQL
+ AND EXISTS (
+    SELECT 1 FROM prod_medidas m
+    INNER JOIN parametros p ON p.tabla = 'TIPOPRODUCTO' AND p.codigo = CAST(m.med_tipoproducto AS CHAR)
+    WHERE m.id = e.evt_medida_fromid
+ )
+ AND EXISTS (
+    SELECT 1 FROM prod_medidas m
+    INNER JOIN parametros p ON p.tabla = 'TIPOPRODUCTO' AND p.codigo = CAST(m.med_tipoproducto AS CHAR)
+    WHERE m.id = e.evt_medida_toid
+ )
 SQL;
         }
         $operatorExpr = 'TRIM(CONCAT(COALESCE(w.wrk_firstname, ""), " ", COALESCE(w.wrk_lastname, "")))';
 
         $sql = <<<SQL
-SELECT
+SELECT DISTINCT
+    {$eventIdExpr} AS event_id,
+    e.evt_crtdat AS event_ts,
+    pa.ag_equipo_id AS machine_id,
+    e.evt_medida_fromid AS measure_from_id,
+    e.evt_medida_toid AS measure_to_id,
     {$operatorExpr} AS operator_name,
-    {$countExpr} AS cnt
+    CASE WHEN e.evt_medida_fromid <> e.evt_medida_toid {$aplicaFilterSql} THEN 1 ELSE 0 END AS applies
 FROM prod_worker_ot_events e
 INNER JOIN prod_worker_ot pwo ON pwo.id = e.evt_prod_worker_otid
 INNER JOIN prod_agenda pa ON pa.id = pwo.wok_ag_id
 LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
 LEFT JOIN workers w ON w.id = pwi.win_wrkid
-{$aplicaJoinSql}
 WHERE e.evt_crtdat BETWEEN :start_ts AND :end_ts
   AND LOWER(e.evt_type) = 'apertura'
-  AND e.evt_medida_fromid IS NOT NULL
-  AND e.evt_medida_toid IS NOT NULL
-  AND e.evt_medida_fromid <> e.evt_medida_toid
+  AND e.evt_medida_fromid > 0
+  AND e.evt_medida_toid > 0
+  AND pa.ag_equipo_id > 0
+{$validStatusSql}
+{$validMeasuresSql}
 {$equipotypeFilterSql}
 {$equipoFilterSql}
-  AND (:operator_name = '' OR {$operatorExpr} = :operator_name_exact)
-GROUP BY {$operatorExpr}
-ORDER BY operator_name ASC
+ORDER BY e.evt_crtdat {$eventOrder}
 SQL;
 
         $counts = [];
+        $excludedRepeats = [];
         try {
             $stmt = $this->erpPdo->prepare($sql);
-            $stmt->execute(array_merge([
+            $params = array_merge([
                 ':start_ts' => $startTs,
                 ':end_ts' => $endTs,
-                ':operator_name' => $operatorName,
-                ':operator_name_exact' => $operatorName,
-            ], $equipotypeParams, $equipoParams));
-            foreach ($stmt->fetchAll() as $r) {
-                if (!is_array($r)) {
-                    continue;
-                }
-                $name = trim((string)($r['operator_name'] ?? ''));
-                if ($name === '') {
-                    continue;
-                }
-                $counts[$name] = (int)($r['cnt'] ?? 0);
+            ], $equipotypeParams, $equipoParams);
+            $stmt->execute($params);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $previous = [];
+            // Seed each machine from its last valid setup before the period, without a
+            // fixed lookback or operator filter. Other operators also change its state.
+            // Recuperar la ultima configuracion previa sin limitar dias ni operadores.
+            $historySql = str_replace(
+                'e.evt_crtdat BETWEEN :start_ts AND :end_ts',
+                'e.evt_crtdat < :start_ts AND pa.ag_equipo_id = :history_machine',
+                $sql
+            );
+            $historySql = str_replace(
+                "ORDER BY e.evt_crtdat {$eventOrder}",
+                'ORDER BY e.evt_crtdat DESC' . ($hasEventId ? ', e.id DESC' : '') . ' LIMIT 1',
+                $historySql
+            );
+            $historyStmt = $this->erpPdo->prepare($historySql);
+            foreach (array_unique(array_column($rows, 'machine_id')) as $machineId) {
+                $historyParams = $params;
+                unset($historyParams[':end_ts']);
+                $historyParams[':history_machine'] = $machineId;
+                $historyStmt->execute($historyParams);
+                $previous[$machineId] = $historyStmt->fetch(PDO::FETCH_ASSOC) ?: null;
             }
+            foreach ($rows as $r) {
+                $machineId = (int)$r['machine_id'];
+                $prior = $previous[$machineId] ?? null;
+                $repeated = $prior && (int)$prior['measure_to_id'] === (int)$r['measure_to_id'];
+                $previous[$machineId] = $r;
+                $name = trim((string)($r['operator_name'] ?? ''));
+                if ($name === '' || ($operatorName !== '' && mb_strtolower($name) !== mb_strtolower($operatorName))
+                    || empty($r['applies'])) continue;
+                if ($repeated) {
+                    $excludedRepeats[] = ['event_id'=>(int)$r['event_id'], 'operator_name'=>$name,
+                        'machine_id'=>$machineId, 'measure_to_id'=>(int)$r['measure_to_id'],
+                        'previous_event_id'=>(int)$prior['event_id']];
+                } else {
+                    $counts[$name] = ($counts[$name] ?? 0) + 1;
+                }
+            }
+            ksort($counts, SORT_NATURAL | SORT_FLAG_CASE);
         } catch (Throwable $e) {
             return ['ok' => false, 'errors' => ['No se pudo consultar cambios de configuración.'], 'period' => $period, 'counts' => []];
         }
 
-        return ['ok' => true, 'errors' => [], 'period' => $period, 'counts' => $counts];
+        return ['ok' => true, 'errors' => [], 'period' => $period, 'counts' => $counts, 'excluded_repeats'=>$excludedRepeats];
     }
 
     public function listErpCysPackagingUnitsForBonusPeriod(string|array $monthKey, ?string $operatorName = null): array
@@ -22869,30 +23029,32 @@ SQL;
     }
 
     /**
-     * Obtiene la colación activa (sin terminar) de un operario para el día actual.
+     * Obtiene la colacion pendiente del operario, incluso si el turno cruza medianoche.
      */
     public function getActiveOperatorLunchBreak(int $workerId = 0, int $initId = 0, string $operatorName = ''): ?array
     {
         $this->ensureOperatorLunchBreaksTable();
-        $today = date('Y-m-d');
+        $where = [];
+        $params = [];
+        if ($workerId > 0) {
+            $where[] = 'worker_id = :worker';
+            $params[':worker'] = $workerId;
+        }
+        if ($initId > 0) {
+            $where[] = ($workerId > 0 ? '(COALESCE(worker_id,0)=0 AND init_id=:init)' : 'init_id=:init');
+            $params[':init'] = $initId;
+        }
+        if (trim($operatorName) !== '') {
+            $where[] = ($workerId > 0 || $initId > 0)
+                ? '(COALESCE(worker_id,0)=0 AND COALESCE(init_id,0)=0 AND operator_name=:name)'
+                : 'operator_name=:name';
+            $params[':name'] = trim($operatorName);
+        }
+        if ($where === []) return null;
         try {
-            $stmt = $this->pdo->prepare("
-                SELECT * FROM production_operator_lunch_breaks
-                WHERE shift_date = :d
-                  AND end_time IS NULL
-                  AND (
-                      (:wrkid > 0 AND worker_id = :wrkid)
-                      OR (:init_id > 0 AND init_id = :init_id)
-                      OR (:wrkid <= 0 AND :init_id <= 0 AND operator_name = :opname)
-                  )
-                ORDER BY id DESC LIMIT 1
-            ");
-            $stmt->execute([
-                ':d' => $today,
-                ':wrkid' => $workerId,
-                ':init_id' => $initId,
-                ':opname' => trim($operatorName),
-            ]);
+            $stmt = $this->pdo->prepare('SELECT * FROM production_operator_lunch_breaks
+                WHERE end_time IS NULL AND (' . implode(' OR ', $where) . ') ORDER BY id DESC LIMIT 1');
+            $stmt->execute($params);
             $row = $stmt->fetch(PDO::FETCH_ASSOC);
             return $row ?: null;
         } catch (Throwable) {
@@ -22932,7 +23094,7 @@ SQL;
         try {
             $targetOtId = 0;
             if ($initId > 0) {
-                $stmtOt = $this->erpPdo->prepare("SELECT id FROM prod_worker_ot WHERE wok_init_id = :init_id ORDER BY id DESC LIMIT 1");
+                $stmtOt = $this->erpPdo->prepare("SELECT id FROM prod_worker_ot WHERE wok_init_id = :init_id AND wok_status=1 ORDER BY id DESC LIMIT 1");
                 $stmtOt->execute([':init_id' => $initId]);
                 $targetOtId = (int)$stmtOt->fetchColumn();
             }
@@ -22942,7 +23104,7 @@ SQL;
                     SELECT ot.id 
                     FROM prod_worker_ot ot
                     INNER JOIN prod_worker_init wi ON ot.wok_init_id = wi.id
-                    WHERE wi.win_wrkid = :wrkid AND wi.win_day = :d AND wi.win_month = :m AND wi.win_year = :y
+                    WHERE wi.win_wrkid = :wrkid AND wi.win_day = :d AND wi.win_month = :m AND wi.win_year = :y AND ot.wok_status=1
                     ORDER BY ot.id DESC LIMIT 1
                 ");
                 $stmtOt->execute([':wrkid' => $workerId, ':d' => (int)$d, ':m' => (int)$m, ':y' => (int)$y]);
@@ -23009,11 +23171,24 @@ SQL;
             $stmt->execute([':id' => $lunchId]);
             $lunch = $stmt->fetch(PDO::FETCH_ASSOC);
         }
-        if (!$lunch) {
+        if (!$lunch && $lunchId <= 0) {
             $lunch = $this->getActiveOperatorLunchBreak($workerId, $initId, $operatorName);
         }
         if (!$lunch) {
             return ['ok' => false, 'error' => 'No se encontró una colación activa en curso para finalizar.'];
+        }
+        $ownsLunch = (int)($lunch['worker_id'] ?? 0) > 0
+            ? $workerId > 0 && (int)$lunch['worker_id'] === $workerId
+            : ((int)($lunch['init_id'] ?? 0) > 0
+                ? $initId > 0 && (int)$lunch['init_id'] === $initId
+                : trim($operatorName) !== '' && trim((string)$lunch['operator_name']) === trim($operatorName));
+        if (!$ownsLunch) {
+            return ['ok'=>false, 'error'=>'La colacion no pertenece al operador conectado.'];
+        }
+        if (!empty($lunch['end_time'])) {
+            return ['ok'=>true, 'duration'=>(int)$lunch['duration_minutes'],
+                'start_time'=>date('H:i', strtotime((string)$lunch['start_time'])),
+                'end_time'=>date('H:i', strtotime((string)$lunch['end_time']))];
         }
 
         $now = time();
@@ -23028,7 +23203,8 @@ SQL;
                     UPDATE prod_worker_ot_events
                     SET evt_enddat = :now, evt_status = 2, evt_amount = :dur,
                         evt_comments = :comments
-                    WHERE id = :id
+                    WHERE id = :id AND evt_type='pause' AND evt_pause_id=1
+                        AND evt_status>0 AND (evt_enddat=0 OR evt_enddat IS NULL)
                 ");
                 $upd->execute([
                     ':now' => $now,
@@ -23036,7 +23212,24 @@ SQL;
                     ':comments' => 'Colación finalizada (' . $duration . ' min de ' . date('H:i', $startTs) . ' a ' . date('H:i', $now) . ')' . ($comments ? " - {$comments}" : ''),
                     ':id' => (int)$lunch['erp_event_id'],
                 ]);
-            } catch (Throwable) {}
+                if ($upd->rowCount() === 0) {
+                    // A retry after a local failure must preserve the ERP closing time.
+                    // Un reintento tras un fallo local conserva la hora de cierre del ERP.
+                    $stmtEnd = $this->erpPdo->prepare("SELECT evt_enddat FROM prod_worker_ot_events
+                        WHERE id=? AND evt_type='pause' AND evt_pause_id=1 AND evt_status>0");
+                    $stmtEnd->execute([(int)$lunch['erp_event_id']]);
+                    $erpEnd = (int)$stmtEnd->fetchColumn();
+                    if ($erpEnd <= 0) {
+                        return ['ok'=>false, 'error'=>'No se pudo cerrar el evento de colacion en el ERP. Reintenta el termino.'];
+                    }
+                    $now = $erpEnd;
+                    $endDt = date('Y-m-d H:i:s', $now);
+                    $duration = max(1, (int)round(($now - $startTs) / 60));
+                }
+            } catch (Throwable $e) {
+                error_log('Lunch ERP closure: ' . $e->getMessage());
+                return ['ok'=>false, 'error'=>'No se pudo guardar el termino de colacion en el ERP. Reintenta cuando se restablezca la conexion.'];
+            }
         }
 
         // 2. Actualizar registro en base local
@@ -23045,7 +23238,7 @@ SQL;
                 UPDATE production_operator_lunch_breaks
                 SET end_time = :et, duration_minutes = :dur,
                     comments = CONCAT(COALESCE(comments, ''), :comm)
-                WHERE id = :id
+                WHERE id = :id AND end_time IS NULL
             ");
             $stmt->execute([
                 ':et' => $endDt,

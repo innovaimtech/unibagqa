@@ -80,10 +80,12 @@ class SimpleXlsx
 
             $tableClass = (string)$table->getAttribute('class');
             $isSummaryTable = str_contains($tableClass, 'summary');
+            $columnKinds = [];
 
             $trs = $xpath->query('.//tr', $table);
             foreach ($trs as $tr) {
                 $rowCells = [];
+                $column = 0;
                 $cells = $xpath->query('.//th | .//td', $tr);
                 foreach ($cells as $cell) {
                     $val = trim($cell->textContent);
@@ -94,52 +96,24 @@ class SimpleXlsx
                     }
                     $class = (string)$cell->getAttribute('class');
 
-                    $isNum = false;
-                    $numVal = 0.0;
-                    $numFormat = 'int';
-
-                    if (str_contains($class, 'num-int')) {
-                        $isNum = true;
-                        $clean = str_replace(['.', ' ', '$'], '', $val);
-                        $clean = str_replace(',', '.', $clean);
-                        $numVal = (float)$clean;
-                        $numFormat = 'int';
-                    } elseif (str_contains($class, 'num-dec') || str_contains($class, 'num-dec1') || str_contains($class, 'num-dec3')) {
-                        $isNum = true;
-                        $clean = str_replace([' ', '$'], '', $val);
-                        if (preg_match('/\.\d{3}/', $clean) && str_contains($clean, ',')) {
-                            $clean = str_replace('.', '', $clean);
-                            $clean = str_replace(',', '.', $clean);
-                        } else {
-                            $clean = str_replace(',', '.', $clean);
-                        }
-                        $clean = preg_replace('/[^0-9.-]/', '', $clean);
-                        $numVal = (float)$clean;
-                        $numFormat = str_contains($class, 'num-dec3') ? 'dec3' : (str_contains($class, 'num-dec1') ? 'dec1' : 'dec2');
-                    } elseif (!$isHeader && !str_contains($class, 'text-cell') && preg_match('/^-?[\d.,]+$/', $val)) {
-                        // Si tiene ceros a la izquierda (ej: 00123), mantener como texto
-                        if (strlen($val) > 1 && $val[0] === '0' && ctype_digit($val)) {
-                            $isNum = false;
-                        } else {
-                            $clean = str_replace(['.'], '', $val);
-                            $clean = str_replace(',', '.', $clean);
-                            if (is_numeric($clean)) {
-                                $isNum = true;
-                                $numVal = (float)$clean;
-                                $numFormat = str_contains($val, ',') || str_contains($val, '.') ? 'dec2' : 'int';
-                            }
-                        }
+                    if ($isHeader && $colspan === 1) {
+                        $columnKinds[$column] = self::columnKind($val);
                     }
+                    $number = $isHeader ? null : self::cellNumber($val,$class,
+                        $columnKinds[$column] ?? '',(string)$cell->getAttribute('style'),
+                        (string)$cell->getAttribute('data-xlsx-type'),
+                        $cell->hasAttribute('data-xlsx-value') ? $cell->getAttribute('data-xlsx-value') : null);
 
                     $rowCells[] = [
                         'val' => $val,
                         'is_header' => $isHeader,
                         'is_summary' => $isSummaryTable && $isHeader,
                         'colspan' => $colspan,
-                        'is_num' => $isNum,
-                        'num_val' => $numVal,
-                        'num_format' => $numFormat,
+                        'is_num' => $number !== null,
+                        'num_val' => $number['value'] ?? 0.0,
+                        'num_format' => $number['format'] ?? 'int',
                     ];
+                    $column += $colspan;
                 }
                 $rowsData[] = $rowCells;
             }
@@ -147,6 +121,92 @@ class SimpleXlsx
         }
 
         return $rowsData;
+    }
+
+    private static function columnKind(string $header): string
+    {
+        $header = strtr(mb_strtolower($header),['á'=>'a','é'=>'e','í'=>'i','ó'=>'o','ú'=>'u','ñ'=>'n']);
+        if (preg_match('/\b(?:cantidad|cant|total|monto|precio|valor|bono|stock|peso|kg|horas|minutos|duracion|factor|mult|porcentaje|ocupacion|unidades|saldo|producci[oó]n)\b|%/u',$header)) {
+            return 'number';
+        }
+        if (preg_match('/\b(?:sku|codigo|cod|rut|id|ot|oc|nv|cc|folio|barcode|ean|upc|serie|lote|documento|factura|guia|operador|cliente|articulo|producto|descripcion|observaciones|medidas|nombre|color|maquina|fecha|hora|turno|bodega|planta|unidad)\b|centro\s+(?:de\s+)?costos?|nota\s+venta/u',$header)) {
+            return 'text';
+        }
+        return '';
+    }
+
+    /** Numbers are written without display symbols; currency/percent signs live in styles.
+     * Los valores se guardan sin simbolos; moneda y porcentaje se aplican como formato. */
+    private static function cellNumber(string $value,string $class,string $kind='',string $style='',string $type='',?string $raw=null): ?array
+    {
+        $classes = preg_split('/\s+/',trim($class)) ?: [];
+        if ($type==='text' || in_array('text-cell',$classes,true) || preg_match('/mso-number-format\s*:[^;]*@/i',$style)) return null;
+        $explicit = in_array($type,['number','currency','percentage'],true) || (bool)preg_match('/(?:^|\s)num-(?:int|dec[123]?|currency|percent)(?:\s|$)/',$class);
+        if ($kind==='text' && !in_array($type,['number','currency','percentage'],true) && $raw===null) return null;
+        $value = trim(str_replace(["\u{00A0}","\u{202F}","\u{2212}"],[' ',' ','-'],$value));
+        if ($value==='' && $raw===null) return null;
+        $currency = $type==='currency' || in_array('num-currency',$classes,true) || (bool)preg_match('/[$€£]|\b(?:CLP|USD|EUR|GBP)\b/u',$value);
+        $currencyFormat = str_contains($value,'€') || preg_match('/\bEUR\b/',$value) ? 'eur'
+            : (str_contains($value,'£') || preg_match('/\bGBP\b/',$value) ? 'gbp' : 'currency');
+        $percent = $type==='percentage' || in_array('num-percent',$classes,true) || str_contains($value,'%');
+        $decimalClass = (bool)preg_match('/(?:^|\s)num-dec[123]?(?:\s|$)/',$class);
+        $clean = preg_replace('/US\$|[$€£%]|\b(?:CLP|USD|EUR|GBP)\b/u','',$value);
+        $clean = trim((string)$clean);
+        if ($currency && preg_match('/^[-–—]$/u',$clean)) return ['value'=>0.0,'format'=>$currencyFormat.'0'];
+        if ($explicit || $kind==='number') {
+            $clean = preg_replace('/\s*(?:kg|g|ton|unid\.?|unidades|uds|mts?|m|metros|mm|cm|hrs?|h|horas|min|minutos|m2|m²|m\/min)\s*$/iu','',$clean);
+            if (preg_match('/^\s*x\s*/i',$clean)) $clean = preg_replace('/^\s*x\s*/i','',$clean);
+        }
+        $clean = trim((string)$clean);
+        $negative = str_starts_with($clean,'(') && str_ends_with($clean,')');
+        if ($negative) $clean = substr($clean,1,-1);
+        $clean = str_replace(' ','',$clean);
+        if ($raw!==null) {
+            if (!preg_match('/^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/',$raw)) return null;
+            $canonical = $raw;
+        } else {
+            if (!preg_match('/^[+-]?\d[\d.,]*$/',$clean)) return null;
+            // Ambiguous identifiers and long codes must not lose leading zeros or precision.
+            // Los identificadores ambiguos conservan ceros y precision.
+            if (!$explicit && $kind!=='number' && preg_match('/^0\d+$|^\d{16,}$/',$clean)) return null;
+            $comma = str_contains($clean,',');$dot = str_contains($clean,'.');
+            if ($comma && $dot) {
+                $decimal = strrpos($clean,',')>strrpos($clean,'.') ? ',' : '.';
+                $group = $decimal===',' ? '.' : ',';
+                $parts = explode($decimal,$clean);
+                if (count($parts)!==2 || !ctype_digit($parts[1])
+                    || !self::validGroupedInteger($parts[0],$group)) return null;
+                $canonical = str_replace($group,'',$parts[0]).'.'.$parts[1];
+            } elseif ($comma) {
+                if (substr_count($clean,',')>1 || (!$percent && ($currency || in_array('num-int',$classes,true))
+                    && !$decimalClass && self::validGroupedInteger($clean,','))) {
+                    if (!self::validGroupedInteger($clean,',')) return null;
+                    $canonical = str_replace(',','',$clean);
+                } else {
+                    $canonical = str_replace(',','.',$clean);
+                }
+            } elseif ($dot && (!$decimalClass || $currency) && self::validGroupedInteger($clean,'.') && str_contains($clean,'.')) {
+                $canonical = str_replace('.','',$clean);
+            } else {
+                $canonical = $clean;
+            }
+            if ($negative) $canonical = '-'.$canonical;
+        }
+        if (!is_numeric($canonical) || !is_finite((float)$canonical)) return null;
+        $number = (float)$canonical;
+        $decimals = str_contains($canonical,'.') ? strlen(explode('.',$canonical,2)[1]) : 0;
+        if ($percent) return ['value'=>$raw!==null ? $number : $number/100,'format'=>$decimals>0?'percent2':'percent0'];
+        if ($currency) return ['value'=>$number,'format'=>$currencyFormat.($decimals>0?'2':'0')];
+        $format = in_array('num-int',$classes,true) ? 'int' : ($decimalClass
+            ? (in_array('num-dec3',$classes,true) ? 'dec3' : (in_array('num-dec1',$classes,true) ? 'dec1' : 'dec2'))
+            : ($decimals>0 ? ($decimals>2?'dec3':'dec2') : 'int'));
+        return ['value'=>$number,'format'=>$format];
+    }
+
+    private static function validGroupedInteger(string $value,string $separator): bool
+    {
+        $separator = preg_quote($separator,'/');
+        return (bool)preg_match('/^[+-]?(?:\d+|[1-9]\d{0,2}(?:'.$separator.'\d{3})+)$/',$value);
     }
 
     /**
@@ -211,23 +271,33 @@ class SimpleXlsx
         // Filas de datos
         foreach ($rows as $row) {
             $rowCells = [];
-            foreach ($row as $val) {
+            foreach ($row as $index=>$val) {
                 $isNum = false;
                 $numVal = 0.0;
                 $numFormat = 'int';
+                $kind = self::columnKind((string)($headers[$index] ?? ''));
 
-                if (is_int($val)) {
+                if ($kind==='text') {
+                    // IDs and SKUs remain text even when PDO supplies an integer.
+                    // IDs y SKU siguen como texto incluso si PDO entrega un entero.
+                } elseif (is_int($val)) {
                     $isNum = true;
                     $numVal = (float)$val;
                     $numFormat = 'int';
-                } elseif (is_float($val)) {
+                } elseif (is_float($val) && is_finite($val)) {
                     $isNum = true;
                     $numVal = $val;
                     $numFormat = (floor($val) == $val) ? 'int' : 'dec2';
-                } elseif (is_numeric($val) && !is_string($val)) {
+                } elseif (is_numeric($val) && !is_string($val) && is_finite((float)$val)) {
                     $isNum = true;
                     $numVal = (float)$val;
                     $numFormat = 'dec2';
+                } elseif (is_string($val)) {
+                    $raw = $kind==='number' && is_numeric($val) ? $val : null;
+                    $number = self::cellNumber($val,'',$kind,'',$raw!==null?'number':'',$raw);
+                    $isNum = $number!==null;
+                    $numVal = $number['value'] ?? 0.0;
+                    $numFormat = $number['format'] ?? 'int';
                 }
 
                 $rowCells[] = [
@@ -404,6 +474,14 @@ class SimpleXlsx
                         'dec1' => 3,
                         'dec2' => 4,
                         'dec3' => 6,
+                        'currency0' => 8,
+                        'currency2' => 9,
+                        'percent0' => 10,
+                        'percent2' => 11,
+                        'eur0' => 12,
+                        'eur2' => 13,
+                        'gbp0' => 14,
+                        'gbp2' => 15,
                         default => 2,
                     };
                 }
@@ -441,10 +519,19 @@ class SimpleXlsx
     {
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <numFmts count="3">
+  <numFmts count="12">
     <numFmt numFmtId="164" formatCode="#,##0"/>
     <numFmt numFmtId="165" formatCode="#,##0.00"/>
     <numFmt numFmtId="166" formatCode="#,##0.000"/>
+    <numFmt numFmtId="167" formatCode="&quot;$&quot; #,##0;[Red]&quot;$&quot; -#,##0;&quot;$&quot; -"/>
+    <numFmt numFmtId="168" formatCode="&quot;$&quot; #,##0.00;[Red]&quot;$&quot; -#,##0.00;&quot;$&quot; -"/>
+    <numFmt numFmtId="169" formatCode="0%"/>
+    <numFmt numFmtId="170" formatCode="0.00%"/>
+    <numFmt numFmtId="171" formatCode="#,##0.0"/>
+    <numFmt numFmtId="180" formatCode="&quot;€&quot; #,##0"/>
+    <numFmt numFmtId="181" formatCode="&quot;€&quot; #,##0.00"/>
+    <numFmt numFmtId="182" formatCode="&quot;£&quot; #,##0"/>
+    <numFmt numFmtId="183" formatCode="&quot;£&quot; #,##0.00"/>
   </numFmts>
   <fonts count="4">
     <!-- 0: Normal 11pt -->
@@ -474,7 +561,7 @@ class SimpleXlsx
     </border>
   </borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="8">
+  <cellXfs count="16">
     <!-- 0: Normal text -->
     <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>
     <!-- 1: Header (Dark BG, White Text, Bold, Centered) -->
@@ -482,7 +569,7 @@ class SimpleXlsx
     <!-- 2: Integer number -->
     <xf numFmtId="164" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
     <!-- 3: Dec1 number -->
-    <xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
+    <xf numFmtId="171" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
     <!-- 4: Dec2 number -->
     <xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
     <!-- 5: Title big bold -->
@@ -491,6 +578,14 @@ class SimpleXlsx
     <xf numFmtId="166" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
     <!-- 7: Summary header (Light slate BG, Bold, Left) -->
     <xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>
+    <xf numFmtId="167" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
+    <xf numFmtId="168" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
+    <xf numFmtId="169" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
+    <xf numFmtId="170" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
+    <xf numFmtId="180" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
+    <xf numFmtId="181" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
+    <xf numFmtId="182" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
+    <xf numFmtId="183" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment horizontal="right"/></xf>
   </cellXfs>
 </styleSheet>';
     }
