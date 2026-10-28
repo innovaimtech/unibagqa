@@ -1,6 +1,22 @@
 <?php
 declare(strict_types=1);
 
+/**
+ * =============================================================================
+ * Módulo HTTP · Configuración y Auditoría de Bonos de Producción
+ * (src/Http/BonusConfigurationModule.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Gestiona la interfaz web (/bonus/config/*) para que los supervisores y jefaturas
+ * configuren las políticas mensuales de bonificación de planta:
+ * 1. Control de Acceso: Edición restringida a jefaturas autorizadas (Javier Perozo y Héctor Matus),
+ *    permitiendo acceso de solo lectura al resto del personal.
+ * 2. Bonos de Corte y Sellado (CyS): Ajuste de medidas, anchos y categorías de bolsas/sacos.
+ * 3. Bonos de Ayudantes: Matriz de montos máximos por proactividad, eficiencia y multitarea.
+ * 4. Historial y Auditoría: Vista detallada de cambios mes a mes con comparación antes/después.
+ */
+
 function canEditBonusConfiguration(): bool
 {
     return unibagIsAuthenticated() && unibagCanUserPerformModifications();

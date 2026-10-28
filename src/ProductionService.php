@@ -7215,32 +7215,108 @@ final class ProductionService
     }
 
     /**
-     * Finaliza la OT tras validación positiva de supervisor (`wok_status = 2`, `wok_enddat = time()`).
+     * Determina si una orden de trabajo (prod_worker_ot) ha iniciado producción real.
+     * Retorna false si la OT fue abierta por error y aún no registra eventos ni cantidades producidas,
+     * permitiendo al operador cerrarla directamente sin autorización de supervisor.
      */
-    public function closeWorkOrder(int $workerOtId, string $supervisorUser, string $supervisorPass): array
+    public function hasWorkOrderProductionStarted(int $workerOtId): bool
+    {
+        if ($workerOtId <= 0) {
+            return false;
+        }
+
+        try {
+            // 1. Verificar si existen eventos de producción cerrados o con producción registrada
+            $stmtProd = $this->erpPdo->prepare("
+                SELECT COUNT(*)
+                FROM prod_worker_ot_events
+                WHERE evt_prod_worker_otid = :ot_id
+                  AND evt_type IN ('prod', 'prodsericolor')
+                  AND evt_status > 0
+                  AND (
+                      evt_status = 2
+                      OR evt_amount > 0 
+                      OR prod_bobina_kg > 0 
+                      OR evt_amount_metros_lineales > 0 
+                      OR evt_amount_metros_maquina > 0
+                  )
+            ");
+            $stmtProd->execute([':ot_id' => $workerOtId]);
+            if ((int)$stmtProd->fetchColumn() > 0) {
+                return true;
+            }
+
+            // 2. Verificar si existen bobinas semielaboradas / impresas emitidas
+            $prSummary = $this->getPrintedRollsSummary($workerOtId);
+            if (!empty($prSummary['rolls_count']) && (int)$prSummary['rolls_count'] > 0) {
+                return true;
+            }
+
+            // 3. Verificar si existen mermas registradas
+            $stmtMermas = $this->erpPdo->prepare("
+                SELECT COUNT(*)
+                FROM prod_worker_ot_defectunits d
+                INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
+                WHERE e.evt_prod_worker_otid = :ot_id
+                  AND d.evt_status > 0
+                  AND (d.evt_amount > 0 OR d.evt_kgstounits > 0 OR d.evt_mtstounits > 0)
+            ");
+            $stmtMermas->execute([':ot_id' => $workerOtId]);
+            if ((int)$stmtMermas->fetchColumn() > 0) {
+                return true;
+            }
+
+            // 4. Verificar si existe algún evento de producción abierto (evt_status = 1)
+            $stmtOpenProd = $this->erpPdo->prepare("
+                SELECT COUNT(*)
+                FROM prod_worker_ot_events
+                WHERE evt_prod_worker_otid = :ot_id
+                  AND evt_type IN ('prod', 'prodsericolor')
+                  AND evt_status = 1
+            ");
+            $stmtOpenProd->execute([':ot_id' => $workerOtId]);
+            if ((int)$stmtOpenProd->fetchColumn() > 0) {
+                return true;
+            }
+        } catch (Throwable) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Finaliza la OT. Si ya se inició producción, requiere validación positiva de supervisor (`wok_status = 2`, `wok_enddat = time()`).
+     * Si no se ha iniciado producción (p. ej. apertura por error), permite el término directo sin supervisor.
+     */
+    public function closeWorkOrder(int $workerOtId, string $supervisorUser = '', string $supervisorPass = ''): array
     {
         if ($workerOtId <= 0) {
             return ['ok' => false, 'error' => 'ID de OT inválido.'];
         }
 
-        if (!$this->validateSupervisor($supervisorUser, $supervisorPass)) {
-            return ['ok' => false, 'error' => 'Usuario o contraseña de supervisor errónea.'];
-        }
+        $prodStarted = $this->hasWorkOrderProductionStarted($workerOtId);
 
-        try {
-            $this->assertNoOpenProductionPhases($workerOtId);
-        } catch (Throwable $e) {
-            return ['ok'=>false, 'error'=>$e->getMessage()];
-        }
+        if ($prodStarted) {
+            if (!$this->validateSupervisor($supervisorUser, $supervisorPass)) {
+                return ['ok' => false, 'error' => 'Usuario o contraseña de supervisor errónea.'];
+            }
 
-        if ($this->trzPdo !== null) {
             try {
-                require_once __DIR__ . '/HandleConsumptionService.php';
-                (new HandleConsumptionService($this->erpPdo, $this->trzPdo))->assertNoPendingForWorkOrder($workerOtId);
-                require_once __DIR__ . '/MaterialSupplyService.php';
-                (new MaterialSupplyService($this->erpPdo, $this->trzPdo))->assertNoOutstandingReceipts($workerOtId);
+                $this->assertNoOpenProductionPhases($workerOtId);
             } catch (Throwable $e) {
-                return ['ok' => false, 'error' => $e->getMessage()];
+                return ['ok'=>false, 'error'=>$e->getMessage()];
+            }
+
+            if ($this->trzPdo !== null) {
+                try {
+                    require_once __DIR__ . '/HandleConsumptionService.php';
+                    (new HandleConsumptionService($this->erpPdo, $this->trzPdo))->assertNoPendingForWorkOrder($workerOtId);
+                    require_once __DIR__ . '/MaterialSupplyService.php';
+                    (new MaterialSupplyService($this->erpPdo, $this->trzPdo))->assertNoOutstandingReceipts($workerOtId);
+                } catch (Throwable $e) {
+                    return ['ok' => false, 'error' => $e->getMessage()];
+                }
             }
         }
 
@@ -7373,7 +7449,7 @@ final class ProductionService
             }
         } catch (Throwable) {}
 
-        return ['ok' => true];
+        return ['ok' => true, 'without_supervisor' => !$prodStarted];
     }
 
     // =========================================================================
@@ -7524,6 +7600,7 @@ final class ProductionService
         // Una consulta por lote utiliza los mismos atributos del panel de maquina.
         $stmt = $this->erpPdo->prepare("
             SELECT oi.req_id, i.item_number_prod, oi.fab_mat_gramms, oi.fab_manilla_length,
+                   oi.fab_design_imagehash, oi.fab_design_name,
                    o.req_embalaje_medidas_caja, o.req_embalaje_bolsas_por_caja_amt,
                    fabric.add_name AS fabric_color, handle.add_name AS manilla_color,
                    (SELECT v.add_name FROM tran_comments_item_vals c JOIN tran_comments_vals v ON v.id = c.val_id WHERE c.item_id = i.id AND c.com_id = 20 ORDER BY c.val_id LIMIT 1) AS bag_type,

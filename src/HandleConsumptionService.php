@@ -3,8 +3,25 @@
 declare(strict_types=1);
 
 /**
- * Internal handle-roll stock movements, excluded from raw-material reports.
- * Movimientos internos de manillas, separados del consumo de materia prima.
+ * =============================================================================
+ * Servicio de Consumo de Manillas en Confección (Corte y Sellado - CyS)
+ * (src/HandleConsumptionService.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Gestiona de forma dedicada y segura los movimientos de stock y consumo de bobinas
+ * de manillas en las máquinas de confección:
+ * 1. Aislamiento Contable: Separa el consumo de manillas del consumo de telas/materia prima
+ *    para evitar distorsiones en los informes oficiales de merma y rendimiento de tela.
+ * 2. Operaciones con Código de Barras (Scan/Consume/Reverse): Permite al operador escanear
+ *    la bobina de manilla en la máquina, registrar el consumo en la OT o revertir/reingresar
+ *    el sobrante.
+ * 3. Sincronización Dual (TRZ + ERP): Registra el diario operativo en la tabla local
+ *    'cys_handle_operations' de TRZ y actualiza el stock oficial en las tablas 'stockchanges'
+ *    y 'item_shops_storehouses' del ERP con bloqueo de tablas (LOCK TABLES) para evitar
+ *    condiciones de carrera.
+ * 4. Validación de Cierre (assertNoPendingForWorkOrder): Garantiza que una OT no pueda
+ *    finalizarse si existen consumos de manilla pendientes de confirmación.
  */
 final class HandleConsumptionService
 {
@@ -13,6 +30,10 @@ final class HandleConsumptionService
     private bool $schemaReady = false;
     private ?bool $transactionalErp = null;
 
+    /**
+     * @param PDO $erp Conexión a la base de datos ERP (unibag_unibag).
+     * @param PDO $trz Conexión a la base de datos local TRZ (unibag_trazabilidad).
+     */
     public function __construct(PDO $erp, PDO $trz)
     {
         $this->erp = $erp;

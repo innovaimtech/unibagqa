@@ -1,21 +1,44 @@
 <?php
 declare(strict_types=1);
 
-/** Bonus-only settings and audit records. Configuracion exclusiva de bonos en TRZ. */
+/**
+ * =============================================================================
+ * Servicio de Configuración y Auditoría de Bonificaciones
+ * (src/BonusConfigurationService.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Administra las políticas, tramos, metas y evaluaciones para el cálculo de bonos:
+ * 1. Bonos de Corte y Sellado (CyS): Reglas de medidas y categorías de producto
+ *    (Bolsas, Bolsas XXL, Sacos, Basurines/Troqueles).
+ * 2. Bonos de Ayudantes: Evaluación multidimensional (proactividad, eficiencia,
+ *    multitarea) con notas de 0 a 10 y factor de liquidación por tramos.
+ * 3. Bonos de Flexografía y Serigrafía: Metas de producción mensual y topes en CLP.
+ * 4. Trazabilidad y Auditoría: Registro inmutable de cada cambio en la configuración
+ *    (quién modificó, fecha, valor previo y valor nuevo en JSON).
+ */
 final class BonusConfigurationService
 {
     private bool $schemaReady = false;
     private array $policyCache = [];
     private array $rulesCache = [];
+
+    /** Categorías oficiales de productos para cálculo de bonos CyS */
     public const CATEGORIES = [
         'bolsas'=>'Bolsas', 'bolsas_xxl'=>'Bolsas XXL',
         'sacos'=>'Sacos', 'basurines_troqueles'=>'Basurines y troqueles',
     ];
 
+    /**
+     * @param PDO $pdo Conexión a la base de datos local TRZ (unibag_trazabilidad).
+     */
     public function __construct(private PDO $pdo)
     {
     }
 
+    /**
+     * Valida y normaliza una calificación de evaluación (escala de 0.00 a 10.00).
+     */
     public static function helperScore(mixed $value): float
     {
         if (is_string($value)) $value = str_replace(',','.',trim($value));

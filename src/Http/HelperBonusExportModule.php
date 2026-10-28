@@ -1,6 +1,21 @@
 <?php
 declare(strict_types=1);
 
+/**
+ * =============================================================================
+ * Módulo HTTP · Exportación a Excel (.xlsx) del Bono de Ayudantes
+ * (src/Http/HelperBonusExportModule.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Genera y entrega la descarga del archivo Microsoft Excel (.xlsx nativo)
+ * para el informe de pago de bonos de ayudantes de producción:
+ * - Hoja 1: Resumen consolidado por ayudante (notas, bono variable, fijo, adicional y total).
+ * - Hoja 2+: Detalle por ayudante con desglose de días trabajados, máquinas y turnos.
+ * - Seguridad: Los montos se calculan exclusivamente en el servidor con los topes
+ *   y notas guardadas en base de datos, nunca a partir de datos enviados por el cliente.
+ */
+
 require_once __DIR__.'/../SimpleXlsx.php';
 require_once __DIR__.'/../HelperBonusWorkbook.php';
 

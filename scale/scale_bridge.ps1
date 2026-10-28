@@ -1,3 +1,28 @@
+<#
+.SYNOPSIS
+  Puente de Comunicación HTTP - Balanza Industrial RS-232 / USB (Unibag Scale Bridge)
+
+.DESCRIPTION
+  Este script levanta un micro-servidor HTTP local en el puerto 8765 (http://localhost:8765/)
+  que permite a la aplicación web PHP (tanto en servidor local como desplegada en VPS)
+  consultar el peso en tiempo real de la balanza física conectada al computador por USB/COM.
+
+  Características principales:
+  1. Detección automática del puerto COM activo (-ComPort AUTO) o manual (COM1, COM3, etc.).
+  2. Protocolo de balanza industrial LP-7516 (9600 baudios, 8 bits, sin paridad, 1 bit de parada).
+  3. Carga nativa de Win32Serial.cs para eludir limitaciones de la clase .NET SerialPort en
+     adaptadores USB-Serie con chips CH340, FTDI y Prolific.
+  4. Endpoints HTTP disponibles:
+     - GET /weight : Retorna {"ok": true, "weight_kg": 15.420, "stable": true, ...}
+     - GET /status : Diagnóstico del puerto serie, lecturas y configuración.
+     - GET /ports  : Lista de puertos COM disponibles en Windows.
+
+.PARAMETER Mode
+  'serial' para conectar a la balanza física, o 'stub' para pruebas simuladas sin hardware.
+
+.PARAMETER ComPort
+  Puerto serie (ej. 'COM3') o 'AUTO' para escanear y conectar al primer puerto disponible.
+#>
 param(
   [ValidateSet('stub','serial')]
   [string]$Mode = 'serial',

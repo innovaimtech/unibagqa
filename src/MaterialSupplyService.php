@@ -3,10 +3,22 @@
 declare(strict_types=1);
 
 /**
- * Central warehouse requests, dispatches and receipt acknowledgements.
- * Solicitudes centrales, despachos y confirmaciones de recepcion.
- * Only TRZ owns the journal; ERP uses its native warehouse-transfer documents.
- * Solo TRZ guarda el diario; ERP utiliza sus documentos nativos de traspaso.
+ * =============================================================================
+ * Servicio de Abastecimiento de Materiales entre Bodega Central y Producción
+ * (src/MaterialSupplyService.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Coordina el ciclo de vida completo de suministro de materias primas e insumos
+ * para las órdenes de trabajo en planta:
+ * 1. Solicitud (Request): El operador o supervisor solicita bobinas para una máquina/OT.
+ * 2. Despacho (Dispatch): Bodega Central (Bodega 3000 / 100) prepara y despacha las bobinas físicas.
+ * 3. Recepción en Máquina (Receive): El operador confirma en la consola la recepción física
+ *    de las bobinas, habilitándolas inmediatamente para su consumo en la OT.
+ * 4. Control de Integridad: Impide el cierre de una OT si existen despachos pendientes
+ *    de confirmación (assertNoOutstandingReceipts).
+ * 5. Trazabilidad de Cadena (chainForRoll): Reconstruye el historial completo desde la
+ *    solicitud de bodega hasta el consumo final en el producto terminado.
  */
 final class MaterialSupplyService
 {
@@ -14,6 +26,10 @@ final class MaterialSupplyService
     private PDO $trz;
     private bool $ready = false;
 
+    /**
+     * @param PDO $erp Conexión a la base de datos ERP (unibag_unibag).
+     * @param PDO $trz Conexión a la base de datos TRZ (unibag_trazabilidad).
+     */
     public function __construct(PDO $erp, PDO $trz)
     {
         $this->erp = $erp;

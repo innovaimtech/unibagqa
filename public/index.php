@@ -64,6 +64,8 @@ require_once __DIR__ . '/../src/HandleConsumptionService.php';
 require_once __DIR__ . '/../src/Http/ProductionModule.php';
 require_once __DIR__ . '/../src/Http/MaterialSupplyModule.php';
 require_once __DIR__ . '/../src/Http/OperatorLunchModule.php';
+require_once __DIR__ . '/../src/TraceabilityService.php';
+require_once __DIR__ . '/../src/Http/TraceabilityModule.php';
 
 Env::load(__DIR__ . '/../.env');
 $appTimezone = trim((string)(Env::get('APP_TIMEZONE', 'America/Santiago') ?? 'America/Santiago'));
@@ -504,6 +506,10 @@ if ($path === '/production/lunch-breaks' || $path === '/production/colaciones') 
 }
 
 if (handleProductionRoutes($path, $method, $prodService, $service, $scale, $currentOperatorName)) {
+    exit;
+}
+
+if (handleTraceabilityRoutes($path, $method, $service, $prodService)) {
     exit;
 }
 
@@ -3273,11 +3279,16 @@ function render(string $title, string $body): void
         } elseif (str_starts_with($currentPath, '/bonificaciones')) {
             $activeModule = 'bonificaciones';
         } elseif (
+            str_starts_with($currentPath, '/trazabilidad')
+            || str_starts_with($currentPath, '/traceability')
+        ) {
+            $activeModule = 'traceability';
+        } elseif (
             str_starts_with($currentPath, '/work-orders')
             || str_starts_with($currentPath, '/chemicals')
             || str_starts_with($currentPath, '/cut')
         ) {
-            $activeModule = 'traceability';
+            $activeModule = 'production';
         }
     } elseif ($displayArea === 'SCALE') {
         $activeModule = 'scale';
@@ -3294,6 +3305,7 @@ function render(string $title, string $body): void
         echo $link('/bonificaciones', 'Bonificaciones', $activeModule === 'bonificaciones');
         echo $link('/stock', 'Bodega', $activeModule === 'warehouses');
         echo $link('/reports/inventory', 'Inventario', $activeModule === 'inventory');
+        echo $link('/trazabilidad', 'Trazabilidad', $activeModule === 'traceability');
     } elseif ($displayArea === 'RECEPTION') {
         echo $link('/purchase-orders?status=active&supplier_type=NATIONAL', 'Recepción', $activeModule === 'reception');
         echo $link('/stock', 'Bodega', $activeModule === 'warehouses');
@@ -3374,6 +3386,16 @@ function render(string $title, string $body): void
         echo '<a class="subitem' . ($isTransfers ? ' active' : '') . '" href="/stock/transfers"><span>🔄 Traspasos</span></a>';
         echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso Trazable</span></a>';
         echo '<a class="subitem' . ($isTrzTree ? ' active' : '') . '" href="/stock/traceability"><span>🌳 Árbol Trazabilidad</span></a>';
+    } elseif ($activeModule === 'traceability') {
+        $trzStage = (string)($_GET['stage'] ?? 'all');
+        $isDetalle = str_starts_with($currentPath, '/trazabilidad/detalle') || isset($_GET['id']);
+        echo '<a class="subitem' . ($trzStage === 'all' && !$isDetalle ? ' active' : '') . '" href="/trazabilidad?stage=all"><span>Todas las OTs</span></a>';
+        echo '<a class="subitem' . ($trzStage === 'clises_espera' ? ' active' : '') . '" href="/trazabilidad?stage=clises_espera"><span>⏳ Esperando Clisés</span></a>';
+        echo '<a class="subitem' . ($trzStage === 'preparacion_espera' ? ' active' : '') . '" href="/trazabilidad?stage=preparacion_espera"><span>📐 Pre-Prensa</span></a>';
+        echo '<a class="subitem' . ($trzStage === 'planificacion_espera' ? ' active' : '') . '" href="/trazabilidad?stage=planificacion_espera"><span>📅 Por Planificar</span></a>';
+        echo '<a class="subitem' . ($trzStage === 'produccion' ? ' active' : '') . '" href="/trazabilidad?stage=produccion"><span>⚙️ En Producción</span></a>';
+        echo '<a class="subitem' . ($trzStage === 'despacho_pendiente' ? ' active' : '') . '" href="/trazabilidad?stage=despacho_pendiente"><span>🚚 Pendiente Despacho</span></a>';
+        echo '<a class="subitem' . ($trzStage === 'entregado' ? ' active' : '') . '" href="/trazabilidad?stage=entregado"><span>✅ Finalizadas</span></a>';
     } elseif ($activeModule === 'scale') {
         echo '<a class="subitem" href="/scale/sealing-waste"><span>Merma Selladora</span></a>';
     } elseif ($activeModule === 'production') {

@@ -2,25 +2,69 @@
 
 declare(strict_types=1);
 
+/**
+ * =============================================================================
+ * Subservicio de Recepción de Bobinas e Insumos Unitarios
+ * (src/RollReceptionService.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Gestiona el alta y registro inicial de bobinas físicas en la base de datos de
+ * trazabilidad (TRZ). Se encarga de:
+ * 1. Validar técnicamente las especificaciones de la bobina (gramaje/micrones,
+ *    ancho en mm, color, metros lineales y peso en kg).
+ * 2. Generar el código único e irrepetible de trazabilidad (RB-YYYYMMDD-XXXXXX).
+ * 3. Insertar el registro maestro en la tabla 'rolls' con estado 'RECEIVED'.
+ * 4. Registrar el movimiento inicial de entrada en la tabla 'movements' (RECEIPT).
+ * 5. Emitir un evento inmutable en la bitácora 'events' (ROLL_RECEIVED).
+ * 6. Soportar recepción masiva en lote mediante createUnits().
+ */
 final class RollReceptionService
 {
+    /**
+     * @param PDO $pdo Conexión a la base de datos local de trazabilidad (unibag_trazabilidad).
+     */
     public function __construct(private PDO $pdo)
     {
     }
 
+    /**
+     * Registra una bobina individual en el sistema con control de transacción.
+     *
+     * @param array<string, mixed> $input Datos capturados en el formulario de recepción:
+     *     - sku_id: ID del catálogo de telas/insumos.
+     *     - warehouse_id: Bodega de destino inicial (ej. Bodega 100 Materias Primas).
+     *     - weight_kg: Peso real capturado en balanza o teclado.
+     *     - reception_mode: 'WEIGHT' (por peso) o 'QUANTITY' (por unidades/conteo).
+     *     - microns / grams: Gramaje o micrones de la tela.
+     *     - width_mm: Ancho en milímetros.
+     *     - color: Color de la tela.
+     *     - meters: Metros lineales estimados o de fábrica.
+     *     - purchase_order_id: Orden de compra asociada (opcional).
+     *     - purchase_order_line_id: Línea de orden de compra (opcional).
+     *     - import_container_id: Contenedor marítimo de importación (opcional).
+     *     - supplier_id: Proveedor de la materia prima (opcional).
+     *     - operator_name: Nombre del operario responsable de la recepción.
+     *
+     * @return array{ok: bool, errors: array<string, string>, id: int|null}
+     */
     public function createRoll(array $input): array
     {
+        // Normalizar valores en cero a null para campos opcionales
         $input['weight_kg'] = $input['weight_kg'] ?? 0;
         foreach (['microns', 'width_mm', 'meters'] as $field) {
             if (isset($input[$field]) && (float)$input[$field] === 0.0) {
                 $input[$field] = null;
             }
         }
+
+        // Validación estricta de reglas de negocio
         $errors = $this->validateCreate($input);
         if ($errors !== []) {
             return ['ok' => false, 'errors' => $errors, 'id' => null];
         }
 
+        // Generar identificador único con prefijo RB (Roll/Bobina)
         $rollCode = $this->generateRollCode();
 
         $microns = isset($input['microns']) && $input['microns'] !== '' && $input['microns'] !== null ? (int)$input['microns'] : null;
@@ -36,12 +80,13 @@ final class RollReceptionService
         $operatorName = trim((string)($input['operator_name'] ?? ''));
         $receptionMode = $this->normalizeReceptionMode((string)($input['reception_mode'] ?? 'QUANTITY'));
 
+        // Manejo atómico de transacción (si no viene abierta externamente)
         $ownsTransaction = !$this->pdo->inTransaction();
         if ($ownsTransaction) {
             $this->pdo->beginTransaction();
         }
         try {
-
+            // 1. Insertar el registro principal de la bobina en 'rolls'
             $stmt = $this->pdo->prepare(
                 'INSERT INTO rolls (roll_code, sku_id, warehouse_id, weight_kg, received_qty, reception_mode, microns, width_mm, color, meters, status, purchase_order_id, purchase_order_line_id, import_container_id, import_container_item_id, supplier_id, current_work_order_id)
                  VALUES (:roll_code, :sku_id, :warehouse_id, :weight_kg, :received_qty, :reception_mode, :microns, :width_mm, :color, :meters, :status, :po_id, :pol_id, :import_container_id, :import_container_item_id, :supplier_id, :work_order_id)'
@@ -68,7 +113,10 @@ final class RollReceptionService
 
             $rollId = (int)$this->pdo->lastInsertId();
 
+            // 2. Registrar movimiento de inventario en la tabla 'movements'
             $this->insertMovement($rollId, (int)$input['warehouse_id'], $input);
+
+            // 3. Registrar auditoría inmutable en la tabla 'events'
             $this->insertEvent('ROLL_RECEIVED', [
                 'roll_id' => $rollId,
                 'roll_code' => $rollCode,
@@ -95,6 +143,12 @@ final class RollReceptionService
         }
     }
 
+    /**
+     * Registra un lote múltiple de unidades de forma secuencial y atómica.
+     *
+     * @param array<string, mixed> $input Contiene received_qty con el número de unidades a crear.
+     * @return array{ok: bool, errors: array<string, string>, id: int|null, ids?: list<int>}
+     */
     public function createUnits(array $input): array
     {
         $quantity = (float)($input['received_qty'] ?? 0);
@@ -132,6 +186,13 @@ final class RollReceptionService
         }
     }
 
+    /**
+     * Inserta el movimiento físico en el libro de movimientos de inventario.
+     *
+     * @param int $rollId ID de la bobina generada.
+     * @param int $toWarehouseId Bodega donde ingresa el material.
+     * @param array<string, mixed> $input Datos originales de recepción.
+     */
     private function insertMovement(int $rollId, int $toWarehouseId, array $input): void
     {
         $stmt = $this->pdo->prepare(
@@ -164,6 +225,12 @@ final class RollReceptionService
         ]);
     }
 
+    /**
+     * Registra un evento inmutable de trazabilidad en la tabla 'events'.
+     *
+     * @param string $type Tipo de evento (ej. 'ROLL_RECEIVED').
+     * @param array<string, mixed> $payload Datos del evento para auditoría.
+     */
     private function insertEvent(string $type, array $payload): void
     {
         $stmt = $this->pdo->prepare('INSERT INTO events (type, payload) VALUES (:type, :payload)');
@@ -173,15 +240,23 @@ final class RollReceptionService
         ]);
     }
 
+    /**
+     * Valida exhaustivamente que los datos de entrada cumplan con los requisitos técnicos.
+     *
+     * @param array<string, mixed> $input
+     * @return array<string, string> Mapa de errores por campo (vacío si todo es válido).
+     */
     private function validateCreate(array $input): array
     {
         $errors = [];
 
+        // 1. Validar que se seleccionó un SKU válido
         $skuId = isset($input['sku_id']) ? (int)$input['sku_id'] : 0;
         if ($skuId <= 0) {
             $errors['sku_id'] = 'SKU es obligatorio.';
         }
 
+        // 2. Validar que la bodega exista en la base de datos
         $warehouseId = isset($input['warehouse_id']) ? (int)$input['warehouse_id'] : 0;
         if ($warehouseId <= 0) {
             $errors['warehouse_id'] = 'Bodega es obligatoria.';
@@ -194,6 +269,7 @@ final class RollReceptionService
             }
         }
 
+        // 3. Validar peso real según la modalidad de recepción
         $mode = $this->normalizeReceptionMode((string)($input['reception_mode'] ?? 'QUANTITY'));
         $weight = isset($input['weight_kg']) ? (float)$input['weight_kg'] : 0.0;
         if ($mode === 'WEIGHT' && $weight <= 0) {
@@ -203,16 +279,19 @@ final class RollReceptionService
             $errors['weight_kg'] = 'Peso real (Kg) no puede ser negativo.';
         }
 
+        // 4. Validar cantidad de unidades recibidas
         $receivedQty = isset($input['received_qty']) ? (float)$input['received_qty'] : 1.0;
         if ($mode === 'QUANTITY' && $receivedQty <= 0) {
             $errors['received_qty'] = 'Cantidad recibida debe ser mayor a 0.';
         }
 
+        // 5. Validar nombre del operario responsable
         $operatorName = trim((string)($input['operator_name'] ?? ''));
         if ($operatorName === '') {
             $errors['operator_name'] = 'Operador es obligatorio.';
         }
 
+        // 6. Validar micrones / gramaje si fue suministrado
         if (isset($input['microns']) && $input['microns'] !== '') {
             $microns = (int)$input['microns'];
             if ($microns <= 0) {
@@ -220,6 +299,7 @@ final class RollReceptionService
             }
         }
 
+        // 7. Validar ancho en mm
         if (isset($input['width_mm']) && $input['width_mm'] !== '') {
             $width = (int)$input['width_mm'];
             if ($width <= 0) {
@@ -227,6 +307,7 @@ final class RollReceptionService
             }
         }
 
+        // 8. Validar color
         if (isset($input['color']) && trim((string)$input['color']) !== '') {
             $color = trim((string)$input['color']);
             if ($color === '') {
@@ -234,6 +315,7 @@ final class RollReceptionService
             }
         }
 
+        // 9. Validar metros lineales
         if (isset($input['meters']) && $input['meters'] !== '') {
             $meters = (float)$input['meters'];
             if ($meters <= 0) {
@@ -244,11 +326,17 @@ final class RollReceptionService
         return $errors;
     }
 
+    /**
+     * Normaliza el modo de recepción a 'WEIGHT' o 'QUANTITY'.
+     */
     private function normalizeReceptionMode(?string $mode): string
     {
         return strtoupper(trim((string)$mode)) === 'WEIGHT' ? 'WEIGHT' : 'QUANTITY';
     }
 
+    /**
+     * Genera un código de bobina único en formato RB-YYYYMMDD-XXXXXX (ej. RB-20261026-A1B2C3).
+     */
     private function generateRollCode(): string
     {
         $date = gmdate('Ymd');

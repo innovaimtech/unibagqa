@@ -2,6 +2,25 @@
 
 declare(strict_types=1);
 
+/**
+ * =============================================================================
+ * Módulo HTTP · Rutas de Suministro y Despacho de Materiales
+ * (src/Http/MaterialSupplyModule.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Gestiona los controladores y vistas HTTP del ciclo de abastecimiento:
+ * 1. Rutas de Operador (/production/materials/*):
+ *    - /production/materials/request: Formulario para solicitar bobinas para una máquina/OT.
+ *    - /production/materials/request/assign: Asignación de OT agendada a la solicitud.
+ *    - /production/materials/receive: Confirmación de recepción física en la máquina.
+ * 2. Rutas de Bodega Central (/stock/material-supply/*):
+ *    - /stock/material-supply: Bandeja de entrada de solicitudes pendientes en bodega.
+ *    - /stock/material-supply/dispatch: Registro del despacho físico de bobinas con códigos RB-*.
+ *    - /stock/material-supply/resume: Reanudación de despachos en borrador.
+ *    - /stock/material-supply/cancel: Cancelación justificada de solicitudes.
+ */
+
 require_once __DIR__ . '/../MaterialSupplyService.php';
 require_once __DIR__ . '/../MaterialSupplyRecommendations.php';
 

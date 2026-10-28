@@ -1,6 +1,22 @@
 <?php
 declare(strict_types=1);
 
+/**
+ * =============================================================================
+ * Módulo HTTP · Evaluación y Liquidación de Bono de Ayudantes
+ * (src/Http/HelperBonusModule.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Gestiona la calificación mensual del personal de apoyo y ayudantes en planta:
+ * 1. Sincronización con ERP: Obtiene el catálogo de operarios (workers) activos en el ERP.
+ * 2. Formulario de Evaluación: Permite al supervisor calificar Proactividad, Eficiencia,
+ *    Multitarea e ingresar incentivos adicionales u observaciones.
+ * 3. Persistencia Atómica en TRZ: Guarda la evaluación del mes en la tabla 'bonus_process_configs'
+ *    y audita el historial de cambios en 'bonus_configuration_history'.
+ * 4. Cálculo de Totales: Determina el monto a pagar según los topes vigentes y tramos.
+ */
+
 /** ERP supplies names only; settings and evaluations belong to TRZ.
  * El ERP aporta nombres; configuraciones y evaluaciones pertenecen a TRZ. */
 function handleHelperBonusConfiguration(ReceptionService $service, BonusConfigurationService $config): void

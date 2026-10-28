@@ -4,15 +4,40 @@ declare(strict_types=1);
 require_once __DIR__.'/SimpleXlsx.php';
 require_once __DIR__.'/BonusConfigurationService.php';
 
-/** Dedicated legacy layout; other reports keep their existing styles.
- * Diseno exclusivo de ayudantes; no cambia los estilos de otros informes. */
+/**
+ * =============================================================================
+ * Generador de Planilla Excel (.xlsx) para Bono de Ayudantes
+ * (src/HelperBonusWorkbook.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Construye el archivo de hoja de cálculo nativo OpenXML Spreadsheet (.xlsx)
+ * con la liquidación detallada del Bono de Ayudantes:
+ * - Diseña la estructura oficial con fuentes, paleta de colores corporativos (#008A87),
+ *   bordes y formatos numéricos de moneda ($ #.##0).
+ * - Integra las calificaciones de Proactividad, Eficiencia y Multitarea.
+ * - Calcula automáticamente factores de cumplimiento y totales por operario ayudante.
+ * - Garantiza que el archivo se abra de forma nativa en Microsoft Excel sin advertencias.
+ */
 final class HelperBonusWorkbook
 {
+    /**
+     * Escapa caracteres especiales para inclusión segura en XML OpenXML.
+     */
     private static function text(mixed $value): string
     {
-        return htmlspecialchars((string)$value,ENT_XML1,'UTF-8');
+        return htmlspecialchars((string)$value, ENT_XML1, 'UTF-8');
     }
 
+    /**
+     * Construye el binario del libro .xlsx completo con pestañas y estilos aplicados.
+     *
+     * @param string $month Mes en formato YYYY-MM.
+     * @param array<int, array<string, mixed>> $rows Lista de operarios ayudantes evaluados.
+     * @param array<string, mixed> $period Datos del periodo contable.
+     * @param array<string, string> $sheets Contenido HTML base para generar las hojas.
+     * @return string Contenido binario del archivo .xlsx listo para descarga.
+     */
     public static function build(string $month, array $rows, array $period, array $sheets): string
     {
         $file=tempnam(sys_get_temp_dir(),'helper_layout_');

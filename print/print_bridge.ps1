@@ -1,3 +1,23 @@
+<#
+.SYNOPSIS
+  Puente de Impresión Térmica Directa HTTP (Unibag Print Bridge - Puerto 8767)
+
+.DESCRIPTION
+  Este script levanta un micro-servidor HTTP local en el puerto 8767 (http://localhost:8767/)
+  que permite a la aplicación web PHP (ejecutada en servidor local o en VPS remoto) enviar
+  etiquetas industriales directamente a impresoras térmicas conectadas por USB a este equipo.
+
+  Mecanismo técnico:
+  1. Utiliza la API nativa de Windows (winspool.drv - RawPrinterHelper) mediante P/Invoke.
+  2. Envía comandos de control crudos (ZPL, TSPL, EPL) sin pasar por drivers gráficos GDI,
+     garantizando velocidad instantánea y fidelidad milimétrica en códigos de barra.
+  3. Soporta impresoras Zebra, Barpos, Argox, TSC y compatibles.
+
+  Endpoints HTTP:
+  - GET  /status : Lista las impresoras instaladas en Windows y la impresora predeterminada.
+  - POST /print  : Recibe JSON {"content": "^XA...^XZ", "printer": "...", "doc_name": "..."}
+                   y lo imprime de inmediato.
+#>
 param(
   [string]$Listen = 'http://localhost:8767/',
   [string]$DefaultPrinter = ''

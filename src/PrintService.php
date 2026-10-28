@@ -2,12 +2,46 @@
 
 declare(strict_types=1);
 
+/**
+ * =============================================================================
+ * Servicio de Generación e Impresión de Etiquetas Térmicas Industriales
+ * (src/PrintService.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Genera el código de control crudo (ZPL II, TSPL o EPL) y coordina el envío
+ * a impresoras térmicas de etiquetas adhesivas (tamaño estándar 100x50 mm y pallets).
+ *
+ * Tipos de etiquetas emitidas:
+ * 1. Etiquetas de Bobina (Roll Label): Identificador RB-*, código de barras Code 128,
+ *    gramaje/micrones, ancho, peso kg, fecha y lote.
+ * 2. Etiquetas de Caja (Box Label / Work Order Finish): Identificador BX-*, unidades,
+ *    OT, operador, máquina y fecha de confección.
+ * 3. Etiquetas de Pallet (Pallet Label): Identificador PL-*, totales consolidados,
+ *    peso neto/bruto y lista de cajas contenidas.
+ *
+ * Perfiles y lenguajes soportados:
+ * - 'zebra'  -> Lenguaje ZPL (Zebra Programming Language II).
+ * - 'barpos' -> Lenguaje TSPL (TSC / Barpos / impresoras genéricas POS).
+ * - 'default'-> Fallback configurable por PRINT_LANGUAGE (por defecto ZPL).
+ *
+ * Mecanismo de envío:
+ * Se comunica vía HTTP POST /print con el puente local (print/print_bridge.ps1 en
+ * puerto 8767), el cual envía los bytes directamente al spooler nativo de Windows
+ * (winspool.drv) sin requerir drivers gráficos complejos.
+ */
 final class PrintService
 {
+    /**
+     * @param array<string, mixed> $env Variables de entorno con credenciales y configuración de impresión.
+     */
     public function __construct(private array $env)
     {
     }
 
+    /**
+     * Retorna una nueva instancia configurada con un perfil específico ('zebra' o 'barpos').
+     */
     public function withProfile(string $profile): self
     {
         $env = $this->env;
@@ -15,6 +49,9 @@ final class PrintService
         return new self($env);
     }
 
+    /**
+     * Obtiene el perfil de impresora actualmente configurado.
+     */
     public function getConfiguredProfile(): string
     {
         return $this->getPrintProfile();

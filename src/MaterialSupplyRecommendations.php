@@ -2,16 +2,35 @@
 
 declare(strict_types=1);
 
-/** Technical suggestions only; operators may select any available material.
- *  Sugerencias tecnicas; el operador puede elegir cualquier material disponible. */
+/**
+ * =============================================================================
+ * Motor de Recomendación Inteligente de Materiales y Telas para OTs
+ * (src/MaterialSupplyRecommendations.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Analiza las especificaciones técnicas de la Orden de Trabajo agendada (ficha técnica:
+ * tipo de tela, ancho requerido, color, gramaje) y las compara contra el catálogo de
+ * bobinas disponibles en bodega para sugerir al operador las bobinas más aptas.
+ *
+ * Principio de diseño:
+ * Provee sugerencias técnicas no bloqueantes (el operador siempre tiene la libertad
+ * de seleccionar cualquier bobina disponible según la realidad física de la planta).
+ */
 final class MaterialSupplyRecommendations
 {
+    /**
+     * Limpia, pasa a minúsculas y elimina acentos/caracteres especiales de un texto.
+     */
     private static function token(string $value): string
     {
         $ascii = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $value);
         return trim(preg_replace('/[^a-z0-9]+/', ' ', strtolower($ascii === false ? $value : $ascii)) ?? '');
     }
 
+    /**
+     * Normaliza el tipo de polímero/material base (ej: TNT, PP, Non Woven -> PP; PLA -> PLA).
+     */
     private static function material(string $value): string
     {
         $value = self::token($value);
@@ -20,12 +39,21 @@ final class MaterialSupplyRecommendations
         return strtoupper($value);
     }
 
+    /**
+     * Normaliza nombres de colores unificando variantes comerciales (ej: crudo -> natural, cristal -> transparente).
+     */
     private static function color(string $value): string
     {
         $value = self::token(preg_replace('/\(pantone[^)]*\)/i', '', $value) ?? $value);
         return ['crudo'=>'natural','beige'=>'natural','cristal'=>'transparente','naranjo'=>'naranja','rosado'=>'rosa'][$value] ?? $value;
     }
 
+    /**
+     * Extrae los requisitos técnicos de la OT agendada (material, ancho en cm, color y gramaje).
+     *
+     * @param array<string, mixed> $agenda Datos de la orden en prod_agenda.
+     * @return array{material: string, width_cm: float, color: string, grammage: float}
+     */
     public static function requirements(array $agenda): array
     {
         $width = (float)($agenda['req_operador_tela_width'] ?? 0);

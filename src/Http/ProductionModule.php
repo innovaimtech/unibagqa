@@ -3,14 +3,39 @@
 declare(strict_types=1);
 
 /**
- * Módulo HTTP de Producción · Operación de Planta y Consola de Operador
- * 
- * Recreación fiel y completa de:
- * - prodwrk.php (layout, topbar #008A87/#00A9A4, sidebar #0E7572, navegación mid=0,1,2,3,5)
- * - editxid.php (4 ramas por máquina: Flexografía, Serigrafía Pulpo, Serigrafía Plana, Selladora/Confección/Rebobinadora/Embalaje)
- * - Información Cliente e Información de Fabricación completas con todos sus campos
- * - Barra de herramientas de acciones y tabla de eventos de la OT
- * - Subformularios dedicados por modo: production, apertura, mantencion, pause, materiales, consumo, reboprod, terminarot
+ * =============================================================================
+ * Módulo HTTP de Producción · Operación en Planta y Consola del Operador
+ * (src/Http/ProductionModule.php)
+ * =============================================================================
+ *
+ * Responsabilidad:
+ * Este módulo es el núcleo de la interfaz web para todos los puestos de trabajo
+ * en planta (confección, sellado, flexografía, serigrafía y rebobinado).
+ *
+ * Componentes principales:
+ * 1. Layout y Shell de Producción (renderProdwrkShell):
+ *    - Barra superior corporativa (TopBar #008A87 / #00A9A4) con datos del operario,
+ *      turno, planta y fecha.
+ *    - Barra lateral de navegación (#0E7572) con accesos rápidos a máquina, OTs activas,
+ *      nueva OT, historial de turnos y trazabilidad.
+ *
+ * 2. Asignación de Máquina y Turno (/production/machines):
+ *    - Permite al operario abrir turno en su máquina específica.
+ *    - Pausa automáticamente los puestos de trabajo previos para evitar duplicidad de turnos.
+ *
+ * 3. Consola Operativa de la OT (/production/work-orders/{agId}/operate):
+ *    - Panel adaptativo según el tipo de máquina (Flexografía, Serigrafía Pulpo,
+ *      Serigrafía Plana, Confección / Selladora, Rebobinadora).
+ *    - Ficha técnica completa de fabricación: medidas, clichés, colores Pantone,
+ *      tiempos estimados y requerimientos del cliente.
+ *    - Registro de avance incremental de producción (metros, kilos y unidades).
+ *    - Registro y justificación de detenciones (pausas de colación, fallas mecánicas, etc.).
+ *    - Consumo y pesaje de bobinas e insumos con control de saldos.
+ *    - Checklist de autocontrol de calidad por máquina.
+ *    - Cierre de orden con validación estricta de credenciales de supervisor (rol 31/admin).
+ *
+ * 4. Trazabilidad Integral (/production/traceability):
+ *    - Árbol genealógico completo de cada bobina (origen, pesaje, transformaciones y OT final).
  */
 
 function handleProductionRoutes(
@@ -1101,10 +1126,18 @@ function handleProductionRoutes(
         $supUser = (string)($_REQUEST['sup_user'] ?? ($_REQUEST['askprdclose_axx_username'] ?? ''));
         $supPass = (string)($_REQUEST['sup_pass'] ?? ($_REQUEST['askprdclose_axx_pass'] ?? ''));
 
+        if ($workerOtId <= 0 && $agId > 0) {
+            $openOt = $prodService->getOpenWorkerOtByAgId($agId);
+            if ($openOt && !empty($openOt['id'])) {
+                $workerOtId = (int)$openOt['id'];
+            }
+        }
+
         $res = $prodService->closeWorkOrder($workerOtId, $supUser, $supPass);
         if ($res['ok']) {
             $prodService->syncPulpoAgendaStats($agId);
-            redirectResponse('/production/work-orders/active?closed=1');
+            $closedParam = !empty($res['without_supervisor']) ? 'closed=1&noprod=1' : 'closed=1';
+            redirectResponse('/production/work-orders/active?' . $closedParam);
         } else {
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=terminarot&error=' . rawurlencode((string)($res['error'] ?? 'Error al cerrar OT.')));
         }
@@ -3224,7 +3257,450 @@ function renderCysHandleMaterials(int $agId, int $otId, string $operator): void
     echo '</tbody></table></div>' . $dialogs . '</section>';
 }
 
+function renderDesignAndAttachmentsHtml(array $agenda, string $medidasStr = '', string $fullDesign = '', int $labelColspan = 1, int $valueColspan = 1, string $contextLabel = 'Imagen Diseño'): string
+{
+    $imgHash = trim((string)($agenda['fab_design_imagehash'] ?? $agenda['item_img_hash'] ?? ''));
+    $hasImg = ($imgHash !== '' && $imgHash !== 'dummy');
+    $imgUrl = $hasImg ? ('/production/design-image?folder=docs.order&hash=' . rawurlencode($imgHash)) : '';
+    $prdNumber = (string)($agenda['prd_number'] ?? '');
+    $custName = (string)($agenda['cust_name'] ?? '');
+    $designTitle = $fullDesign !== '' ? $fullDesign : trim((string)($agenda['fab_design_name'] ?? $agenda['item_title'] ?? ''));
+    if ($medidasStr === '') {
+        $w = (int)($agenda['fab_med_width'] ?? 0);
+        $h = (int)($agenda['fab_med_height'] ?? 0);
+        $f = (int)($agenda['fab_med_fuelle'] ?? 0);
+        $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($f > 0 ? " + {$f}" : "") . " cm") : '-';
+    }
+
+    $lc = $labelColspan > 1 ? ' colspan="' . $labelColspan . '"' : '';
+    $vc = $valueColspan > 1 ? ' colspan="' . $valueColspan . '"' : '';
+
+    $html = '<tr>';
+    $html .= '<td class="tdleft"' . $lc . ' valign="middle" style="font-weight:bold">' . htmlspecialchars($contextLabel) . '</td>';
+    $html .= '<td class="tdnrm"' . $vc . ' valign="middle">';
+    if ($hasImg) {
+        $html .= '<div style="display:inline-flex;align-items:center;gap:12px;flex-wrap:wrap">';
+        $html .= '<a href="' . htmlspecialchars($imgUrl) . '" target="_blank" onclick="openDesignModal(\'' . htmlspecialchars($imgUrl) . '\', \'' . htmlspecialchars($prdNumber) . '\', \'' . htmlspecialchars(addslashes($custName)) . '\', \'' . htmlspecialchars(addslashes($designTitle)) . '\', \'' . htmlspecialchars($medidasStr) . '\'); return false;" title="Clic para ampliar foto en ventana flotante (con rotación)">';
+        $html .= '<img src="' . htmlspecialchars($imgUrl) . '" alt="Foto Diseño" style="max-height:75px;max-width:120px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.12);cursor:pointer">';
+        $html .= '</a>';
+        $html .= '<a href="' . htmlspecialchars($imgUrl) . '" target="_blank" onclick="openDesignModal(\'' . htmlspecialchars($imgUrl) . '\', \'' . htmlspecialchars($prdNumber) . '\', \'' . htmlspecialchars(addslashes($custName)) . '\', \'' . htmlspecialchars(addslashes($designTitle)) . '\', \'' . htmlspecialchars($medidasStr) . '\'); return false;" class="btngrey" style="padding:5px 12px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">';
+        $html .= '<i class="fa fa-fw fa-image" style="color:white;"></i> Ver Foto Completa';
+        $html .= '</a>';
+        $html .= '</div>';
+    } else {
+        $html .= '<span style="color:#94A3B8;font-style:italic">Sin imagen de diseño cargada</span>';
+    }
+    $html .= '</td></tr>';
+
+    for ($x = 0; $x < 5; $x++) {
+        if (!empty($agenda["req_prod_adjfile_{$x}"])) {
+            $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+            $adjIsImage = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $adjFile);
+            $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
+            $adjComments = (string)($agenda["req_prod_adjcomments_{$x}"] ?? '');
+
+            $html .= '<tr>';
+            $html .= '<td class="tdleft"' . $lc . ' valign="middle">Adjunto #' . ($x + 1) . '</td>';
+            $html .= '<td class="tdnrm"' . $vc . ' valign="middle">';
+            $html .= '<div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">';
+            if ($adjIsImage) {
+                $html .= '<a href="' . htmlspecialchars($adjUrl) . '" target="_blank" onclick="openDesignModal(\'' . htmlspecialchars($adjUrl) . '\', \'' . htmlspecialchars($prdNumber) . '\', \'' . htmlspecialchars(addslashes($custName)) . '\', \'Adjunto #' . ($x + 1) . '\', \'' . htmlspecialchars($medidasStr) . '\'); return false;" title="Clic para ampliar adjunto">';
+                $html .= '<img src="' . htmlspecialchars($adjUrl) . '" alt="Adjunto #' . ($x + 1) . '" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">';
+                $html .= '</a>';
+                $html .= '<a href="' . htmlspecialchars($adjUrl) . '" target="_blank" onclick="openDesignModal(\'' . htmlspecialchars($adjUrl) . '\', \'' . htmlspecialchars($prdNumber) . '\', \'' . htmlspecialchars(addslashes($custName)) . '\', \'Adjunto #' . ($x + 1) . '\', \'' . htmlspecialchars($medidasStr) . '\'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">';
+                $html .= '<i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen';
+                $html .= '</a>';
+            } else {
+                $html .= '<a href="' . htmlspecialchars($adjUrl) . '" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">';
+                $html .= '<i class="fa fa-fw fa-file" style="color:white;"></i> Descargar Documento';
+                $html .= '</a>';
+            }
+            if ($adjComments !== '') {
+                $html .= '<span style="color:#64748B;font-size:11.5px">' . htmlspecialchars($adjComments) . '</span>';
+            }
+            $html .= '</div>';
+            $html .= '</td></tr>';
+        }
+    }
+
+    return $html;
+}
+
+/**
+ * Renderiza el cuadro lateral del mismo largo del cierre de produccion
+ * para Corte y Sellado y Embalaje con las fotos de Diseno y Medidas,
+ * mas los 5 campos secuenciales de balance de CC y sincronizacion en tiempo real.
+ */
+function renderProductionClosingRightPanel(
+    array $agenda,
+    ?array $currentRefEvt,
+    int $refId,
+    float $valAmount,
+    int $overrideEmbalaje,
+    bool $isSelladora
+): void {
+    $totalCc = (float)($agenda['item_amount'] ?? $agenda['ag_amount'] ?? 0);
+    if ($totalCc <= 0) {
+        $totalCc = (float)($agenda['ag_amount'] ?? 0);
+    }
+
+    $reqId = (int)($agenda['ag_reqid'] ?? 0);
+    $excludeEvtId = (int)($refId > 0 ? $refId : ($currentRefEvt['id'] ?? 0));
+    $acumuladoCc = 0.0;
+
+    if ($reqId > 0) {
+        try {
+            if ($overrideEmbalaje === 1) {
+                $stAcum = Db::erpPdo()->prepare("
+                    SELECT COALESCE(SUM(evt.evt_amount), 0)
+                    FROM prod_worker_ot_events evt
+                    JOIN prod_worker_ot pwo ON evt.evt_prod_worker_otid = pwo.id
+                    JOIN prod_agenda pa ON pwo.wok_ag_id = pa.id
+                    WHERE pa.ag_reqid = :req_id
+                      AND evt.evt_type = 'prod'
+                      AND evt.overrideembalaje_act = 1
+                      AND evt.evt_status > 0
+                      AND evt.id != :exclude_evt_id
+                ");
+                $stAcum->execute([':req_id' => $reqId, ':exclude_evt_id' => $excludeEvtId]);
+                $acumuladoCc = (float)$stAcum->fetchColumn();
+            } else {
+                $stAcum = Db::erpPdo()->prepare("
+                    SELECT COALESCE(SUM(evt.evt_amount), 0)
+                    FROM prod_worker_ot_events evt
+                    JOIN prod_worker_ot pwo ON evt.evt_prod_worker_otid = pwo.id
+                    JOIN prod_agenda pa ON pwo.wok_ag_id = pa.id
+                    JOIN equipo teq ON pa.ag_equipo_id = teq.id
+                    JOIN equipo_type ttype ON teq.equipo_type_id = ttype.id
+                    WHERE pa.ag_reqid = :req_id
+                      AND evt.evt_type = 'prod'
+                      AND evt.overrideembalaje_act = 0
+                      AND (ttype.id = 8 OR ttype.type_ant_title LIKE '%SELLADORA%')
+                      AND evt.evt_status > 0
+                      AND evt.id != :exclude_evt_id
+                ");
+                $stAcum->execute([':req_id' => $reqId, ':exclude_evt_id' => $excludeEvtId]);
+                $acumuladoCc = (float)$stAcum->fetchColumn();
+            }
+        } catch (Throwable) {
+            $acumuladoCc = 0.0;
+        }
+    }
+
+    $producidoInitial = (float)$valAmount;
+    $totalCcActualizado = $acumuladoCc + $producidoInitial;
+    $porProducir = max(0.0, $totalCc - $totalCcActualizado);
+    $percentProgress = ($totalCc > 0) ? min(100.0, round(($totalCcActualizado / $totalCc) * 100, 1)) : 0.0;
+
+    $prdNumber = (string)($agenda['prd_number'] ?? '');
+    $custName = (string)($agenda['cust_name'] ?? '');
+    $reqNumber = (string)($agenda['req_number'] ?? '');
+    $itemTitle = (string)($agenda['item_title'] ?? '');
+    $fabType = (string)($agenda['fab_type'] ?? '');
+
+    $w = (int)($agenda['fab_med_width'] ?? 0);
+    $h = (int)($agenda['fab_med_height'] ?? 0);
+    $f = (int)($agenda['fab_med_fuelle'] ?? 0);
+    $m = (int)($agenda['fab_manilla_length'] ?? 0);
+    $medidasStr = $w > 0 ? ("{$w} x {$h}" . ($f > 0 ? " + {$f}" : "") . " cm") : '-';
+
+    // Foto 1: Diseño
+    $designHash = trim((string)($agenda['fab_design_imagehash'] ?? $agenda['item_img_hash'] ?? ''));
+    $hasDesignImg = ($designHash !== '' && $designHash !== 'dummy');
+    $designUrl = $hasDesignImg ? ('/production/design-image?folder=order&hash=' . rawurlencode($designHash)) : '';
+    $designTitle = trim((string)($agenda['fab_design_name'] ?? $itemTitle));
+
+    // Foto 2: Medidas / Montaje
+    $medidasImgUrl = '';
+    $medidasImgTitle = 'Medidas y Montaje';
+    $hasMedidasImg = false;
+
+    for ($x = 4; $x >= 0; $x--) {
+        if (!empty($agenda["req_prod_adjfile_{$x}"])) {
+            $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+            if (preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $adjFile)) {
+                $medidasImgUrl = '/docs/prod/' . rawurlencode($adjFile);
+                $hasMedidasImg = true;
+                $adjComment = trim((string)($agenda["req_prod_adjcomments_{$x}"] ?? ''));
+                $adjName = trim((string)($agenda["req_prod_adjname_{$x}"] ?? ''));
+                if ($adjComment !== '') {
+                    $medidasImgTitle = $adjComment;
+                } elseif ($adjName !== '') {
+                    $medidasImgTitle = $adjName;
+                } else {
+                    $medidasImgTitle = 'Plano de Medidas #' . ($x + 1);
+                }
+                break;
+            }
+        }
+    }
+
+    if (!$hasMedidasImg && !empty($agenda['item_img'])) {
+        $itemImg = (string)$agenda['item_img'];
+        if (preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $itemImg)) {
+            $medidasImgUrl = '/docs/item/' . rawurlencode($itemImg);
+            $hasMedidasImg = true;
+            $medidasImgTitle = 'Ficha Técnica del Producto';
+        }
+    }
+    ?>
+    <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:space-between;min-height:100%">
+        <div>
+            <!-- Encabezado del panel -->
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding-bottom:12px;border-bottom:2px solid #E2E8F0">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <div style="width:36px;height:36px;border-radius:8px;background:#E6FFFA;color:#00A9A6;display:flex;align-items:center;justify-content:center;font-size:17px">
+                        <i class="fa fa-clipboard-check"></i>
+                    </div>
+                    <div>
+                        <div style="font-size:15px;font-weight:bold;color:#115452">Control y Balance de CC</div>
+                        <div style="font-size:12px;color:#64748B">
+                            CC #<b><?=htmlspecialchars($reqNumber)?></b> &bull; OT #<b><?=htmlspecialchars($prdNumber)?></b>
+                        </div>
+                    </div>
+                </div>
+                <div style="font-size:11.5px;background:#F1F5F9;color:#334155;padding:4px 10px;border-radius:6px;font-weight:700;border:1px solid #CBD5E1">
+                    <?=$overrideEmbalaje === 1 ? '<i class="fa fa-box"></i> Embalaje' : '<i class="fa fa-cut"></i> Corte y Sellado'?>
+                </div>
+            </div>
+
+            <!-- FOTOS: Diseño y Medidas lado a lado -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px">
+                <!-- FOTO 1: DISEÑO -->
+                <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;min-height:210px;box-shadow:0 1px 3px rgba(15,23,42,0.04)">
+                    <div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                        <span style="font-size:11px;font-weight:700;color:#0284C7;text-transform:uppercase;letter-spacing:0.5px">
+                            <i class="fa fa-palette"></i> Foto Diseño
+                        </span>
+                        <?php if ($hasDesignImg): ?>
+                            <span style="font-size:10px;background:#E0F2FE;color:#0369A1;padding:2px 6px;border-radius:4px;font-weight:600">Arte</span>
+                        <?php endif; ?>
+                    </div>
+                    <div style="flex:1;display:flex;align-items:center;justify-content:center;width:100%;padding:4px 0">
+                        <?php if ($hasDesignImg): ?>
+                            <a href="<?=$designUrl?>" target="_blank" onclick="openDesignModal('<?=$designUrl?>', '<?=htmlspecialchars($prdNumber)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($designTitle))?>', '<?=htmlspecialchars($medidasStr)?>'); return false;" title="Clic para ampliar y rotar foto de diseño" style="display:block;cursor:pointer">
+                                <img src="<?=$designUrl?>" alt="Diseño de Bolsa" style="max-height:135px;max-width:100%;object-fit:contain;border-radius:6px;border:1px solid #CBD5E1;background:#FFFFFF;box-shadow:0 2px 5px rgba(0,0,0,0.08);transition:transform 0.15s ease" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform='scale(1)'">
+                            </a>
+                        <?php else: ?>
+                            <div style="text-align:center;color:#94A3B8;padding:15px 6px">
+                                <i class="fa fa-image" style="font-size:30px;margin-bottom:6px;display:block;color:#CBD5E1"></i>
+                                <span style="font-size:11px">Sin foto de diseño</span>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                    <?php if ($hasDesignImg): ?>
+                        <button type="button" class="btngrey" style="width:100%;font-size:11px;padding:5px 8px;margin-top:6px;display:inline-flex;align-items:center;justify-content:center;gap:5px;cursor:pointer" onclick="openDesignModal('<?=$designUrl?>', '<?=htmlspecialchars($prdNumber)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($designTitle))?>', '<?=htmlspecialchars($medidasStr)?>')">
+                            <i class="fa fa-search-plus"></i> Ampliar / Rotar 360°
+                        </button>
+                    <?php endif; ?>
+                </div>
+
+                <!-- FOTO 2: MEDIDAS -->
+                <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;min-height:210px;box-shadow:0 1px 3px rgba(15,23,42,0.04)">
+                    <div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                        <span style="font-size:11px;font-weight:700;color:#059669;text-transform:uppercase;letter-spacing:0.5px">
+                            <i class="fa fa-ruler-combined"></i> Foto Medidas
+                        </span>
+                        <span style="font-size:10px;background:#ECFDF5;color:#047857;padding:2px 6px;border-radius:4px;font-weight:600">Plano / Ficha</span>
+                    </div>
+                    <div style="flex:1;display:flex;align-items:center;justify-content:center;width:100%;padding:4px 0">
+                        <?php if ($hasMedidasImg): ?>
+                            <a href="<?=$medidasImgUrl?>" target="_blank" onclick="openDesignModal('<?=$medidasImgUrl?>', '<?=htmlspecialchars($prdNumber)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($medidasImgTitle))?>', '<?=htmlspecialchars($medidasStr)?>'); return false;" title="Clic para ampliar y rotar foto de medidas" style="display:block;cursor:pointer">
+                                <img src="<?=$medidasImgUrl?>" alt="Medidas de Bolsa" style="max-height:135px;max-width:100%;object-fit:contain;border-radius:6px;border:1px solid #CBD5E1;background:#FFFFFF;box-shadow:0 2px 5px rgba(0,0,0,0.08);transition:transform 0.15s ease" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform='scale(1)'">
+                            </a>
+                        <?php else: ?>
+                            <div style="width:100%;background:#FFFFFF;border:1px dashed #CBD5E1;border-radius:6px;padding:10px 8px;text-align:center">
+                                <div style="font-size:11.5px;font-weight:bold;color:#1E293B;margin-bottom:4px">
+                                    <i class="fa fa-shopping-bag" style="color:#00A9A6"></i> <?=htmlspecialchars($itemTitle ?: 'Bolsa')?>
+                                </div>
+                                <div style="display:inline-block;background:#F1F5F9;border:1px solid #CBD5E1;border-radius:4px;padding:5px 8px;margin:3px 0">
+                                    <div style="font-size:13px;font-weight:bold;color:#115452"><?=$medidasStr?></div>
+                                    <div style="font-size:10px;color:#64748B">Ancho &times; Alto <?= $f > 0 ? '+ Fuelle' : '' ?></div>
+                                </div>
+                                <?php if ($m > 0): ?>
+                                    <div style="font-size:10.5px;color:#475569;margin-top:2px">Manilla: <b><?=$m?> cm</b></div>
+                                <?php endif; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                    <?php if ($hasMedidasImg): ?>
+                        <button type="button" class="btngrey" style="width:100%;font-size:11px;padding:5px 8px;margin-top:6px;display:inline-flex;align-items:center;justify-content:center;gap:5px;cursor:pointer" onclick="openDesignModal('<?=$medidasImgUrl?>', '<?=htmlspecialchars($prdNumber)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($medidasImgTitle))?>', '<?=htmlspecialchars($medidasStr)?>')">
+                            <i class="fa fa-search-plus"></i> Ampliar / Rotar 360°
+                        </button>
+                    <?php else: ?>
+                        <div style="width:100%;font-size:10.5px;color:#64748B;text-align:center;padding-top:4px">
+                            Medidas: <b><?=$medidasStr?></b>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <!-- LOS 5 CAMPOS SEGUIDOS PARA ABAJO -->
+            <div style="display:flex;flex-direction:column;gap:9px;margin-bottom:16px">
+                <!-- 1. TOTAL CC -->
+                <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-left:4px solid #0284C7;border-radius:6px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between">
+                    <div>
+                        <div style="font-size:13px;font-weight:700;color:#1E293B;display:flex;align-items:center;gap:6px">
+                            <i class="fa fa-clipboard-list" style="color:#0284C7"></i> Total CC:
+                        </div>
+                        <div style="font-size:11px;color:#64748B">Total que se debe producir en esta CC</div>
+                    </div>
+                    <div style="text-align:right">
+                        <span style="font-size:17px;font-weight:800;color:#0F172A"><?=number_format($totalCc, 0, ',', '.')?></span>
+                        <span style="font-size:11px;color:#64748B;font-weight:600">unid.</span>
+                    </div>
+                </div>
+
+                <!-- 2. PRODUCIDO -->
+                <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-left:4px solid #2563EB;border-radius:6px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between">
+                    <div>
+                        <div style="font-size:13px;font-weight:700;color:#1E40AF;display:flex;align-items:center;gap:6px">
+                            <i class="fa fa-arrow-circle-right" style="color:#2563EB"></i> Producido:
+                        </div>
+                        <div style="font-size:11px;color:#3B82F6">Lo que se produjo en esta producción</div>
+                    </div>
+                    <div style="text-align:right">
+                        <span id="sync_cierre_producido" style="font-size:17px;font-weight:800;color:#1D4ED8"><?=number_format($producidoInitial, 0, ',', '.')?></span>
+                        <span style="font-size:11px;color:#2563EB;font-weight:600">unid.</span>
+                    </div>
+                </div>
+
+                <!-- 3. ACUMULADO CC -->
+                <div style="background:#F1F5F9;border:1px solid #CBD5E1;border-left:4px solid #64748B;border-radius:6px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between">
+                    <div>
+                        <div style="font-size:13px;font-weight:700;color:#334155;display:flex;align-items:center;gap:6px">
+                            <i class="fa fa-layer-group" style="color:#64748B"></i> Acumulado CC:
+                        </div>
+                        <div style="font-size:11px;color:#64748B">Acumulado hasta el momento sin esta producción</div>
+                    </div>
+                    <div style="text-align:right">
+                        <span style="font-size:17px;font-weight:800;color:#334155"><?=number_format($acumuladoCc, 0, ',', '.')?></span>
+                        <span style="font-size:11px;color:#64748B;font-weight:600">unid.</span>
+                    </div>
+                </div>
+
+                <!-- 4. TOTAL CC ACTUALIZADO -->
+                <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-left:4px solid #059669;border-radius:6px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between">
+                    <div>
+                        <div style="font-size:13px;font-weight:700;color:#065F46;display:flex;align-items:center;gap:6px">
+                            <i class="fa fa-chart-line" style="color:#059669"></i> Total CC Actualizado:
+                        </div>
+                        <div style="font-size:11px;color:#059669">Total producido con el acumulado (Acumulado + Producido)</div>
+                    </div>
+                    <div style="text-align:right">
+                        <span id="sync_cierre_total_act" style="font-size:17px;font-weight:800;color:#047857"><?=number_format($totalCcActualizado, 0, ',', '.')?></span>
+                        <span style="font-size:11px;color:#059669;font-weight:600">unid.</span>
+                    </div>
+                </div>
+
+                <!-- 5. POR PRODUCIR -->
+                <div style="background:#FFFBEB;border:1px solid #FDE68A;border-left:4px solid #D97706;border-radius:6px;padding:10px 14px;display:flex;align-items:center;justify-content:space-between">
+                    <div>
+                        <div style="font-size:13px;font-weight:700;color:#92400E;display:flex;align-items:center;gap:6px">
+                            <i class="fa fa-hourglass-half" style="color:#D97706"></i> Por Producir:
+                        </div>
+                        <div style="font-size:11px;color:#B45309">Monto que falta por producir (Total CC - Total CC Actualizado)</div>
+                    </div>
+                    <div style="text-align:right">
+                        <span id="sync_cierre_por_producir" style="font-size:17px;font-weight:800;color:#B45309"><?=number_format($porProducir, 0, ',', '.')?></span>
+                        <span style="font-size:11px;color:#D97706;font-weight:600">unid.</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- BARRA DE CUMPLIMIENTO DE LA CC -->
+        <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:12px;margin-top:auto">
+            <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:bold;margin-bottom:6px">
+                <span style="color:#475569"><i class="fa fa-percentage" style="color:#00A9A6"></i> Cumplimiento de la CC:</span>
+                <span id="sync_cierre_perc_txt" style="color:#115452;font-size:13px"><?=number_format($percentProgress, 1, ',', '.')?>%</span>
+            </div>
+            <div style="height:10px;background:#E2E8F0;border-radius:999px;overflow:hidden">
+                <div id="sync_cierre_progress_bar" style="height:100%;width:<?=$percentProgress?>%;background:linear-gradient(90deg,#00A9A6,#059669);border-radius:999px;transition:width 0.25s ease"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL DE PREVISUALIZACIÓN Y ROTACIÓN 360° -->
+    <?=renderDesignPreviewModal()?>
+
+    <script>
+    (function() {
+        var TOTAL_CC = <?=(float)$totalCc?>;
+        var ACUMULADO_CC = <?=(float)$acumuladoCc?>;
+        var IS_SELLADORA = <?=$isSelladora ? 'true' : 'false'?>;
+        var IS_EMBALAJE = <?=$overrideEmbalaje === 1 ? 'true' : 'false'?>;
+
+        function formatNumberEs(num) {
+            return Math.round(num).toLocaleString('es-CL');
+        }
+
+        function updateClosingPanel(currentProd) {
+            var produced = Math.max(0, parseFloat(currentProd) || 0);
+            var totalAct = ACUMULADO_CC + produced;
+            var porProd = Math.max(0, TOTAL_CC - totalAct);
+            var perc = TOTAL_CC > 0 ? Math.min(100, Math.round((totalAct / TOTAL_CC) * 1000) / 10) : 0;
+
+            var elProd = document.getElementById('sync_cierre_producido');
+            if (elProd) elProd.textContent = formatNumberEs(produced);
+
+            var elTotAct = document.getElementById('sync_cierre_total_act');
+            if (elTotAct) elTotAct.textContent = formatNumberEs(totalAct);
+
+            var elPorProd = document.getElementById('sync_cierre_por_producir');
+            if (elPorProd) elPorProd.textContent = formatNumberEs(porProd);
+
+            var elBar = document.getElementById('sync_cierre_progress_bar');
+            if (elBar) elBar.style.width = perc + '%';
+
+            var elTxt = document.getElementById('sync_cierre_perc_txt');
+            if (elTxt) elTxt.textContent = (perc.toFixed(1)).replace('.', ',') + '%';
+        }
+
+        window.updateClosingPanelFromCurrentInput = function() {
+            var producedVal = 0;
+            if (IS_SELLADORA) {
+                var inpCyS = document.getElementById('cys_counter_main');
+                if (inpCyS) producedVal = parseFloat(inpCyS.value) || 0;
+            } else if (IS_EMBALAJE) {
+                var inpPack = document.getElementById('pack_total_units');
+                if (inpPack) producedVal = parseFloat(inpPack.value) || 0;
+            }
+            updateClosingPanel(producedVal);
+        };
+
+        if (IS_SELLADORA) {
+            var cysInp = document.getElementById('cys_counter_main');
+            if (cysInp) {
+                cysInp.addEventListener('input', function() { updateClosingPanel(this.value); });
+                cysInp.addEventListener('change', function() { updateClosingPanel(this.value); });
+            }
+        }
+
+        if (IS_EMBALAJE) {
+            var packTotal = document.getElementById('pack_total_units');
+            if (packTotal) {
+                packTotal.addEventListener('input', function() { updateClosingPanel(this.value); });
+                packTotal.addEventListener('change', function() { updateClosingPanel(this.value); });
+            }
+            document.querySelectorAll('input[name^="req_embalaje_"]').forEach(function(inp) {
+                inp.addEventListener('input', function() {
+                    setTimeout(function() {
+                        var p = document.getElementById('pack_total_units');
+                        if (p) updateClosingPanel(p.value);
+                    }, 50);
+                });
+            });
+        }
+
+        setTimeout(window.updateClosingPanelFromCurrentInput, 100);
+    })();
+    </script>
+    <?php
+}
+
 function renderMachineAutocontrolFabrication(array $agenda, array $machine, array $transcomInfos, float $cutMeters): void
+
 {
     $typeId = (int)($machine['equipo_type_id'] ?? 0);
     $machineName = mb_strtolower((string)($machine['equipo_name'] ?? '') . ' ' . (string)($machine['type_ant_title'] ?? ''));
@@ -3276,6 +3752,7 @@ function renderMachineAutocontrolFabrication(array $agenda, array $machine, arra
         echo '<tr><td class="tdleft" width="180">' . htmlspecialchars($label) . '</td><td class="tdnrm">'
             . htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8') . '</td></tr>';
     }
+    echo renderDesignAndAttachmentsHtml($agenda, '', '', 1, 1, 'Imagen Diseño');
     echo '</table>';
     renderMachineFabricationExtras($agenda, !$isSerigraphy && !$isRebo);
     echo '</div></div>';
@@ -3865,6 +4342,11 @@ function renderProductionOperatorConsole(
                         <i class="fa fa-fw fa-laptop-code" style="font-size:14px;"></i> Ordenes de trabajo
                         <i class="fa fa-fw fa-chevron-right" style="font-size:12px;margin:0 5px"></i>
                         <b>En curso</b>: OT #<?=htmlspecialchars((string)$agenda['prd_number'])?> | Máquina: <b><?=htmlspecialchars((string)($machineInit['equipo_name'] ?? '-'))?></b>
+                    </td>
+                    <td align="right">
+                        <div class="btngreen" style="display:inline-block;cursor:pointer;padding:6px 14px;font-size:13px;font-weight:bold;border-radius:4px" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>&mode=terminarot'">
+                            <i class="fa fa-fw fa-check" style="color:white;"></i> Terminar OT
+                        </div>
                     </td>
                 </tr>
                 </table>
@@ -7027,6 +7509,7 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">Cantidad Bolsas</td>
                     <td class="tdnrm"><b><?=$fmt($agenda['ag_amount'])?></b></td>
                 </tr>
+                <?=renderDesignAndAttachmentsHtml($agenda, (int)$agenda['fab_med_width'] . ' x ' . (int)$agenda['fab_med_height'] . ' x ' . (int)$agenda['fab_med_fuelle'] . ' cm', (string)($agenda['fab_design_name'] ?? $agenda['item_title'] ?? ''), 1, 3, 'Imagen Diseño (lo que se está embalando)')?>
                 </table>
             </div>
         </div>
@@ -7128,6 +7611,7 @@ function renderProductionOperatorConsole(
                     <td class="tdleft">Fecha Entrega</td>
                     <td class="tdnrm"><b><?=htmlspecialchars((string)($agenda['req_despacho_desc'] !== '' ? $agenda['req_despacho_desc'] : $agenda['ag_date']))?></b></td>
                 </tr>
+                <?=renderDesignAndAttachmentsHtml($agenda, (int)($agenda['fab_med_width'] ?? 0) . ' x ' . (int)($agenda['fab_med_height'] ?? 0) . ' x ' . (int)($agenda['fab_med_fuelle'] ?? 0) . ' cm', (string)($agenda['fab_design_name'] ?? $agenda['item_title'] ?? ''), 1, 3, 'Imagen Diseño')?>
                 </table>
             </div>
         </div>
@@ -7160,6 +7644,7 @@ function renderProductionOperatorConsole(
                     <td class="tdleft" style="background-color:#EEEEEE;">N° C.C.</td>
                     <td class="tdnrm"><?=htmlspecialchars((string)$agenda['req_number'])?></td>
                 </tr>
+                <?=renderDesignAndAttachmentsHtml($agenda, (int)($agenda['fab_med_width'] ?? 0) . ' x ' . (int)($agenda['fab_med_height'] ?? 0) . ' x ' . (int)($agenda['fab_med_fuelle'] ?? 0) . ' cm', (string)($agenda['fab_design_name'] ?? $agenda['item_title'] ?? ''), 1, 1, 'Imagen Diseño (lo que se está cortando / sellando)')?>
                 </table>
 
                 <!-- Tablas de Configuración e Insumos en 2 columnas (editxid.php 2170-2340) -->
@@ -7977,7 +8462,29 @@ function renderProductionOperatorConsole(
             <!-- ============================================================== -->
             <!-- PANTALLA 2: FINALIZAR PRODUCCIÓN O MODIFICAR REGISTRO          -->
             <!-- ============================================================== -->
-            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;<?=$overrideEmbalaje === 1 ? 'max-width:1180px;margin:0 auto' : ''?>">
+            <?php $showClosingSidePanel = ($isSelladora || $overrideEmbalaje === 1); ?>
+            <?php if ($showClosingSidePanel): ?>
+            <style>
+            .closing-layout-grid {
+                display: grid;
+                grid-template-columns: minmax(0, 1.35fr) minmax(360px, 1fr);
+                gap: 20px;
+                align-items: stretch;
+                width: 100%;
+                margin-bottom: 20px;
+            }
+            @media (max-width: 1150px) {
+                .closing-layout-grid {
+                    grid-template-columns: 1fr;
+                }
+                .closing-layout-grid .pack-close-grid {
+                    grid-template-columns: 1fr !important;
+                }
+            }
+            </style>
+            <div class="closing-layout-grid">
+            <?php endif; ?>
+            <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;box-sizing:border-box;<?=$overrideEmbalaje === 1 && !$showClosingSidePanel ? 'max-width:1180px;margin:0 auto' : ''?>">
                 <div style="font-size:16px;font-weight:bold;color:#115452;margin-bottom:15px">
                     <i class="fa fa-fw fa-flag-checkered"></i> <?=$overrideEmbalaje === 1 ? ($isEvtOpen ? 'Finalizar embalaje' : 'Detalle de embalaje') : ($refId > 0 ? ($isEvtOpen ? 'Finalizar / Registrar Avance de Producción' : 'Detalle de Producción') : 'Cierre de Producción')?>
                 </div>
@@ -8490,6 +8997,10 @@ function renderProductionOperatorConsole(
                 }
                 </script>
             </div>
+            <?php if ($showClosingSidePanel): ?>
+                <?php renderProductionClosingRightPanel($agenda, $currentRefEvt, $refId, $valAmount, $overrideEmbalaje, $isSelladora); ?>
+            </div>
+            <?php endif; ?>
         <?php endif; ?>
 
     <?php elseif ($mode === 'apertura'): ?>
@@ -12505,7 +13016,10 @@ function renderProductionOperatorConsole(
 
     <?php elseif ($mode === 'terminarot'): ?>
         <!-- SUBFORMULARIO: Cierre de OT con Supervisor (fancy.embalaje.termot.php) -->
-        <?php $useCloseSupervisorModal = true; ?>
+        <?php 
+        $useCloseSupervisorModal = true; 
+        $prodStarted = $prodService->hasWorkOrderProductionStarted($workerOtId);
+        ?>
         <?php if (!$useCloseSupervisorModal): ?>
             <div style="margin-bottom:15px">
                 <div class="btngrey" style="display:inline-block;cursor:pointer" onclick="location.href='/production/work-orders/operate?agid=<?=$agId?>'">
@@ -12515,11 +13029,15 @@ function renderProductionOperatorConsole(
         <?php endif; ?>
         <div style="<?= $useCloseSupervisorModal ? 'padding:0;max-width:none;margin:0;border:none;background:transparent' : 'background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:25px;max-width:700px;margin:0 auto' ?>">
             <?php if (!$useCloseSupervisorModal): ?>
-                <div style="font-size:18px;font-weight:bold;color:#D64141;margin-bottom:10px;text-align:center">
-                    <i class="fa fa-fw fa-lock"></i> Finalizar y Cerrar Orden de Trabajo
+                <div style="font-size:18px;font-weight:bold;color:<?=!$prodStarted ? '#059669' : '#D64141'?>;margin-bottom:10px;text-align:center">
+                    <i class="fa fa-fw <?=!$prodStarted ? 'fa-check-circle' : 'fa-lock'?>"></i> <?=!$prodStarted ? 'Terminar Orden de Trabajo (Sin Producción)' : 'Finalizar y Cerrar Orden de Trabajo'?>
                 </div>
                 <div style="text-align:center;color:#666;margin-bottom:20px;font-size:13px">
-                    Se requiere autorización de Supervisor para cerrar la OT #<b><?=htmlspecialchars((string)$agenda['prd_number'])?></b>.
+                    <?php if (!$prodStarted): ?>
+                        Esta OT #<b><?=htmlspecialchars((string)$agenda['prd_number'])?></b> no registra producción iniciada. Puede cerrarla directamente.
+                    <?php else: ?>
+                        Se requiere autorización de Supervisor para cerrar la OT #<b><?=htmlspecialchars((string)$agenda['prd_number'])?></b>.
+                    <?php endif; ?>
                 </div>
             <?php endif; ?>
             <?php if ($isSeriPulpo && !$useCloseSupervisorModal): ?>
@@ -12706,12 +13224,22 @@ function renderProductionOperatorConsole(
             <?php if ($useCloseSupervisorModal): ?>
                 <div id="close_ot_supervisor_modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.62);z-index:99999;align-items:center;justify-content:center;padding:18px;box-sizing:border-box">
                     <div style="background:#FFFFFF;border-radius:12px;box-shadow:0 24px 48px rgba(0,0,0,0.3);width:100%;max-width:1100px;max-height:92vh;border:1px solid #CBD5E1;overflow:hidden;display:flex;flex-direction:column">
-                        <div style="background:#991B1B;color:#FFFFFF;padding:16px 20px;font-size:17px;font-weight:bold;display:flex;align-items:center;justify-content:space-between;gap:12px">
-                            <span><i class="fa fa-lock"></i> Cierre de OT con Supervisor</span>
+                        <div style="background:<?=!$prodStarted ? '#047857' : '#991B1B'?>;color:#FFFFFF;padding:16px 20px;font-size:17px;font-weight:bold;display:flex;align-items:center;justify-content:space-between;gap:12px">
+                            <span><i class="fa <?=!$prodStarted ? 'fa-check-circle' : 'fa-lock'?>"></i> <?=!$prodStarted ? 'Terminar OT (Sin Producción Iniciada)' : 'Cierre de OT con Supervisor'?></span>
                             <button type="button" onclick="closeCloseOtSupervisorModal()" style="background:transparent;border:none;color:#FFFFFF;font-size:22px;cursor:pointer;line-height:1">&times;</button>
                         </div>
                         <div style="padding:18px 20px 6px;color:#475569;font-size:13px">
-                            OT #<b><?=htmlspecialchars((string)$agenda['prd_number'])?></b>. Ingrese las credenciales del supervisor para confirmar el cierre.
+                            <?php if (!$prodStarted): ?>
+                                <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:6px;padding:12px 16px;color:#065F46;font-size:13px;display:flex;align-items:center;gap:10px">
+                                    <i class="fa fa-info-circle" style="font-size:20px;color:#059669;flex-shrink:0"></i>
+                                    <div>
+                                        <b>Esta orden de trabajo no registra producción iniciada</b> (0 unidades/metros/kg y sin mermas).<br>
+                                        Puede terminarla directamente para liberar la máquina sin necesidad de llamar al supervisor.
+                                    </div>
+                                </div>
+                            <?php else: ?>
+                                OT #<b><?=htmlspecialchars((string)$agenda['prd_number'])?></b>. La orden registra producción o mermas; ingrese las credenciales del supervisor para autorizar el término de la OT.
+                            <?php endif; ?>
                         </div>
                         <div style="padding:0 20px 8px;overflow:auto;flex:1 1 auto">
                             <?php if ($isSeriPulpo): ?>
@@ -12922,29 +13450,48 @@ function renderProductionOperatorConsole(
                             <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
 
                             <div style="padding:14px 20px 20px;border-top:1px solid #E2E8F0">
-                                <div style="display:grid;grid-template-columns:1fr;gap:14px">
-                                    <div>
-                                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Usuario Supervisor</label>
-                                        <input type="text" name="sup_user" id="close_ot_sup_user" class="inptxt" style="width:100%" required autocomplete="off">
+                                <?php if ($prodStarted): ?>
+                                    <div style="display:grid;grid-template-columns:1fr;gap:14px">
+                                        <div>
+                                            <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Usuario Supervisor</label>
+                                            <input type="text" name="sup_user" id="close_ot_sup_user" class="inptxt" style="width:100%" required autocomplete="off">
+                                        </div>
+                                        <div>
+                                            <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Contraseña</label>
+                                            <input type="password" name="sup_pass" id="close_ot_sup_pass" class="inptxt" style="width:100%" required>
+                                        </div>
+                                        <div>
+                                            <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Motivo / Cierre</label>
+                                            <select name="close_reason" class="inptxt" style="width:100%">
+                                                <option value="completa">Producción Completada al 100%</option>
+                                                <option value="parcial">Cierre Parcial por Cambio de Turno</option>
+                                                <option value="interrumpida">Interrumpida por Falla Mecánica / Insumo</option>
+                                            </select>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Contraseña</label>
-                                        <input type="password" name="sup_pass" id="close_ot_sup_pass" class="inptxt" style="width:100%" required>
-                                    </div>
-                                    <div>
-                                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Motivo / Cierre</label>
+                                <?php else: ?>
+                                    <input type="hidden" name="sup_user" value="">
+                                    <input type="hidden" name="sup_pass" value="">
+                                    <div style="margin-bottom:10px">
+                                        <label style="display:block;font-size:12.5px;font-weight:bold;color:#334155;margin-bottom:5px">Motivo de Término</label>
                                         <select name="close_reason" class="inptxt" style="width:100%">
-                                            <option value="completa">Producción Completada al 100%</option>
-                                            <option value="parcial">Cierre Parcial por Cambio de Turno</option>
-                                            <option value="interrumpida">Interrumpida por Falla Mecánica / Insumo</option>
+                                            <option value="apertura_error">Apertura por error (Sin producción)</option>
+                                            <option value="cambio_planificacion">Cambio de planificación / OT cancelada</option>
+                                            <option value="interrumpida">Interrumpida antes de iniciar producción</option>
                                         </select>
                                     </div>
-                                </div>
+                                <?php endif; ?>
                                 <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:18px">
                                     <button type="button" class="btngrey" style="font-size:14px;padding:10px 18px;border:none;cursor:pointer" onclick="closeCloseOtSupervisorModal()">Cancelar</button>
-                                    <button type="submit" class="btnred" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer">
-                                        <i class="fa fa-fw fa-check-circle"></i> Terminar
-                                    </button>
+                                    <?php if ($prodStarted): ?>
+                                        <button type="submit" class="btnred" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer">
+                                            <i class="fa fa-fw fa-check-circle"></i> Terminar con Supervisor
+                                        </button>
+                                    <?php else: ?>
+                                        <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;border:none;cursor:pointer;font-weight:bold">
+                                            <i class="fa fa-fw fa-check-circle"></i> Terminar OT sin Supervisor
+                                        </button>
+                                    <?php endif; ?>
                                 </div>
                             </div>
                         </form>
@@ -12983,30 +13530,54 @@ function renderProductionOperatorConsole(
                     <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
 
                     <table border="0" width="100%" cellpadding="8" cellspacing="0">
-                    <tr>
-                        <td class="tdleft" width="180">Usuario Supervisor</td>
-                        <td class="tdnrm"><input type="text" name="sup_user" class="inptxt" style="width:100%" required autocomplete="off"></td>
-                    </tr>
-                    <tr>
-                        <td class="tdleft">Contraseña</td>
-                        <td class="tdnrm"><input type="password" name="sup_pass" class="inptxt" style="width:100%" required></td>
-                    </tr>
+                    <?php if ($prodStarted): ?>
+                        <tr>
+                            <td class="tdleft" width="180">Usuario Supervisor</td>
+                            <td class="tdnrm"><input type="text" name="sup_user" class="inptxt" style="width:100%" required autocomplete="off"></td>
+                        </tr>
+                        <tr>
+                            <td class="tdleft">Contraseña</td>
+                            <td class="tdnrm"><input type="password" name="sup_pass" class="inptxt" style="width:100%" required></td>
+                        </tr>
+                    <?php else: ?>
+                        <input type="hidden" name="sup_user" value="">
+                        <input type="hidden" name="sup_pass" value="">
+                        <tr>
+                            <td class="tdnrm" colspan="2">
+                                <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:6px;padding:12px 16px;color:#065F46;font-size:13px">
+                                    <i class="fa fa-check-circle" style="color:#059669"></i> Esta OT no registra producción. Puede terminarla directamente sin clave de supervisor.
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endif; ?>
                     <tr>
                         <td class="tdleft">Motivo / Cierre</td>
                         <td class="tdnrm">
                             <select name="close_reason" class="inptxt" style="width:100%">
-                                <option value="completa">Producción Completada al 100%</option>
-                                <option value="parcial">Cierre Parcial por Cambio de Turno</option>
-                                <option value="interrumpida">Interrumpida por Falla Mecánica / Insumo</option>
+                                <?php if ($prodStarted): ?>
+                                    <option value="completa">Producción Completada al 100%</option>
+                                    <option value="parcial">Cierre Parcial por Cambio de Turno</option>
+                                    <option value="interrumpida">Interrumpida por Falla Mecánica / Insumo</option>
+                                <?php else: ?>
+                                    <option value="apertura_error">Apertura por error (Sin producción)</option>
+                                    <option value="cambio_planificacion">Cambio de planificación / OT cancelada</option>
+                                    <option value="interrumpida">Interrumpida antes de iniciar producción</option>
+                                <?php endif; ?>
                             </select>
                         </td>
                     </tr>
                     <tr>
                         <td class="tdleft">&nbsp;</td>
                         <td class="tdnrm">
-                            <button type="submit" class="btnred" style="font-size:14px;padding:10px 24px;width:100%">
-                                <i class="fa fa-fw fa-check-circle"></i> Terminar
-                            </button>
+                            <?php if ($prodStarted): ?>
+                                <button type="submit" class="btnred" style="font-size:14px;padding:10px 24px;width:100%">
+                                    <i class="fa fa-fw fa-check-circle"></i> Terminar con Supervisor
+                                </button>
+                            <?php else: ?>
+                                <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;width:100%;font-weight:bold">
+                                    <i class="fa fa-fw fa-check-circle"></i> Terminar OT sin Supervisor
+                                </button>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     </table>
@@ -13744,38 +14315,88 @@ function renderProductionNeedMachineScreen(string $operatorName, string $plantaN
 
 function renderDesignPreviewModal(): string
 {
+    static $rendered = false;
+    if ($rendered) {
+        return '';
+    }
+    $rendered = true;
+
     return <<<HTML
-    <!-- MODAL PREVISUALIZACIÓN DE DISEÑO / FOTO DE BOLSA -->
-    <div id="modal_design_preview" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.75);backdrop-filter:blur(2px);z-index:99999;align-items:center;justify-content:center;padding:16px" onclick="if(event.target===this)closeDesignModal()">
-        <div style="background:#FFFFFF;border-radius:10px;max-width:680px;width:96%;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 25px 50px -12px rgba(0,0,0,0.45);overflow:hidden;border:1px solid #CBD5E1">
-            <div style="padding:12px 18px;background:#0F172A;color:#FFFFFF;display:flex;justify-content:space-between;align-items:center">
+    <!-- MODAL PREVISUALIZACIÓN DE DISEÑO / FOTO DE BOLSA CON ROTACIÓN -->
+    <div id="modal_design_preview" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.8);backdrop-filter:blur(3px);z-index:99999;align-items:center;justify-content:center;padding:16px;box-sizing:border-box" onclick="if(event.target===this)closeDesignModal()">
+        <div style="background:#FFFFFF;border-radius:10px;max-width:960px;width:96%;max-height:94vh;display:flex;flex-direction:column;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5);overflow:hidden;border:1px solid #CBD5E1">
+            <div style="padding:10px 18px;background:#0F172A;color:#FFFFFF;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
                 <div style="font-weight:bold;font-size:15px;display:flex;align-items:center;gap:8px">
                     <i class="fa fa-camera" style="color:#38BDF8"></i>
                     <span id="modal_design_title">Foto de Diseño de la Bolsa</span>
                 </div>
-                <button type="button" onclick="closeDesignModal()" style="background:none;border:none;color:#94A3B8;font-size:24px;cursor:pointer;line-height:1">&times;</button>
+                <div style="display:flex;align-items:center;gap:6px">
+                    <button type="button" onclick="rotateDesignModal(-90)" style="background:#1E293B;color:#FFFFFF;border:1px solid #475569;border-radius:4px;padding:5px 10px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="Girar 90° a la izquierda (tecla L)">
+                        <i class="fa fa-undo"></i> -90°
+                    </button>
+                    <button type="button" onclick="rotateDesignModal(90)" style="background:#1E293B;color:#FFFFFF;border:1px solid #475569;border-radius:4px;padding:5px 10px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="Girar 90° a la derecha (tecla R)">
+                        <i class="fa fa-redo"></i> +90°
+                    </button>
+                    <button type="button" onclick="resetRotateDesignModal()" style="background:#1E293B;color:#94A3B8;border:1px solid #475569;border-radius:4px;padding:5px 8px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="Restablecer rotación (tecla 0)">
+                        <i class="fa fa-sync-alt"></i> <span id="modal_design_rot_indicator" style="color:#38BDF8;font-weight:bold">0°</span>
+                    </button>
+                    <button type="button" onclick="closeDesignModal()" style="background:none;border:none;color:#94A3B8;font-size:26px;cursor:pointer;line-height:1;margin-left:6px" title="Cerrar">&times;</button>
+                </div>
             </div>
-            <div style="padding:16px;overflow:auto;text-align:center;background:#F8FAFC;flex:1;display:flex;align-items:center;justify-content:center;min-height:280px">
-                <img id="modal_design_img" src="" alt="Diseño de bolsa" style="max-width:100%;max-height:60vh;object-fit:contain;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,0.12);background:#FFFFFF;border:1px solid #E2E8F0">
+            <div style="padding:16px;overflow:hidden;text-align:center;background:#0F172A;flex:1;display:flex;align-items:center;justify-content:center;min-height:300px;position:relative">
+                <img id="modal_design_img" src="" alt="Diseño de bolsa" style="max-width:100%;max-height:65vh;object-fit:contain;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,0.3);background:#FFFFFF;transition:transform 0.22s ease-in-out">
             </div>
-            <div style="padding:12px 18px;background:#FFFFFF;border-top:1px solid #E2E8F0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+            <div style="padding:10px 18px;background:#FFFFFF;border-top:1px solid #E2E8F0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
                 <div>
                     <div id="modal_design_subtitle" style="font-size:13px;font-weight:600;color:#1E293B"></div>
                     <div id="modal_design_meta" style="font-size:11.5px;color:#64748B"></div>
                 </div>
-                <div style="display:flex;gap:8px">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <button type="button" onclick="rotateDesignModal(-90)" class="btngrey" style="padding:5px 10px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="Girar 90° a la izquierda">
+                        <i class="fa fa-undo"></i> Girar Izq.
+                    </button>
+                    <button type="button" onclick="rotateDesignModal(90)" class="btngrey" style="padding:5px 10px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="Girar 90° a la derecha">
+                        <i class="fa fa-redo"></i> Girar Der.
+                    </button>
                     <a id="modal_design_link" href="#" target="_blank" class="btn" style="background:#0284C7;color:#FFFFFF;padding:6px 14px;border-radius:4px;font-size:12px;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:6px">
-                        <i class="fa fa-external-link-alt"></i> Ver en pestaña nueva
+                        <i class="fa fa-external-link-alt"></i> Ver original
                     </a>
-                    <button type="button" class="btngrey" style="padding:6px 14px;font-size:12px" onclick="closeDesignModal()">Cerrar</button>
+                    <button type="button" class="btngrey" style="padding:6px 14px;font-size:12px;cursor:pointer" onclick="closeDesignModal()">Cerrar</button>
                 </div>
             </div>
         </div>
     </div>
     <script>
+    var currentDesignRotation = 0;
+    function applyDesignRotation() {
+        var img = document.getElementById('modal_design_img');
+        var badge = document.getElementById('modal_design_rot_indicator');
+        if (!img) return;
+        var norm = ((currentDesignRotation % 360) + 360) % 360;
+        img.style.transform = 'rotate(' + currentDesignRotation + 'deg)';
+        if (badge) badge.textContent = norm + '°';
+        var isSideways = (norm === 90 || norm === 270);
+        if (isSideways) {
+            img.style.maxHeight = '72vw';
+            img.style.maxWidth = '55vh';
+        } else {
+            img.style.maxHeight = '65vh';
+            img.style.maxWidth = '100%';
+        }
+    }
+    function rotateDesignModal(deg) {
+        currentDesignRotation += deg;
+        applyDesignRotation();
+    }
+    function resetRotateDesignModal() {
+        currentDesignRotation = 0;
+        applyDesignRotation();
+    }
     function openDesignModal(imgUrl, otNumber, custName, designName, medInfo) {
         var modal = document.getElementById('modal_design_preview');
         if (!modal) return;
+        currentDesignRotation = 0;
+        applyDesignRotation();
         document.getElementById('modal_design_img').src = imgUrl;
         document.getElementById('modal_design_title').textContent = 'Diseño de Bolsa · OT #' + otNumber;
         document.getElementById('modal_design_subtitle').textContent = custName ? ('Cliente: ' + custName) : '';
@@ -13791,10 +14412,21 @@ function renderDesignPreviewModal(): string
         if (modal) {
             modal.style.display = 'none';
             document.getElementById('modal_design_img').src = '';
+            currentDesignRotation = 0;
         }
     }
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') closeDesignModal();
+        var modal = document.getElementById('modal_design_preview');
+        if (!modal || modal.style.display !== 'flex') return;
+        if (e.key === 'Escape') {
+            closeDesignModal();
+        } else if (e.key === 'r' || e.key === 'R') {
+            rotateDesignModal(90);
+        } else if (e.key === 'l' || e.key === 'L') {
+            rotateDesignModal(-90);
+        } else if (e.key === '0') {
+            resetRotateDesignModal();
+        }
     });
     </script>
 HTML;
@@ -14816,6 +15448,24 @@ function renderProductionActiveOrdersScreen(
 
     ob_start();
     ?>
+    <?php if (isset($_GET['closed'])): ?>
+        <?php if (!empty($_GET['noprod'])): ?>
+            <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-left:5px solid #059669;padding:12px 18px;border-radius:6px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+                <div style="font-size:14px;font-weight:bold;color:#065F46;display:flex;align-items:center;gap:7px">
+                    <i class="fa fa-check-circle" style="font-size:16px;color:#059669"></i> Orden de trabajo terminada exitosamente
+                </div>
+                <div style="font-size:12.5px;color:#047857;margin-top:4px">
+                    La OT no registraba producción iniciada y fue terminada directamente por el operador sin requerir autorización de supervisor.
+                </div>
+            </div>
+        <?php else: ?>
+            <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-left:5px solid #059669;padding:12px 18px;border-radius:6px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
+                <div style="font-size:14px;font-weight:bold;color:#065F46;display:flex;align-items:center;gap:7px">
+                    <i class="fa fa-check-circle" style="font-size:16px;color:#059669"></i> Orden de trabajo finalizada y cerrada con autorización de supervisor.
+                </div>
+            </div>
+        <?php endif; ?>
+    <?php endif; ?>
     <?php if ($isRebobinadora): ?>
         <!-- ============================================================== -->
         <!-- DISEÑO ESPECÍFICO REBOBINADORA: En curso                       -->
