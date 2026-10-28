@@ -2982,20 +2982,25 @@ function renderStartPackagingButton(int $agId, int $workerOtId, string $style): 
         . ' class="btngrey" style="text-decoration:none;' . htmlspecialchars($style, ENT_QUOTES, 'UTF-8') . '">Embalaje</a>';
 }
 
-function renderProductionReceiverField(array $receivers, array $saved): void
+function renderProductionReceiverField(array $receivers, array $saved, bool $isRequired = false): void
 {
-    echo '<tr><td class="tdleft">Recibe produccion</td><td class="tdnrm">';
-    if ($saved !== []) {
-        echo '<b>' . htmlspecialchars((string)$saved['receiver_name'], ENT_QUOTES, 'UTF-8') . '</b>';
-    } else {
-        echo '<select name="phase_receiver_worker_id" class="inptxt" style="width:100%" required>'
-            . '<option value="">Seleccionar</option>';
-        foreach ($receivers as $receiver) {
-            echo '<option value="' . (int)$receiver['id'] . '">'
-                . htmlspecialchars(trim($receiver['wrk_firstname'] . ' ' . $receiver['wrk_lastname']), ENT_QUOTES, 'UTF-8')
-                . '</option>';
-        }
-        echo '</select>';
+    $savedReceiverId = (int)($saved['receiver_worker_id'] ?? 0);
+    $savedReceiverName = trim((string)($saved['receiver_name'] ?? ''));
+
+    echo '<tr><td class="tdleft">Recibe producción</td><td class="tdnrm">';
+    echo '<select name="phase_receiver_worker_id" class="inptxt" style="width:100%"' . ($isRequired ? ' required' : '') . '>';
+    echo '<option value="">-- Seleccionar quién recibe ' . ($isRequired ? '' : '(opcional)') . ' --</option>';
+    foreach ($receivers as $receiver) {
+        $rId = (int)$receiver['id'];
+        $rName = htmlspecialchars(trim($receiver['wrk_firstname'] . ' ' . $receiver['wrk_lastname']), ENT_QUOTES, 'UTF-8');
+        $selected = ($savedReceiverId > 0 && $savedReceiverId === $rId) ? ' selected="selected"' : '';
+        echo '<option value="' . $rId . '"' . $selected . '>' . $rName . '</option>';
+    }
+    echo '</select>';
+    if ($savedReceiverName !== '') {
+        echo '<div style="font-size:11px;color:#64748b;margin-top:4px"><i class="fa fa-info-circle"></i> Asignado previamente: <b>'
+            . htmlspecialchars($savedReceiverName, ENT_QUOTES, 'UTF-8')
+            . '</b> (puedes cambiarlo si otra persona recibe al finalizar)</div>';
     }
     echo '</td></tr>';
 }
@@ -8449,9 +8454,6 @@ function renderProductionOperatorConsole(
                         <td class="tdleft">Operador Responsable</td>
                         <td class="tdnrm"><b><?=htmlspecialchars($currentOperatorName)?></b></td>
                     </tr>
-                    <?php if ($isSelladora || $overrideEmbalaje === 1): ?>
-                        <?php renderProductionReceiverField($phaseReceivers, []); ?>
-                    <?php endif; ?>
                     <tr>
                         <td class="tdleft">Hora de Inicio</td>
                         <td class="tdnrm"><b style="color:#059669"><i class="fa fa-clock"></i> <?=date('d.m.Y H:i')?></b></td>
@@ -13830,7 +13832,9 @@ function renderProductionOperatorConsole(
                         <td class="tdnrm">
                             <?php $phaseResponsible = $phaseResponsibilities[(int)$ev['id']] ?? []; ?>
                             <?php if ($phaseResponsible !== []): ?>
-                                <b>Recibe: <?=htmlspecialchars((string)$phaseResponsible['receiver_name'])?></b><br>
+                                <?php if (!empty($phaseResponsible['receiver_name'])): ?>
+                                    <b>Recibe: <?=htmlspecialchars((string)$phaseResponsible['receiver_name'])?></b><br>
+                                <?php endif; ?>
                                 Inicio: <?=htmlspecialchars((string)$phaseResponsible['started_by_name'])?><br>
                                 <?php if ((int)$phaseResponsible['ended_by_worker_id'] > 0): ?>
                                     Finalizo: <?=htmlspecialchars((string)$phaseResponsible['ended_by_name'])?><br>

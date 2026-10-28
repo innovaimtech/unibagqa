@@ -2285,10 +2285,10 @@ final class ProductionService
             event_id BIGINT NOT NULL PRIMARY KEY,
             worker_ot_id BIGINT NOT NULL,
             packaging INTEGER NOT NULL,
-            receiver_worker_id BIGINT NOT NULL,
-            receiver_name VARCHAR(200) NOT NULL,
-            started_by_worker_id BIGINT NOT NULL,
-            started_by_name VARCHAR(200) NOT NULL,
+            receiver_worker_id BIGINT NOT NULL DEFAULT 0,
+            receiver_name VARCHAR(200) NOT NULL DEFAULT '',
+            started_by_worker_id BIGINT NOT NULL DEFAULT 0,
+            started_by_name VARCHAR(200) NOT NULL DEFAULT '',
             ended_by_worker_id BIGINT NOT NULL DEFAULT 0,
             ended_by_name VARCHAR(200) NOT NULL DEFAULT ''
         )" . ($this->trzPdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql'
@@ -2326,16 +2326,28 @@ final class ProductionService
         if ((int)($actor['worker_id'] ?? 0) <= 0 || trim((string)($actor['name'] ?? '')) === '') {
             throw new RuntimeException('No se pudo identificar al operador conectado.');
         }
-        $existing = $refId ? ($this->getProductionPhaseResponsibilities($workerOtId)[$refId] ?? null) : null;
-        if ($existing !== null) {
-            $actor['receiver_worker_id'] = (int)$existing['receiver_worker_id'];
-            $actor['receiver_name'] = (string)$existing['receiver_name'];
-        } else {
+        $existing = ($refId !== null && $refId > 0)
+            ? ($this->getProductionPhaseResponsibilities($workerOtId)[$refId] ?? null)
+            : null;
+        $receiverId = (int)($actor['receiver_worker_id'] ?? 0);
+
+        if ($receiverId > 0) {
             $stmt = $this->erpPdo->prepare('SELECT wrk_firstname, wrk_lastname FROM workers WHERE id=? AND wrk_status>0');
-            $stmt->execute([(int)($actor['receiver_worker_id'] ?? 0)]);
+            $stmt->execute([$receiverId]);
             $receiver = $stmt->fetch(PDO::FETCH_ASSOC);
-            if (!$receiver) throw new RuntimeException('Selecciona quien recibe esta produccion.');
-            $actor['receiver_name'] = trim($receiver['wrk_firstname'] . ' ' . $receiver['wrk_lastname']);
+            if ($receiver) {
+                $actor['receiver_worker_id'] = $receiverId;
+                $actor['receiver_name'] = trim($receiver['wrk_firstname'] . ' ' . $receiver['wrk_lastname']);
+            } else {
+                $actor['receiver_worker_id'] = 0;
+                $actor['receiver_name'] = '';
+            }
+        } elseif ($existing !== null && !empty($existing['receiver_worker_id'])) {
+            $actor['receiver_worker_id'] = (int)$existing['receiver_worker_id'];
+            $actor['receiver_name'] = (string)($existing['receiver_name'] ?? '');
+        } else {
+            $actor['receiver_worker_id'] = 0;
+            $actor['receiver_name'] = '';
         }
         $this->ensureProductionPhaseSchema();
         return $actor;
@@ -2344,18 +2356,44 @@ final class ProductionService
     private function saveProductionPhaseActor(int $eventId, int $workerOtId, int $packaging, array $actor, bool $isEnd): void
     {
         $existing = $this->getProductionPhaseResponsibilities($workerOtId)[$eventId] ?? null;
+        $receiverId = (int)($actor['receiver_worker_id'] ?? 0);
+        $receiverName = (string)($actor['receiver_name'] ?? '');
+
         if ($existing === null) {
             $stmt = $this->trzPdo->prepare('INSERT INTO production_phase_responsibility
                 (event_id, worker_ot_id, packaging, receiver_worker_id, receiver_name,
-                 started_by_worker_id, started_by_name) VALUES (?,?,?,?,?,?,?)');
-            $stmt->execute([$eventId, $workerOtId, $packaging, $actor['receiver_worker_id'],
-                $actor['receiver_name'], $actor['starting'] ? $actor['worker_id'] : 0,
-                $actor['starting'] ? $actor['name'] : 'No registrado']);
-        }
-        if ($isEnd) {
-            $stmt = $this->trzPdo->prepare('UPDATE production_phase_responsibility
-                SET ended_by_worker_id=?, ended_by_name=? WHERE event_id=? AND ended_by_worker_id=0');
-            $stmt->execute([$actor['worker_id'], $actor['name'], $eventId]);
+                 started_by_worker_id, started_by_name, ended_by_worker_id, ended_by_name)
+                VALUES (?,?,?,?,?,?,?,?,?)');
+            $stmt->execute([
+                $eventId,
+                $workerOtId,
+                $packaging,
+                $receiverId,
+                $receiverName,
+                !empty($actor['starting']) ? (int)$actor['worker_id'] : 0,
+                !empty($actor['starting']) ? (string)$actor['name'] : 'No registrado',
+                $isEnd ? (int)$actor['worker_id'] : 0,
+                $isEnd ? (string)$actor['name'] : ''
+            ]);
+        } else {
+            if ($isEnd) {
+                if ($receiverId > 0 && $receiverName !== '') {
+                    $stmt = $this->trzPdo->prepare('UPDATE production_phase_responsibility
+                        SET ended_by_worker_id=?, ended_by_name=?, receiver_worker_id=?, receiver_name=?
+                        WHERE event_id=?');
+                    $stmt->execute([(int)$actor['worker_id'], (string)$actor['name'], $receiverId, $receiverName, $eventId]);
+                } else {
+                    $stmt = $this->trzPdo->prepare('UPDATE production_phase_responsibility
+                        SET ended_by_worker_id=?, ended_by_name=?
+                        WHERE event_id=?');
+                    $stmt->execute([(int)$actor['worker_id'], (string)$actor['name'], $eventId]);
+                }
+            } elseif ($receiverId > 0 && $receiverName !== '') {
+                $stmt = $this->trzPdo->prepare('UPDATE production_phase_responsibility
+                    SET receiver_worker_id=?, receiver_name=?
+                    WHERE event_id=?');
+                $stmt->execute([$receiverId, $receiverName, $eventId]);
+            }
         }
     }
 
