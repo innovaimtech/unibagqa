@@ -3410,38 +3410,64 @@ function renderProductionClosingRightPanel(
     $designUrl = $hasDesignImg ? ('/production/design-image?folder=order&hash=' . rawurlencode($designHash)) : '';
     $designTitle = trim((string)($agenda['fab_design_name'] ?? $itemTitle));
 
-    // Foto 2: Medidas / Montaje
-    $medidasImgUrl = '';
-    $medidasImgTitle = 'Medidas y Montaje';
-    $hasMedidasImg = false;
+    // Obtener datos de "Registrar fechas de entrega y observaciones" (prod_clasify / prod_amtplan)
+    $prdId = (int)($agenda['prdid'] ?? $agenda['ag_prdid'] ?? 0);
+    $prodHeaderData = null;
+    $plantaName = '';
+    $prodPlans = [];
+    $orderData = null;
 
-    for ($x = 4; $x >= 0; $x--) {
-        if (!empty($agenda["req_prod_adjfile_{$x}"])) {
-            $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
-            if (preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $adjFile)) {
-                $medidasImgUrl = '/docs/prod/' . rawurlencode($adjFile);
-                $hasMedidasImg = true;
-                $adjComment = trim((string)($agenda["req_prod_adjcomments_{$x}"] ?? ''));
-                $adjName = trim((string)($agenda["req_prod_adjname_{$x}"] ?? ''));
-                if ($adjComment !== '') {
-                    $medidasImgTitle = $adjComment;
-                } elseif ($adjName !== '') {
-                    $medidasImgTitle = $adjName;
-                } else {
-                    $medidasImgTitle = 'Plano de Medidas #' . ($x + 1);
-                }
-                break;
-            }
+    try {
+        if ($prdId > 0) {
+            $stPrd = Db::erpPdo()->prepare("
+                SELECT ph.id, ph.prd_desc, ph.prd_plantaid, ph.prd_number, pl.planta_name
+                FROM prod_header ph
+                LEFT JOIN plantas pl ON ph.prd_plantaid = pl.id
+                WHERE ph.id = :prd_id
+                LIMIT 1
+            ");
+            $stPrd->execute([':prd_id' => $prdId]);
+            $prodHeaderData = $stPrd->fetch(PDO::FETCH_ASSOC) ?: null;
         }
-    }
 
-    if (!$hasMedidasImg && !empty($agenda['item_img'])) {
-        $itemImg = (string)$agenda['item_img'];
-        if (preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $itemImg)) {
-            $medidasImgUrl = '/docs/item/' . rawurlencode($itemImg);
-            $hasMedidasImg = true;
-            $medidasImgTitle = 'Ficha Técnica del Producto';
+        if (!$prodHeaderData && $reqId > 0) {
+            $stPrd = Db::erpPdo()->prepare("
+                SELECT ph.id, ph.prd_desc, ph.prd_plantaid, ph.prd_number, pl.planta_name
+                FROM prod_header ph
+                LEFT JOIN plantas pl ON ph.prd_plantaid = pl.id
+                WHERE ph.prd_reqid = :req_id AND ph.prd_status >= 1
+                ORDER BY ph.id DESC LIMIT 1
+            ");
+            $stPrd->execute([':req_id' => $reqId]);
+            $prodHeaderData = $stPrd->fetch(PDO::FETCH_ASSOC) ?: null;
         }
+
+        $actualPrdId = (int)($prodHeaderData['id'] ?? $prdId);
+        if ($actualPrdId > 0) {
+            $stPlans = Db::erpPdo()->prepare("
+                SELECT id, prodplan_amt, prodplan_date
+                FROM prod_amtplan
+                WHERE prodplan_prdid = :prdid
+                ORDER BY prodplan_date ASC, id ASC
+            ");
+            $stPlans->execute([':prdid' => $actualPrdId]);
+            $prodPlans = $stPlans->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        }
+
+        if (!empty($prodHeaderData['planta_name'])) {
+            $plantaName = (string)$prodHeaderData['planta_name'];
+        }
+
+        if ($reqId > 0) {
+            $stOrd = Db::erpPdo()->prepare("
+                SELECT req_despacho_desc, req_desc_intern, req_fec_despacho
+                FROM orders WHERE id = :req_id LIMIT 1
+            ");
+            $stOrd->execute([':req_id' => $reqId]);
+            $orderData = $stOrd->fetch(PDO::FETCH_ASSOC) ?: null;
+        }
+    } catch (Throwable) {
+        // Fallback defensivo ante eventual error en BD
     }
     ?>
     <div style="background:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;padding:20px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:space-between;min-height:100%">
@@ -3464,22 +3490,28 @@ function renderProductionClosingRightPanel(
                 </div>
             </div>
 
-            <!-- FOTOS: Diseño y Medidas lado a lado -->
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:18px">
-                <!-- FOTO 1: DISEÑO -->
-                <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;min-height:210px;box-shadow:0 1px 3px rgba(15,23,42,0.04)">
+            <!-- FOTO DE DISEÑO (Foto de medidas retirada a solicitud) -->
+            <div style="margin-bottom:14px">
+                <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;box-shadow:0 1px 3px rgba(15,23,42,0.04)">
                     <div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
                         <span style="font-size:11px;font-weight:700;color:#0284C7;text-transform:uppercase;letter-spacing:0.5px">
                             <i class="fa fa-palette"></i> Foto Diseño
                         </span>
-                        <?php if ($hasDesignImg): ?>
-                            <span style="font-size:10px;background:#E0F2FE;color:#0369A1;padding:2px 6px;border-radius:4px;font-weight:600">Arte</span>
-                        <?php endif; ?>
+                        <div style="display:flex;align-items:center;gap:6px">
+                            <?php if ($medidasStr !== '-'): ?>
+                                <span style="font-size:10px;background:#F1F5F9;color:#475569;padding:2px 6px;border-radius:4px;font-weight:600" title="Medidas de la bolsa">
+                                    <i class="fa fa-ruler"></i> <?=$medidasStr?>
+                                </span>
+                            <?php endif; ?>
+                            <?php if ($hasDesignImg): ?>
+                                <span style="font-size:10px;background:#E0F2FE;color:#0369A1;padding:2px 6px;border-radius:4px;font-weight:600">Arte</span>
+                            <?php endif; ?>
+                        </div>
                     </div>
-                    <div style="flex:1;display:flex;align-items:center;justify-content:center;width:100%;padding:4px 0">
+                    <div style="display:flex;align-items:center;justify-content:center;width:100%;padding:4px 0;min-height:120px">
                         <?php if ($hasDesignImg): ?>
                             <a href="<?=$designUrl?>" target="_blank" onclick="openDesignModal('<?=$designUrl?>', '<?=htmlspecialchars($prdNumber)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($designTitle))?>', '<?=htmlspecialchars($medidasStr)?>'); return false;" title="Clic para ampliar y rotar foto de diseño" style="display:block;cursor:pointer">
-                                <img src="<?=$designUrl?>" alt="Diseño de Bolsa" style="max-height:135px;max-width:100%;object-fit:contain;border-radius:6px;border:1px solid #CBD5E1;background:#FFFFFF;box-shadow:0 2px 5px rgba(0,0,0,0.08);transition:transform 0.15s ease" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform='scale(1)'">
+                                <img src="<?=$designUrl?>" alt="Diseño de Bolsa" style="max-height:140px;max-width:100%;object-fit:contain;border-radius:6px;border:1px solid #CBD5E1;background:#FFFFFF;box-shadow:0 2px 5px rgba(0,0,0,0.08);transition:transform 0.15s ease" onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'">
                             </a>
                         <?php else: ?>
                             <div style="text-align:center;color:#94A3B8;padding:15px 6px">
@@ -3492,45 +3524,6 @@ function renderProductionClosingRightPanel(
                         <button type="button" class="btngrey" style="width:100%;font-size:11px;padding:5px 8px;margin-top:6px;display:inline-flex;align-items:center;justify-content:center;gap:5px;cursor:pointer" onclick="openDesignModal('<?=$designUrl?>', '<?=htmlspecialchars($prdNumber)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($designTitle))?>', '<?=htmlspecialchars($medidasStr)?>')">
                             <i class="fa fa-search-plus"></i> Ampliar / Rotar 360°
                         </button>
-                    <?php endif; ?>
-                </div>
-
-                <!-- FOTO 2: MEDIDAS -->
-                <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:10px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;min-height:210px;box-shadow:0 1px 3px rgba(15,23,42,0.04)">
-                    <div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                        <span style="font-size:11px;font-weight:700;color:#059669;text-transform:uppercase;letter-spacing:0.5px">
-                            <i class="fa fa-ruler-combined"></i> Foto Medidas
-                        </span>
-                        <span style="font-size:10px;background:#ECFDF5;color:#047857;padding:2px 6px;border-radius:4px;font-weight:600">Plano / Ficha</span>
-                    </div>
-                    <div style="flex:1;display:flex;align-items:center;justify-content:center;width:100%;padding:4px 0">
-                        <?php if ($hasMedidasImg): ?>
-                            <a href="<?=$medidasImgUrl?>" target="_blank" onclick="openDesignModal('<?=$medidasImgUrl?>', '<?=htmlspecialchars($prdNumber)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($medidasImgTitle))?>', '<?=htmlspecialchars($medidasStr)?>'); return false;" title="Clic para ampliar y rotar foto de medidas" style="display:block;cursor:pointer">
-                                <img src="<?=$medidasImgUrl?>" alt="Medidas de Bolsa" style="max-height:135px;max-width:100%;object-fit:contain;border-radius:6px;border:1px solid #CBD5E1;background:#FFFFFF;box-shadow:0 2px 5px rgba(0,0,0,0.08);transition:transform 0.15s ease" onmouseover="this.style.transform='scale(1.03)'" onmouseout="this.style.transform='scale(1)'">
-                            </a>
-                        <?php else: ?>
-                            <div style="width:100%;background:#FFFFFF;border:1px dashed #CBD5E1;border-radius:6px;padding:10px 8px;text-align:center">
-                                <div style="font-size:11.5px;font-weight:bold;color:#1E293B;margin-bottom:4px">
-                                    <i class="fa fa-shopping-bag" style="color:#00A9A6"></i> <?=htmlspecialchars($itemTitle ?: 'Bolsa')?>
-                                </div>
-                                <div style="display:inline-block;background:#F1F5F9;border:1px solid #CBD5E1;border-radius:4px;padding:5px 8px;margin:3px 0">
-                                    <div style="font-size:13px;font-weight:bold;color:#115452"><?=$medidasStr?></div>
-                                    <div style="font-size:10px;color:#64748B">Ancho &times; Alto <?= $f > 0 ? '+ Fuelle' : '' ?></div>
-                                </div>
-                                <?php if ($m > 0): ?>
-                                    <div style="font-size:10.5px;color:#475569;margin-top:2px">Manilla: <b><?=$m?> cm</b></div>
-                                <?php endif; ?>
-                            </div>
-                        <?php endif; ?>
-                    </div>
-                    <?php if ($hasMedidasImg): ?>
-                        <button type="button" class="btngrey" style="width:100%;font-size:11px;padding:5px 8px;margin-top:6px;display:inline-flex;align-items:center;justify-content:center;gap:5px;cursor:pointer" onclick="openDesignModal('<?=$medidasImgUrl?>', '<?=htmlspecialchars($prdNumber)?>', '<?=htmlspecialchars(addslashes($custName))?>', '<?=htmlspecialchars(addslashes($medidasImgTitle))?>', '<?=htmlspecialchars($medidasStr)?>')">
-                            <i class="fa fa-search-plus"></i> Ampliar / Rotar 360°
-                        </button>
-                    <?php else: ?>
-                        <div style="width:100%;font-size:10.5px;color:#64748B;text-align:center;padding-top:4px">
-                            Medidas: <b><?=$medidasStr?></b>
-                        </div>
                     <?php endif; ?>
                 </div>
             </div>
@@ -3604,6 +3597,102 @@ function renderProductionClosingRightPanel(
                     <div style="text-align:right">
                         <span id="sync_cierre_por_producir" style="font-size:17px;font-weight:800;color:#B45309"><?=number_format($porProducir, 0, ',', '.')?></span>
                         <span style="font-size:11px;color:#D97706;font-weight:600">unid.</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- REGISTRAR FECHAS DE ENTREGA Y OBSERVACIONES (clasificar la orden de trabajo) -->
+            <div style="background:#FFFFFF;border:1px solid #CBD5E1;border-radius:8px;overflow:hidden;margin-bottom:16px;box-shadow:0 1px 3px rgba(15,23,42,0.04)">
+                <div style="background:#F1F5F9;border-bottom:1px solid #CBD5E1;padding:8px 12px;display:flex;align-items:center;justify-content:space-between">
+                    <div style="font-size:11.5px;font-weight:700;color:#0F172A;display:flex;align-items:center;gap:6px">
+                        <i class="fa fa-calendar-alt" style="color:#00A9A6"></i> Registrar fechas de entrega y observaciones
+                    </div>
+                    <?php if (!empty($plantaName)): ?>
+                        <span style="font-size:10px;background:#E2E8F0;color:#334155;padding:2px 7px;border-radius:4px;font-weight:700">
+                            <i class="fa fa-industry"></i> <?=htmlspecialchars($plantaName)?>
+                        </span>
+                    <?php endif; ?>
+                </div>
+
+                <div style="padding:10px 12px">
+                    <table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:8px">
+                        <thead>
+                            <tr style="background:#F8FAFC;border-bottom:1px solid #E2E8F0;color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.4px">
+                                <th style="padding:5px 8px;text-align:left;font-weight:700">Cantidad</th>
+                                <th style="padding:5px 8px;text-align:left;font-weight:700">Fecha entrega</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (!empty($prodPlans)): ?>
+                                <?php 
+                                $totalPlanAmt = 0.0;
+                                foreach ($prodPlans as $pPlan): 
+                                    $pAmt = (float)($pPlan['prodplan_amt'] ?? 0);
+                                    $totalPlanAmt += $pAmt;
+                                    $pDateTs = (int)($pPlan['prodplan_date'] ?? 0);
+                                    $pDateStr = $pDateTs > 0 ? date('d/m/Y', $pDateTs) : '-';
+                                ?>
+                                    <tr style="border-bottom:1px solid #F1F5F9">
+                                        <td style="padding:5px 8px;font-weight:700;color:#1E293B">
+                                            <?=number_format($pAmt, 0, ',', '.')?> <span style="font-size:10px;color:#64748B;font-weight:400">unid.</span>
+                                        </td>
+                                        <td style="padding:5px 8px;color:#0F172A">
+                                            <i class="fa fa-calendar-day" style="color:#00A9A6;margin-right:4px"></i> <b><?=$pDateStr?></b>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                                <?php if (count($prodPlans) > 1): ?>
+                                    <tr style="background:#F8FAFC;border-top:1px solid #CBD5E1;font-weight:700">
+                                        <td style="padding:5px 8px;color:#0F172A">
+                                            Total: <?=number_format($totalPlanAmt, 0, ',', '.')?> <span style="font-size:10px;color:#64748B;font-weight:400">unid.</span>
+                                        </td>
+                                        <td style="padding:5px 8px;color:#64748B;font-size:10.5px">
+                                            (<?=count($prodPlans)?> entregas)
+                                        </td>
+                                    </tr>
+                                <?php endif; ?>
+                            <?php else: ?>
+                                <?php
+                                $fecDespachoTs = (int)($orderData['req_fec_despacho'] ?? 0);
+                                $fecDespachoStr = $fecDespachoTs > 0 ? date('d/m/Y', $fecDespachoTs) : (!empty($orderData['req_despacho_desc']) ? (string)$orderData['req_despacho_desc'] : '-');
+                                ?>
+                                <tr style="border-bottom:1px solid #F1F5F9">
+                                    <td style="padding:5px 8px;font-weight:700;color:#1E293B">
+                                        <?=number_format($totalCc, 0, ',', '.')?> <span style="font-size:10px;color:#64748B;font-weight:400">unid.</span>
+                                    </td>
+                                    <td style="padding:5px 8px;color:#0F172A">
+                                        <i class="fa fa-calendar-day" style="color:#00A9A6;margin-right:4px"></i> <b><?=$fecDespachoStr?></b>
+                                    </td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+
+                    <!-- PLANTA Y OBSERVACIONES -->
+                    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;padding:8px 10px">
+                        <div style="font-size:10.5px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between">
+                            <span><i class="fa fa-comment-dots" style="color:#0284C7"></i> Planta y observaciones</span>
+                            <?php if (!empty($plantaName)): ?>
+                                <span style="font-weight:600;color:#1E293B;text-transform:none"><?=htmlspecialchars($plantaName)?></span>
+                            <?php endif; ?>
+                        </div>
+                        <?php 
+                        $obsPrd = trim((string)($prodHeaderData['prd_desc'] ?? ''));
+                        $obsDesp = trim((string)($orderData['req_despacho_desc'] ?? ''));
+                        ?>
+                        <?php if ($obsPrd !== ''): ?>
+                            <div style="font-size:11.5px;color:#1E293B;white-space:pre-wrap;line-height:1.4;background:#FFFFFF;border:1px solid #CBD5E1;border-radius:4px;padding:6px 8px"><?=htmlspecialchars($obsPrd)?></div>
+                        <?php endif; ?>
+                        <?php if ($obsDesp !== '' && $obsDesp !== $obsPrd): ?>
+                            <div style="font-size:11px;color:#475569;margin-top:<?=$obsPrd !== '' ? '5px' : '0'?>;line-height:1.35">
+                                <span style="font-weight:600;color:#64748B">Despacho:</span> <?=htmlspecialchars($obsDesp)?>
+                            </div>
+                        <?php endif; ?>
+                        <?php if ($obsPrd === '' && $obsDesp === ''): ?>
+                            <div style="font-size:11px;color:#94A3B8;font-style:italic">
+                                Sin observaciones registradas para esta OT.
+                            </div>
+                        <?php endif; ?>
                     </div>
                 </div>
             </div>
@@ -3758,70 +3847,7 @@ function renderMachineAutocontrolFabrication(array $agenda, array $machine, arra
     echo '</div></div>';
 }
 
-/** Mandatory CyS setup capture before displaying any operation controls.
- *  Captura obligatoria de medidas CyS antes de mostrar controles operativos. */
-function renderCysSetupMeasuresGate(array $ctx, array $status, array $medidas, array $helpers, string $name, string $plant): void
-{
-    $agenda = $ctx['agenda'];
-    $event = $status['event'] ?? [];
-    $agId = (int)$agenda['id'];
-    $otId = (int)($ctx['worker_ot']['id'] ?? 0);
-    $escape = static fn($value) => htmlspecialchars((string)$value,ENT_QUOTES,'UTF-8');
-    ob_start();
-    ?>
-    <style>
-    #cys_setup_measures{width:min(900px,94vw);max-height:92vh;overflow:auto;border:1px solid #cbd5e1;border-radius:10px;padding:24px;box-sizing:border-box}
-    #cys_setup_measures::backdrop{background:rgba(15,23,42,.65)}
-    #cys_setup_measures label{display:block;font-weight:bold;margin:14px 0 6px}
-    #cys_setup_measures select,#cys_setup_measures textarea{width:100%;box-sizing:border-box;padding:10px;font-size:16px}
-    .cys-measure-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
-    </style>
-    <dialog id="cys_setup_measures" oncancel="event.preventDefault()">
-        <h2>De Medida a Medida</h2>
-        <p><b><?=$escape($ctx['machine_init']['equipo_name'] ?? $agenda['equipo_name'] ?? 'Corte y Sellado')?> |
-            OT <?=$escape($agenda['prd_number'] ?? $agId)?></b></p>
-        <p>Selecciona la medida actual y la medida para esta OT. Si no cambia la configuracion, selecciona la misma medida en ambos campos.</p>
-        <?php if (!empty($_GET['error'])): ?><p style="color:#991b1b"><?=$escape($_GET['error'])?></p><?php endif; ?>
-        <form method="post" action="/production/work-orders/events/apertura">
-            <input type="hidden" name="_csrf" value="<?=$escape(csrfToken())?>">
-            <input type="hidden" name="agid" value="<?=$agId?>">
-            <input type="hidden" name="worker_ot_id" value="<?=$otId?>">
-            <input type="hidden" name="refid" value="<?=(int)($event['id'] ?? 0)?>">
-            <input type="hidden" name="submode" value="<?=!empty($event['id'])?'update':'start'?>">
-            <?php foreach (['from'=>'De Medida','to'=>'A Medida'] as $side=>$label): ?>
-            <label for="cys_measure_<?=$side?>"><?=$label?> *</label>
-            <select id="cys_measure_<?=$side?>" name="evt_medida_<?=$side?>id" required onchange="updateCysMeasureChange()">
-                <option value="">Seleccione medida...</option>
-                <?php foreach ($medidas as $m): ?>
-                <option value="<?=(int)$m['id']?>" <?=(int)($event['evt_medida_'.$side.'id']??0)===(int)$m['id']?'selected':''?>><?=$escape($m['med_name'])?></option>
-                <?php endforeach; ?>
-            </select>
-            <?php endforeach; ?>
-            <p id="cys_measure_change" style="background:#f1f5f9;padding:12px;font-weight:bold"></p>
-            <label>Ayudante</label>
-            <select name="evt_idayudante"><option value="0">Sin ayudante</option>
-                <?php foreach ($helpers as $h): ?><option value="<?=(int)$h['id']?>" <?=(int)($event['evt_idayudante']??0)===(int)$h['id']?'selected':''?>><?=$escape($h['ayudantes'])?></option><?php endforeach; ?>
-            </select>
-            <label>Comentarios</label><textarea name="evt_comments" rows="3"><?=$escape($event['evt_comments']??'')?></textarea>
-            <?php if (!$medidas): ?><p style="color:#991b1b">No hay medidas disponibles en el catalogo ERP.</p><?php endif; ?>
-            <div class="cys-measure-actions">
-                <a class="btngrey" href="/production/work-orders/active">Volver</a>
-                <button type="submit" class="btngreen" <?=$medidas?'':'disabled'?>>Guardar</button>
-            </div>
-        </form>
-    </dialog>
-    <script>
-    function updateCysMeasureChange(){
-        const from=document.getElementById('cys_measure_from').value;
-        const to=document.getElementById('cys_measure_to').value;
-        document.getElementById('cys_measure_change').textContent=!from||!to?'Selecciona ambas medidas.'
-            :(from===to?'Sin cambio de configuracion':'Cambio de configuracion');
-    }
-    document.getElementById('cys_setup_measures').showModal();updateCysMeasureChange();
-    </script>
-    <?php
-    renderProdwrkShell('De Medida a Medida',ob_get_clean(),2,$name,$plant);
-}
+
 
 function renderProductionOperatorConsole(
     array $ctx,
@@ -3894,14 +3920,7 @@ function renderProductionOperatorConsole(
     $isSeriPlana = $isSeri && !$isSeriPulpo;
     $isPrinter = $isFlexo || $isSeri;
     $isSelladora = $equipoTypeId === 8 || stripos((string)($machineInit['type_ant_title'] ?? ''), 'selladora') !== false;
-    if ($isSelladora && $workerOtId > 0) {
-        $setupService = $ctx['prod_service'] ?? new ProductionService(Db::erpPdo(),Db::trzPdo());
-        $setupStatus = $setupService->getCysSetupMeasuresStatus($workerOtId);
-        if (!$setupStatus['complete']) {
-            renderCysSetupMeasuresGate($ctx,$setupStatus,$medidas,$helpers,$currentOperatorName,$plantaName);
-            return;
-        }
-    }
+
     // Legacy packaging URLs lead to confirmation, never to box generation in CyS.
     // Las URLs antiguas de embalaje llevan a confirmar, no a generar cajas en CyS.
     if ($isSelladora && $mode === 'embalaje') {

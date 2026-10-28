@@ -186,6 +186,7 @@ class TraceabilityService
 
     /**
      * Search orders with filters and pagination.
+     * Uses optimized two-phase execution (late row lookup) for high performance.
      */
     public function searchOrders(array $filters, int $page = 1, int $perPage = 25): array
     {
@@ -201,7 +202,6 @@ class TraceabilityService
         if ($stageFilter === 'entregado') {
             $where[] = "o.req_status = 4";
         } else {
-            // By default include active orders (2, 3) or recent closed orders if searching explicitly
             $hasSearchTerm = !empty($filters['q']) || !empty($filters['oc']) || !empty($filters['cc']) || !empty($filters['ot']);
             if ($hasSearchTerm) {
                 $where[] = "(o.req_status IN (2, 3) OR (o.req_status = 4 AND o.req_crtdat > UNIX_TIMESTAMP(NOW() - INTERVAL 180 DAY)))";
@@ -213,27 +213,31 @@ class TraceabilityService
         // Global search query
         $q = trim((string)($filters['q'] ?? ''));
         if ($q !== '') {
+            $wild = '%' . $q . '%';
             $where[] = "(
                 o.req_oc_number LIKE :q_oc
                 OR o.req_number LIKE :q_nv
-                OR ph.prd_number LIKE :q_ot
-                OR c.cust_name LIKE :q_cust
-                OR c.cust_rut LIKE :q_rut
-                OR i.item_title LIKE :q_title
-                OR i.item_number_prod LIKE :q_sku
                 OR o.req_infoaddprd_cliche_codigo LIKE :q_cliche
                 OR o.req_solic_supp_seudonimo LIKE :q_seud
+                OR EXISTS (SELECT 1 FROM customer c WHERE c.id = o.req_cust_id AND (c.cust_name LIKE :q_cust OR c.cust_rut LIKE :q_rut))
+                OR EXISTS (SELECT 1 FROM prod_header ph WHERE ph.prd_reqid = o.id AND ph.prd_number LIKE :q_ot)
+                OR EXISTS (
+                    SELECT 1 FROM orders_items oi 
+                    LEFT JOIN item i ON oi.item_id = i.id 
+                    WHERE oi.req_id = o.id 
+                      AND (i.item_title LIKE :q_title OR i.item_number_prod LIKE :q_sku OR oi.fab_printtype LIKE :q_ptype)
+                )
             )";
-            $wild = '%' . $q . '%';
             $params[':q_oc'] = $wild;
             $params[':q_nv'] = $wild;
-            $params[':q_ot'] = $wild;
-            $params[':q_cust'] = $wild;
-            $params[':q_rut'] = $wild;
-            $params[':q_title'] = $wild;
-            $params[':q_sku'] = $wild;
             $params[':q_cliche'] = $wild;
             $params[':q_seud'] = $wild;
+            $params[':q_cust'] = $wild;
+            $params[':q_rut'] = $wild;
+            $params[':q_ot'] = $wild;
+            $params[':q_title'] = $wild;
+            $params[':q_sku'] = $wild;
+            $params[':q_ptype'] = $wild;
         }
 
         // Specific field filters
@@ -248,19 +252,21 @@ class TraceabilityService
         }
 
         if (!empty($filters['ot'])) {
-            $where[] = "ph.prd_number LIKE :spec_ot";
+            $where[] = "EXISTS (SELECT 1 FROM prod_header ph WHERE ph.prd_reqid = o.id AND ph.prd_number LIKE :spec_ot)";
             $params[':spec_ot'] = '%' . trim((string)$filters['ot']) . '%';
         }
 
         if (!empty($filters['customer'])) {
-            $where[] = "(c.cust_name LIKE :spec_cust OR c.cust_rut LIKE :spec_cust2)";
+            $where[] = "EXISTS (SELECT 1 FROM customer c WHERE c.id = o.req_cust_id AND (c.cust_name LIKE :spec_cust OR c.cust_rut LIKE :spec_cust2))";
             $params[':spec_cust'] = '%' . trim((string)$filters['customer']) . '%';
             $params[':spec_cust2'] = '%' . trim((string)$filters['customer']) . '%';
         }
 
         if (!empty($filters['print_type'])) {
-            $where[] = "oi.fab_printtype = :spec_print";
-            $params[':spec_print'] = trim((string)$filters['print_type']);
+            $pType = trim((string)$filters['print_type']);
+            $where[] = "EXISTS (SELECT 1 FROM orders_items oi WHERE oi.req_id = o.id AND (oi.fab_printtype = :spec_print OR oi.fab_printtype LIKE :spec_print_like))";
+            $params[':spec_print'] = $pType;
+            $params[':spec_print_like'] = '%' . $pType . '%';
         }
 
         if (!empty($filters['date_from'])) {
@@ -281,43 +287,55 @@ class TraceabilityService
 
         // Filter by stage
         if ($stageFilter === 'clises_espera') {
-            $where[] = "(oi.fab_printtype NOT IN ('', 'SIN', 'SIN IMPRESION', 'SIN IMPRESIÓN') OR oi.fab_printtype IS NOT NULL)
+            $where[] = "EXISTS (SELECT 1 FROM orders_items oi WHERE oi.req_id = o.id AND oi.fab_printtype NOT IN ('', 'SIN', 'SIN IMPRESION', 'SIN IMPRESIÓN'))
                         AND o.req_cliche_peli_solic_repeat_act = 0
                         AND (o.req_cliche_peli_solic_dat = 0 OR (o.req_cliche_peli_solic_dat > 0 AND o.req_cliche_peli_recep_dat = 0))";
         } elseif ($stageFilter === 'preparacion_espera') {
             $where[] = "o.req_prod_checklist_term = 0";
         } elseif ($stageFilter === 'planificacion_espera') {
-            $where[] = "(ph.id IS NULL OR (SELECT COUNT(*) FROM prod_agenda pa WHERE pa.ag_prdid = ph.id) = 0)";
+            $where[] = "NOT EXISTS (SELECT 1 FROM prod_header ph INNER JOIN prod_agenda pa ON pa.ag_prdid = ph.id WHERE ph.prd_reqid = o.id)";
         } elseif ($stageFilter === 'produccion') {
-            $where[] = "ph.id IS NOT NULL AND (SELECT COUNT(*) FROM prod_agenda pa WHERE pa.ag_prdid = ph.id) > 0";
+            $where[] = "EXISTS (SELECT 1 FROM prod_header ph INNER JOIN prod_agenda pa ON pa.ag_prdid = ph.id WHERE ph.prd_reqid = o.id)";
         } elseif ($stageFilter === 'despacho_pendiente') {
-            $where[] = "(SELECT COALESCE(SUM(evt.evt_amount), 0) FROM prod_worker_ot_events evt 
-                         JOIN prod_worker_ot pwo ON evt.evt_prod_worker_otid = pwo.id
-                         JOIN prod_agenda pa ON pwo.wok_ag_id = pa.id
-                         WHERE pa.ag_prdid = ph.id AND evt.evt_type = 'prod') >= (SELECT SUM(oi2.item_amount) FROM orders_items oi2 WHERE oi2.req_id = o.id) * 0.90
-                        AND (SELECT COALESCE(SUM(odi.item_amount_shipped), 0) FROM orders_delivery od 
-                             JOIN orders_delivery_items odi ON odi.dlv_id = od.id 
-                             WHERE od.dlv_order_id = o.id) < (SELECT SUM(oi2.item_amount) FROM orders_items oi2 WHERE oi2.req_id = o.id) * 0.95";
+            $where[] = "o.req_status = 3";
         }
 
         $whereClause = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
 
-        // Count total matching orders
-        $countSql = "
-            SELECT COUNT(DISTINCT o.id)
-            FROM orders o
-            LEFT JOIN customer c ON o.req_cust_id = c.id
-            LEFT JOIN orders_items oi ON oi.req_id = o.id
-            LEFT JOIN item i ON oi.item_id = i.id
-            LEFT JOIN prod_header ph ON ph.prd_reqid = o.id
-            {$whereClause}
-        ";
-
+        // Phase 1: Fast count
+        $countSql = "SELECT COUNT(*) FROM orders o {$whereClause}";
         $countStmt = $this->pdo->prepare($countSql);
         $countStmt->execute($params);
         $totalRows = (int)$countStmt->fetchColumn();
 
-        // Fetch paginated results
+        if ($totalRows === 0) {
+            return [
+                'items' => [],
+                'total' => 0,
+                'page' => $page,
+                'per_page' => $perPage,
+                'total_pages' => 0,
+            ];
+        }
+
+        // Phase 1b: Fetch ONLY the 20 order IDs for the page
+        $idSql = "SELECT o.id FROM orders o {$whereClause} ORDER BY o.id DESC LIMIT {$perPage} OFFSET {$offset}";
+        $idStmt = $this->pdo->prepare($idSql);
+        $idStmt->execute($params);
+        $ids = $idStmt->fetchAll(PDO::FETCH_COLUMN);
+
+        if (empty($ids)) {
+            return [
+                'items' => [],
+                'total' => $totalRows,
+                'page' => $page,
+                'per_page' => $perPage,
+                'total_pages' => (int)ceil($totalRows / $perPage),
+            ];
+        }
+
+        // Phase 2: Fetch detailed columns ONLY for the selected page order IDs
+        $idIn = implode(',', array_map('intval', $ids));
         $dataSql = "
             SELECT 
                 o.id, 
@@ -337,11 +355,11 @@ class TraceabilityService
                 o.req_solic_supp_seudonimo,
                 o.req_prod_checklist_term, 
                 o.req_design_assign_uid,
-                SUM(oi.item_amount) as total_order_amount,
-                GROUP_CONCAT(DISTINCT oi.fab_printtype SEPARATOR ', ') as print_types,
-                GROUP_CONCAT(DISTINCT i.item_title SEPARATOR ' | ') as item_titles,
-                GROUP_CONCAT(DISTINCT i.item_number_prod SEPARATOR ', ') as item_skus,
-                MAX(oi.fab_design_imagehash) as fab_design_imagehash,
+                (SELECT SUM(oi.item_amount) FROM orders_items oi WHERE oi.req_id = o.id) as total_order_amount,
+                (SELECT GROUP_CONCAT(DISTINCT oi.fab_printtype SEPARATOR ', ') FROM orders_items oi WHERE oi.req_id = o.id) as print_types,
+                (SELECT GROUP_CONCAT(DISTINCT i.item_title SEPARATOR ' | ') FROM orders_items oi JOIN item i ON oi.item_id = i.id WHERE oi.req_id = o.id) as item_titles,
+                (SELECT GROUP_CONCAT(DISTINCT i.item_number_prod SEPARATOR ', ') FROM orders_items oi JOIN item i ON oi.item_id = i.id WHERE oi.req_id = o.id) as item_skus,
+                (SELECT MAX(oi.fab_design_imagehash) FROM orders_items oi WHERE oi.req_id = o.id) as fab_design_imagehash,
                 ph.id as prod_header_id, 
                 ph.prd_number as ot_number, 
                 ph.prd_status,
@@ -351,24 +369,22 @@ class TraceabilityService
                  FROM prod_worker_ot_events evt 
                  JOIN prod_worker_ot pwo ON evt.evt_prod_worker_otid = pwo.id
                  JOIN prod_agenda pa ON pwo.wok_ag_id = pa.id
-                 WHERE pa.ag_prdid = ph.id AND evt.evt_type = 'prod') as produced_units,
+                 LEFT JOIN equipo e ON pa.ag_equipo_id = e.id
+                 WHERE pa.ag_prdid = ph.id AND evt.evt_type = 'prod' 
+                   AND (pa.ag_equipotype_id = 15 OR e.equipo_name = 'EMBALAJE' OR pa.ag_equipo_id = 25)) as produced_units,
                 (SELECT COALESCE(SUM(odi.item_amount_shipped), 0)
                  FROM orders_delivery od
                  JOIN orders_delivery_items odi ON odi.dlv_id = od.id
                  WHERE od.dlv_order_id = o.id) as shipped_units
             FROM orders o
             LEFT JOIN customer c ON o.req_cust_id = c.id
-            LEFT JOIN orders_items oi ON oi.req_id = o.id
-            LEFT JOIN item i ON oi.item_id = i.id
             LEFT JOIN prod_header ph ON ph.prd_reqid = o.id
-            {$whereClause}
+            WHERE o.id IN ({$idIn})
             GROUP BY o.id
             ORDER BY o.id DESC
-            LIMIT {$perPage} OFFSET {$offset}
         ";
 
-        $stmt = $this->pdo->prepare($dataSql);
-        $stmt->execute($params);
+        $stmt = $this->pdo->query($dataSql);
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         $items = [];
@@ -450,14 +466,42 @@ class TraceabilityService
         $producedUnits = 0.0;
         $producedMeters = 0.0;
         $consumedKg = 0.0;
+        $producedFlexo = 0.0;
+        $producedSellado = 0.0;
+        $producedEmbalaje = 0.0;
+
         foreach ($events as $ev) {
             if ($ev['evt_type'] === 'prod') {
-                $producedUnits += (float)$ev['evt_amount'];
-                $producedMeters += (float)$ev['evt_amount_metros_lineales'];
-                $consumedKg += (float)$ev['prod_bobina_kg'];
+                $amt = (float)$ev['evt_amount'];
+                $meters = (float)$ev['evt_amount_metros_lineales'];
+                $kg = (float)$ev['prod_bobina_kg'];
+
+                $eqType = (int)($ev['ag_equipotype_id'] ?? 0);
+                $eqName = strtoupper(trim((string)($ev['equipo_name'] ?? '')));
+                $eqId = (int)($ev['ag_equipo_id'] ?? 0);
+
+                $isEmbalaje = ($eqType === 15 || $eqName === 'EMBALAJE' || $eqId === 25);
+                $isFlexo = ($eqType === 7 || str_contains($eqName, 'FLEXO'));
+                $isSellado = ($eqType === 8 || str_contains($eqName, 'SELLA'));
+
+                if ($isEmbalaje) {
+                    $producedEmbalaje += $amt;
+                } elseif ($isSellado) {
+                    $producedSellado += $amt;
+                } elseif ($isFlexo) {
+                    $producedFlexo += $amt;
+                }
+
+                $producedMeters += $meters;
+                $consumedKg += $kg;
             }
         }
-        $order['produced_units'] = $producedUnits;
+
+        // REQUERIMIENTO UNIBAG: El total fabricado para bolsas terminadas es SOLO lo que se embaló
+        $order['produced_units'] = $producedEmbalaje;
+        $order['produced_flexo'] = $producedFlexo;
+        $order['produced_sellado'] = $producedSellado;
+        $order['produced_embalaje'] = $producedEmbalaje;
         $order['produced_meters'] = $producedMeters;
         $order['consumed_kg'] = $consumedKg;
 
@@ -601,7 +645,7 @@ class TraceabilityService
     }
 
     /**
-     * Get production events log and machine execution.
+     * Get production events log and machine execution with full operator and duration details.
      */
     public function getOrderProductionEvents(int $orderId): array
     {
@@ -615,23 +659,52 @@ class TraceabilityService
                 evt.evt_crtdat,
                 evt.evt_enddat,
                 evt.evt_status,
+                evt.evt_comments,
+                e.id as ag_equipo_id,
                 e.equipo_name,
-                pa.ag_date
+                e.equipo_code,
+                e.equipo_desc,
+                pa.id as agenda_id,
+                pa.ag_date,
+                pa.ag_equipotype_id,
+                pa.ag_amount as planned_amount,
+                COALESCE(NULLIF(TRIM(CONCAT(w.wrk_firstname, ' ', w.wrk_lastname)), ''), TRIM(CONCAT(u.user_firstname, ' ', u.user_lastname)), 'No asignado') as operator_name,
+                COALESCE(TRIM(CONCAT(w_ay.wrk_firstname, ' ', w_ay.wrk_lastname)), '') as helper_name
             FROM prod_worker_ot_events evt
             INNER JOIN prod_worker_ot pwo ON evt.evt_prod_worker_otid = pwo.id
             INNER JOIN prod_agenda pa ON pwo.wok_ag_id = pa.id
             INNER JOIN prod_header ph ON pa.ag_prdid = ph.id
             LEFT JOIN equipo e ON pa.ag_equipo_id = e.id
+            LEFT JOIN prod_worker_init pwi ON pwo.wok_init_id = pwi.id
+            LEFT JOIN workers w ON pwi.win_wrkid = w.id
+            LEFT JOIN user u ON (pwo.wok_idusuario > 0 AND pwo.wok_idusuario = u.id)
+            LEFT JOIN workers w_ay ON evt.evt_idayudante = w_ay.id
             WHERE ph.prd_reqid = :order_id
             ORDER BY evt.id DESC
         ";
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute([':order_id' => $orderId]);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($rows as &$r) {
+            $crtdat = (int)$r['evt_crtdat'];
+            $enddat = (int)$r['evt_enddat'];
+            $durSec = ($enddat > $crtdat && $enddat > 0) ? ($enddat - $crtdat) : 0;
+            $hrs = floor($durSec / 3600);
+            $mins = floor(($durSec % 3600) / 60);
+
+            $r['duration_sec'] = $durSec;
+            $r['duration_text'] = ($enddat > 0 && $durSec > 0) ? ($hrs > 0 ? "{$hrs}h {$mins}m" : "{$mins} min") : ($enddat > 0 ? "Menos de 1 min" : "En curso");
+            $r['start_fmt'] = $crtdat > 0 ? date('d/m/Y H:i', $crtdat) : '-';
+            $r['end_fmt'] = $enddat > 0 ? date('d/m/Y H:i', $enddat) : 'En proceso';
+        }
+        unset($r);
+
+        return $rows;
     }
 
     /**
-     * Get delivery records and dispatch guides for an order.
+     * Get delivery records and dispatch guides for an order, including all dispatched items.
      */
     public function getOrderDeliveries(int $orderId): array
     {
@@ -639,19 +712,97 @@ class TraceabilityService
             SELECT 
                 od.id,
                 od.dlv_num,
+                od.dlv_docnum,
                 od.dlv_delivery_date,
                 od.dlv_status,
                 od.dlv_oc_number,
+                od.dlv_annotation,
+                od.dlv_direccion_destino,
+                od.dlv_total_netto,
+                od.dlv_total_brutto,
+                c.cust_name,
+                c.cust_rut,
                 COALESCE(SUM(odi.item_amount_shipped), 0) as total_shipped
             FROM orders_delivery od
             LEFT JOIN orders_delivery_items odi ON odi.dlv_id = od.id
+            LEFT JOIN customer c ON od.dlv_cust_id = c.id
             WHERE od.dlv_order_id = :order_id
             GROUP BY od.id
             ORDER BY od.id DESC
         ";
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute([':order_id' => $orderId]);
+        $deliveries = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($deliveries as &$dlv) {
+            $dlv['items'] = $this->getDeliveryItems((int)$dlv['id']);
+            $dlv['date_fmt'] = (int)$dlv['dlv_delivery_date'] > 0 ? date('d/m/Y', (int)$dlv['dlv_delivery_date']) : '-';
+        }
+        unset($dlv);
+
+        return $deliveries;
+    }
+
+    /**
+     * Get all items shipped in a specific delivery guide.
+     */
+    public function getDeliveryItems(int $deliveryId): array
+    {
+        $sql = "
+            SELECT 
+                odi.dlv_id,
+                odi.item_id,
+                odi.item_pos,
+                odi.item_amount_shipped,
+                odi.item_sellprice_netto,
+                odi.item_sellprice_brutto,
+                odi.item_desc,
+                COALESCE(NULLIF(i.item_title, ''), odi.item_desc, 'Bolsa') as item_title,
+                i.item_number_prod,
+                o.req_number as order_nv,
+                o.req_oc_number as order_oc
+            FROM orders_delivery_items odi
+            LEFT JOIN item i ON odi.item_id = i.id
+            LEFT JOIN orders_delivery od ON odi.dlv_id = od.id
+            LEFT JOIN orders o ON od.dlv_order_id = o.id
+            WHERE odi.dlv_id = :dlv_id
+            ORDER BY odi.item_pos ASC
+        ";
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute([':dlv_id' => $deliveryId]);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Get full detailed header and items for a delivery guide.
+     */
+    public function getDeliveryDetail(int $deliveryId): ?array
+    {
+        $sql = "
+            SELECT 
+                od.*,
+                c.cust_name,
+                c.cust_rut,
+                c.cust_street,
+                c.cust_phone,
+                u.user_firstname as creator_firstname,
+                u.user_lastname as creator_lastname
+            FROM orders_delivery od
+            LEFT JOIN customer c ON od.dlv_cust_id = c.id
+            LEFT JOIN user u ON od.dlv_crtusr = u.id
+            WHERE od.id = :dlv_id
+            LIMIT 1
+        ";
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute([':dlv_id' => $deliveryId]);
+        $dlv = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$dlv) {
+            return null;
+        }
+
+        $dlv['items'] = $this->getDeliveryItems($deliveryId);
+        $dlv['date_fmt'] = (int)$dlv['dlv_delivery_date'] > 0 ? date('d/m/Y', (int)$dlv['dlv_delivery_date']) : '-';
+        return $dlv;
     }
 
     /**

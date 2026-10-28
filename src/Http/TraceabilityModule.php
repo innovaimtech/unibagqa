@@ -25,6 +25,85 @@ function handleTraceabilityRoutes(
     $pdo = Db::erpPdo();
     $traceService = new TraceabilityService($pdo);
 
+    // Sub-route: API Guía de Despacho (JSON for floating modal)
+    if ($cleanPath === '/trazabilidad/api/guia') {
+        header('Content-Type: application/json; charset=utf-8');
+        $dlvId = (int)($_GET['id'] ?? 0);
+        if ($dlvId <= 0) {
+            echo json_encode(['success' => false, 'error' => 'ID de guía no especificado']);
+            return true;
+        }
+        $dlv = $traceService->getDeliveryDetail($dlvId);
+        if (!$dlv) {
+            echo json_encode(['success' => false, 'error' => 'Guía de despacho no encontrada']);
+            return true;
+        }
+        echo json_encode(['success' => true, 'delivery' => $dlv]);
+        return true;
+    }
+
+    // Sub-route: API Evento de Producción (JSON for floating modal)
+    if ($cleanPath === '/trazabilidad/api/evento') {
+        header('Content-Type: application/json; charset=utf-8');
+        $evtId = (int)($_GET['id'] ?? 0);
+        if ($evtId <= 0) {
+            echo json_encode(['success' => false, 'error' => 'ID de evento no especificado']);
+            return true;
+        }
+        $sql = "
+            SELECT 
+                evt.*,
+                e.id as ag_equipo_id,
+                e.equipo_name,
+                e.equipo_code,
+                e.equipo_desc,
+                pa.id as agenda_id,
+                pa.ag_date,
+                pa.ag_equipotype_id,
+                pa.ag_amount as planned_amount,
+                ph.prd_number as ot_number,
+                o.req_number as nv_number,
+                o.req_oc_number as oc_number,
+                c.cust_name,
+                COALESCE(NULLIF(TRIM(CONCAT(w.wrk_firstname, ' ', w.wrk_lastname)), ''), TRIM(CONCAT(u.user_firstname, ' ', u.user_lastname)), 'No asignado') as operator_name,
+                COALESCE(TRIM(CONCAT(w_ay.wrk_firstname, ' ', w_ay.wrk_lastname)), '') as helper_name
+            FROM prod_worker_ot_events evt
+            INNER JOIN prod_worker_ot pwo ON evt.evt_prod_worker_otid = pwo.id
+            INNER JOIN prod_agenda pa ON pwo.wok_ag_id = pa.id
+            INNER JOIN prod_header ph ON pa.ag_prdid = ph.id
+            LEFT JOIN orders o ON ph.prd_reqid = o.id
+            LEFT JOIN customer c ON o.req_cust_id = c.id
+            LEFT JOIN equipo e ON pa.ag_equipo_id = e.id
+            LEFT JOIN prod_worker_init pwi ON pwo.wok_init_id = pwi.id
+            LEFT JOIN workers w ON pwi.win_wrkid = w.id
+            LEFT JOIN user u ON (pwo.wok_idusuario > 0 AND pwo.wok_idusuario = u.id)
+            LEFT JOIN workers w_ay ON evt.evt_idayudante = w_ay.id
+            WHERE evt.id = :evt_id
+            LIMIT 1
+        ";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([':evt_id' => $evtId]);
+        $ev = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$ev) {
+            echo json_encode(['success' => false, 'error' => 'Evento de producción no encontrado']);
+            return true;
+        }
+
+        $crtdat = (int)$ev['evt_crtdat'];
+        $enddat = (int)$ev['evt_enddat'];
+        $durSec = ($enddat > $crtdat && $enddat > 0) ? ($enddat - $crtdat) : 0;
+        $hrs = floor($durSec / 3600);
+        $mins = floor(($durSec % 3600) / 60);
+
+        $ev['duration_sec'] = $durSec;
+        $ev['duration_text'] = ($enddat > 0 && $durSec > 0) ? ($hrs > 0 ? "{$hrs}h {$mins}m" : "{$mins} min") : ($enddat > 0 ? "Menos de 1 min" : "En curso");
+        $ev['start_fmt'] = $crtdat > 0 ? date('d/m/Y H:i', $crtdat) : '-';
+        $ev['end_fmt'] = $enddat > 0 ? date('d/m/Y H:i', $enddat) : 'En proceso';
+
+        echo json_encode(['success' => true, 'event' => $ev]);
+        return true;
+    }
+
     // Sub-route: Order Detail Dossier
     if ($cleanPath === '/trazabilidad/detalle' || isset($_GET['id'])) {
         $orderId = (int)($_GET['id'] ?? 0);
@@ -470,8 +549,10 @@ function renderTraceabilityListView(array $searchResult, array $stats, array $fi
         <?php endif; ?>
     </div>
 
-    <!-- Rotator Modal for Designs -->
+    <!-- Modals for Designs, Deliveries and Production -->
     <?php renderTrzRotatorModalHtml(); ?>
+    <?php renderTrzDeliveryModalHtml(); ?>
+    <?php renderTrzProdModalHtml(); ?>
 
     <!-- Traceability Styles -->
     <?php renderTraceabilityStyles(); ?>
@@ -858,18 +939,46 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
                     <h3>4. Fabricación en Planta & Mermas</h3>
                 </div>
                 <div class="trz-card-body">
-                    <!-- Progress Bar -->
+                    <!-- Progress Bar (Basado estrictamente en lo que se EMBALÓ como bolsas terminadas) -->
                     <div class="trz-prog-section">
                         <div class="prog-label-row">
-                            <span>Avance de Fabricación</span>
-                            <strong><?= number_format($prodPct, 1) ?>%</strong>
+                            <span>Avance de Fabricación (Terminado en Embalaje)</span>
+                            <strong style="color:#00a9a6; font-size:16px;"><?= number_format($prodPct, 1) ?>%</strong>
                         </div>
                         <div class="trz-bar-track bar-lg">
                             <div class="trz-bar-fill fill-cyan" style="width: <?= min(100, $prodPct) ?>%;"></div>
                         </div>
                         <div class="prog-stats-row">
-                            <span>Fabricado: <strong><?= number_format($produced, 0, ',', '.') ?> un.</strong></span>
-                            <span>Requerido: <strong><?= number_format($totalAmount, 0, ',', '.') ?> un.</strong></span>
+                            <span>Terminado (Embalaje): <strong style="color:#00a9a6; font-size:14px;"><?= number_format($produced, 0, ',', '.') ?> un.</strong></span>
+                            <span>Requerido Pedido: <strong><?= number_format($totalAmount, 0, ',', '.') ?> un.</strong></span>
+                        </div>
+                    </div>
+
+                    <!-- Desglose por Proceso (Evita sumar 2000 x 3 = 6000 cuando pasa por 3 etapas) -->
+                    <div class="trz-process-breakdown">
+                        <span class="breakdown-title">📊 Producción Registrada por Etapa:</span>
+                        <div class="breakdown-grid">
+                            <div class="process-pill pill-flexo">
+                                <span class="proc-icon">🎨</span>
+                                <div class="proc-info">
+                                    <span class="proc-label">Flexografía</span>
+                                    <strong class="proc-val"><?= number_format((float)($order['produced_flexo'] ?? 0), 0, ',', '.') ?> un.</strong>
+                                </div>
+                            </div>
+                            <div class="process-pill pill-sellado">
+                                <span class="proc-icon">✂️</span>
+                                <div class="proc-info">
+                                    <span class="proc-label">Corte y Sellado</span>
+                                    <strong class="proc-val"><?= number_format((float)($order['produced_sellado'] ?? 0), 0, ',', '.') ?> un.</strong>
+                                </div>
+                            </div>
+                            <div class="process-pill pill-embalaje">
+                                <span class="proc-icon">📦</span>
+                                <div class="proc-info">
+                                    <span class="proc-label">Embalaje (Final)</span>
+                                    <strong class="proc-val text-success"><?= number_format((float)($order['produced_embalaje'] ?? 0), 0, ',', '.') ?> un.</strong>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -890,29 +999,57 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
 
                     <hr class="trz-card-divider">
 
-                    <h4 class="trz-subheading">Historial de Eventos de Producción</h4>
+                    <div class="trz-head-with-hint">
+                        <h4 class="trz-subheading" style="margin:0;">Historial de Eventos de Producción</h4>
+                        <span class="trz-table-hint">💡 Clic en cualquier fila para ver operador y tiempos</span>
+                    </div>
+
                     <?php if (empty($events)): ?>
-                        <p class="trz-text-muted" style="font-size:12px;">No hay eventos de producción registrados aún en esta OT.</p>
+                        <p class="trz-text-muted" style="font-size:12px; margin-top:8px;">No hay eventos de producción registrados aún en esta OT.</p>
                     <?php else: ?>
                         <div class="trz-events-table-wrap">
-                            <table class="trz-events-table">
+                            <table class="trz-events-table trz-table-clickable">
                                 <thead>
                                     <tr>
-                                        <th>Fecha</th>
+                                        <th>Fecha / Hora</th>
                                         <th>Máquina</th>
-                                        <th>Tipo</th>
+                                        <th>Operador Responsable</th>
+                                        <th>Tiempo Empleado</th>
                                         <th style="text-align:right;">Cantidad</th>
                                         <th style="text-align:right;">Kilos</th>
+                                        <th style="text-align:center;">Detalle</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php foreach (array_slice($events, 0, 8) as $ev): ?>
-                                        <tr>
-                                            <td><?= (int)$ev['evt_crtdat'] > 0 ? date('d/m/Y H:i', (int)$ev['evt_crtdat']) : '-' ?></td>
-                                            <td><strong><?= h($ev['equipo_name'] ?: 'Máquina') ?></strong></td>
-                                            <td><span class="trz-ev-tag"><?= h($ev['evt_type']) ?></span></td>
-                                            <td style="text-align:right; font-weight:700;"><?= number_format((float)$ev['evt_amount'], 0, ',', '.') ?> un.</td>
-                                            <td style="text-align:right;"><?= number_format((float)$ev['prod_bobina_kg'], 1, ',', '.') ?> kg</td>
+                                    <?php foreach ($events as $idx => $ev): ?>
+                                        <tr onclick="openTrzProdModal(<?= $idx ?>)" style="cursor:pointer;" title="Click para abrir detalle de tiempos y operador">
+                                            <td><?= h($ev['start_fmt']) ?></td>
+                                            <td>
+                                                <strong><?= h($ev['equipo_name'] ?: 'Máquina') ?></strong>
+                                                <span class="trz-ev-tag" style="margin-left:4px;"><?= h($ev['evt_type']) ?></span>
+                                            </td>
+                                            <td>
+                                                <span class="trz-worker-name"><?= h($ev['operator_name']) ?></span>
+                                                <?php if (!empty($ev['helper_name'])): ?>
+                                                    <span class="trz-helper-sub">+ <?= h($ev['helper_name']) ?></span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
+                                                <span class="trz-duration-badge <?= ($ev['duration_sec'] ?? 0) > 0 ? 'dur-done' : 'dur-prog' ?>">
+                                                    ⏱️ <?= h($ev['duration_text']) ?>
+                                                </span>
+                                            </td>
+                                            <td style="text-align:right; font-weight:700;">
+                                                <?= number_format((float)$ev['evt_amount'], 0, ',', '.') ?> un.
+                                            </td>
+                                            <td style="text-align:right;">
+                                                <?= number_format((float)$ev['prod_bobina_kg'], 1, ',', '.') ?> kg
+                                            </td>
+                                            <td style="text-align:center;">
+                                                <button type="button" class="trz-btn trz-btn-outline trz-btn-xs" onclick="event.stopPropagation(); openTrzProdModal(<?= $idx ?>)">
+                                                    👁️ Ver
+                                                </button>
+                                            </td>
                                         </tr>
                                     <?php endforeach; ?>
                                 </tbody>
@@ -950,9 +1087,13 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
                         </div>
                     </div>
 
-                    <h4 class="trz-subheading" style="margin-top:16px;">Guías de Despacho Emitidas</h4>
+                    <div class="trz-head-with-hint" style="margin-top:18px;">
+                        <h4 class="trz-subheading" style="margin:0;">Guías de Despacho Emitidas</h4>
+                        <span class="trz-table-hint">💡 Clic en el N° de Guía para ver todos los productos despachados</span>
+                    </div>
+
                     <?php if (empty($deliveries)): ?>
-                        <div class="trz-notice-box notice-warning">
+                        <div class="trz-notice-box notice-warning" style="margin-top:8px;">
                             ⚠️ Aún <strong>no se han emitido Guías de Despacho</strong> para este pedido.
                         </div>
                     <?php else: ?>
@@ -960,24 +1101,38 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
                             <table class="trz-events-table">
                                 <thead>
                                     <tr>
-                                        <th>N° Guía / Factura</th>
+                                        <th>N° Guía de Despacho</th>
                                         <th>Fecha Despacho</th>
                                         <th>OC Despacho</th>
+                                        <th>Ítems en Guía</th>
                                         <th>Estado Guía</th>
                                         <th style="text-align:right;">Cantidad Despachada</th>
+                                        <th style="text-align:center;">Acción</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php foreach ($deliveries as $dlv): ?>
-                                        <tr>
-                                            <td><strong><?= h($dlv['dlv_num']) ?></strong></td>
-                                            <td><?= (int)$dlv['dlv_delivery_date'] > 0 ? date('d/m/Y', (int)$dlv['dlv_delivery_date']) : '-' ?></td>
+                                    <?php foreach ($deliveries as $idx => $dlv): ?>
+                                        <tr onclick="openTrzDeliveryModal(<?= $idx ?>)" style="cursor:pointer;" title="Click para ver qué más se despachó en esta guía">
+                                            <td>
+                                                <button type="button" class="trz-badge-dlv-btn" onclick="event.stopPropagation(); openTrzDeliveryModal(<?= $idx ?>)">
+                                                    🚚 <?= h($dlv['dlv_num']) ?> 🔍
+                                                </button>
+                                            </td>
+                                            <td><?= h($dlv['date_fmt']) ?></td>
                                             <td><?= h($dlv['dlv_oc_number'] ?: $oc) ?></td>
+                                            <td>
+                                                <span class="trz-badge badge-info"><?= count($dlv['items']) ?> producto(s)</span>
+                                            </td>
                                             <td>
                                                 <span class="trz-badge badge-success">Entregado</span>
                                             </td>
                                             <td style="text-align:right; font-weight:800; color:#00a9a6;">
                                                 <?= number_format((float)$dlv['total_shipped'], 0, ',', '.') ?> un.
+                                            </td>
+                                            <td style="text-align:center;">
+                                                <button type="button" class="trz-btn trz-btn-primary trz-btn-xs" onclick="event.stopPropagation(); openTrzDeliveryModal(<?= $idx ?>)">
+                                                    Ver Despacho ↗
+                                                </button>
                                             </td>
                                         </tr>
                                     <?php endforeach; ?>
@@ -990,8 +1145,16 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
         </div>
     </div>
 
-    <!-- Rotator Modal for Designs -->
+    <!-- Modals for Designs, Deliveries and Production -->
     <?php renderTrzRotatorModalHtml(); ?>
+    <?php renderTrzDeliveryModalHtml(); ?>
+    <?php renderTrzProdModalHtml(); ?>
+
+    <!-- Client-side data stores for instant modal opening -->
+    <script>
+        var trzDeliveriesData = <?= json_encode($deliveries, JSON_UNESCAPED_UNICODE) ?>;
+        var trzEventsData = <?= json_encode($events, JSON_UNESCAPED_UNICODE) ?>;
+    </script>
 
     <!-- Traceability Styles -->
     <?php renderTraceabilityStyles(); ?>
@@ -1117,6 +1280,370 @@ function renderTrzRotatorModalHtml(): void
                 rotateTrzModal(-90);
             } else if (e.key === '0') {
                 resetTrzModalRotation();
+            }
+        });
+    </script>
+    <?php
+}
+
+/**
+ * Render the floating modal for Delivery Guides (Despachos) with detailed items.
+ */
+function renderTrzDeliveryModalHtml(): void
+{
+    ?>
+    <div id="trzDeliveryModal" class="trz-modal-backdrop" onclick="closeTrzDeliveryModal(event)">
+        <div class="trz-modal-box trz-modal-wide" onclick="event.stopPropagation()">
+            <div class="trz-modal-top">
+                <div class="trz-modal-title-wrap">
+                    <span class="trz-modal-icon">🚚</span>
+                    <div>
+                        <h4 id="trzDlvModalTitle" class="trz-modal-title">Guía de Despacho N° GV000000</h4>
+                        <span id="trzDlvModalSub" class="trz-modal-sub">Detalle de mercadería despachada y datos de entrega</span>
+                    </div>
+                </div>
+                <div class="trz-modal-tools">
+                    <span id="trzDlvModalBadge" class="trz-badge badge-success">Entregado</span>
+                    <button type="button" class="trz-modal-close" onclick="closeTrzDeliveryModal(event)" title="Cerrar (Escape)">✕</button>
+                </div>
+            </div>
+
+            <div class="trz-modal-body-content">
+                <!-- Header Meta Grid -->
+                <div class="trz-modal-meta-grid">
+                    <div class="meta-card">
+                        <span class="meta-label">Cliente / Razón Social:</span>
+                        <strong id="trzDlvCustName" class="meta-val">-</strong>
+                        <span id="trzDlvCustRut" class="meta-sub">-</span>
+                    </div>
+                    <div class="meta-card">
+                        <span class="meta-label">Fecha de Despacho:</span>
+                        <strong id="trzDlvDate" class="meta-val">-</strong>
+                        <span id="trzDlvOc" class="meta-sub">OC: -</span>
+                    </div>
+                    <div class="meta-card">
+                        <span class="meta-label">Dirección de Destino:</span>
+                        <strong id="trzDlvAddress" class="meta-val">-</strong>
+                    </div>
+                    <div class="meta-card">
+                        <span class="meta-label">Total Unidades Despachadas:</span>
+                        <strong id="trzDlvTotalShipped" class="meta-val text-primary" style="font-size:18px;">-</strong>
+                    </div>
+                </div>
+
+                <!-- Delivery Notes / Annotation Box -->
+                <div id="trzDlvAnnotationBox" class="trz-modal-annotation-box">
+                    <span class="annot-label">📦 Anotación de Entrega & Bultos:</span>
+                    <p id="trzDlvAnnotationText" class="annot-text">-</p>
+                </div>
+
+                <!-- Dispatched Items Table -->
+                <h5 class="trz-modal-section-title">Ítems Despachados en esta Guía</h5>
+                <div class="trz-table-responsive" style="max-height: 280px; overflow-y: auto;">
+                    <table class="trz-table trz-modal-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 120px;">Código SKU</th>
+                                <th>Descripción del Producto / Medidas</th>
+                                <th style="width: 140px;">Nota de Venta / OC</th>
+                                <th style="width: 130px; text-align: right;">Cantidad</th>
+                            </tr>
+                        </thead>
+                        <tbody id="trzDlvItemsTableBody">
+                            <tr>
+                                <td colspan="4" class="trz-text-muted" style="text-align: center; padding: 20px;">
+                                    Cargando información del despacho...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="trz-modal-footer">
+                <span class="trz-modal-hint">Presione <strong>Escape</strong> para cerrar esta ventana flotante</span>
+                <button type="button" class="trz-btn trz-btn-outline trz-btn-sm" onclick="closeTrzDeliveryModal(event)">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function openTrzDeliveryModal(ref) {
+            var modal = document.getElementById('trzDeliveryModal');
+            if (!modal) return;
+
+            var dlv = null;
+            if (typeof ref === 'object' && ref !== null) {
+                dlv = ref;
+            } else if (typeof ref === 'number' && typeof trzDeliveriesData !== 'undefined' && trzDeliveriesData[ref]) {
+                dlv = trzDeliveriesData[ref];
+            }
+
+            if (dlv) {
+                populateTrzDeliveryModal(dlv);
+                modal.classList.add('open');
+            } else if (typeof ref === 'number' || typeof ref === 'string') {
+                fetch('/trazabilidad/api/guia?id=' + encodeURIComponent(ref))
+                    .then(function(res) { return res.json(); })
+                    .then(function(data) {
+                        if (data && data.success && data.delivery) {
+                            populateTrzDeliveryModal(data.delivery);
+                            modal.classList.add('open');
+                        } else {
+                            alert('No se pudo cargar la información de la guía de despacho.');
+                        }
+                    })
+                    .catch(function(err) {
+                        console.error('Error al cargar guía:', err);
+                        alert('Error al consultar los datos del despacho.');
+                    });
+            }
+        }
+
+        function populateTrzDeliveryModal(dlv) {
+            document.getElementById('trzDlvModalTitle').textContent = 'Guía de Despacho N° ' + (dlv.dlv_num || 'Sin número');
+            document.getElementById('trzDlvModalSub').textContent = 'Doc. Folio #' + (dlv.dlv_docnum || dlv.id) + ' | Emisión Unibag';
+            document.getElementById('trzDlvCustName').textContent = dlv.cust_name || 'Cliente registrado';
+            document.getElementById('trzDlvCustRut').textContent = dlv.cust_rut ? 'RUT: ' + dlv.cust_rut : '';
+            document.getElementById('trzDlvDate').textContent = dlv.date_fmt || '-';
+            document.getElementById('trzDlvOc').textContent = dlv.dlv_oc_number ? 'OC: ' + dlv.dlv_oc_number : '(Sin OC)';
+            document.getElementById('trzDlvAddress').textContent = dlv.dlv_direccion_destino || 'Entrega en planta / Según acuerdo';
+            
+            var totalShipped = parseFloat(dlv.total_shipped || 0);
+            document.getElementById('trzDlvTotalShipped').textContent = totalShipped.toLocaleString('es-CL') + ' un.';
+
+            var annotEl = document.getElementById('trzDlvAnnotationText');
+            var annotBox = document.getElementById('trzDlvAnnotationBox');
+            if (dlv.dlv_annotation && dlv.dlv_annotation.trim() !== '') {
+                annotEl.textContent = dlv.dlv_annotation;
+                annotBox.style.display = 'block';
+            } else {
+                annotBox.style.display = 'none';
+            }
+
+            var tbody = document.getElementById('trzDlvItemsTableBody');
+            tbody.innerHTML = '';
+            var items = dlv.items || [];
+            if (items.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="trz-text-muted" style="text-align: center; padding: 16px;">No hay ítems detallados para esta guía.</td></tr>';
+            } else {
+                items.forEach(function(it) {
+                    var tr = document.createElement('tr');
+                    var sku = it.item_number_prod || 'PROD';
+                    var title = it.item_title || it.item_desc || 'Bolsa';
+                    var nv = it.order_nv || '';
+                    var oc = it.order_oc || '';
+                    var orderRef = nv ? ('NV: ' + nv + (oc ? ' | OC: ' + oc : '')) : '-';
+                    var amt = parseFloat(it.item_amount_shipped || 0);
+
+                    tr.innerHTML = '<td><code>' + escapeTrzHtml(sku) + '</code></td>' +
+                        '<td><strong>' + escapeTrzHtml(title) + '</strong></td>' +
+                        '<td><span class="trz-text-muted" style="font-size:12px;">' + escapeTrzHtml(orderRef) + '</span></td>' +
+                        '<td style="text-align: right; font-weight: 800; color: #00a9a6;">' + amt.toLocaleString('es-CL') + ' un.</td>';
+                    tbody.appendChild(tr);
+                });
+            }
+        }
+
+        function closeTrzDeliveryModal(e) {
+            var modal = document.getElementById('trzDeliveryModal');
+            if (modal) modal.classList.remove('open');
+        }
+    </script>
+    <?php
+}
+
+/**
+ * Render the floating modal for Production Events and Machine execution details.
+ */
+function renderTrzProdModalHtml(): void
+{
+    ?>
+    <div id="trzProdModal" class="trz-modal-backdrop" onclick="closeTrzProdModal(event)">
+        <div class="trz-modal-box trz-modal-wide" onclick="event.stopPropagation()">
+            <div class="trz-modal-top">
+                <div class="trz-modal-title-wrap">
+                    <span class="trz-modal-icon">⚙️</span>
+                    <div>
+                        <h4 id="trzProdModalTitle" class="trz-modal-title">Detalle de Fabricación en Máquina</h4>
+                        <span id="trzProdModalSub" class="trz-modal-sub">Información técnica de tirada, operador responsable y tiempos</span>
+                    </div>
+                </div>
+                <div class="trz-modal-tools">
+                    <span id="trzProdModalBadge" class="trz-badge badge-primary">Terminado</span>
+                    <button type="button" class="trz-modal-close" onclick="closeTrzProdModal(event)" title="Cerrar (Escape)">✕</button>
+                </div>
+            </div>
+
+            <div class="trz-modal-body-content">
+                <!-- Operator & Duration Meta Grid -->
+                <div class="trz-modal-meta-grid">
+                    <div class="meta-card">
+                        <span class="meta-label">👷 Operador Responsable:</span>
+                        <strong id="trzProdOperator" class="meta-val">-</strong>
+                        <span id="trzProdHelper" class="meta-sub" style="color: #00a9a6;">-</span>
+                    </div>
+                    <div class="meta-card">
+                        <span class="meta-label">⏱️ Tiempo Empleado (Duración):</span>
+                        <strong id="trzProdDuration" class="meta-val text-primary" style="font-size: 19px;">-</strong>
+                        <span id="trzProdTimeRange" class="meta-sub">-</span>
+                    </div>
+                    <div class="meta-card">
+                        <span class="meta-label">Máquina / Equipo:</span>
+                        <strong id="trzProdMachine" class="meta-val">-</strong>
+                        <span id="trzProdMaqCode" class="meta-sub">Código: -</span>
+                    </div>
+                    <div class="meta-card">
+                        <span class="meta-label">Bolsas Fabricadas:</span>
+                        <strong id="trzProdAmount" class="meta-val text-success" style="font-size: 19px;">-</strong>
+                        <span id="trzProdMetersKg" class="meta-sub">-</span>
+                    </div>
+                </div>
+
+                <!-- Technical Details Grid -->
+                <h5 class="trz-modal-section-title">Parámetros de Turno & Ejecución</h5>
+                <div class="trz-modal-details-grid">
+                    <div class="detail-row">
+                        <span class="detail-name">Tipo de Proceso / Evento:</span>
+                        <strong id="trzProdType" class="detail-val">-</strong>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-name">Fecha y Hora de Inicio:</span>
+                        <span id="trzProdStart" class="detail-val">-</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-name">Fecha y Hora de Término:</span>
+                        <span id="trzProdEnd" class="detail-val">-</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-name">Metros Lineales Fabricados:</span>
+                        <strong id="trzProdMeters" class="detail-val">-</strong>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-name">Kilos Bobina Consumidos:</span>
+                        <strong id="trzProdKg" class="detail-val">-</strong>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-name">Cantidad Planificada en Turno:</span>
+                        <span id="trzProdPlanned" class="detail-val">-</span>
+                    </div>
+                </div>
+
+                <!-- Observations / Comments Box -->
+                <div id="trzProdCommentsBox" class="trz-modal-annotation-box" style="margin-top: 14px;">
+                    <span class="annot-label">📝 Observaciones & Comentarios del Operador:</span>
+                    <p id="trzProdCommentsText" class="annot-text">-</p>
+                </div>
+            </div>
+
+            <div class="trz-modal-footer">
+                <span class="trz-modal-hint">Presione <strong>Escape</strong> para cerrar esta ventana flotante</span>
+                <button type="button" class="trz-btn trz-btn-outline trz-btn-sm" onclick="closeTrzProdModal(event)">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function openTrzProdModal(ref) {
+            var modal = document.getElementById('trzProdModal');
+            if (!modal) return;
+
+            var ev = null;
+            if (typeof ref === 'object' && ref !== null) {
+                ev = ref;
+            } else if (typeof ref === 'number' && typeof trzEventsData !== 'undefined' && trzEventsData[ref]) {
+                ev = trzEventsData[ref];
+            }
+
+            if (ev) {
+                populateTrzProdModal(ev);
+                modal.classList.add('open');
+            } else if (typeof ref === 'number' || typeof ref === 'string') {
+                fetch('/trazabilidad/api/evento?id=' + encodeURIComponent(ref))
+                    .then(function(res) { return res.json(); })
+                    .then(function(data) {
+                        if (data && data.success && data.event) {
+                            populateTrzProdModal(data.event);
+                            modal.classList.add('open');
+                        } else {
+                            alert('No se pudo cargar la información del evento de producción.');
+                        }
+                    })
+                    .catch(function(err) {
+                        console.error('Error al cargar evento:', err);
+                        alert('Error al consultar los datos de producción.');
+                    });
+            }
+        }
+
+        function populateTrzProdModal(ev) {
+            var machineName = ev.equipo_name || 'Máquina';
+            document.getElementById('trzProdModalTitle').textContent = 'Detalle de Fabricación: ' + machineName;
+            document.getElementById('trzProdModalSub').textContent = 'Evento #' + (ev.id || '-') + (ev.ag_date ? ' | Fecha: ' + ev.ag_date : '');
+            
+            document.getElementById('trzProdOperator').textContent = ev.operator_name || 'No asignado';
+            var helperEl = document.getElementById('trzProdHelper');
+            if (ev.helper_name && ev.helper_name.trim() !== '') {
+                helperEl.textContent = 'Ayudante: ' + ev.helper_name;
+                helperEl.style.display = 'block';
+            } else {
+                helperEl.style.display = 'none';
+            }
+
+            document.getElementById('trzProdDuration').textContent = ev.duration_text || 'En curso';
+            document.getElementById('trzProdTimeRange').textContent = (ev.start_fmt || '-') + ' hasta ' + (ev.end_fmt || '-');
+
+            document.getElementById('trzProdMachine').textContent = machineName;
+            document.getElementById('trzProdMaqCode').textContent = ev.equipo_code ? 'Código: ' + ev.equipo_code : (ev.equipo_desc ? ev.equipo_desc : '');
+
+            var amt = parseFloat(ev.evt_amount || 0);
+            var meters = parseFloat(ev.evt_amount_metros_lineales || 0);
+            var kg = parseFloat(ev.prod_bobina_kg || 0);
+
+            document.getElementById('trzProdAmount').textContent = amt.toLocaleString('es-CL') + ' un.';
+            document.getElementById('trzProdMetersKg').textContent = meters.toLocaleString('es-CL') + ' m | ' + kg.toLocaleString('es-CL', {minimumFractionDigits: 1, maximumFractionDigits: 1}) + ' kg';
+
+            document.getElementById('trzProdType').textContent = (ev.evt_type || 'prod').toUpperCase();
+            document.getElementById('trzProdStart').textContent = ev.start_fmt || '-';
+            document.getElementById('trzProdEnd').textContent = ev.end_fmt || '-';
+            document.getElementById('trzProdMeters').textContent = meters.toLocaleString('es-CL') + ' metros lineales';
+            document.getElementById('trzProdKg').textContent = kg.toLocaleString('es-CL', {minimumFractionDigits: 1, maximumFractionDigits: 1}) + ' kg';
+
+            var plannedAmt = parseFloat(ev.planned_amount || 0);
+            document.getElementById('trzProdPlanned').textContent = plannedAmt > 0 ? (plannedAmt.toLocaleString('es-CL') + ' un.') : 'No especificado';
+
+            var commentsBox = document.getElementById('trzProdCommentsBox');
+            var commentsEl = document.getElementById('trzProdCommentsText');
+            if (ev.evt_comments && ev.evt_comments.trim() !== '') {
+                commentsEl.textContent = ev.evt_comments;
+                commentsBox.style.display = 'block';
+            } else {
+                commentsEl.textContent = 'Sin observaciones adicionales registradas por el operador.';
+                commentsBox.style.display = 'block';
+            }
+        }
+
+        function closeTrzProdModal(e) {
+            var modal = document.getElementById('trzProdModal');
+            if (modal) modal.classList.remove('open');
+        }
+
+        function escapeTrzHtml(str) {
+            if (!str) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        // Global Escape key handler for all traceability modals
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeTrzDeliveryModal();
+                closeTrzProdModal();
+                if (typeof closeTrzDesignModal === 'function') closeTrzDesignModal();
             }
         });
     </script>
@@ -2343,9 +2870,244 @@ function renderTraceabilityStyles(): void
             border-color: #475569;
             color: #fff;
         }
-        .trz-modal-footer .trz-btn-outline:hover {
+        /* Process Breakdown Pills */
+        .trz-process-breakdown {
+            margin: 14px 0 16px;
+            padding: 12px 14px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+        }
+        .breakdown-title {
+            display: block;
+            font-size: 11px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            color: #64748b;
+            margin-bottom: 8px;
+        }
+        .breakdown-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+        }
+        .process-pill {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            background: #fff;
+        }
+        .pill-flexo { border-color: rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.05); }
+        .pill-sellado { border-color: rgba(2, 132, 199, 0.35); background: rgba(2, 132, 199, 0.05); }
+        .pill-embalaje { border-color: rgba(16, 185, 129, 0.45); background: rgba(16, 185, 129, 0.07); }
+        .proc-icon { font-size: 20px; }
+        .proc-info { display: flex; flex-direction: column; }
+        .proc-label { font-size: 11px; color: #64748b; font-weight: 600; }
+        .proc-val { font-size: 14px; font-weight: 800; color: #0f172a; }
+
+        /* Headings with hints */
+        .trz-head-with-hint {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .trz-table-hint {
+            font-size: 11px;
+            color: #00a9a6;
+            font-weight: 700;
+        }
+
+        /* Clickable tables and row highlights */
+        .trz-table-clickable tbody tr {
+            transition: background 0.12s ease;
+        }
+        .trz-table-clickable tbody tr:hover {
+            background: rgba(0, 169, 166, 0.05) !important;
+        }
+        .trz-worker-name {
+            font-weight: 700;
+            color: #0f172a;
+            display: block;
+            font-size: 12px;
+        }
+        .trz-helper-sub {
+            font-size: 11px;
+            color: #00a9a6;
+            font-weight: 600;
+            display: block;
+        }
+        .trz-duration-badge {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 7px;
+            border-radius: 4px;
+        }
+        .dur-done {
+            background: #e0f2fe;
+            color: #0369a1;
+            border: 1px solid #bae6fd;
+        }
+        .dur-prog {
+            background: #fef3c7;
+            color: #b45309;
+            border: 1px solid #fde68a;
+        }
+
+        /* Guía badge button */
+        .trz-badge-dlv-btn {
+            background: #f0fdfa;
+            border: 1px solid #99f6e4;
+            color: #0f766e;
+            font-weight: 800;
+            font-size: 13px;
+            padding: 5px 11px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .trz-badge-dlv-btn:hover {
             background: #00a9a6;
+            color: #fff;
             border-color: #00a9a6;
+            box-shadow: 0 2px 8px rgba(0, 169, 166, 0.25);
+        }
+        .trz-guia-hint {
+            font-size: 10px;
+            font-weight: 600;
+            opacity: 0.85;
+        }
+
+        /* Wide floating modals */
+        .trz-modal-wide {
+            max-width: 820px !important;
+            width: 95% !important;
+            max-height: 90vh;
+        }
+        .trz-modal-body-content {
+            padding: 18px 20px;
+            background: #0f172a;
+            color: #f8fafc;
+            overflow-y: auto;
+            max-height: calc(85vh - 120px);
+        }
+        .trz-modal-meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .meta-card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+        }
+        .meta-label {
+            font-size: 10px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            color: #94a3b8;
+            margin-bottom: 4px;
+        }
+        .meta-val {
+            font-size: 13px;
+            color: #f8fafc;
+            line-height: 1.25;
+        }
+        .meta-sub {
+            font-size: 11px;
+            color: #64748b;
+            margin-top: 3px;
+        }
+        .trz-modal-annotation-box {
+            background: rgba(30, 41, 59, 0.7);
+            border-left: 3px solid #00a9a6;
+            border-radius: 6px;
+            padding: 10px 14px;
+            margin-bottom: 16px;
+        }
+        .annot-label {
+            display: block;
+            font-size: 11px;
+            font-weight: 800;
+            text-transform: uppercase;
+            color: #00a9a6;
+            margin-bottom: 4px;
+        }
+        .annot-text {
+            font-size: 12px;
+            color: #cbd5e1;
+            margin: 0;
+            line-height: 1.4;
+        }
+        .trz-modal-section-title {
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            color: #94a3b8;
+            margin: 14px 0 8px;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 5px;
+        }
+        .trz-modal-table {
+            background: #1e293b !important;
+            color: #e2e8f0 !important;
+            border-radius: 6px;
+            border: 1px solid #334155;
+        }
+        .trz-modal-table th {
+            background: #0f172a !important;
+            color: #94a3b8 !important;
+            border-bottom: 1px solid #334155 !important;
+            font-size: 11px !important;
+        }
+        .trz-modal-table td {
+            border-bottom: 1px solid #334155 !important;
+            color: #f1f5f9 !important;
+            font-size: 12px !important;
+        }
+        .trz-modal-details-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 12px 16px;
+        }
+        .detail-row {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+        .detail-name {
+            font-size: 11px;
+            color: #94a3b8;
+            font-weight: 600;
+        }
+        .detail-val {
+            font-size: 13px;
+            color: #f8fafc;
+        }
+        .trz-btn-xs {
+            padding: 4px 9px !important;
+            font-size: 11px !important;
+            border-radius: 5px !important;
         }
 
         /* Print styles */
