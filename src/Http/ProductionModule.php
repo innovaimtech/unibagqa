@@ -15522,17 +15522,24 @@ function renderProductionNewWorkOrderScreen(
                 <?php if ($isFlexo): ?>
                     <col width="140">
                     <col width="85">
-                    <col width="90">
+                    <col width="100">
+                    <col width="100">
+                    <col width="105">
                 <?php elseif ($isSeri): ?>
                     <col width="140">
+                    <col width="90">
+                    <col width="90">
                     <col width="90">
                 <?php elseif ($isRebobinadora): ?>
                     <col width="150">
                     <col width="90">
+                    <col width="90">
+                    <col width="90">
                 <?php else: ?>
                     <col width="130">
+                    <col width="90">
+                    <col width="90">
                 <?php endif; ?>
-                <col width="90">
                 <col width="65">
                 <col width="120">
             </colgroup>
@@ -15547,18 +15554,24 @@ function renderProductionNewWorkOrderScreen(
                     <?php if ($isFlexo): ?>
                         <td class="tdheader">Colores</td>
                         <td class="tdheader" align="center">Rodillo [Z]</td>
-                        <td class="tdheader" align="right">Metros</td>
+                        <td class="tdheader" align="right" style="min-width:95px">Planificación</td>
+                        <td class="tdheader" align="right" style="min-width:95px">Producidas</td>
+                        <td class="tdheader" align="right" style="min-width:105px;color:#0284C7">Total CC</td>
                     <?php elseif ($isSeri): ?>
                         <td class="tdheader">Colores</td>
                         <td class="tdheader" align="right">Contador</td>
+                        <td class="tdheader" align="right">Planificado</td>
+                        <td class="tdheader" align="right">Producidas</td>
                     <?php elseif ($isRebobinadora): ?>
                         <td class="tdheader">Actividad</td>
                         <td class="tdheader" align="right">Metros</td>
+                        <td class="tdheader" align="right">Planificado</td>
+                        <td class="tdheader" align="right">Producidas</td>
                     <?php else: ?>
                         <td class="tdheader">Tipo Impresión</td>
+                        <td class="tdheader" align="right">Planificado</td>
+                        <td class="tdheader" align="right">Producidas</td>
                     <?php endif; ?>
-                    <td class="tdheader" align="right">Planificado</td>
-                    <td class="tdheader" align="right">Producidas</td>
                     <td class="tdheader" align="center">Imagen</td>
                     <td class="tdheader" align="center">Acción</td>
                 </tr>
@@ -15566,7 +15579,7 @@ function renderProductionNewWorkOrderScreen(
             <tbody>
             <?php if (empty($unscheduledOrders)): ?>
                 <tr>
-                    <td colspan="13" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
+                    <td colspan="14" class="tdnrm" style="text-align:center;padding:35px 20px;color:#64748B">
                         <i class="fa fa-check-circle" style="font-size:28px;color:#10B981;margin-bottom:8px;display:block"></i>
                         <?php if (!empty($searchQuery)): ?>
                             No se encontraron órdenes fuera de planificación que coincidan con "<b><?=htmlspecialchars($searchQuery)?></b>".
@@ -15600,8 +15613,11 @@ function renderProductionNewWorkOrderScreen(
                         }
                     }
                     
-                        $cantBolsas = (float)($uo['item_amount'] ?? 0);
-                        $producidas = (float)($uo['total_produced'] ?? 0);
+                    $cantBolsas = (float)($uo['item_amount'] ?? 0);
+                    $producidas = (float)($uo['total_produced'] ?? 0);
+                    $producidasMts = (float)($uo['total_produced_meters'] ?? 0);
+                    $totalCcBolsas = (float)($uo['total_cc_units'] ?? $producidas);
+                    $totalCcMts = (float)($uo['total_cc_meters'] ?? $producidasMts);
                     $metros = (float)($uo['flexo_metros'] ?? 0);
                     $z = (int)($uo['flexo_z'] ?? 0);
                     $contador = (float)($uo['seri_contador'] ?? 0);
@@ -15637,7 +15653,18 @@ function renderProductionNewWorkOrderScreen(
                                     <span style="color:#94A3B8;font-size:12px">-</span>
                                 <?php endif; ?>
                             </td>
-                            <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
+                            <td class="tdnrm" align="right" style="white-space:nowrap">
+                                <div style="font-weight:700;color:#0F172A;font-size:12.5px"><?=number_format($metros, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#64748B;font-weight:600"><?=number_format($cantBolsas, 0, ',', '.')?> un.</div>
+                            </td>
+                            <td class="tdnrm" align="right" style="white-space:nowrap">
+                                <div style="font-weight:700;color:#0F766E;font-size:12.5px"><?=number_format($producidasMts, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#0F766E;font-weight:600"><?=number_format($producidas, 0, ',', '.')?> un.</div>
+                            </td>
+                            <td class="tdnrm" align="right" style="white-space:nowrap;background-color:rgba(2, 132, 199, 0.05)">
+                                <div style="font-weight:800;color:#0369A1;font-size:12.5px"><?=number_format($totalCcMts, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#0284C7;font-weight:700"><?=number_format($totalCcBolsas, 0, ',', '.')?> un.</div>
+                            </td>
                         <?php elseif ($isSeri): ?>
                             <td class="tdnrm">
                                 <?php if (empty($colores)): ?>
@@ -15653,14 +15680,18 @@ function renderProductionNewWorkOrderScreen(
                                 <?php endif; ?>
                             </td>
                             <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($contador, 0, ',', '.')?></b></td>
+                            <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                            <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
                         <?php elseif ($isRebobinadora): ?>
                             <td class="tdnrm"><span style="color:#0F766E;font-weight:600;font-size:12.5px"><i class="fa fa-cut"></i> <?=htmlspecialchars($actividad)?></span><div style="font-weight:800">Color: <?=htmlspecialchars((string)($uo['fabric_color'] ?? '-'))?></div></td>
                             <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
+                            <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                            <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
                         <?php else: ?>
                             <td class="tdnrm"><?=htmlspecialchars((string)$uo['fab_printtype'])?></td>
+                            <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
+                            <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
                         <?php endif; ?>
-                        <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
-                        <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
                         <td class="tdnrm" align="center">
                             <?php if ($hasImg): ?>
                                 <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$uo['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$uo['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
@@ -15866,8 +15897,9 @@ function renderProductionNewWorkOrderScreen(
                     <col width="140">
                     <col width="85">
                     <col width="95">
-                    <col width="85">
-                    <col width="90">
+                    <col width="100">
+                    <col width="100">
+                    <col width="105">
                     <col width="65">
                     <col width="105">
                 </colgroup>
@@ -15882,9 +15914,9 @@ function renderProductionNewWorkOrderScreen(
                         <td class="tdheader">Colores</td>
                         <td class="tdheader" align="center">Rodillo [Z]</td>
                         <td class="tdheader" align="center">Ubicación Clisé</td>
-                        <td class="tdheader" align="right">Metros</td>
-                        <td class="tdheader" align="right">Planificado</td>
-                        <td class="tdheader" align="right">Producidas</td>
+                        <td class="tdheader" align="right" style="min-width:95px">Planificación</td>
+                        <td class="tdheader" align="right" style="min-width:95px">Producidas</td>
+                        <td class="tdheader" align="right" style="min-width:105px;color:#0284C7">Total CC</td>
                         <td class="tdheader" align="center">Imagen</td>
                         <td class="tdheader" align="center">Opciones</td>
                     </tr>
@@ -15929,6 +15961,9 @@ function renderProductionNewWorkOrderScreen(
                         $metros = (float)($so['flexo_metros'] ?? 0);
                         $cantBolsas = (float)($so['ag_amount'] ?? 0);
                         $producidas = (float)($so['total_produced'] ?? 0);
+                        $producidasMts = (float)($so['total_produced_meters'] ?? 0);
+                        $totalCcBolsas = (float)($so['total_cc_units'] ?? $producidas);
+                        $totalCcMts = (float)($so['total_cc_meters'] ?? $producidasMts);
                     ?>
                         <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
                             <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
@@ -15971,9 +16006,18 @@ function renderProductionNewWorkOrderScreen(
                                     <span style="color:#94A3B8;font-size:12px">-</span>
                                 <?php endif; ?>
                             </td>
-                            <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
-                            <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
-                            <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
+                            <td class="tdnrm" align="right" style="white-space:nowrap">
+                                <div style="font-weight:700;color:#0F172A;font-size:12.5px"><?=number_format($metros, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#64748B;font-weight:600"><?=number_format($cantBolsas, 0, ',', '.')?> un.</div>
+                            </td>
+                            <td class="tdnrm" align="right" style="white-space:nowrap">
+                                <div style="font-weight:700;color:#0F766E;font-size:12.5px"><?=number_format($producidasMts, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#0F766E;font-weight:600"><?=number_format($producidas, 0, ',', '.')?> un.</div>
+                            </td>
+                            <td class="tdnrm" align="right" style="white-space:nowrap;background-color:rgba(2, 132, 199, 0.05)">
+                                <div style="font-weight:800;color:#0369A1;font-size:12.5px"><?=number_format($totalCcMts, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#0284C7;font-weight:700"><?=number_format($totalCcBolsas, 0, ',', '.')?> un.</div>
+                            </td>
                             <td class="tdnrm" align="center">
                                 <?php if ($hasImg): ?>
                                     <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$so['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$so['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">
@@ -16485,8 +16529,9 @@ function renderProductionActiveOrdersScreen(
                 <col width="140">
                 <col width="85">
                 <col width="95">
-                <col width="85">
-                <col width="90">
+                <col width="100">
+                <col width="100">
+                <col width="105">
                 <col width="65">
                 <col width="105">
             </colgroup>
@@ -16501,9 +16546,9 @@ function renderProductionActiveOrdersScreen(
                     <td class="tdheader">Colores</td>
                     <td class="tdheader" align="center">Rodillo [Z]</td>
                     <td class="tdheader" align="center">Ubicación Clisé</td>
-                    <td class="tdheader" align="right">Metros</td>
-                    <td class="tdheader" align="right">Planificado</td>
-                    <td class="tdheader" align="right">Producidas</td>
+                    <td class="tdheader" align="right" style="min-width:95px">Planificación</td>
+                    <td class="tdheader" align="right" style="min-width:95px">Producidas</td>
+                    <td class="tdheader" align="right" style="min-width:105px;color:#0284C7">Total CC</td>
                     <td class="tdheader" align="center">Imagen</td>
                     <td class="tdheader" align="center">Opciones</td>
                 </tr>
@@ -16554,6 +16599,9 @@ function renderProductionActiveOrdersScreen(
                     $metros = (float)($row['flexo_metros'] ?? 0);
                     $cantBolsas = (float)($row['ag_amount'] ?? 0);
                     $producidas = (float)($row['total_produced'] ?? 0);
+                    $producidasMts = (float)($row['total_produced_meters'] ?? 0);
+                    $totalCcBolsas = (float)($row['total_cc_units'] ?? $producidas);
+                    $totalCcMts = (float)($row['total_cc_meters'] ?? $producidasMts);
                 ?>
                     <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
                         <td class="tdnrm"><b><?=htmlspecialchars((string)$row['req_number'])?></b></td>
@@ -16603,9 +16651,18 @@ function renderProductionActiveOrdersScreen(
                                 <span style="color:#94A3B8;font-size:12px">-</span>
                             <?php endif; ?>
                         </td>
-                        <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
-                    <td class="tdnrm" align="right"><b><?=number_format($cantBolsas, 0, ',', '.')?></b></td>
-                    <td class="tdnrm" align="right"><b style="color:#0F766E"><?=number_format($producidas, 0, ',', '.')?></b></td>
+                        <td class="tdnrm" align="right" style="white-space:nowrap">
+                            <div style="font-weight:700;color:#0F172A;font-size:12.5px"><?=number_format($metros, 0, ',', '.')?> m</div>
+                            <div style="font-size:11px;color:#64748B;font-weight:600"><?=number_format($cantBolsas, 0, ',', '.')?> un.</div>
+                        </td>
+                        <td class="tdnrm" align="right" style="white-space:nowrap">
+                            <div style="font-weight:700;color:#0F766E;font-size:12.5px"><?=number_format($producidasMts, 0, ',', '.')?> m</div>
+                            <div style="font-size:11px;color:#0F766E;font-weight:600"><?=number_format($producidas, 0, ',', '.')?> un.</div>
+                        </td>
+                        <td class="tdnrm" align="right" style="white-space:nowrap;background-color:rgba(2, 132, 199, 0.05)">
+                            <div style="font-weight:800;color:#0369A1;font-size:12.5px"><?=number_format($totalCcMts, 0, ',', '.')?> m</div>
+                            <div style="font-size:11px;color:#0284C7;font-weight:700"><?=number_format($totalCcBolsas, 0, ',', '.')?> un.</div>
+                        </td>
                         <td class="tdnrm" align="center">
                             <?php if ($hasImg): ?>
                                 <div style="display:inline-flex;align-items:center;gap:4px;cursor:pointer" onclick="openDesignModal('<?=htmlspecialchars($imgUrl)?>', '<?=htmlspecialchars((string)$row['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$row['cust_name']))?>', '<?=htmlspecialchars(addslashes($fullDesign))?>', '<?=htmlspecialchars($medidasStr)?>')" title="Click para ver foto del diseño">

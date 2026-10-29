@@ -973,6 +973,82 @@ final class ProductionService
 
         $cacheParams = [];
 
+        $agIds = [];
+        $reqIds = [];
+        foreach ($orders as $ord) {
+            $isFlexo = ((int)($ord['equipo_type_id'] ?? 0) === 7)
+                || ((int)($ord['equipo_prod_isprinter_flexo'] ?? 0) === 1)
+                || stripos((string)($ord['equipo_name'] ?? ''), 'flexo') !== false
+                || stripos((string)($ord['type_ant_title'] ?? ''), 'flexo') !== false;
+            if ($isFlexo) {
+                if (!empty($ord['ag_id'])) {
+                    $agIds[] = (int)$ord['ag_id'];
+                }
+                if (!empty($ord['req_id'])) {
+                    $reqIds[] = (int)$ord['req_id'];
+                }
+            }
+        }
+        $agIds = array_values(array_unique(array_filter($agIds)));
+        $reqIds = array_values(array_unique(array_filter($reqIds)));
+
+        $prodAgMap = [];
+        if (!empty($agIds)) {
+            try {
+                $agPlaceholders = implode(',', $agIds);
+                $stmt = $this->erpPdo->query("
+                    SELECT t_ot.wok_ag_id,
+                           COALESCE(SUM(t_ev.evt_amount), 0) AS units,
+                           COALESCE(SUM(t_ev.evt_amount_metros_lineales), 0) AS meters
+                    FROM prod_worker_ot t_ot
+                    INNER JOIN prod_worker_ot_events t_ev ON t_ev.evt_prod_worker_otid = t_ot.id
+                    WHERE t_ot.wok_ag_id IN ($agPlaceholders)
+                      AND t_ev.evt_type = 'prod'
+                      AND t_ev.evt_status > 0
+                      AND (t_ev.evt_comments IS NULL OR (t_ev.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t_ev.evt_comments NOT LIKE '%ROLL-SE-%'))
+                    GROUP BY t_ot.wok_ag_id
+                ");
+                if ($stmt) {
+                    while ($r = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                        $prodAgMap[(int)$r['wok_ag_id']] = [
+                            'units' => (float)$r['units'],
+                            'meters' => (float)$r['meters'],
+                        ];
+                    }
+                }
+            } catch (Throwable) {}
+        }
+
+        $prodCcMap = [];
+        if (!empty($reqIds)) {
+            try {
+                $reqPlaceholders = implode(',', $reqIds);
+                $stmt = $this->erpPdo->query("
+                    SELECT pa.ag_reqid,
+                           COALESCE(SUM(t_ev.evt_amount), 0) AS units,
+                           COALESCE(SUM(t_ev.evt_amount_metros_lineales), 0) AS meters
+                    FROM prod_agenda pa
+                    INNER JOIN prod_worker_ot t_ot ON t_ot.wok_ag_id = pa.id
+                    INNER JOIN prod_worker_ot_events t_ev ON t_ev.evt_prod_worker_otid = t_ot.id
+                    LEFT JOIN equipo eq ON pa.ag_equipo_id = eq.id
+                    WHERE pa.ag_reqid IN ($reqPlaceholders)
+                      AND t_ev.evt_type = 'prod'
+                      AND t_ev.evt_status > 0
+                      AND (eq.equipo_type_id = 7 OR eq.equipo_prod_isprinter_flexo = 1 OR eq.equipo_name LIKE '%flexo%' OR eq.equipo_name LIKE '%FLEXO%')
+                      AND (t_ev.evt_comments IS NULL OR (t_ev.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t_ev.evt_comments NOT LIKE '%ROLL-SE-%'))
+                    GROUP BY pa.ag_reqid
+                ");
+                if ($stmt) {
+                    while ($r = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                        $prodCcMap[(int)$r['ag_reqid']] = [
+                            'units' => (float)$r['units'],
+                            'meters' => (float)$r['meters'],
+                        ];
+                    }
+                }
+            } catch (Throwable) {}
+        }
+
         foreach ($orders as &$ord) {
             $isFlexo = ((int)($ord['equipo_type_id'] ?? 0) === 7)
                 || ((int)($ord['equipo_prod_isprinter_flexo'] ?? 0) === 1)
@@ -1025,9 +1101,37 @@ final class ProductionService
             $mlinAddi = round($mlinProg / 100 * $mermaPerc);
             $metrosAImprimir = round($mlinProg + $mlinAddi);
 
+            $agId = (int)($ord['ag_id'] ?? 0);
+            $reqId = (int)($ord['req_id'] ?? 0);
+
+            $agUnits = (float)($prodAgMap[$agId]['units'] ?? ($ord['total_produced'] ?? 0));
+            $agMeters = (float)($prodAgMap[$agId]['meters'] ?? 0);
+            if ($agMeters <= 0 && $agUnits > 0 && $corteM2 > 0) {
+                $agMeters = round($agUnits * $corteM2);
+            }
+            if ($agUnits <= 0 && $agMeters > 0 && $corteM2 > 0) {
+                $agUnits = round($agMeters / $corteM2);
+            }
+
+            $ccUnits = (float)($prodCcMap[$reqId]['units'] ?? $agUnits);
+            $ccMeters = (float)($prodCcMap[$reqId]['meters'] ?? $agMeters);
+            if ($ccMeters <= 0 && $ccUnits > 0 && $corteM2 > 0) {
+                $ccMeters = round($ccUnits * $corteM2);
+            }
+            if ($ccUnits <= 0 && $ccMeters > 0 && $corteM2 > 0) {
+                $ccUnits = round($ccMeters / $corteM2);
+            }
+
+            $ccUnits = max($ccUnits, $agUnits);
+            $ccMeters = max($ccMeters, $agMeters);
+
             $ord['flexo_z'] = $corteZ;
             $ord['flexo_corte_m2'] = $corteM2;
             $ord['flexo_metros'] = $metrosAImprimir;
+            $ord['total_produced'] = $agUnits;
+            $ord['total_produced_meters'] = $agMeters;
+            $ord['total_cc_units'] = $ccUnits;
+            $ord['total_cc_meters'] = $ccMeters;
         }
         unset($ord);
     }
