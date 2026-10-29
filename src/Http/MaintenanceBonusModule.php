@@ -26,6 +26,12 @@ function maintenanceBonusTable(array $report, bool $excel=false): string
             $value=(float)$row[$key];
             if ($key==='days') $html.='<td class="num-int">'.(int)$value.'</td>';
             elseif ($excel) $html.='<td class="num-dec3" data-xlsx-value="'.($value/3600).'">'.number_format($value/3600,3,',','').'</td>';
+            elseif (in_array($key,['breakdown','setup','external'],true)) {
+                $html.='<td><button type="button" class="btn secondary" data-maintenance-hours-machine="'.(int)$row['id']
+                    .'" data-maintenance-hours-category="'.$key.'" data-maintenance-hours-name="'.h($row['name'])
+                    .'" data-maintenance-hours-total="'.h(MaintenanceBonusService::duration($value)).'" title="Ver eventos">'
+                    .h(MaintenanceBonusService::duration($value)).'</button></td>';
+            }
             else $html.='<td>'.h(MaintenanceBonusService::duration($value)).'</td>';
         }
         foreach (['real','target'] as $key) {
@@ -115,6 +121,26 @@ function maintenanceBonusDetail(array $report, bool $excel=false): string
     }
     if (!$report['detail']) $html.='<tr><td colspan="'.($excel?10:11).'">Sin eventos registrados.</td></tr>';
     return $html.'</tbody></table><p>El detalle lista eventos individuales; el resumen une intervalos repetidos y no duplica su tiempo.</p>';
+}
+
+/** Desglose auditable de los intervalos contabilizados / Counted interval drill-down. */
+function maintenanceBonusHourEvents(array $report): string
+{
+    $html='<p data-maintenance-hours-summary></p><label>Buscar <input type="search" data-maintenance-hours-search placeholder="CC, operario, motivo o evento"></label>'
+        .'<table class="maintenance-table"><thead><tr><th>Evento</th><th>CC</th><th>Operario</th><th>Motivo</th><th>Inicio</th><th>Termino</th><th>Duracion</th><th>Observaciones</th><th>Acciones</th></tr></thead><tbody>';
+    foreach ($report['detail'] as $event) {
+        if (empty($event['counts_in_bonus']) || $event['seconds']<=0) continue;
+        $values=[$event['source'].' #'.$event['id'],$event['ot_number']??'', $event['operator']??'',
+            $event['reason'],date('d/m/Y H:i:s',(int)$event['start_ts']),date('d/m/Y H:i:s',(int)$event['end_ts']),
+            MaintenanceBonusService::duration($event['seconds']),$event['comments']??''];
+        $html.='<tr hidden data-maintenance-hours-row data-machine="'.(int)$event['machine_id'].'" data-category="'.h($event['category'])
+            .'" data-search="'.h(implode(' ',$values)).'">';
+        foreach ($values as $value) $html.='<td class="text-cell">'.h((string)$value).'</td>';
+        $html.='<td><button type="button" class="btn secondary" data-activity-detail-source="'.($event['source']==='ERP'?'ERP':'STANDBY')
+            .'" data-activity-detail-id="'.(int)$event['id'].'">Revisar</button></td></tr>';
+    }
+    return $html.'</tbody></table><p data-maintenance-hours-empty hidden>Sin eventos contabilizados para esta seleccion.</p>'
+        .'<p>Las duraciones individuales pueden sumar mas que el total: el bono une los intervalos superpuestos de una misma categoria y maquina para no duplicar tiempo.</p>';
 }
 
 function maintenanceBonusCalendar(array $report): string
@@ -325,7 +351,7 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
     $pendingHtml=maintenanceBonusPending($report['rows'],count($report['problem_events']??[]));
     $html.='<div id="maintenance-pending" class="maintenance-notice" role="status"'.($pendingHtml===''?' hidden':'').'>'.$pendingHtml.'</div>';
     $html.='<div id="maintenance-results" class="maintenance-card maintenance-scroll">'.maintenanceBonusTable($report).'</div>';
-    $contents=['activities'=>renderOpenActivityPanel($report),'detail'=>maintenanceBonusDetail($report),
+    $contents=['hours'=>maintenanceBonusHourEvents($report),'activities'=>renderOpenActivityPanel($report),'detail'=>maintenanceBonusDetail($report),
         'problems'=>maintenanceBonusProblemEvents($report),'sources'=>maintenanceBonusSources(),
         'history'=>maintenanceBonusHistory($config->listHistory($month,'bonomantencion'),$report['machines'])];
     $form='<p>Vigencia desde '.h(substr($month,5,2).'/'.substr($month,0,4)).'. Metas, preventivo y clasificaciones se mantienen hacia adelante; los meses anteriores no cambian.</p>'
@@ -374,12 +400,14 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
         .(!$editable ? '<p>Solo Javier y Hector pueden modificar la configuracion.</p>' : '').'</form>';
     $contents['config']=$form;
     foreach ($contents as $id=>$content) {
-        $titles=['activities'=>'Actividades abiertas','detail'=>'Detalle','problems'=>'Ver pendientes','sources'=>'Cálculo y fuentes','history'=>'Historial','config'=>'Configuración'];
+        $titles=['hours'=>'Eventos contabilizados','activities'=>'Actividades abiertas','detail'=>'Detalle','problems'=>'Ver pendientes','sources'=>'Cálculo y fuentes','history'=>'Historial','config'=>'Configuración'];
         $html.='<dialog class="maintenance-dialog" id="maintenance-'.$id.'"><div class="maintenance-dialog-head">'
             .'<b>Bono mantención: '.$titles[$id].'</b><button type="button" class="btn secondary" data-maintenance-close>Cerrar</button></div>'
             .'<div class="maintenance-dialog-body">'.$content.'</div></dialog>';
     }
     $html.='<script>(function(){function filterProblems(body){var search=body.querySelector("[data-maintenance-problem-filter]").value.trim().toLocaleLowerCase("es"),machine=body.querySelector("[data-maintenance-problem-machine-filter]").value,count=0;body.querySelectorAll("[data-maintenance-problem-search]").forEach(function(row){row.hidden=!!machine&&row.dataset.maintenanceProblemMachine!==machine||!row.dataset.maintenanceProblemSearch.toLocaleLowerCase("es").includes(search);if(!row.hidden)count++;});body.querySelector("[data-maintenance-problem-count]").textContent=count+" eventos con problemas";body.querySelector("[data-maintenance-problem-empty]").hidden=count>0;}'
+        .'var hours=document.getElementById("maintenance-hours");function filterHours(){var body=hours.querySelector(".maintenance-dialog-body"),q=body.querySelector("[data-maintenance-hours-search]").value.trim().toLocaleLowerCase("es"),count=0;body.querySelectorAll("[data-maintenance-hours-row]").forEach(function(row){row.hidden=row.dataset.machine!==hours.dataset.machine||row.dataset.category!==hours.dataset.category||!row.dataset.search.toLocaleLowerCase("es").includes(q);if(!row.hidden)count++;});body.querySelector("[data-maintenance-hours-summary]").textContent=hours.dataset.name+" | "+hours.dataset.label+" | Total contabilizado: "+hours.dataset.total+" | "+count+" eventos";body.querySelector("[data-maintenance-hours-empty]").hidden=count>0;}'
+        .'document.addEventListener("click",function(e){var b=e.target.closest("[data-maintenance-hours-machine]");if(!b)return;hours.dataset.machine=b.dataset.maintenanceHoursMachine;hours.dataset.category=b.dataset.maintenanceHoursCategory;hours.dataset.name=b.dataset.maintenanceHoursName;hours.dataset.total=b.dataset.maintenanceHoursTotal;hours.dataset.label=({breakdown:"Averias",setup:"Alistamientos operativos",external:"Paros externos"})[hours.dataset.category];hours.querySelector("[data-maintenance-hours-search]").value="";filterHours();if(!hours.open)hours.showModal();});document.addEventListener("input",function(e){if(e.target.matches("[data-maintenance-hours-search]"))filterHours();});document.addEventListener("maintenance-hours-updated",function(){if(!hours.open)return;var b=document.querySelector(\'[data-maintenance-hours-machine="\'+hours.dataset.machine+\'"][data-maintenance-hours-category="\'+hours.dataset.category+\'"]\');if(b)hours.dataset.total=b.dataset.maintenanceHoursTotal;filterHours();});'
         .'document.addEventListener("click",function(e){var b=e.target.closest("[data-maintenance-open]");if(b){var d=document.getElementById("maintenance-"+b.dataset.maintenanceOpen);if(b.dataset.maintenanceOpen==="problems"){var body=d.querySelector(".maintenance-dialog-body");body.querySelector("[data-maintenance-problem-machine-filter]").value=b.dataset.maintenanceProblemMachine||"";body.querySelector("[data-maintenance-problem-filter]").value="";filterProblems(body);}d.showModal();return;}b=e.target.closest("[data-maintenance-close]");if(b){var dialog=b.closest("dialog");if(dialog.id==="maintenance-config"&&dialog.dataset.dirty==="1"){document.getElementById("maintenance-config-state").textContent="Guarda los cambios o pulsa Descartar antes de cerrar.";return;}dialog.close();}});'
         .'document.addEventListener("input",function(e){if(e.target.matches("[data-maintenance-problem-filter]"))filterProblems(e.target.closest(".maintenance-dialog-body"));});document.addEventListener("change",function(e){if(e.target.matches("[data-maintenance-problem-machine-filter]"))filterProblems(e.target.closest(".maintenance-dialog-body"));});'
         .'function duration(s){var n=Math.round(Math.abs(s));return (s<0?"-":"")+Math.floor(n/3600)+":"+String(Math.floor(n%3600/60)).padStart(2,"0")+":"+String(n%60).padStart(2,"0");}'
