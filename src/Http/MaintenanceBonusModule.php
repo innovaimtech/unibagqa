@@ -74,7 +74,7 @@ function maintenanceBonusSources(): string
         .'El total compara el promedio simple de disponibilidades con el promedio simple de metas, como la planilla. '
         .'No exige que todas las maquinas cumplan individualmente.</p>'
         .'<p><b>Control:</b> solo cuentan eventos con inicio y termino registrados dentro del periodo 26-25. No se infieren cierres ni se recortan eventos que cruzan periodos. Se unen intervalos duplicados por maquina. '
-        .'Ver pendientes muestra exclusivamente eventos iniciados en el periodo sin termino. Los eventos ya cerrados no aparecen por duracion, superposicion o limites de OT/sesion. Los abiertos no suman tiempo ni bloquean el bono; los terminos fuera del periodo tambien se excluyen. La superposicion no exige volver a cerrar eventos. Motivos no reconocidos en eventos contabilizados, datos ausentes o tiempos incompatibles con la jornada dejan el bono PENDIENTE. '
+        .'Ver pendientes muestra exclusivamente eventos iniciados en el periodo sin termino. Los eventos ya cerrados no aparecen por duracion, superposicion o limites de OT/sesion. Los abiertos no suman tiempo ni bloquean el bono; los terminos fuera del periodo tambien se excluyen. La superposicion no exige volver a cerrar eventos. Los motivos sin clasificar permanecen en Detalle con cero tiempo contabilizado y no bloquean el bono. Datos ausentes o tiempos incompatibles con la jornada dejan el bono PENDIENTE. '
         .'Un periodo cuyo dia 25 aun no termino no determina el bono definitivo.</p>'
         .'<p><b>Importe:</b> este modulo determina cumplimiento, no un monto a pagar: no se proporciono una tarifa ni una regla de pago.</p>';
 }

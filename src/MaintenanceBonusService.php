@@ -326,6 +326,12 @@ final class MaintenanceBonusService
             $event['effective_end_ts']=(int)($event['end_ts']??0);
             $event['end_source']=$event['counts_in_bonus']?'Evento registrado':'Excluido del calculo';
             $event['category'] = self::classify($event,$policy['mapping']);
+            // No inventar categoria ni bloquear cierres por motivos desconocidos.
+            // Unknown reasons stay visible but neither count nor block the bonus.
+            if ($event['category']==='unknown') {
+                $event['counts_in_bonus']=false;
+                $event['end_source']='Motivo sin clasificar; excluido del calculo';
+            }
             $reasons[$event['reason_key']] = ['label'=>$event['reason'],'category'=>$event['category']];
             $grouped[(int)$event['machine_id']][] = $event;
         }
@@ -343,7 +349,6 @@ final class MaintenanceBonusService
                 $end = (int)$event['effective_end_ts'];
                 $seconds=$event['counts_in_bonus'] ? $end-$start : 0;
                 if ($seconds>0) $intervals[$event['category']][] = [$start,$end];
-                if ($event['counts_in_bonus'] && $event['category']==='unknown') $warnings['unknown']='Motivos sin clasificar';
                 $detail[] = array_replace($event,['machine_name'=>$machine['name'],'seconds'=>$seconds,
                     'open'=>$end<=0,'clipped_start'=>$start,'clipped_end'=>$event['counts_in_bonus']?$end:$start]);
             }
