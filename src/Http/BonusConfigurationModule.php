@@ -17,6 +17,33 @@ declare(strict_types=1);
  * 4. Historial y Auditoría: Vista detallada de cambios mes a mes con comparación antes/después.
  */
 
+/** Estilos comunes de las cabeceras de bonos / Shared bonus filter styles. */
+function bonusFilterStyles(): string
+{
+    return '<style>
+        .erp-filter-card { width: 100%; box-sizing: border-box; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 20px 24px; box-shadow: 0 4px 16px rgba(15,23,42,.04); display: flex; flex-direction: column; gap: 16px; margin-bottom: 16px; }
+        .erp-filter-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; width: 100%; }
+        .erp-filter-title { font-size: 20px; font-weight: 800; color: #0f172a; letter-spacing: -.02em; text-transform: uppercase; }
+        .erp-filter-sub { font-size: 13px; color: #64748b; font-weight: 500; margin-top: 3px; }
+        .erp-filter-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .erp-filter-form { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; width: 100%; padding-top: 16px; border-top: 1px solid #f1f5f9; }
+        .erp-filter-field { display: flex; flex-direction: column; gap: 5px; }
+        .erp-filter-field.is-hidden { display: none !important; }
+        .erp-filter-field label { font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: .05em; }
+        .erp-filter-field select, .erp-filter-field input { height: 40px; border: 1px solid #cbd5e1; border-radius: 10px; padding: 0 12px; background: #f8fafc; font-size: 13px; font-weight: 600; color: #1e293b; outline: none; transition: all .15s ease; box-sizing: border-box; }
+        .erp-filter-field select:focus, .erp-filter-field input:focus { border-color: #2563eb; background: #fff; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+        .btn-filter-apply { height: 40px; padding: 0 20px; border-radius: 10px; background: linear-gradient(135deg,#2563eb,#1d4ed8); color: #fff; font-weight: 700; font-size: 13px; border: none; cursor: pointer; box-shadow: 0 4px 12px rgba(37,99,235,.25); transition: all .15s ease; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; white-space: nowrap; box-sizing: border-box; }
+        .btn-filter-apply:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37,99,235,.35); color: #fff; }
+        .btn-filter-secondary { height: 40px; padding: 0 16px; border-radius: 10px; background: #ffffff; color: #334155; font-weight: 700; font-size: 13px; border: 1px solid #cbd5e1; cursor: pointer; transition: all .15s ease; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; white-space: nowrap; box-sizing: border-box; }
+        .btn-filter-secondary:hover { background: #f8fafc; border-color: #94a3b8; color: #0f172a; }
+        @media (max-width: 900px) {
+            .erp-filter-header { flex-direction: column; align-items: stretch; }
+            .erp-filter-form { flex-direction: column; align-items: stretch; }
+            .erp-filter-field select, .erp-filter-field input, .btn-filter-apply, .btn-filter-secondary { width: 100%; }
+        }
+    </style>';
+}
+
 function canEditBonusConfiguration(): bool
 {
     return unibagIsAuthenticated() && unibagCanUserPerformModifications();

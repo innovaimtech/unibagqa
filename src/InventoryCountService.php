@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/ErpInventoryCountPostingService.php';
+
 // =============================================================================
 // Servicio · Toma de inventario
 //
@@ -484,11 +486,12 @@ final class InventoryCountService
             return [];
         }
 
-        $sql = 'SELECT iss.item_id, iss.st_id, iss.iss_inventory, iss.iss_inventory_reserved, iss.iss_inventory_min,
+        $sql = 'SELECT iss.item_id, iss.st_id, SUM(iss.iss_inventory) AS iss_inventory,
+                       SUM(iss.iss_inventory_reserved) AS iss_inventory_reserved, MAX(iss.iss_inventory_min) AS iss_inventory_min,
                        it.item_number_prod, it.item_title,
                        it.item_reg_width, it.item_reg_gsm, it.item_reg_length, it.item_reg_kg,
                        COALESCE(u.unit_name, "UNID") AS unit_name,
-                       (iss.iss_inventory - iss.iss_inventory_reserved) AS available_qty
+                       SUM(iss.iss_inventory - iss.iss_inventory_reserved) AS available_qty
                 FROM item_shops_storehouses iss
                 JOIN item it ON it.id = iss.item_id
                 LEFT JOIN item_units u ON u.id = it.item_unit
@@ -497,10 +500,6 @@ final class InventoryCountService
 
         $params = [':st_id' => $storehouseId];
 
-        if ($onlyWithStock) {
-            $sql .= ' AND iss.iss_inventory > 0';
-        }
-
         $search = trim((string)$search);
         if ($search !== '') {
             $sql .= ' AND (it.item_number_prod LIKE :search1 OR it.item_title LIKE :search2)';
@@ -508,6 +507,11 @@ final class InventoryCountService
             $params[':search2'] = '%' . $search . '%';
         }
 
+        $sql .= ' GROUP BY iss.item_id, iss.st_id, it.item_number_prod, it.item_title,
+                    it.item_reg_width, it.item_reg_gsm, it.item_reg_length, it.item_reg_kg, u.unit_name';
+        if ($onlyWithStock) {
+            $sql .= ' HAVING SUM(iss.iss_inventory) > 0';
+        }
         $sql .= ' ORDER BY it.item_number_prod ASC';
 
         $stmt = $this->erpPdo->prepare($sql);
@@ -525,6 +529,7 @@ final class InventoryCountService
                 'item_title' => trim((string)$r['item_title']),
                 'unit_name' => trim((string)$r['unit_name']),
                 'iss_inventory' => $inv,
+                'inventory_exact' => ErpInventoryCountPostingService::quantity((string)$r['iss_inventory']),
                 'iss_inventory_reserved' => $res,
                 'iss_inventory_min' => $min,
                 'available_qty' => $inv - $res,
@@ -549,7 +554,7 @@ final class InventoryCountService
 
         $draft = [];
         foreach ($items as $it) {
-            $sysQty = (float)($it['iss_inventory'] ?? 0);
+            $sysQty = (string)$it['inventory_exact'];
             $dispQty = (float)($it['available_qty'] ?? 0);
             if ($sysQty <= 0 && $dispQty <= 0) {
                 continue;
@@ -573,113 +578,15 @@ final class InventoryCountService
      * Guarda una toma de inventario (recuento) en las tablas de ERP:
      * stockcounts, stockcounts_lists, stockcounts_lists_items, stockcounts_storehouses.
      */
-    public function createErpInventoryCount(int $storehouseId, string $storehouseName, string $annotation, string $operatorName, array $items): array
+    public function createErpInventoryCount(int $storehouseId, string $storehouseName, string $annotation, string $operatorName, array $items, string $request = ''): array
     {
         if ($this->erpPdo === null) {
             return ['ok' => false, 'errors' => ['No hay conexión a la base de datos del ERP.']];
         }
 
-        $storehouseId = max(0, $storehouseId);
-        if ($storehouseId <= 0) {
-            return ['ok' => false, 'errors' => ['Debe seleccionar una bodega válida.']];
-        }
-
-        $annotation = trim($annotation);
-        if ($annotation === '') {
-            $annotation = 'Recuento inventario ' . date('d.m.Y');
-        }
-
-        $operatorName = trim($operatorName);
-        if ($operatorName === '') {
-            $operatorName = 'Operador';
-        }
-
-        $currtme = time();
-        $userId = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 1);
-
-        try {
-            $maxStmt = $this->erpPdo->query('SELECT MAX(id) AS m FROM stockcounts');
-            $nextId = (int)($maxStmt->fetchColumn() ?: 0) + 1;
-            $stcNum = 'IR' . str_pad((string)$nextId, 7, '0', STR_PAD_LEFT);
-
-            $this->erpPdo->beginTransaction();
-
-            $insHead = $this->erpPdo->prepare(
-                'INSERT INTO stockcounts (
-                    stc_num, stc_companyid, stc_shopid, stc_annotation, stc_bookdate,
-                    stc_crtdat, stc_crtusr, stc_status, stc_onlystock
-                 ) VALUES (
-                    :stc_num, 20010, 30010, :annotation, :bookdate,
-                    :crtdat, :crtusr, 2, 1
-                 )'
-            );
-            $insHead->execute([
-                ':stc_num' => $stcNum,
-                ':annotation' => $annotation,
-                ':bookdate' => $currtme,
-                ':crtdat' => $currtme,
-                ':crtusr' => $userId,
-            ]);
-            $stcId = (int)$this->erpPdo->lastInsertId();
-
-            $insList = $this->erpPdo->prepare(
-                'INSERT INTO stockcounts_lists (stc_id, lst_pos, lst_name, lst_sthid, lst_date, lst_status, lst_crtdat)
-                 VALUES (:stc_id, 1, :name, :sthid, :dt, 2, :crtdat)'
-            );
-            $insList->execute([
-                ':stc_id' => $stcId,
-                ':name' => $annotation . ' - ' . $storehouseName,
-                ':sthid' => $storehouseId,
-                ':dt' => $currtme,
-                ':crtdat' => $currtme,
-            ]);
-
-            $insSth = $this->erpPdo->prepare(
-                'INSERT INTO stockcounts_storehouses (stc_id, sth_id) VALUES (:stc_id, :sth_id)
-                 ON DUPLICATE KEY UPDATE sth_id = VALUES(sth_id)'
-            );
-            $insSth->execute([':stc_id' => $stcId, ':sth_id' => $storehouseId]);
-
-            $insItem = $this->erpPdo->prepare(
-                'INSERT INTO stockcounts_lists_items (
-                    stc_id, stc_lst_posid, item_id, item_pos, item_stid,
-                    item_amount_stock, item_amount_count, item_amount_book, item_comment
-                 ) VALUES (
-                    :stc_id, 1, :item_id, :pos, :item_stid,
-                    :amt_stock, :amt_count, :amt_book, :comment
-                 )'
-            );
-
-            $pos = 1;
-            foreach ($items as $it) {
-                $itemId = (int)($it['item_id'] ?? 0);
-                if ($itemId <= 0) continue;
-
-                $sys = (float)($it['system_qty'] ?? 0);
-                $phy = (float)($it['physical_qty'] ?? $sys);
-                $diff = $phy - $sys;
-                $comment = trim((string)($it['comment'] ?? ''));
-
-                $insItem->execute([
-                    ':stc_id' => $stcId,
-                    ':item_id' => $itemId,
-                    ':pos' => $pos++,
-                    ':item_stid' => $storehouseId,
-                    ':amt_stock' => $sys,
-                    ':amt_count' => $phy,
-                    ':amt_book' => $diff,
-                    ':comment' => $comment,
-                ]);
-            }
-
-            $this->erpPdo->commit();
-            return ['ok' => true, 'id' => $stcId, 'stc_num' => $stcNum];
-        } catch (Throwable $e) {
-            if ($this->erpPdo->inTransaction()) {
-                $this->erpPdo->rollBack();
-            }
-            return ['ok' => false, 'errors' => ['Error al guardar en ERP: ' . $e->getMessage()]];
-        }
+        $userId = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 0);
+        return (new ErpInventoryCountPostingService($this->erpPdo, $this->pdo))
+            ->create($storehouseId, $annotation, $operatorName, $items, $userId, $request);
     }
 
     /**

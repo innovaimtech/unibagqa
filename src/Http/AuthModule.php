@@ -615,6 +615,14 @@ function unibagCanUserPerformModifications(): bool
     return false;
 }
 
+/** Excepcion limitada a la toma de inventario: responsables y usuarios de Bodega.
+ * Inventory-count exception only; other modification permissions stay unchanged. */
+function unibagCanPerformInventoryCount(): bool
+{
+    return unibagIsAuthenticated()
+        && (userCanAccessArea('RECEPTION',sessionAreaPermissions()) || unibagCanUserPerformModifications());
+}
+
 /**
  * Determina si el usuario autenticado es Javier (Javier Perozo) o cuenta con autorización de Javier.
  */

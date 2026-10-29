@@ -18,6 +18,7 @@
 storage/sessions/*
 !storage/sessions/.keep
 storage/logs/
+storage/calendar/
 
 # Salidas locales no versionables
 *.log

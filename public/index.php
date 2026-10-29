@@ -58,6 +58,7 @@ require_once __DIR__ . '/../src/BonusConfigurationService.php';
 require_once __DIR__ . '/../src/Http/BonusConfigurationModule.php';
 require_once __DIR__ . '/../src/Http/HelperBonusModule.php';
 require_once __DIR__ . '/../src/Http/HelperBonusExportModule.php';
+require_once __DIR__ . '/../src/Http/MaintenanceBonusModule.php';
 require_once __DIR__ . '/../src/ScaleService.php';
 require_once __DIR__ . '/../src/PrintService.php';
 require_once __DIR__ . '/../src/Http/AuthModule.php';
@@ -2965,6 +2966,9 @@ function detectRequestedArea(string $path): string
     if ($path === '/' || $path === '/reports/production-dashboard') {
         return currentSessionArea();
     }
+    if ($path === '/stock/inventory-counts') {
+        return userCanAccessArea('ERP',sessionAreaPermissions()) ? 'ERP' : 'RECEPTION';
+    }
     if (str_starts_with($path, '/scale')) {
         return 'SCALE';
     }
@@ -4020,7 +4024,7 @@ function render(string $title, string $body): void
     } elseif ($displayArea === 'RECEPTION') {
         echo $link('/purchase-orders?status=active&supplier_type=NATIONAL', 'Recepción', $activeModule === 'reception');
         echo $link('/stock', 'Bodega', $activeModule === 'warehouses');
-        echo $link('/reports/inventory', 'Inventario', $activeModule === 'inventory');
+        echo $link('/stock/inventory-counts', 'Inventario', $activeModule === 'inventory');
     } elseif ($displayArea === 'SCALE') {
         echo $link('/scale/sealing-waste', 'Balanza', str_starts_with($currentPath, '/scale'));
     } else {
@@ -4073,6 +4077,7 @@ function render(string $title, string $body): void
         echo '<a class="subitem' . ($bonusView === 'bonocys' ? ' active' : '') . '" href="/bonificaciones?view=bonocys"><span>Bono CYS</span></a>';
         echo '<a class="subitem' . ($bonusView === 'bonopulp' ? ' active' : '') . '" href="/bonificaciones?view=bonopulp"><span>Bono pulp</span></a>';
         echo '<a class="subitem' . ($bonusView === 'bonoayudante' ? ' active' : '') . '" href="/bonificaciones?view=bonoayudante"><span>Bono ayudante</span></a>';
+        echo '<a class="subitem' . ($bonusView === 'bonomantencion' ? ' active' : '') . '" href="/bonificaciones?view=bonomantencion"><span>Bono mantención</span></a>';
         echo '<a class="subitem' . ($bonusView === 'configuracion' ? ' active' : '') . '" href="/bonificaciones?view=configuracion"><span>Configuración</span></a>';
     } elseif ($activeModule === 'warehouses') {
         $isTrzEntry = str_starts_with($currentPath, '/stock/traceability-entry') || str_starts_with($currentPath, '/stock/ingreso-trazable');
@@ -4092,11 +4097,15 @@ function render(string $title, string $body): void
         $isTrzEntry = str_starts_with($currentPath, '/stock/traceability-entry') || str_starts_with($currentPath, '/stock/ingreso-trazable');
         $isTrzTree = str_starts_with($currentPath, '/stock/traceability') && !$isTrzEntry;
         $isTransfers = str_starts_with($currentPath, '/stock/transfers') || str_starts_with($currentPath, '/stock/traspasos');
-        echo '<a class="subitem' . ($isInvReport ? ' active' : '') . '" href="/reports/inventory"><span>Informe de inventario</span></a>';
+        if (userCanAccessArea('ERP', $areaPermissions)) {
+            echo '<a class="subitem' . ($isInvReport ? ' active' : '') . '" href="/reports/inventory"><span>Informe de inventario</span></a>';
+        }
         echo '<a class="subitem' . ($isInvCount ? ' active' : '') . '" href="/stock/inventory-counts"><span>Toma de inventario</span></a>';
-        echo '<a class="subitem' . ($isTransfers ? ' active' : '') . '" href="/stock/transfers"><span>🔄 Traspasos</span></a>';
-        echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso Trazable</span></a>';
-        echo '<a class="subitem' . ($isTrzTree ? ' active' : '') . '" href="/stock/traceability"><span>🌳 Árbol Trazabilidad</span></a>';
+        if (userCanAccessArea('ERP', $areaPermissions)) {
+            echo '<a class="subitem' . ($isTransfers ? ' active' : '') . '" href="/stock/transfers"><span>🔄 Traspasos</span></a>';
+            echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso Trazable</span></a>';
+            echo '<a class="subitem' . ($isTrzTree ? ' active' : '') . '" href="/stock/traceability"><span>🌳 Árbol Trazabilidad</span></a>';
+        }
     } elseif ($activeModule === 'traceability') {
         $trzStage = (string)($_GET['stage'] ?? 'all');
         $isDetalle = str_starts_with($currentPath, '/trazabilidad/detalle') || isset($_GET['id']);
@@ -10928,6 +10937,9 @@ if ($path === '/waste/compactadora' && $method === 'GET') {
 // Nota: el cálculo de período 26–25 y la consulta ERP para Flexo están encapsulados en
 // ReceptionService (getBonusPeriodByMonthFinal / listErpFlexoProductionForBonusPeriod).
 // =============================================================================
+if (handleMaintenanceBonusRoutes($path, $method, $erpPdo, $trzPdo)) {
+    exit;
+}
 if (str_starts_with($path, '/bonificaciones/config/') && $method === 'POST') {
     requireBonusConfigurationEditAccess();
 }
@@ -10952,28 +10964,7 @@ if (in_array($path, [
 }
 
 if ($path === '/bonificaciones' && $method === 'GET') {
-    $body = '<style>
-        .erp-filter-card { width: 100%; box-sizing: border-box; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 18px; padding: 20px 24px; box-shadow: 0 4px 16px rgba(15,23,42,.04); display: flex; flex-direction: column; gap: 16px; margin-bottom: 16px; }
-        .erp-filter-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; width: 100%; }
-        .erp-filter-title { font-size: 20px; font-weight: 800; color: #0f172a; letter-spacing: -.02em; text-transform: uppercase; }
-        .erp-filter-sub { font-size: 13px; color: #64748b; font-weight: 500; margin-top: 3px; }
-        .erp-filter-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-        .erp-filter-form { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; width: 100%; padding-top: 16px; border-top: 1px solid #f1f5f9; }
-        .erp-filter-field { display: flex; flex-direction: column; gap: 5px; }
-        .erp-filter-field.is-hidden { display: none !important; }
-        .erp-filter-field label { font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: .05em; }
-        .erp-filter-field select, .erp-filter-field input { height: 40px; border: 1px solid #cbd5e1; border-radius: 10px; padding: 0 12px; background: #f8fafc; font-size: 13px; font-weight: 600; color: #1e293b; outline: none; transition: all .15s ease; box-sizing: border-box; }
-        .erp-filter-field select:focus, .erp-filter-field input:focus { border-color: #2563eb; background: #fff; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
-        .btn-filter-apply { height: 40px; padding: 0 20px; border-radius: 10px; background: linear-gradient(135deg,#2563eb,#1d4ed8); color: #fff; font-weight: 700; font-size: 13px; border: none; cursor: pointer; box-shadow: 0 4px 12px rgba(37,99,235,.25); transition: all .15s ease; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; white-space: nowrap; box-sizing: border-box; }
-        .btn-filter-apply:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(37,99,235,.35); color: #fff; }
-        .btn-filter-secondary { height: 40px; padding: 0 16px; border-radius: 10px; background: #ffffff; color: #334155; font-weight: 700; font-size: 13px; border: 1px solid #cbd5e1; cursor: pointer; transition: all .15s ease; display: inline-flex; align-items: center; gap: 6px; text-decoration: none; white-space: nowrap; box-sizing: border-box; }
-        .btn-filter-secondary:hover { background: #f8fafc; border-color: #94a3b8; color: #0f172a; }
-        @media (max-width: 900px) {
-            .erp-filter-header { flex-direction: column; align-items: stretch; }
-            .erp-filter-form { flex-direction: column; align-items: stretch; }
-            .erp-filter-field select, .erp-filter-field input, .btn-filter-apply, .btn-filter-secondary { width: 100%; }
-        }
-    </style>';
+    $body = bonusFilterStyles();
     $view = strtolower(trim((string)($_GET['view'] ?? '')));
     $viewLabel = 'Bonificaciones';
     if ($view === 'bonoflexo') { $viewLabel = 'Bonoflexo'; }
@@ -11001,6 +10992,7 @@ if ($path === '/bonificaciones' && $method === 'GET') {
             'bonocys' => 'Bono CYS',
             'bonopulp' => 'Bono pulp',
             'bonoayudante' => 'Bono ayudante',
+            'bonomantencion' => 'Bono mantención',
         ];
         $selectedLabel = (string)($bonusLabels[$bonusCode] ?? $bonusCode);
         $canEditBonuses = canEditBonusConfiguration();

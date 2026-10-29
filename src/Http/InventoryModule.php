@@ -868,7 +868,7 @@ function unibagRenderStockPage(ReceptionService $service): void
 }
 
 /**
- * Renderiza la pantalla de toma de inventario físico conectada al ERP unibag_unibag.
+ * Renderiza la toma de inventario en el ambiente ERP conectado.
  */
 function unibagRenderInventoryCountsPage(ReceptionService $service): void
 {
@@ -900,6 +900,9 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
     if ($storehouseId > 0) {
         $draftItems = $service->getErpInventoryCountDraft($storehouseId);
     }
+    $request = bin2hex(random_bytes(24));
+    $_SESSION['inventory_count_requests'] = array_slice((array)($_SESSION['inventory_count_requests'] ?? []), -19, null, true);
+    $_SESSION['inventory_count_requests'][$request] = ['warehouse' => $storehouseId, 'items' => count($draftItems)];
 
     $body = '<div class="erp-prod-shell" style="max-width:1440px;margin:0 auto">';
 
@@ -907,12 +910,12 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
         <div>
           <div style="font-size:22px;font-weight:800;color:#0f172a">Toma de inventario · ERP</div>
           <div class="muted" style="font-size:13px;margin-top:2px">
-            Registro de recuento físico directo en <code>unibag_unibag</code> (stockcounts). Las diferencias se calculan automáticamente.
+            Al guardar se ajustan las existencias y se registran las diferencias en el kardex como toma de inventario.
           </div>
         </div>
         <div style="display:flex;gap:8px">
-          <a class="btn secondary" href="/stock?bodega=' . $storehouseId . '">← Volver a consulta de stock</a>
-          <a class="btn secondary" href="/reports/inventory">Ver historial de inventarios</a>
+          <a class="btn secondary" href="/' . (userCanAccessArea('ERP', sessionAreaPermissions()) ? 'stock?bodega=' . $storehouseId : 'purchase-orders?status=active&supplier_type=NATIONAL') . '">Volver</a>
+          ' . (userCanAccessArea('ERP', sessionAreaPermissions()) ? '<a class="btn secondary" href="/reports/inventory">Historial</a>' : '') . '
         </div>
       </div>';
 
@@ -938,8 +941,10 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
       </div>';
 
     $body .= '<div class="card" style="border-radius:14px;padding:20px">';
-    $body .= '<form method="post" action="/stock/inventory-counts">';
+    $body .= '<form id="inventory-count-form" method="post" action="/stock/inventory-counts">';
     $body .= '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">';
+    $body .= '<input type="hidden" name="request_key" value="' . h($request) . '">';
+    $body .= '<input type="hidden" name="items_json" id="inventory-count-payload" value="">';
     $body .= '<input type="hidden" name="bodega" value="' . $storehouseId . '">';
     $body .= '<input type="hidden" name="storehouse_name" value="' . h($storehouseName) . '">';
 
@@ -979,25 +984,22 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
     }
 
     foreach ($draftItems as $idx => $item) {
-        $sysQty = (float)($item['system_qty'] ?? 0);
-        $phyQty = (float)($item['physical_qty'] ?? $sysQty);
-        $diff = $phyQty - $sysQty;
+        $sysQty = ErpInventoryCountPostingService::quantity($item['system_qty'] ?? '0');
+        $phyQty = ErpInventoryCountPostingService::quantity($item['physical_qty'] ?? $sysQty);
+        $diff = 0.0;
         $prefix = 'items[' . $idx . ']';
 
         $body .= '<tr style="border-bottom:1px solid #e2e8f0">
             <td style="padding:8px 10px;font-weight:700;white-space:nowrap">
               ' . h((string)$item['item_number_prod']) . '
               <input type="hidden" name="' . $prefix . '[item_id]" value="' . (int)$item['item_id'] . '">
-              <input type="hidden" name="' . $prefix . '[item_number_prod]" value="' . h((string)$item['item_number_prod']) . '">
-              <input type="hidden" name="' . $prefix . '[item_title]" value="' . h((string)$item['item_title']) . '">
-              <input type="hidden" name="' . $prefix . '[unit_name]" value="' . h((string)$item['unit_name']) . '">
-              <input type="hidden" name="' . $prefix . '[system_qty]" value="' . number_format($sysQty, 3, '.', '') . '">
+              <input type="hidden" name="' . $prefix . '[system_qty]" value="' . h($sysQty) . '">
             </td>
             <td style="padding:8px 10px;font-weight:600;color:#334155">' . h((string)$item['item_title']) . '</td>
             <td style="padding:8px 10px;text-align:center;color:#64748b">' . h((string)$item['unit_name']) . '</td>
-            <td style="padding:8px 10px;text-align:right;font-weight:700">' . number_format($sysQty, 2, ',', '.') . '</td>
+            <td style="padding:8px 10px;text-align:right;font-weight:700">' . h(rtrim(rtrim($sysQty, '0'), '.')) . '</td>
             <td style="padding:8px 10px;text-align:right">
-              <input data-system-qty="' . number_format($sysQty, 3, '.', '') . '" data-diff-target="diff-' . $idx . '" name="' . $prefix . '[physical_qty]" type="number" step="0.01" min="0" value="' . number_format($phyQty, 2, '.', '') . '" style="width:110px;height:34px;text-align:right;font-weight:700;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px">
+              <input data-system-qty="' . h($sysQty) . '" data-diff-target="diff-' . $idx . '" name="' . $prefix . '[physical_qty]" type="number" step="0.0000000001" min="0" required value="' . h(rtrim(rtrim($phyQty, '0'), '.')) . '" style="width:150px;height:34px;text-align:right;font-weight:700;border:1px solid #cbd5e1;border-radius:6px;padding:0 6px">
             </td>
             <td style="padding:8px 10px;text-align:right;font-weight:800">
               <span id="diff-' . $idx . '" style="color:' . ($diff === 0.0 ? '#64748b' : ($diff > 0 ? '#16a34a' : '#dc2626')) . '">' . number_format($diff, 2, ',', '.') . '</span>
@@ -1010,17 +1012,17 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
 
     $body .= '</tbody></table></div>';
 
-    $canEdit = unibagCanUserPerformModifications();
+    $canEdit = unibagCanPerformInventoryCount();
     if ($canEdit) {
         $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:16px;border-top:1px solid #e2e8f0">
-            <div class="muted" style="font-size:12px">Al guardar, se creará el registro de recuento <code>IR0000XXX</code> en la base de datos ERP.</div>
-            <button class="btn" type="submit"' . ($draftItems === [] ? ' disabled' : '') . ' style="padding:10px 24px;font-size:14px;font-weight:800">
-              Guardar inventario realizado en ERP
+            <div class="muted" style="font-size:12px">Faltantes: salida. Sobrantes: entrada. Sin diferencia: no genera movimiento.</div>
+            <button class="btn" type="button" onclick="document.getElementById(&quot;inventory-count-confirm&quot;).showModal()"' . ($draftItems === [] ? ' disabled' : '') . ' style="padding:10px 24px;font-size:14px;font-weight:800">
+              Guardar inventario
             </button>
           </div>';
     } else {
         $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:16px;border-top:1px solid #e2e8f0">
-            <div class="muted" style="font-size:12px">🔒 La toma y modificación de inventario físico está restringida exclusivamente a HECTOR y JAVIER.</div>
+            <div class="muted" style="font-size:12px">La toma de inventario requiere acceso de Bodega o autorización de responsable.</div>
             <button class="btn secondary" type="button" disabled style="padding:10px 24px;font-size:14px;font-weight:700;color:#94a3b8">
               🔒 Modificación restringida
             </button>
@@ -1028,26 +1030,50 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
     }
 
     $body .= '</form>';
+    $body .= '<dialog id="inventory-count-confirm" style="border:0;border-radius:12px;padding:24px;max-width:480px">
+        <h3>Guardar inventario</h3><p>Se ajustará el stock de esta bodega al conteo físico y se registrarán las entradas o salidas en el kardex. ¿Confirmas el conteo?</p>
+        <button class="btn secondary" type="button" onclick="this.closest(&quot;dialog&quot;).close()">Volver</button>
+        <button class="btn" type="button" onclick="this.closest(&quot;dialog&quot;).close();document.getElementById(&quot;inventory-count-form&quot;).requestSubmit()">Confirmar</button>
+        </dialog>';
 
     $body .= '<script>
         (function () {
           var inputs = document.querySelectorAll("input[data-system-qty][data-diff-target]");
           function recalc(input) {
-            var sys = parseFloat(input.getAttribute("data-system-qty") || "0");
-            var phy = parseFloat(input.value || "0");
-            if (isNaN(phy)) phy = 0;
-            var diff = phy - sys;
+            function scaled(value) {
+              if (!/^\d+(\.\d{0,10})?$/.test(value)) return null;
+              var parts = value.split(".");
+              return BigInt(parts[0]) * 10000000000n + BigInt((parts[1] || "").padEnd(10, "0"));
+            }
+            var sys = scaled(input.getAttribute("data-system-qty") || "0");
+            var phy = scaled(input.value);
+            var diff = phy === null || sys === null ? null : phy - sys;
             var targetId = input.getAttribute("data-diff-target");
             var span = targetId ? document.getElementById(targetId) : null;
             if (span) {
-              span.textContent = (diff > 0 ? "+" : "") + diff.toLocaleString("es-CL", {minimumFractionDigits: 2, maximumFractionDigits: 2});
-              span.style.color = diff === 0 ? "#64748b" : (diff > 0 ? "#16a34a" : "#dc2626");
+              var digits = diff === null ? "" : (diff < 0n ? -diff : diff).toString().padStart(11, "0");
+              var fraction = digits.slice(-10).replace(/0+$/, "");
+              span.textContent = diff === null ? "Revisar" : (diff < 0n ? "-" : (diff > 0n ? "+" : "")) + digits.slice(0, -10) + (fraction ? "," + fraction : "");
+              span.style.color = diff === 0n ? "#64748b" : (diff !== null && diff > 0n ? "#16a34a" : "#dc2626");
             }
           }
           for (var i = 0; i < inputs.length; i++) {
             inputs[i].addEventListener("input", function () { recalc(this); });
             recalc(inputs[i]);
           }
+          // JSON evita truncar planillas grandes por max_input_vars.
+          // JSON avoids PHP input-variable truncation on large count sheets.
+          document.getElementById("inventory-count-form").addEventListener("submit", function () {
+            var rows = {};
+            var fields = this.querySelectorAll("[name^=\"items[\"]");
+            fields.forEach(function (field) {
+              var match = field.name.match(/^items\[(\d+)\]\[(\w+)\]$/);
+              if (match) { rows[match[1]] = rows[match[1]] || {}; rows[match[1]][match[2]] = field.value; }
+            });
+            document.getElementById("inventory-count-payload").value = JSON.stringify(Object.values(rows));
+            fields.forEach(function (field) { field.removeAttribute("name"); });
+            this.querySelectorAll("button").forEach(function (button) { button.disabled = true; });
+          });
         })();
       </script>';
 
@@ -5575,8 +5601,8 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
 
     if ($path === '/stock/inventory-counts' && $method === 'POST') {
         requireCsrf();
-        if (!unibagCanUserPerformModifications()) {
-            redirectResponse('/stock/inventory-counts?bodega=' . ((int)($_POST['bodega'] ?? 0)) . '&error=' . rawurlencode('Modificaciones restringidas exclusivamente a HECTOR y JAVIER.'));
+        if (!unibagCanPerformInventoryCount()) {
+            redirectResponse('/stock/inventory-counts?bodega=' . ((int)($_POST['bodega'] ?? 0)) . '&error=' . rawurlencode('La toma de inventario requiere acceso de Bodega o autorización de responsable.'));
             return true;
         }
         $storehouseId = (int)($_POST['bodega'] ?? 0);
@@ -5584,15 +5610,20 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
         $annotation = trim((string)($_POST['annotation'] ?? ''));
         $operatorName = trim((string)($_POST['operator_name'] ?? $currentOperatorName));
 
-        $postedItems = is_array($_POST['items'] ?? null) ? $_POST['items'] : [];
+        $request = (string)($_POST['request_key'] ?? '');
+        $sheet = $_SESSION['inventory_count_requests'][$request] ?? [];
+        $postedItems = json_decode((string)($_POST['items_json'] ?? ''), true);
+        if (!is_array($postedItems)) $postedItems = is_array($_POST['items'] ?? null) ? $_POST['items'] : [];
+        if ((int)($sheet['warehouse'] ?? 0) !== $storehouseId || count($postedItems) !== (int)($sheet['items'] ?? -1)) {
+            redirectResponse('/stock/inventory-counts?bodega=' . $storehouseId . '&error=' . rawurlencode('La planilla está incompleta o vencida. Cárgala nuevamente antes de guardar.'));
+            return true;
+        }
         $items = [];
         foreach ($postedItems as $it) {
-            if (!is_array($it)) continue;
+            if (!is_array($it)) $it = [];
             $itemId = (int)($it['item_id'] ?? 0);
-            if ($itemId <= 0) continue;
-
-            $sysQty = (float)($it['system_qty'] ?? 0);
-            $phyQty = (float)($it['physical_qty'] ?? $sysQty);
+            $sysQty = (string)($it['system_qty'] ?? '');
+            $phyQty = (string)($it['physical_qty'] ?? '');
             $comment = trim((string)($it['comment'] ?? ''));
 
             $items[] = [
@@ -5613,7 +5644,8 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
             $storehouseName,
             $annotation,
             $operatorName,
-            $items
+            $items,
+            $request
         );
 
         if (!$result['ok']) {
@@ -5622,7 +5654,10 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
         }
 
         $stcNum = (string)($result['stc_num'] ?? '');
-        redirectResponse('/reports/inventory?msg=' . rawurlencode('Inventario ' . $stcNum . ' guardado exitosamente en el ERP unibag_unibag.'));
+        $numbers = array_column((array)($result['adjustments'] ?? []), 'number');
+        $message = 'Inventario ' . $stcNum . ' contabilizado. ' . ($numbers ? 'Ajustes: ' . implode(', ', $numbers) . '.' : 'Sin diferencias: no se generaron movimientos.');
+        if (!empty($result['warning'])) $message .= ' ' . $result['warning'];
+        redirectResponse('/stock/inventory-counts?bodega=' . $storehouseId . '&msg=' . rawurlencode($message));
         return true;
     }
 

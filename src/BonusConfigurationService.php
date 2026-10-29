@@ -396,6 +396,53 @@ final class BonusConfigurationService
         }
     }
 
+    /** Effective maintenance policy, independent of the ERP payroll tables.
+     * Politica vigente de mantencion, independiente de las tablas de pago ERP. */
+    public function getMaintenanceConfiguration(string $month): array
+    {
+        self::validatePeriod($month);
+        $this->ensureSchema();
+        $stmt = $this->pdo->prepare('SELECT month_key,policy_json FROM bonus_process_configs
+            WHERE bonus_code=? AND month_key<=? ORDER BY month_key DESC LIMIT 1');
+        $stmt->execute(['bonomantencion',$month]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$row) return [];
+        $policy = json_decode($row['policy_json'],true,512,JSON_THROW_ON_ERROR);
+        $policy['effective_from'] = $row['month_key'];
+        return $policy;
+    }
+
+    public function saveMaintenanceConfiguration(string $month, array $policy, string $actor): void
+    {
+        self::validatePeriod($month);
+        $this->ensureSchema();
+        unset($policy['effective_from']);
+        $this->pdo->beginTransaction();
+        try {
+            $lock = $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME)==='mysql' ? ' FOR UPDATE' : '';
+            $stmt = $this->pdo->prepare('SELECT policy_json FROM bonus_process_configs
+                WHERE bonus_code=? AND month_key<=? ORDER BY month_key DESC LIMIT 1'.$lock);
+            $stmt->execute(['bonomantencion',$month]);
+            $previous = $stmt->fetchColumn();
+            $before = $previous!==false ? json_decode($previous,true,512,JSON_THROW_ON_ERROR) : [];
+            $stmt = $this->pdo->prepare('SELECT policy_json FROM bonus_process_configs WHERE bonus_code=? AND month_key=?'.$lock);
+            $stmt->execute(['bonomantencion',$month]);
+            $exists = $stmt->fetchColumn() !== false;
+            $json = json_encode($policy,JSON_THROW_ON_ERROR);
+            $sql = $exists
+                ? 'UPDATE bonus_process_configs SET policy_json=? WHERE bonus_code=? AND month_key=?'
+                : 'INSERT INTO bonus_process_configs(policy_json,bonus_code,month_key) VALUES(?,?,?)';
+            $this->pdo->prepare($sql)->execute([$json,'bonomantencion',$month]);
+            if (json_encode($before,JSON_THROW_ON_ERROR) !== $json) {
+                $this->audit($month,'bonomantencion',$before?:null,$policy,$actor);
+            }
+            $this->pdo->commit();
+        } catch (Throwable $e) {
+            $this->pdo->rollBack();
+            throw $e;
+        }
+    }
+
     public function listHistory(string $month, string $code): array
     {
         self::validatePeriod($month);

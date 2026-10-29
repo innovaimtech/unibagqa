@@ -16415,9 +16415,9 @@ SQL;
         return $this->inventoryCountService->getErpInventoryCountDraft($storehouseId);
     }
 
-    public function createErpInventoryCount(int $storehouseId, string $storehouseName, string $annotation, string $operatorName, array $items): array
+    public function createErpInventoryCount(int $storehouseId, string $storehouseName, string $annotation, string $operatorName, array $items, string $request = ''): array
     {
-        return $this->inventoryCountService->createErpInventoryCount($storehouseId, $storehouseName, $annotation, $operatorName, $items);
+        return $this->inventoryCountService->createErpInventoryCount($storehouseId, $storehouseName, $annotation, $operatorName, $items, $request);
     }
 
     public function listErpStockcounts(int $limit = 100): array
@@ -19552,6 +19552,7 @@ SQL;
             'bonocys',
             'bonopulp',
             'bonoayudante',
+            'bonomantencion',
         ];
     }
 
