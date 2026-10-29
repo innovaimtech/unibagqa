@@ -268,6 +268,7 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
     $disabled=$editable ? '' : ' disabled';
     $summaryClass=$report['summary']['status']==='CUMPLE'?'yes':($report['summary']['status']==='NO CUMPLE'?'no':'pending');
     $html=bonusFilterStyles().'<style>
+        main:has(.maintenance-header){max-width:none;width:100%;box-sizing:border-box;padding:12px 16px}
         .maintenance-card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:16px;margin-bottom:14px}
         .maintenance-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
         .maintenance-header .erp-filter-title{margin:0;text-transform:none;font-size:22px}
@@ -310,6 +311,8 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
         .maintenance-table{border-collapse:collapse;width:100%;font-size:12px}
         .maintenance-table th,.maintenance-table td{border:1px solid #e2e8f0;padding:8px;text-align:right;white-space:nowrap}
         .maintenance-table th{background:#eff6ff;color:#334155;white-space:normal;position:sticky;top:0;z-index:1}
+        #maintenance-results .maintenance-table th,#maintenance-results .maintenance-table td{padding:8px 6px}
+        #maintenance-results .maintenance-table th{overflow-wrap:break-word}
         .maintenance-table td:nth-child(2),.maintenance-table .text-cell{text-align:left}
         .maintenance-hour-link{appearance:none;background:transparent;border:0;padding:0;margin:0;color:inherit;font:inherit;line-height:inherit;cursor:pointer}
         .maintenance-hour-link:hover{text-decoration:underline;text-underline-offset:3px}
@@ -323,10 +326,10 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
         .maintenance-status{font-weight:800;padding:4px 7px;border-radius:6px;display:inline-block}
         .maintenance-status.yes{color:#166534;background:#dcfce7}.maintenance-status.no{color:#991b1b;background:#fee2e2}
         .maintenance-status.pending{color:#92400e;background:#fef3c7}
-        .maintenance-dialog{width:96vw;max-width:1500px;height:90vh;border:0;border-radius:14px;padding:0}
+        .maintenance-dialog{width:calc(100vw - 24px);max-width:none;max-height:calc(100vh - 24px);height:calc(100vh - 24px);box-sizing:border-box;border:0;border-radius:14px;padding:0}
         .maintenance-dialog::backdrop{background:#0f172aa8}
         .maintenance-dialog-head{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid #e2e8f0}
-        .maintenance-dialog-body{padding:18px;overflow:auto;height:calc(90vh - 75px);box-sizing:border-box}
+        .maintenance-dialog-body{padding:14px;overflow:auto;height:calc(100% - 65px);box-sizing:border-box}
         .maintenance-dialog input:not([type=checkbox]),.maintenance-dialog select{max-width:170px;padding:7px;border:1px solid #cbd5e1;border-radius:7px}
         .maintenance-dialog p{line-height:1.5}.maintenance-dialog input:disabled{background:#f1f5f9}
         </style><section class="erp-filter-card maintenance-header" aria-labelledby="maintenance-title">'
