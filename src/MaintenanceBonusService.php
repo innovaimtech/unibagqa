@@ -167,10 +167,9 @@ final class MaintenanceBonusService
             LEFT JOIN workers w ON w.id=wi.win_wrkid
             LEFT JOIN prod_pause_types pt ON pt.id=ev.evt_pause_id
             WHERE ev.evt_status>0 AND ot.wok_status>0 AND ev.evt_type IN ('pause','apertura','mantencion')
-              AND ev.evt_crtdat<:finish AND (ev.evt_enddat>:start OR COALESCE(ev.evt_enddat,0)=0
-                OR (ev.evt_enddat<ev.evt_crtdat AND ev.evt_crtdat>=:invalid_start))
+              AND ev.evt_crtdat>=:start AND ev.evt_crtdat<:finish
             ORDER BY ev.evt_crtdat,ev.id");
-        $stmt->execute([':finish'=>$period['end'],':start'=>$period['start'],':invalid_start'=>$period['start']]);
+        $stmt->execute([':finish'=>$period['end'],':start'=>$period['start']]);
         $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
         $repairs = [];
         // evt_equipo_mantid references equipo_manttype in the legacy ERP.
@@ -192,8 +191,8 @@ final class MaintenanceBonusService
         unset($event);
         if ($this->tableExists($this->trz,'production_machine_standby_events')) {
             $stmt = $this->trz->prepare('SELECT * FROM production_machine_standby_events
-                WHERE created_at<? AND (ended_at>? OR COALESCE(ended_at,0)=0) ORDER BY created_at,id');
-            $stmt->execute([$period['end'],$period['start']]);
+                WHERE shift_date>=? AND shift_date<? ORDER BY shift_date,start_time,id');
+            $stmt->execute([date('Y-m-d',$period['start']),date('Y-m-d',$period['end'])]);
             foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
                 // Standby stores ERP machine ids, just like the machine connection.
                 $start = strtotime($row['shift_date'].' '.$row['start_time']) ?: (int)$row['created_at'];
@@ -257,52 +256,12 @@ final class MaintenanceBonusService
         foreach ($events as $event) {
             $start=(int)$event['start_ts'];
             $rawEnd=(int)($event['end_ts']??0);
-            $effectiveEnd=(int)($event['effective_end_ts']??self::eventEnd($event)['end']);
-            if ($start>=$period['end'] || ($effectiveEnd>0 && $effectiveEnd<=$period['start'] && $effectiveEnd>=$start)) continue;
-            $issues=[];
-            if ($rawEnd<=0) {
-                $issues[]=$effectiveEnd>0 ? 'Termino sin registrar; limitado por '.($event['end_source']??'cierre registrado') : 'Evento sin finalizar';
-            }
+            if ($start<$period['start'] || $start>=$period['end'] || $rawEnd>0) continue;
+            $issues=['Evento sin finalizar; excluido del calculo del bono'];
             if ($start<=0 || $start>$now) $issues[]='Fecha de inicio no valida';
-            if ($rawEnd>0 && $rawEnd<$start) $issues[]='Termino anterior al inicio';
-            foreach (['ot_end_ts','session_end_ts'] as $field) {
-                if ($rawEnd>0 && (int)($event[$field]??0)>0 && $rawEnd>(int)$event[$field]) {
-                    $issues[]='Termino posterior al cierre de OT o sesion';
-                    break;
-                }
-            }
-            if (($event['category']??'')==='unknown') $issues[]='Motivo sin clasificar';
-            $name=mb_strtolower(trim((string)($event['reason']??'')),'UTF-8');
-            $maintenance=($event['event_type']??'')==='mantencion' || ($event['category']??'')==='preventive'
-                || in_array($name,['mantencion','mantención','mantenimiento','mantenimiento / reparacion','mantenimiento / reparación'],true);
-            $limit=($event['category']??'')==='lunch' ? 3600 : ($maintenance ? 10800 : null);
-            $duration=max(0,($rawEnd>0?$rawEnd:($effectiveEnd>0?$effectiveEnd:min($now,$period['end'])))-$start);
-            if ($limit!==null && $duration>$limit) $issues[]=$limit===3600 ? 'Colacion mayor a 1 hora' : 'Mantencion mayor a 3 horas';
-            $items[]=array_replace($event,['issues'=>$issues,'review_seconds'=>$rawEnd>0 && $rawEnd>=$start?$rawEnd-$start:null]);
+            $items[]=array_replace($event,['issues'=>$issues,'review_seconds'=>null]);
         }
-        // Sweep only loss categories, matching the existing bonus overlap rule.
-        // Revisar solo categorias de perdida, igual que la regla actual del bono.
-        $order=array_keys($items);
-        usort($order,static fn($a,$b)=>[$items[$a]['machine_id'],$items[$a]['clipped_start']]
-            <=>[$items[$b]['machine_id'],$items[$b]['clipped_start']]);
-        $active=[];$overlapping=[];
-        foreach ($order as $index) {
-            $event=$items[$index];
-            if (!in_array($event['category'],['breakdown','setup','external'],true) || $event['clipped_end']<=$event['clipped_start']) continue;
-            foreach ($active as $other=>$previous) {
-                if ((int)$previous['machine_id']!==(int)$event['machine_id'] || $previous['clipped_end']<=$event['clipped_start']) {
-                    unset($active[$other]);
-                    continue;
-                }
-                if ($previous['category']!==$event['category']) {
-                    if (!isset($overlapping[$index])) $items[$index]['issues'][]='Superpuesto con '.$previous['source'].' #'.$previous['id'];
-                    if (!isset($overlapping[$other])) $items[$other]['issues'][]='Superpuesto con '.$event['source'].' #'.$event['id'];
-                    $overlapping[$index]=$overlapping[$other]=true;
-                }
-            }
-            $active[$index]=$event;
-        }
-        return array_values(array_filter($items,static fn($event)=>!empty($event['issues'])));
+        return $items;
     }
 
     /** Jornada indicada, independiente de turnos/asistencia o ajustes antiguos.
@@ -321,9 +280,19 @@ final class MaintenanceBonusService
             INNER JOIN prod_worker_ot ot ON ot.id=ev.evt_prod_worker_otid
             INNER JOIN prod_worker_init wi ON wi.id=ot.wok_init_id
             WHERE ev.evt_status>0 AND ot.wok_status>0 AND ev.evt_type IN ('prod','prodsericolor')
-                AND ev.evt_crtdat<? AND (ev.evt_enddat>? OR ev.evt_crtdat>=?)");
-        $stmt->execute([$period['end'],$period['start'],$period['start']]);
+                AND ev.evt_crtdat>=? AND ev.evt_crtdat<? AND ev.evt_enddat>=ev.evt_crtdat
+                AND ev.evt_enddat>0 AND ev.evt_enddat<?");
+        $stmt->execute([$period['start'],$period['end'],$period['end']]);
         return array_fill_keys(array_map('intval',$stmt->fetchAll(PDO::FETCH_COLUMN)),true);
+    }
+
+    /** Solo tiempos registrados completos del periodo, sin inferencias ni recortes.
+     * Only complete recorded intervals in this period, without inference or clipping. */
+    public static function countsInPeriod(array $event,array $period): bool
+    {
+        $start=(int)$event['start_ts'];$end=(int)($event['end_ts']??0);
+        return $start>=$period['start'] && $start<$period['end']
+            && $end>0 && $end>=$start && $end<$period['end'];
     }
 
     public static function calculate(float $total, float $preventive, float $lunch, float $breakdown,
@@ -352,12 +321,10 @@ final class MaintenanceBonusService
         $grouped = [];
         $reasons = $this->fixedReasons();
         foreach ($events as $event) {
-            $end=self::eventEnd($event);
-            // Closed historical events do not belong to this bonus period.
-            // Eventos historicos ya cerrados no afectan el periodo consultado.
-            if ($end['end']>0 && $end['end']<=$period['start'] && $end['end']>=(int)$event['start_ts']) continue;
-            $event['effective_end_ts']=$end['end'];
-            $event['end_source']=$end['source'];
+            if ((int)$event['start_ts']<$period['start'] || (int)$event['start_ts']>=$period['end']) continue;
+            $event['counts_in_bonus']=self::countsInPeriod($event,$period);
+            $event['effective_end_ts']=(int)($event['end_ts']??0);
+            $event['end_source']=$event['counts_in_bonus']?'Evento registrado':'Excluido del calculo';
             $event['category'] = self::classify($event,$policy['mapping']);
             $reasons[$event['reason_key']] = ['label'=>$event['reason'],'category'=>$event['category']];
             $grouped[(int)$event['machine_id']][] = $event;
@@ -372,29 +339,16 @@ final class MaintenanceBonusService
             $warnings = [];
             $machineEvents = $grouped[$id]??[];
             foreach ($machineEvents as $event) {
-                $start = max((int)$event['start_ts'],$period['start']);
+                $start = (int)$event['start_ts'];
                 $end = (int)$event['effective_end_ts'];
-                if ($end<=0) {
-                    $warnings['open']='Eventos sin finalizar';
-                    // Missing duration is not elapsed time over months or years.
-                    // Sin duracion validable: no inventar horas hasta la fecha actual.
-                    $end=$start;
-                } elseif ($end<(int)$event['start_ts']) {
-                    $warnings['invalid']='Eventos con fechas invalidas';
-                }
-                $end=min($end,$period['end']);
-                $seconds=max(0,$end-$start);
+                $seconds=$event['counts_in_bonus'] ? $end-$start : 0;
                 if ($seconds>0) $intervals[$event['category']][] = [$start,$end];
-                if ($event['category']==='unknown') $warnings['unknown']='Motivos sin clasificar';
+                if ($event['counts_in_bonus'] && $event['category']==='unknown') $warnings['unknown']='Motivos sin clasificar';
                 $detail[] = array_replace($event,['machine_name'=>$machine['name'],'seconds'=>$seconds,
-                    'open'=>(int)$event['effective_end_ts']<=0,'clipped_start'=>$start,'clipped_end'=>$end]);
+                    'open'=>$end<=0,'clipped_start'=>$start,'clipped_end'=>$event['counts_in_bonus']?$end:$start]);
             }
             $seconds = [];
             foreach ($intervals as $category=>$ranges) $seconds[$category]=self::unionSeconds($ranges);
-            $lossRanges = array_merge($intervals['breakdown'],$intervals['setup'],$intervals['external']);
-            if ($seconds['breakdown']+$seconds['setup']+$seconds['external']>self::unionSeconds($lossRanges)) {
-                $warnings['overlap']='Tiempos de distintas categorias superpuestos';
-            }
             if (!$programmed['days']) $warnings['schedule']='Sin dias habiles disponibles en el periodo';
             if (!$machineEvents && !isset($productionEvidence[$id])) $warnings['records']='Sin registros de actividad';
             if (empty($policy['effective_from'])) $warnings['policy']='Confirmar parametros de la planilla en Configuracion';
@@ -417,6 +371,9 @@ final class MaintenanceBonusService
         $real = $complete ? array_sum(array_column($rows,'real'))/count($rows) : null;
         $target = $rows ? array_sum(array_column($rows,'target'))/count($rows) : null;
         $problem_events=self::problemEvents($detail,$period);
+        $problemCounts=array_count_values(array_map(static fn($e)=>(int)$e['machine_id'],$problem_events));
+        foreach ($rows as &$row) $row['pending_count']=$problemCounts[(int)$row['id']]??0;
+        unset($row);
         return compact('month','period','calendar','machines','policy','rows','detail','reasons','problem_events')+
             ['summary'=>['real'=>$real,'target'=>$target,'status'=>!$complete ? 'PENDIENTE' : ($real>=$target ? 'CUMPLE' : 'NO CUMPLE')]];
     }

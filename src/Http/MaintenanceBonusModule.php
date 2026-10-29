@@ -35,7 +35,12 @@ function maintenanceBonusTable(array $report, bool $excel=false): string
         }
         $class=$row['status']==='CUMPLE' ? 'yes' : ($row['status']==='NO CUMPLE' ? 'no' : 'pending');
         $html.='<td class="text-cell"><span class="maintenance-status '.$class.'" title="'.h(implode('; ',$row['warnings'])).'">'
-            .h($row['status']).'</span></td></tr>';
+            .h($row['status']).'</span>';
+        if (!$excel && !empty($row['pending_count'])) {
+            $html.=' <button type="button" class="btn secondary" data-maintenance-open="problems" data-maintenance-problem-machine="'
+                .(int)$row['id'].'">Pendientes ('.(int)$row['pending_count'].')</button>';
+        }
+        $html.='</td></tr>';
     }
     if (!$report['rows']) $html.='<tr><td colspan="17">Sin maquinas seleccionadas.</td></tr>';
     $html.='</tbody><tfoot><tr><th colspan="14">PROMEDIO SIMPLE</th>';
@@ -68,8 +73,8 @@ function maintenanceBonusSources(): string
         .'<p><b>Cumplimiento:</b> disponibilidad real mayor o igual a meta, sin redondear antes de comparar. '
         .'El total compara el promedio simple de disponibilidades con el promedio simple de metas, como la planilla. '
         .'No exige que todas las maquinas cumplan individualmente.</p>'
-        .'<p><b>Control:</b> se excluyen eventos y OTs anulados, se recortan tiempos al periodo 26-25 y se unen intervalos duplicados por maquina. '
-        .'Los cierres registrados de OT y sesion limitan la duracion de eventos heredados. Si falta el termino, se usa la siguiente conexion registrada del mismo operario o, para una apertura, el inicio de produccion de esa OT; el detalle identifica ese limite. Sin ningun limite registrado, la duracion queda sin determinar y no se inventan horas. Eventos realmente abiertos, motivos no reconocidos, datos ausentes, tiempos incompatibles o categorias superpuestas dejan el bono PENDIENTE. '
+        .'<p><b>Control:</b> solo cuentan eventos con inicio y termino registrados dentro del periodo 26-25. No se infieren cierres ni se recortan eventos que cruzan periodos. Se unen intervalos duplicados por maquina. '
+        .'Ver pendientes muestra exclusivamente eventos iniciados en el periodo sin termino. Los eventos ya cerrados no aparecen por duracion, superposicion o limites de OT/sesion. Los abiertos no suman tiempo ni bloquean el bono; los terminos fuera del periodo tambien se excluyen. La superposicion no exige volver a cerrar eventos. Motivos no reconocidos en eventos contabilizados, datos ausentes o tiempos incompatibles con la jornada dejan el bono PENDIENTE. '
         .'Un periodo cuyo dia 25 aun no termino no determina el bono definitivo.</p>'
         .'<p><b>Importe:</b> este modulo determina cumplimiento, no un monto a pagar: no se proporciono una tarifa ni una regla de pago.</p>';
 }
@@ -79,12 +84,17 @@ function maintenanceBonusDetail(array $report, bool $excel=false): string
     $html=maintenanceBonusCalendar($report).'<table class="maintenance-table"><thead><tr><th>Máquina</th><th>Programación</th><th>Colación registrada (h)</th>'
         .'<th>Preventivo realizado (h)</th><th>Pendientes por maquina</th></tr></thead><tbody>';
     foreach ($report['rows'] as $row) {
-        $ready=empty($row['warnings']) && in_array($row['status']??'', ['CUMPLE','NO CUMPLE'],true);
+        $ready=empty($row['warnings']) && empty($row['pending_count']) && in_array($row['status']??'', ['CUMPLE','NO CUMPLE'],true);
         $html.='<tr'.(!$excel && $ready ? ' class="maintenance-ready"' : '').'><td class="text-cell">'.h($row['name']).'</td><td class="text-cell">'.h($row['schedule_source']).'</td>';
         foreach (['recorded_lunch','recorded_preventive'] as $key) {
             $html.='<td class="num-dec3" data-xlsx-value="'.($row[$key]/3600).'">'.number_format($row[$key]/3600,3,',','').'</td>';
         }
-        $html.='<td class="text-cell">'.h(implode('; ',$row['warnings']) ?: 'Sin pendientes').'</td></tr>';
+        $html.='<td class="text-cell">';
+        if (!$excel && !empty($row['pending_count'])) {
+            $html.='<button type="button" class="btn secondary" data-maintenance-open="problems" data-maintenance-problem-machine="'
+                .(int)$row['id'].'">Pendientes ('.(int)$row['pending_count'].')</button> ';
+        }
+        $html.=h(implode('; ',$row['warnings']) ?: (!empty($row['pending_count'])?(int)$row['pending_count'].' eventos para corregir':'Sin pendientes')).'</td></tr>';
     }
     $html.='</tbody></table><h3>Eventos del mes</h3><table class="maintenance-table"><thead><tr>'
         .'<th>Maquina</th><th>Origen</th><th>Evento</th><th>Motivo</th><th>Clasificacion</th><th>Inicio</th><th>Termino</th><th>Origen del termino</th><th>Horas</th><th>Observaciones</th>'
@@ -92,8 +102,8 @@ function maintenanceBonusDetail(array $report, bool $excel=false): string
     foreach ($report['detail'] as $event) {
         $html.='<tr>';
         $values=[$event['machine_name'],$event['source'],(string)$event['id'],$event['reason'],
-            MaintenanceBonusService::CATEGORIES[$event['category']],date('d/m/Y H:i:s',$event['clipped_start']),
-            $event['open'] ? 'Sin finalizar' : date('d/m/Y H:i:s',$event['clipped_end']),
+            MaintenanceBonusService::CATEGORIES[$event['category']],date('d/m/Y H:i:s',(int)$event['start_ts']),
+            $event['open'] ? 'Sin finalizar' : date('d/m/Y H:i:s',(int)$event['end_ts']),
             $event['end_source']??'Evento'];
         foreach ($values as $value) $html.='<td class="text-cell">'.h((string)$value).'</td>';
         $html.=$event['open'] ? '<td class="text-cell">Sin determinar</td>'
@@ -170,6 +180,11 @@ function maintenanceBonusProblemEvents(array $report): string
     $events=$report['problem_events']??MaintenanceBonusService::problemEvents($report['detail'],$report['period']);
     $editable=canManageMaintenanceBonus();
     $html='<div class="maintenance-toolbar"><label>Buscar <input type="search" data-maintenance-problem-filter placeholder="Maquina, CC, operario o problema"></label>'
+        .'<label>Maquina <select data-maintenance-problem-machine-filter><option value="">Todas</option>';
+    $machines=[];
+    foreach ($events as $event) $machines[(int)$event['machine_id']]=$event['machine_name'];
+    foreach ($machines as $id=>$name) $html.='<option value="'.$id.'">'.h($name).'</option>';
+    $html.='</select></label>'
         .'<span data-maintenance-problem-count role="status">'.count($events).' eventos con problemas</span></div>'
         .'<p>Periodo: '.date('d/m/Y',$report['period']['start']).' al '.date('d/m/Y',$report['period']['end']-1).'</p>'
         .'<div class="maintenance-scroll"><table class="maintenance-table maintenance-problems"><thead><tr>'
@@ -178,7 +193,7 @@ function maintenanceBonusProblemEvents(array $report): string
         $issues=implode('; ',array_unique($event['issues']));
         $search=implode(' ',[$event['machine_name'],$event['source'].' #'.$event['id'],$event['ot_number']??'',
             $event['operator']??'',$event['reason'],$issues]);
-        $html.='<tr data-maintenance-problem-search="'.h($search).'">';
+        $html.='<tr data-maintenance-problem-machine="'.(int)$event['machine_id'].'" data-maintenance-problem-search="'.h($search).'">';
         foreach ([$event['machine_name'],$event['source'].' #'.$event['id'],$event['ot_number']??'Sin OT',
             $event['operator']??'',$event['reason'],date('d/m/Y H:i:s',(int)$event['start_ts']),
             (int)$event['end_ts']>0?date('d/m/Y H:i:s',(int)$event['end_ts']):'Sin finalizar',
@@ -364,8 +379,9 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
             .'<b>Bono mantención: '.$titles[$id].'</b><button type="button" class="btn secondary" data-maintenance-close>Cerrar</button></div>'
             .'<div class="maintenance-dialog-body">'.$content.'</div></dialog>';
     }
-    $html.='<script>(function(){document.addEventListener("click",function(e){var b=e.target.closest("[data-maintenance-open]");if(b){document.getElementById("maintenance-"+b.dataset.maintenanceOpen).showModal();return;}b=e.target.closest("[data-maintenance-close]");if(b){var dialog=b.closest("dialog");if(dialog.id==="maintenance-config"&&dialog.dataset.dirty==="1"){document.getElementById("maintenance-config-state").textContent="Guarda los cambios o pulsa Descartar antes de cerrar.";return;}dialog.close();}});'
-        .'document.addEventListener("input",function(e){if(!e.target.matches("[data-maintenance-problem-filter]"))return;var body=e.target.closest(".maintenance-dialog-body"),search=e.target.value.trim().toLocaleLowerCase("es"),count=0;body.querySelectorAll("[data-maintenance-problem-search]").forEach(function(row){row.hidden=!row.dataset.maintenanceProblemSearch.toLocaleLowerCase("es").includes(search);if(!row.hidden)count++;});body.querySelector("[data-maintenance-problem-count]").textContent=count+" eventos con problemas";body.querySelector("[data-maintenance-problem-empty]").hidden=count>0;});'
+    $html.='<script>(function(){function filterProblems(body){var search=body.querySelector("[data-maintenance-problem-filter]").value.trim().toLocaleLowerCase("es"),machine=body.querySelector("[data-maintenance-problem-machine-filter]").value,count=0;body.querySelectorAll("[data-maintenance-problem-search]").forEach(function(row){row.hidden=!!machine&&row.dataset.maintenanceProblemMachine!==machine||!row.dataset.maintenanceProblemSearch.toLocaleLowerCase("es").includes(search);if(!row.hidden)count++;});body.querySelector("[data-maintenance-problem-count]").textContent=count+" eventos con problemas";body.querySelector("[data-maintenance-problem-empty]").hidden=count>0;}'
+        .'document.addEventListener("click",function(e){var b=e.target.closest("[data-maintenance-open]");if(b){var d=document.getElementById("maintenance-"+b.dataset.maintenanceOpen);if(b.dataset.maintenanceOpen==="problems"){var body=d.querySelector(".maintenance-dialog-body");body.querySelector("[data-maintenance-problem-machine-filter]").value=b.dataset.maintenanceProblemMachine||"";body.querySelector("[data-maintenance-problem-filter]").value="";filterProblems(body);}d.showModal();return;}b=e.target.closest("[data-maintenance-close]");if(b){var dialog=b.closest("dialog");if(dialog.id==="maintenance-config"&&dialog.dataset.dirty==="1"){document.getElementById("maintenance-config-state").textContent="Guarda los cambios o pulsa Descartar antes de cerrar.";return;}dialog.close();}});'
+        .'document.addEventListener("input",function(e){if(e.target.matches("[data-maintenance-problem-filter]"))filterProblems(e.target.closest(".maintenance-dialog-body"));});document.addEventListener("change",function(e){if(e.target.matches("[data-maintenance-problem-machine-filter]"))filterProblems(e.target.closest(".maintenance-dialog-body"));});'
         .'function duration(s){var n=Math.round(Math.abs(s));return (s<0?"-":"")+Math.floor(n/3600)+":"+String(Math.floor(n%3600/60)).padStart(2,"0")+":"+String(n%60).padStart(2,"0");}'
         .'document.querySelectorAll("[data-maintenance-preventive]").forEach(function(input){function update(){var row=input.closest("tr"),raw=input.value.trim().replace(",","."),hours=Number(raw),total=Number(row.dataset.maintenanceDays)*Number(row.dataset.maintenanceDaily);'
         .'var valid=/^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/.test(raw)&&Number.isFinite(hours)&&hours>=0&&hours<=744;'

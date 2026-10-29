@@ -1,0 +1,14 @@
+{"state":"started","actor":"Regularizacion solicitada en conversacion 29\/10\/2026; octubre incluido expresamente","ids":[43171,43252,43378,43183,43217,43294],"created_at":"2026-10-29T13:33:02-03:00"}
+{"state":"intent","id":43171,"proposed_end":1790868130,"evidence":"Siguiente conexion del operario"}
+{"id":43171,"state":"Finalizado","audit_id":28,"warning":"","end":1790868130,"evidence":"Siguiente conexion del operario"}
+{"state":"intent","id":43252,"proposed_end":1791054930,"evidence":"Cierre de sesion"}
+{"id":43252,"state":"Finalizado","audit_id":29,"warning":"","end":1791054930,"evidence":"Cierre de sesion"}
+{"state":"intent","id":43378,"proposed_end":1791382421,"evidence":"Cierre de sesion"}
+{"id":43378,"state":"Finalizado","audit_id":30,"warning":"","end":1791382421,"evidence":"Cierre de sesion"}
+{"state":"intent","id":43183,"proposed_end":1790871741,"evidence":"Cierre de sesion"}
+{"id":43183,"state":"Finalizado","audit_id":31,"warning":"","end":1790871741,"evidence":"Cierre de sesion"}
+{"state":"intent","id":43217,"proposed_end":1790881575,"evidence":"Siguiente conexion del operario"}
+{"id":43217,"state":"Finalizado","audit_id":32,"warning":"","end":1790881575,"evidence":"Siguiente conexion del operario"}
+{"state":"intent","id":43294,"proposed_end":1791224942,"evidence":"Cierre de sesion"}
+{"id":43294,"state":"Finalizado","audit_id":33,"warning":"","end":1791224942,"evidence":"Cierre de sesion"}
+{"applied":6,"failed":0,"audits_done":6,"verified_closed":6,"remaining_listed":110,"unselected_unchanged":110,"created_at":"2026-10-29T13:33:17-03:00"}

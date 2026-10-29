@@ -1,0 +1,100 @@
+﻿"ID evento";Maquina;Operario;OT;Motivo;Inicio;"Termino registrado";"Duracion segundos";Estado;"Evidencia o revision pendiente";"Auditoria TRZ"
+1511;EMBALAJE;"Marco De la Cerda";4797;"Apertura / Alistamiento";"09/03/2023 15:13:58";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+5930;"SELLADORA II.";"Wilton Andrés Estrada Loaiza";5990;"Apertura / Alistamiento";"05/10/2023 15:48:41";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+6904;"SELLADORA II.";"Wilton Andrés Estrada Loaiza";6108;"Apertura / Alistamiento";"03/11/2023 17:10:30";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+9071;"SELLADORA VI.";"Adrián José Suárez Guerrero";6593;"Apertura / Alistamiento";"08/01/2024 07:33:41";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+10297;"SELLADORA II.";"Wilton Andrés Estrada Loaiza";6122;"Falta de Material";"05/02/2024 10:18:39";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+10791;EMBALAJE;"Diana Carolina Garrido Colmenares";6497;Colación;"19/02/2024 13:20:20";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+12691;"SELLADORA V.";"Miguel Angel Quintero Bordones";7195;"Apertura / Alistamiento";"25/04/2024 14:21:42";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+12948;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";7255;"Apertura / Alistamiento";"07/05/2024 12:23:09";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+13083;"SELLADORA VI.";"Adrián José Suárez Guerrero";7216;"Apertura / Alistamiento";"13/05/2024 08:14:42";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+13324;"SELLADORA IV.";"Daniel Eduardo Medina Rincon";7319;"Apertura / Alistamiento";"21/05/2024 15:45:08";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+13508;"SELLADORA II.";"Wilton Andrés Estrada Loaiza";7352;"Apertura / Alistamiento";"27/05/2024 15:48:55";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+13529;"SELLADORA II.";"Wilton Andrés Estrada Loaiza";7342;"Apertura / Alistamiento";"28/05/2024 09:39:22";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+13652;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";7386;"Apertura / Alistamiento";"31/05/2024 10:51:32";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+13653;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";7386;"Apertura / Alistamiento";"31/05/2024 10:51:39";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+14274;"FLEXO I.";"Juan Alberto Gutiérrez Cabeza";7444;"Apertura / Alistamiento";"24/06/2024 07:47:40";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+14279;"FLEXO I.";"Juan Alberto Gutiérrez Cabeza";7479;"Apertura / Alistamiento";"24/06/2024 09:18:01";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+14399;"SELLADORA II.";"Wilton Andrés Estrada Loaiza";7300;"Mantencion: Semanal.";"27/06/2024 07:19:51";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+14685;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";7295;"Apertura / Alistamiento";"05/07/2024 10:09:12";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+14749;"SELLADORA IV.";"Daniel Eduardo Medina Rincon";7293;"Apertura / Alistamiento";"09/07/2024 06:15:00";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+14770;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";7559;"Apertura / Alistamiento";"09/07/2024 09:07:37";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+14811;"FLEXO I.";"Sebastian Andres Catalán Vallejos";7422;"Apertura / Alistamiento";"10/07/2024 11:04:49";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+14847;"SELLADORA IV.";"Daniel Eduardo Medina Rincon";7546;"Apertura / Alistamiento";"11/07/2024 06:26:35";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+15032;"FLEXO I.";"Sebastian Andres Catalán Vallejos";7538;"Apertura / Alistamiento";"17/07/2024 11:21:18";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+15366;"FLEXO I.";"Juan Alberto Gutiérrez Cabeza";7613;"Apertura / Alistamiento";"26/07/2024 10:04:03";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+15434;"SELLADORA VI.";"Adrián José Suárez Guerrero";7602;"Reunión / Capacitación";"30/07/2024 10:15:58";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+15661;"FLEXO II.";"Gabriel Alejandro Garcia Camacho";7684;"Apertura / Alistamiento";"08/08/2024 11:05:23";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+15854;"FLEXO I.";"José Alberto Totesaut Velásquez";7656;"Apertura / Alistamiento";"14/08/2024 11:33:13";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+16037;"FLEXO I.";"Sebastian Andres Catalán Vallejos";7600;"Apertura / Alistamiento";"20/08/2024 12:59:55";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+16227;"FLEXO II.";"Gabriel Alejandro Garcia Camacho";7759;"Apertura / Alistamiento";"26/08/2024 10:15:50";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+16359;"FLEXO I.";"Sebastian Andres Catalán Vallejos";7776;"Apertura / Alistamiento";"28/08/2024 15:30:12";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+16436;"SELLADORA VI.";"Adrián José Suárez Guerrero";7675;"Mantencion: Electromecánica";"30/08/2024 07:45:43";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+16666;"SELLADORA VI.";"Adrián José Suárez Guerrero";7838;"Apertura / Alistamiento";"06/09/2024 07:14:54";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+16686;"FLEXO I.";"Sebastian Andres Catalán Vallejos";7802;"Apertura / Alistamiento";"06/09/2024 08:33:32";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+17215;"SELLADORA V.";"Miguel Angel Quintero Bordones";7850;"Apertura / Alistamiento";"26/09/2024 12:33:09";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+17264;"FLEXO I.";"Sebastian Andres Catalán Vallejos";7898;"Apertura / Alistamiento";"27/09/2024 12:46:25";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+17269;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";7888;"Apertura / Alistamiento";"27/09/2024 13:40:03";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+17402;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";7602;"Apertura / Alistamiento";"01/10/2024 17:10:59";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+17949;"FLEXO I.";"Sebastian Andres Catalán Vallejos";7954;"Apertura / Alistamiento";"14/10/2024 15:13:15";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+18284;"SELLADORA VI.";"Adrián José Suárez Guerrero";7996;"Apertura / Alistamiento";"22/10/2024 15:43:11";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+18649;"SERI III.";"Juan Carlos Viloria Madrid";6130;"Apertura / Alistamiento";"04/11/2024 10:33:22";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+18654;"SELLADORA V.";"Miguel Angel Quintero Bordones";7595;"Apertura / Alistamiento";"04/11/2024 11:53:26";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+19401;"SELLADORA I.";"Daniel Eduardo Medina Rincon";8182;"Apertura / Alistamiento";"28/11/2024 09:29:34";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+19556;"SELLADORA I.";"Wilton Andrés Estrada Loaiza";8090;"Apertura / Alistamiento";"03/12/2024 15:13:14";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+19904;"SELLADORA IV.";"Miguel Angel Quintero Bordones";8259;"Apertura / Alistamiento";"11/12/2024 15:49:40";"11/12/2024 16:29:59";2419;Finalizado;"Cierre de OT";1
+20218;"SELLADORA V.";"Miguel Angel Quintero Bordones";8317;"Apertura / Alistamiento";"20/12/2024 14:37:27";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+20584;"SELLADORA I.";"Wilton Andrés Estrada Loaiza";8383;"Apertura / Alistamiento";"07/01/2025 15:24:36";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+20585;"FLEXO II.";"Javier Antonio Perozo López";7225;"Apertura / Alistamiento";"07/01/2025 16:11:22";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+21664;"SELLADORA IV.";"Daniel Eduardo Medina Rincon";8472;"Apertura / Alistamiento";"31/01/2025 12:30:37";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+21790;"SELLADORA I.";"Daniel Eduardo Medina Rincon";8372;"Mantencion: Semanal.";"04/02/2025 15:32:11";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+22501;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";8669;"Apertura / Alistamiento";"25/02/2025 13:14:27";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+23126;"PULPO SERIGRAFICO";"Luis Arturo Briceño Lázaro";8671;"Apertura / Alistamiento";"18/03/2025 08:41:16";"18/03/2025 10:54:26";7990;Finalizado;"Cierre de OT";2
+24925;"PULPO SERIGRAFICO";"Fernando Calvachi Machuca";9132;"Apertura / Alistamiento";"14/05/2025 10:50:11";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+26092;"SELLADORA V.";"Miguel Angel Quintero Bordones";9277;"Apertura / Alistamiento";"25/06/2025 06:18:35";"25/06/2025 06:18:49";14;Finalizado;"Cierre de OT";3
+26297;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";9337;"Apertura / Alistamiento";"01/07/2025 08:22:11";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+26342;"PULPO SERIGRAFICO";"Luis Arturo Briceño Lázaro";9353;"Apertura / Alistamiento";"02/07/2025 08:27:25";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+26614;"SELLADORA IV.";"Daniel Eduardo Medina Rincon";9378;"Mantencion: Semanal.";"09/07/2025 08:40:25";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+26749;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";9423;"Apertura / Alistamiento";"14/07/2025 14:13:02";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+26982;"SERI II.";"Juan Carlos Viloria Madrid";9439;"Apertura / Alistamiento";"22/07/2025 07:34:34";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+27027;"SERI II.";"Juan Carlos Viloria Madrid";9439;"Apertura / Alistamiento";"23/07/2025 07:19:47";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+27080;"PULPO SERIGRAFICO";"Luis Arturo Briceño Lázaro";9444;"Apertura / Alistamiento";"23/07/2025 12:59:58";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+27159;"SELLADORA V.";"Miguel Angel Quintero Bordones";9378;"Apertura / Alistamiento";"24/07/2025 15:02:17";"24/07/2025 15:09:51";454;Finalizado;"Cierre de OT";4
+27597;"FLEXO I.";"Fernando Garrido";9488;"Apertura / Alistamiento";"04/08/2025 16:52:05";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+27599;"SELLADORA V.";"Miguel Angel Quintero Bordones";9458;"Apertura / Alistamiento";"05/08/2025 06:17:08";"05/08/2025 06:17:20";12;Finalizado;"Cierre de OT";5
+28245;"PULPO SERIGRAFICO";"Luis Arturo Briceño Lázaro";9622;"Apertura / Alistamiento";"20/08/2025 10:49:21";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+28688;"SELLADORA V.";"Miguel Angel Quintero Bordones";9623;"Apertura / Alistamiento";"29/08/2025 12:16:57";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+29050;"SELLADORA IV.";"Miguel Angel Quintero Bordones";9720;"Apertura / Alistamiento";"10/09/2025 06:20:36";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+29111;"SELLADORA IV.";"Miguel Angel Quintero Bordones";9743;"Apertura / Alistamiento";"11/09/2025 06:27:34";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+29193;"PULPO SERIGRAFICO";"Luis Arturo Briceño Lázaro";9759;"Apertura / Alistamiento";"12/09/2025 08:35:27";;;Pendiente;"Cierre de OT/sesion incompatible o sin evidencia verificable.";
+29398;"SELLADORA V.";"Miguel Angel Quintero Bordones";9623;"Apertura / Alistamiento";"22/09/2025 06:23:01";"22/09/2025 06:23:08";7;Finalizado;"Cierre de OT";6
+29565;EMBALAJE;"Melanie Valentina Aviles Castillo";9703;"Apertura / Alistamiento";"24/09/2025 12:18:40";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+29567;EMBALAJE;"Melanie Valentina Aviles Castillo";9703;Colación;"24/09/2025 12:20:33";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+30107;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";9801;"Apertura / Alistamiento";"06/10/2025 14:02:58";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+30515;"SELLADORA V.";"Miguel Angel Quintero Bordones";9805;"Apertura / Alistamiento";"15/10/2025 07:17:48";"15/10/2025 07:18:12";24;Finalizado;"Cierre de OT";7
+30559;"SELLADORA IV.";"Daniel Eduardo Medina Rincon";9805;"Apertura / Alistamiento";"15/10/2025 14:21:54";"15/10/2025 14:23:10";76;Finalizado;"Cierre de sesion";8
+31269;EMBALAJE;"Diana Carolina Garrido Colmenares";9973;"Apertura / Alistamiento";"30/10/2025 10:07:02";"30/10/2025 10:07:13";11;Finalizado;"Cierre de OT";9
+31271;EMBALAJE;"Diana Carolina Garrido Colmenares";9973;"Apertura / Alistamiento";"30/10/2025 10:07:06";"30/10/2025 10:07:13";7;Finalizado;"Cierre de OT";10
+31727;"SELLADORA IV.";"Daniel Eduardo Medina Rincon";10111;"Apertura / Alistamiento";"12/11/2025 16:25:57";"12/11/2025 16:26:12";15;Finalizado;"Cierre de OT";11
+31837;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";10083;"Apertura / Alistamiento";"14/11/2025 10:16:47";"14/11/2025 10:17:03";16;Finalizado;"Cierre de OT";12
+32965;"SELLADORA IV.";"Daniel Eduardo Medina Rincon";10139;Colación;"17/12/2025 12:31:17";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+33396;"SELLADORA V.";"Miguel Angel Quintero Bordones";10293;"Apertura / Alistamiento";"05/01/2026 07:19:12";"05/01/2026 10:12:38";10406;Finalizado;"Siguiente conexion del operario";13
+33908;"FLEXO II.";"Juan Alberto Gutiérrez Cabeza";10300;"Apertura / Alistamiento";"19/01/2026 07:19:57";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+34452;EMBALAJE;"Natali Jennifer Coronado De Wilchez";10250;"Apertura / Alistamiento";"30/01/2026 07:31:10";"30/01/2026 07:31:41";31;Finalizado;"Cierre de sesion";14
+34453;EMBALAJE;"Natali Jennifer Coronado De Wilchez";10250;"Apertura / Alistamiento";"30/01/2026 07:31:12";"30/01/2026 07:31:41";29;Finalizado;"Cierre de sesion";15
+34492;"SELLADORA V.";"Miguel Angel Quintero Bordones";10113;"Apertura / Alistamiento";"02/02/2026 07:17:21";"02/02/2026 07:18:07";46;Finalizado;"Cierre de OT";16
+34654;"FLEXO III.";"Juan Alberto Gutiérrez Cabeza";10524;"Apertura / Alistamiento";"04/02/2026 15:05:54";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+37095;"SELLADORA IV.";"Hugo Andres Ceballos Chamorro";10913;"Apertura / Alistamiento";"09/04/2026 15:37:53";"09/04/2026 16:26:12";2899;Finalizado;"Cierre de sesion";17
+37216;"SELLADORA IV.";"Hugo Andres Ceballos Chamorro";10739;"Apertura / Alistamiento";"14/04/2026 14:01:40";"14/04/2026 16:28:47";8827;Finalizado;"Cierre de sesion";18
+37980;"FLEXO II.";"Damian Felipe Ruiz Cortes";11087;"Apertura / Alistamiento";"06/05/2026 11:50:41";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+39346;"SELLADORA II.";"Wilton Andrés Estrada Loaiza";11267;"Apertura / Alistamiento";"17/06/2026 07:22:44";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+39475;"SELLADORA I.";"Wilton Andrés Estrada Loaiza";11304;"Apertura / Alistamiento";"22/06/2026 14:48:20";"22/06/2026 15:21:30";1990;Finalizado;"Siguiente conexion del operario";19
+39574;"SELLADORA VI.";"Hugo Andres Ceballos Chamorro";11330;"Apertura / Alistamiento";"25/06/2026 15:45:52";;;Pendiente;"Termino sugerido demasiado lejano; verificar manualmente. No se recorto la duracion.";
+39878;"FLEXO III.";"Juan Alberto Gutiérrez Cabeza";11423;"Apertura / Alistamiento";"09/07/2026 07:23:38";"09/07/2026 07:23:49";11;Finalizado;"Cierre de OT";20
+40527;"FLEXO II.";"Damian Felipe Ruiz Cortes";11578;"Apertura / Alistamiento";"03/08/2026 14:47:15";"03/08/2026 14:47:20";5;Finalizado;"Cierre de OT";21
+41762;"SELLADORA V.";"Miguel Angel Quintero Bordones";11798;"Apertura / Alistamiento";"10/09/2026 07:18:25";"10/09/2026 07:18:42";17;Finalizado;"Cierre de OT";22
+42054;EMBALAJE;"Juan Alberto Gutiérrez Cabeza";4616;"Apertura / Alistamiento";"22/09/2026 02:56:45";"22/09/2026 02:56:48";3;Finalizado;"Cierre de sesion";23
+42191;"FLEXO II.";"Alejandro Andres Muñoz Espinoza";4638;"Apertura / Alistamiento";"24/09/2026 15:02:16";"24/09/2026 15:30:40";1704;Finalizado;"Cierre de sesion";24
+42195;"PULPO SERIGRAFICO";"Alejandro Andres Muñoz Espinoza";8591;"Apertura / Alistamiento";"24/09/2026 15:33:41";"24/09/2026 15:36:53";192;Finalizado;"Cierre de sesion";25
+42196;"FLEXO II.";"Alejandro Andres Muñoz Espinoza";4638;"Apertura / Alistamiento";"24/09/2026 15:37:15";"24/09/2026 15:37:45";30;Finalizado;"Cierre de sesion";26
+42197;EMBALAJE;"Alejandro Andres Muñoz Espinoza";6943;"Apertura / Alistamiento";"24/09/2026 15:38:05";"24/09/2026 15:38:21";16;Finalizado;"Cierre de sesion";27

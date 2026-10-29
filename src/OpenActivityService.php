@@ -126,7 +126,7 @@ final class OpenActivityService
                 $suggested=['end'=>0,'source'=>'Requiere horario verificado'];
             }
         }
-        return ['source'=>$source,'id'=>$id,'key'=>$source.':'.$id,'type'=>$type,'category'=>$category,
+        $activity=['source'=>$source,'id'=>$id,'key'=>$source.':'.$id,'type'=>$type,'category'=>$category,
             'reason'=>$reason,'machine_id'=>(int)$raw['machine_id'],'machine_name'=>(string)($raw['machine_name']??''),
             'operator'=>$operator,'worker_id'=>(int)($raw['worker_id']??0),'ot_id'=>(int)($raw['ot_id']??0),
             'ot_number'=>(string)($raw['ot_number']??''),'init_id'=>(int)($raw['init_id']??0),
@@ -135,6 +135,20 @@ final class OpenActivityService
             'suggested_end'=>$suggested['end'],'suggested_end_source'=>$suggested['source'],
             'alert'=>array_replace($alert,$invalid ? ['anomaly'=>true,'label'=>'Termino incompatible con inicio o cierre de OT/sesion'] : []),
             'raw'=>$raw];
+        $activity['correction_end_limit']=self::correctionEndLimit($activity);
+        return $activity;
+    }
+
+    /** Un cierre anterior al evento es inconsistente, no un limite util para corregirlo.
+     * A parent closure before the event is inconsistent, not a usable correction limit. */
+    public static function correctionEndLimit(array $activity): int
+    {
+        $raw=$activity['raw']??[];
+        $ends=($activity['source']??'')==='ERP'
+            ? [(int)($raw['wok_enddat']??0),(int)($raw['win_enddat']??0)]
+            : [(int)($activity['parent_end']??0)];
+        $valid=array_filter($ends,static fn($end)=>$end>0 && $end>=(int)$activity['start']);
+        return $valid?min($valid):0;
     }
 
     public function get(string $source,int $id,?int $now=null): array
@@ -166,9 +180,7 @@ final class OpenActivityService
         $params=[];
         if ($scope==='period') array_push($params,$period['start'],$period['end']);
         elseif ($scope==='old') $params[]=$period['start'];
-        $raw=$this->erpRows('(COALESCE(e.evt_enddat,0)=0 OR (e.evt_enddat>0
-            AND (e.evt_enddat<e.evt_crtdat OR (o.wok_enddat>0 AND e.evt_enddat>o.wok_enddat)
-                OR (i.win_enddat>0 AND e.evt_enddat>i.win_enddat))))'.$scopeSql,$params);
+        $raw=$this->erpRows('COALESCE(e.evt_enddat,0)=0'.$scopeSql,$params);
         if (count($raw)>500) $truncated=true;
         foreach (array_slice($raw,0,500) as $row) { $item=$this->normalize('ERP',$row,$now); $items[$item['key']]=$item; }
         foreach (['STANDBY'=>'production_machine_standby_events','LUNCH'=>'production_operator_lunch_breaks'] as $source=>$table) {
@@ -184,8 +196,7 @@ final class OpenActivityService
             foreach (array_slice($raw,0,500) as $row) {
                 if ($source==='LUNCH' && (int)($row['erp_event_id']??0)>0) {
                     $item=$this->get('LUNCH',(int)$row['id'],$now);
-                    if (!$item['open']) $item['alert']=array_replace($item['alert'],
-                        ['anomaly'=>true,'label'=>'Colacion local pendiente de sincronizar con ERP']);
+                    if (!$item['open']) continue;
                 } else $item=$this->normalize($source,$row,$now);
                 $items[$item['key']]=$item;
             }
@@ -255,9 +266,8 @@ final class OpenActivityService
             if (!is_string($item['end']??'')) throw new RuntimeException('El termino debe tener formato dd/mm/aaaa hh:mm:ss.');
             $requested=trim($item['end']??'');
             $end=$requested!==''?self::parseDate($requested):$current['suggested_end'];
-            if (!$end || $end<$current['start'] || $end>time() || $current['start']<$current['parent_start']
-                || $current['start']>time() || ($current['parent_end']>0 && $end>$current['parent_end'])) {
-                throw new RuntimeException('Indica un termino verificado y compatible con OT/sesion para '.$current['key'].'.');
+            if (!$end || $end<$current['start'] || $end>time() || $current['start']<=0 || $current['start']>time()) {
+                throw new RuntimeException('El termino debe ser igual o posterior al inicio y no estar en el futuro para '.$current['key'].'.');
             }
             $current['batch_end']=$end;
             $current['batch_end_source']=$end===$current['suggested_end']?$current['suggested_end_source']:'horario verificado manualmente';
@@ -297,15 +307,21 @@ final class OpenActivityService
         if (!hash_equals($activity['version'],(string)($input['version']??''))) throw new RuntimeException('La actividad cambio. Actualiza el detalle antes de intervenir.');
         $start=$action==='close' ? $activity['start'] : self::parseDate((string)($input['start']??''));
         $end=trim((string)($input['end']??''))!=='' ? self::parseDate((string)$input['end']) : 0;
-        if ($start<=0 || $start>time() || ($end>0 && ($end<$start || $end>time()))
-            || ($activity['parent_start']>0 && $start<$activity['parent_start'])
-            || ($activity['parent_end']>0 && ($start>$activity['parent_end'] || $end>$activity['parent_end']))) {
-            throw new RuntimeException('El horario debe respetar inicio, cierre de OT/sesion y fecha actual.');
+        if ($start<=0 || $start>time() || ($end>0 && ($end<$start || $end>time()))) {
+            throw new RuntimeException('El termino debe ser igual o posterior al inicio y no estar en el futuro.');
         }
         if (($action==='close' || !$activity['open']) && !$end) throw new RuntimeException('Debes indicar el termino; no se permite reabrir un evento cerrado.');
         $comments=trim((string)($input['comments']??$activity['comments']));
         if (mb_strlen($comments)>5000) throw new RuntimeException('Observaciones demasiado extensas.');
         $labels=['forgotten'=>'Olvido de cierre','system_error'=>'Error del sistema','verified'=>'Revision confirmada'];
+        if ($activity['parent_end']>0 && $activity['parent_end']<$activity['start']) {
+            $notes.='; cierre manual: OT/sesion registra termino '.date('d/m/Y H:i:s',$activity['parent_end'])
+                .' anterior al inicio del evento. Se conserva la OT/sesion sin cambios.';
+        }
+        if (($activity['parent_start']>0 && $start<$activity['parent_start'])
+            || ($activity['parent_end']>0 && ($start>$activity['parent_end'] || $end>$activity['parent_end']))) {
+            $notes.='; horario manual confirmado independientemente de los limites de OT/sesion, que se conservan sin cambios.';
+        }
         $auditLine='Revision por '.$actor.'; autorizado por '.trim((string)$input['supervisor']).'; '.$labels[$diagnosis].': '.$notes;
         $after=['start'=>$start,'end'=>$end,'comments'=>$comments."\n".$auditLine];
         $before=array_intersect_key($activity,array_flip(['start','end','comments']));
