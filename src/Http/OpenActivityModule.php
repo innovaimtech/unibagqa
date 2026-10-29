@@ -21,7 +21,17 @@ function handleOpenActivityRoutes(string $path,string $method,PDO $erp,PDO $trz)
     }
     if ($save || $batch) requireCsrf();
     try {
-        $service=new OpenActivityService($erp,$trz);
+        // La sesion de Javier/Hector autoriza; no se solicita una segunda clave.
+        // Javier/Hector's authenticated session authorizes without a second password.
+        $service=new OpenActivityService($erp,$trz,static fn()=>canManageMaintenanceBonus());
+        $input=$_POST;
+        if ($save || $batch) {
+            $actor=bonusConfigurationActor();
+            $input['supervisor']=$actor;
+            $input['password']='';
+            $input['diagnosis']='verified';
+            $input['notes']='Horario verificado y guardado por '.$actor.'.';
+        }
         if ($list) {
             $period=MaintenanceBonusService::period((string)($_GET['month']??date('Y-m')));
             $result=['ok'=>true]+$service->monitor(null,$period,(string)($_GET['scope']??'period'));
@@ -47,9 +57,9 @@ function handleOpenActivityRoutes(string $path,string $method,PDO $erp,PDO $trz)
         } elseif ($batch) {
             $json=$_POST['items_json']??'';
             if (!is_string($json) || strlen($json)>20000) throw new RuntimeException('Seleccion de eventos no valida.');
-            $input=$_POST;$input['items']=json_decode($json,true,512,JSON_THROW_ON_ERROR);
+            $input['items']=json_decode($json,true,512,JSON_THROW_ON_ERROR);
             $result=$service->changeBatch($input,bonusConfigurationActor());
-        } else $result=$service->change($_POST,bonusConfigurationActor());
+        } else $result=$service->change($input,bonusConfigurationActor());
         echo json_encode($result,JSON_THROW_ON_ERROR|JSON_INVALID_UTF8_SUBSTITUTE);
     } catch (Throwable $e) {
         error_log('Open activity: '.$e->getMessage());
@@ -89,25 +99,17 @@ function renderOpenActivityPanel(array $report): string
         .'<div class="maintenance-toolbar"><label>Inicio (dd/mm/aaaa hh:mm:ss)<input name="start" required></label>'
         .'<label>Termino (dd/mm/aaaa hh:mm:ss)<input name="end"></label></div>'
         .'<label>Observaciones<textarea name="comments" rows="3" maxlength="5000" style="display:block;width:95%"></textarea></label>'
-        .'<div class="maintenance-toolbar"><label>Causa<select name="diagnosis" required><option value="">Seleccionar</option>'
-        .'<option value="forgotten">Olvido de cierre</option><option value="system_error">Error del sistema</option>'
-        .'<option value="verified">Actividad verificada</option></select></label>'
-        .'<label>Revision realizada<input name="notes" required minlength="5" maxlength="1000"></label>'
-        .'<label>Supervisor<input name="supervisor" required autocomplete="off"></label>'
-        .'<label>Clave<input name="password" type="password" required autocomplete="new-password"></label></div>'
+        .'<input name="password" type="hidden">'
         .'<p>Modifica solo horarios y observaciones. No cierra la OT, no cambia cantidades ni movimientos de bodega. '
-        .'La clasificacion del motivo permanece fija. El supervisor confirma la causa; el sistema no puede deducir por si solo un olvido o un error.</p>'
+        .'La clasificacion permanece fija y el responsable se registra automaticamente desde su sesion.</p>'
         .'<button class="btn" type="submit" id="activity-submit">Guardar</button></form>'
-        .(!$editable ? '<p>Solo lectura: las intervenciones requieren un responsable autorizado y credenciales de supervisor.</p>' : '')
+        .(!$editable ? '<p>Solo lectura: solo Javier y Hector pueden guardar cambios.</p>' : '')
         .'<h3>Historial de intervenciones</h3><div id="activity-audit"></div></div></dialog>'
         .'<dialog class="maintenance-dialog" id="activity-batch-editor"><div class="maintenance-dialog-head"><b>Finalizar seleccionados</b>'
         .'<button type="button" class="btn secondary" id="activity-batch-close">Cerrar</button></div>'
         .'<div class="maintenance-dialog-body"><div id="activity-batch-preview"></div><div id="activity-batch-message" role="alert"></div>'
         .'<form id="activity-batch-form"><input type="hidden" name="_csrf" value="'.h(csrfToken()).'"><input type="hidden" name="items_json">'
-        .'<div class="maintenance-toolbar"><label>Causa<select name="diagnosis" required><option value="">Seleccionar</option>'
-        .'<option value="forgotten">Olvido de cierre</option><option value="system_error">Error del sistema</option><option value="verified">Actividad verificada</option></select></label>'
-        .'<label>Revision realizada<input name="notes" required minlength="5" maxlength="850"></label>'
-        .'<label>Supervisor<input name="supervisor" required autocomplete="off"></label><label>Clave<input name="password" type="password" required autocomplete="new-password"></label></div>'
+        .'<input name="password" type="hidden">'
         .'<p>Solo registra el cierre de cada evento seleccionado. No cierra OTs ni sesiones, no modifica produccion o stock. Cada resultado queda en el historial.</p>'
         .'<label><input type="checkbox" name="confirmed" value="1" required> Revise y confirmo los horarios de cierre mostrados arriba.</label>'
         .'<p><button class="btn" type="submit" id="activity-batch-submit"'.(!$editable?' disabled':'').'>Finalizar seleccionados</button></p>'
