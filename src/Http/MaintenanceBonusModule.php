@@ -27,7 +27,7 @@ function maintenanceBonusTable(array $report, bool $excel=false): string
             if ($key==='days') $html.='<td class="num-int">'.(int)$value.'</td>';
             elseif ($excel) $html.='<td class="num-dec3" data-xlsx-value="'.($value/3600).'">'.number_format($value/3600,3,',','').'</td>';
             elseif (in_array($key,['breakdown','setup','external'],true)) {
-                $html.='<td><button type="button" class="btn secondary" data-maintenance-hours-machine="'.(int)$row['id']
+                $html.='<td><button type="button" class="maintenance-hour-link" data-maintenance-hours-machine="'.(int)$row['id']
                     .'" data-maintenance-hours-category="'.$key.'" data-maintenance-hours-name="'.h($row['name'])
                     .'" data-maintenance-hours-total="'.h(MaintenanceBonusService::duration($value)).'" title="Ver eventos">'
                     .h(MaintenanceBonusService::duration($value)).'</button></td>';
@@ -311,6 +311,9 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
         .maintenance-table th,.maintenance-table td{border:1px solid #e2e8f0;padding:8px;text-align:right;white-space:nowrap}
         .maintenance-table th{background:#eff6ff;color:#334155;white-space:normal;position:sticky;top:0;z-index:1}
         .maintenance-table td:nth-child(2),.maintenance-table .text-cell{text-align:left}
+        .maintenance-hour-link{appearance:none;background:transparent;border:0;padding:0;margin:0;color:inherit;font:inherit;line-height:inherit;cursor:pointer}
+        .maintenance-hour-link:hover{text-decoration:underline;text-underline-offset:3px}
+        .maintenance-hour-link:focus-visible{outline:2px solid #64748b;outline-offset:3px;border-radius:2px}
         .maintenance-table .maintenance-ready td{background:#dcfce7;color:#166534}
         .maintenance-table .maintenance-ready td:first-child,.maintenance-table .maintenance-ready td:last-child{font-weight:800}
         .maintenance-problems .maintenance-problem-cause{white-space:normal;min-width:240px;color:#991b1b;font-weight:700}
