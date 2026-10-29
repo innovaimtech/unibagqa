@@ -72,19 +72,25 @@ final class MachineRollContinuityService
         return $machine>0?[$this->lock('machine:'.$machine)]:[];
     }
 
-    public function lockMachineForWorkOrder(int $workerOtId): array
+    public function lockMachineForWorkOrder(int $workerOtId, int $expectedMachineId = 0): array
     {
         $job=$this->context($workerOtId);
-        if (!$job || (int)$job['wok_status']!==1 || (int)$job['win_status']!==1) {
+        if (!$job || (int)$job['wok_status']!==1 || (int)$job['win_status']!==1 || (int)$job['win_equipoid']<=0) {
             throw new RuntimeException('La OT no esta abierta en una maquina activa.');
         }
         $locks=$this->trz->getAttribute(PDO::ATTR_DRIVER_NAME)==='mysql'
             ?[$this->lock('machine:'.$job['win_equipoid'])]:[];
         try {
-            $latest=(int)$this->query($this->erp,'SELECT o.id FROM prod_worker_ot o
-                JOIN prod_worker_init i ON i.id=o.wok_init_id
-                WHERE i.win_equipoid=? AND o.wok_status>0 ORDER BY o.id DESC LIMIT 1',[(int)$job['win_equipoid']])->fetchColumn();
-            if ($latest!==$workerOtId) throw new RuntimeException('La maquina tiene una OT mas reciente. Actualiza la pantalla antes de cargar material.');
+            // La carga valida su apertura, no el mayor ID historico de la maquina.
+            // Loading validates its own opening, not the machine's highest historical ID.
+            $current=$this->context($workerOtId);
+            if (!$current || (int)$current['wok_status']!==1 || (int)$current['win_status']!==1
+                || (int)$current['win_equipoid']!==(int)$job['win_equipoid']) {
+                throw new RuntimeException('La OT dejo de estar activa. Actualiza la pantalla antes de cargar material.');
+            }
+            if ($expectedMachineId>0 && (int)$current['win_equipoid']!==$expectedMachineId) {
+                throw new RuntimeException('La OT no pertenece a la maquina conectada. Actualiza la pantalla.');
+            }
             return $locks;
         } catch (Throwable $e) {
             $this->unlock($locks);
@@ -148,7 +154,8 @@ final class MachineRollContinuityService
         try {
             if ($this->trz->getAttribute(PDO::ATTR_DRIVER_NAME)==='mysql') $locks[]=$this->lock('machine:'.$target['win_equipoid']);
             $latest=(int)$this->query($this->erp,'SELECT o.id FROM prod_worker_ot o
-                JOIN prod_worker_init i ON i.id=o.wok_init_id WHERE i.win_equipoid=? AND o.wok_status>0 ORDER BY o.id DESC LIMIT 1',
+                JOIN prod_worker_init i ON i.id=o.wok_init_id
+                WHERE i.win_equipoid=? AND o.wok_status=1 AND i.win_status=1 ORDER BY o.id DESC LIMIT 1',
                 [(int)$target['win_equipoid']])->fetchColumn();
             if ($latest!==$workerOtId) return [];
             $candidates=$this->trz->query("SELECT id FROM rolls WHERE status='IN_PROCESS' AND weight_kg>0 ORDER BY id")->fetchAll(PDO::FETCH_COLUMN);

@@ -371,6 +371,20 @@ final class ProductionService
         return is_array($row) ? $row : null;
     }
 
+    /** Apertura operativa exacta, sin recurrir a sesiones u ordenes historicas.
+     * Exact operational opening, without historical session or job fallbacks. */
+    public function getOpenWorkerOtForInit(int $initId, int $agId): ?array
+    {
+        if ($initId<=0 || $agId<=0) return null;
+        $stmt=$this->erpPdo->prepare("SELECT o.* FROM prod_worker_ot o
+            JOIN prod_worker_init i ON i.id=o.wok_init_id
+            WHERE o.wok_init_id=:init_id AND o.wok_ag_id=:ag_id
+                AND o.wok_status=1 AND i.win_status=1
+            ORDER BY o.id DESC LIMIT 1");
+        $stmt->execute([':init_id'=>$initId, ':ag_id'=>$agId]);
+        return $stmt->fetch(PDO::FETCH_ASSOC)?:null;
+    }
+
     /**
      * Retorna la OT activa filtrando por ID de agenda específica.
      *
@@ -1429,7 +1443,9 @@ final class ProductionService
     public function getWorkOrderOperatingContext(int $agId, int $workerId, int $plantaId): ?array
     {
         $openInit = $this->getOpenWorkerInit($workerId, $plantaId);
-        $workerOt = $this->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
+        $workerOt = $openInit !== null
+            ? $this->getOpenWorkerOtForInit((int)$openInit['id'], $agId)
+            : $this->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
 
         $agendaData = $this->getWorkOrderAgendaDetails($agId);
 
@@ -12961,7 +12977,7 @@ final class ProductionService
         $locks=[];
         try {
             $continuity=new MachineRollContinuityService($this->erpPdo,$this->trzPdo);
-            $locks=$continuity->lockMachineForWorkOrder($workerOtId);
+            $locks=$continuity->lockMachineForWorkOrder($workerOtId,$machineId);
             if (!$skipTraceability && ctype_digit($rollIdentifier)) {
                 $locks=array_merge($locks,$this->lockRollState([(int)$rollIdentifier],$workerOtId));
             }

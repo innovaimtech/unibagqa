@@ -1314,6 +1314,14 @@ function handleProductionRoutes(
         if ($actionMode === 'take_bodega3000' && !empty($rollIds)) {
             $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
             $equipoId = $activeInit !== null ? (int)($activeInit['win_equipoid'] ?? 0) : 0;
+            $activeOt = $activeInit !== null
+                ? $prodService->getOpenWorkerOtForInit((int)$activeInit['id'], $agId) : null;
+            if ($activeOt === null) {
+                redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=materiales&error='
+                    . rawurlencode('Abre la OT en la maquina conectada antes de cargar la bobina.'));
+                return true;
+            }
+            $workerOtId = (int)$activeOt['id'];
             $weightKg = (float)str_replace(',', '.', (string)($_REQUEST['weight_kg'] ?? 0));
             $confirmedTraceabilityCode = trim((string)($_REQUEST['confirmed_traceability_code'] ?? ''));
             $traceabilityMode = trim((string)($_REQUEST['traceability_mode'] ?? 'auto'));
@@ -2067,7 +2075,8 @@ function handleProductionRoutes(
         }
 
         $selectedAgenda = $selectedAgId > 0 ? $prodService->getWorkOrderAgendaDetails($selectedAgId) : null;
-        $workerOt = ($selectedAgId > 0) ? $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $selectedAgId) : null;
+        $workerOt = ($selectedAgId > 0)
+            ? $prodService->getOpenWorkerOtForInit((int)$activeInit['id'], $selectedAgId) : null;
         $workerOtId = $workerOt !== null ? (int)$workerOt['id'] : 0;
 
         $bodega3000Rolls = $prodService->listAvailableRollsInBodega3000($selectedAgId, 60, null, $equipoId, true);
@@ -2115,10 +2124,19 @@ function handleProductionRoutes(
         $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
         $equipoId = $activeInit !== null ? (int)$activeInit['win_equipoid'] : 0;
 
+        // No reutilizar el ID enviado si corresponde a otra sesion o a una OT cerrada.
+        // Never reuse a submitted ID belonging to another session or a closed job.
+        $activeOt = $activeInit !== null
+            ? $prodService->getOpenWorkerOtForInit((int)$activeInit['id'], $agId) : null;
+        $workerOtId = $activeOt !== null ? (int)$activeOt['id'] : 0;
         if ($workerOtId <= 0 && $agId > 0 && $activeInit !== null) {
             $startRes = $prodService->startWorkerOt($agId, (int)$activeInit['id']);
             if ($startRes['ok']) {
                 $workerOtId = (int)$startRes['worker_ot_id'];
+            } else {
+                redirectResponse('/production/materials/request?agid=' . $agId . '&error='
+                    . rawurlencode((string)($startRes['error'] ?? 'No se pudo abrir la OT en la maquina conectada.')));
+                return true;
             }
         }
 
