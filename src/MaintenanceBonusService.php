@@ -103,7 +103,9 @@ final class MaintenanceBonusService
         $policy['mapping']=self::FIXED_CLASSIFICATIONS;
         foreach ($machines as $machine) {
             $id = (int)$machine['id'];
-            $policy['machines'][$id] = array_replace(self::suggestedMachine($machine),$policy['machines'][$id]??[],
+            $defaults=self::suggestedMachine($machine);
+            if ($saved && !isset($saved['machines'][$id])) $defaults['active']=false;
+            $policy['machines'][$id] = array_replace($defaults,$policy['machines'][$id]??[],
                 ['confirmed'=>isset($saved['machines'][$id])]);
         }
         return $policy;
@@ -129,7 +131,14 @@ final class MaintenanceBonusService
         }
         if (($event['source']??'') === 'TRZ') return 'unknown';
         if ($event['event_type']==='apertura') return 'setup';
-        if ($event['event_type']==='mantencion') return 'unknown';
+        if ($event['event_type']==='mantencion') {
+            // Codigos del catalogo nativo de reparaciones, distintos de pause_clasifica.
+            // Native repair catalog codes are not pause classification codes.
+            $repairCode=(int)($event['repair_code']??0);
+            if (in_array($repairCode,[1200,1300,1400,1500,1600],true)) return 'breakdown';
+            if (in_array($repairCode,[1100,1700],true)) return 'preventive';
+            return 'unknown';
+        }
         $code = (int)($event['classification']??0);
         if ($code >= 1000) $code = intdiv($code,1000);
         if ((int)($event['pause_id']??0)===1 || ($event['pause_code']??'')==='2200') return 'lunch';
@@ -142,6 +151,8 @@ final class MaintenanceBonusService
         // Sin joins a parametros: descripciones duplicadas no duplican horas.
         $stmt = $this->erp->prepare("SELECT ev.id,wi.win_equipoid AS machine_id,ev.evt_type AS event_type,
             ev.evt_crtdat AS start_ts,ev.evt_enddat AS end_ts,ev.evt_comments AS comments,
+            ot.id AS worker_ot_id,TRIM(CONCAT(COALESCE(w.wrk_firstname,''),' ',COALESCE(w.wrk_lastname,''))) AS operator,
+            (SELECT o.req_number FROM orders o WHERE o.id=(SELECT a.ag_reqid FROM prod_agenda a WHERE a.id=ot.wok_ag_id)) AS ot_number,
             ot.wok_enddat AS ot_end_ts,wi.win_enddat AS session_end_ts,
             (SELECT MIN(ns.win_crtdat) FROM prod_worker_init ns
                 WHERE ns.win_wrkid=wi.win_wrkid AND ns.win_crtdat>ev.evt_crtdat) AS next_session_ts,
@@ -153,26 +164,29 @@ final class MaintenanceBonusService
             FROM prod_worker_ot_events ev
             INNER JOIN prod_worker_ot ot ON ot.id=ev.evt_prod_worker_otid
             INNER JOIN prod_worker_init wi ON wi.id=ot.wok_init_id
+            LEFT JOIN workers w ON w.id=wi.win_wrkid
             LEFT JOIN prod_pause_types pt ON pt.id=ev.evt_pause_id
             WHERE ev.evt_status>0 AND ot.wok_status>0 AND ev.evt_type IN ('pause','apertura','mantencion')
-              AND ev.evt_crtdat<:finish AND (ev.evt_enddat>:start OR COALESCE(ev.evt_enddat,0)=0)
+              AND ev.evt_crtdat<:finish AND (ev.evt_enddat>:start OR COALESCE(ev.evt_enddat,0)=0
+                OR (ev.evt_enddat<ev.evt_crtdat AND ev.evt_crtdat>=:invalid_start))
             ORDER BY ev.evt_crtdat,ev.id");
-        $stmt->execute([':finish'=>$period['end'],':start'=>$period['start']]);
+        $stmt->execute([':finish'=>$period['end'],':start'=>$period['start'],':invalid_start'=>$period['start']]);
         $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
         $repairs = [];
         // evt_equipo_mantid references equipo_manttype in the legacy ERP.
         // prod_repairtypes is a different catalog and produced false "Sin motivo".
         if ($this->tableExists($this->erp,'equipo_manttype')) {
-            foreach ($this->erp->query('SELECT id,mant_title FROM equipo_manttype')->fetchAll(PDO::FETCH_ASSOC) as $row) {
-                $repairs[(int)$row['id']] = $row['mant_title'];
+            foreach ($this->erp->query('SELECT id,mant_title,mant_code FROM equipo_manttype')->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $repairs[(int)$row['id']] = $row;
             }
         }
         foreach ($events as &$event) {
             $event['source'] = 'ERP';
+            $event['repair_code']=$repairs[(int)$event['repair_id']]['mant_code']??'';
             $event['reason_key'] = $event['event_type']==='mantencion'
                 ? 'repair:'.$event['repair_id'] : ($event['event_type']==='apertura' ? 'setup' : 'pause:'.$event['pause_id']);
             $event['reason'] = $event['event_type']==='mantencion'
-                ? 'Mantencion: '.($repairs[(int)$event['repair_id']]??'Sin motivo')
+                ? 'Mantencion: '.($repairs[(int)$event['repair_id']]['mant_title']??'Sin motivo')
                 : ($event['event_type']==='apertura' ? 'Apertura / Alistamiento' : ($event['pause_name']??'Pausa sin motivo'));
         }
         unset($event);
@@ -190,6 +204,7 @@ final class MaintenanceBonusService
                 }
                 $events[] = ['source'=>'TRZ','id'=>$row['id'],'machine_id'=>$row['machine_id'],
                     'event_type'=>'standby','start_ts'=>$start,'end_ts'=>$end,'comments'=>$row['comments'],
+                    'operator'=>$row['operator_name']??'','ot_number'=>'Sin OT',
                     'reason_key'=>'standby:'.$row['reason'],'reason'=>$row['reason'],'classification'=>0];
             }
         }
@@ -231,6 +246,63 @@ final class MaintenanceBonusService
             else { $total += $end-$start; [$start,$end]=[$a,$b]; }
         }
         return $total+($end-$start);
+    }
+
+    /** Problemas por registro, separados de avisos de configuracion de la maquina.
+     * Record-level problems, kept separate from machine configuration warnings. */
+    public static function problemEvents(array $events, array $period, ?int $now=null): array
+    {
+        $now=$now??time();
+        $items=[];
+        foreach ($events as $event) {
+            $start=(int)$event['start_ts'];
+            $rawEnd=(int)($event['end_ts']??0);
+            $effectiveEnd=(int)($event['effective_end_ts']??self::eventEnd($event)['end']);
+            if ($start>=$period['end'] || ($effectiveEnd>0 && $effectiveEnd<=$period['start'] && $effectiveEnd>=$start)) continue;
+            $issues=[];
+            if ($rawEnd<=0) {
+                $issues[]=$effectiveEnd>0 ? 'Termino sin registrar; limitado por '.($event['end_source']??'cierre registrado') : 'Evento sin finalizar';
+            }
+            if ($start<=0 || $start>$now) $issues[]='Fecha de inicio no valida';
+            if ($rawEnd>0 && $rawEnd<$start) $issues[]='Termino anterior al inicio';
+            foreach (['ot_end_ts','session_end_ts'] as $field) {
+                if ($rawEnd>0 && (int)($event[$field]??0)>0 && $rawEnd>(int)$event[$field]) {
+                    $issues[]='Termino posterior al cierre de OT o sesion';
+                    break;
+                }
+            }
+            if (($event['category']??'')==='unknown') $issues[]='Motivo sin clasificar';
+            $name=mb_strtolower(trim((string)($event['reason']??'')),'UTF-8');
+            $maintenance=($event['event_type']??'')==='mantencion' || ($event['category']??'')==='preventive'
+                || in_array($name,['mantencion','mantención','mantenimiento','mantenimiento / reparacion','mantenimiento / reparación'],true);
+            $limit=($event['category']??'')==='lunch' ? 3600 : ($maintenance ? 10800 : null);
+            $duration=max(0,($rawEnd>0?$rawEnd:($effectiveEnd>0?$effectiveEnd:min($now,$period['end'])))-$start);
+            if ($limit!==null && $duration>$limit) $issues[]=$limit===3600 ? 'Colacion mayor a 1 hora' : 'Mantencion mayor a 3 horas';
+            $items[]=array_replace($event,['issues'=>$issues,'review_seconds'=>$rawEnd>0 && $rawEnd>=$start?$rawEnd-$start:null]);
+        }
+        // Sweep only loss categories, matching the existing bonus overlap rule.
+        // Revisar solo categorias de perdida, igual que la regla actual del bono.
+        $order=array_keys($items);
+        usort($order,static fn($a,$b)=>[$items[$a]['machine_id'],$items[$a]['clipped_start']]
+            <=>[$items[$b]['machine_id'],$items[$b]['clipped_start']]);
+        $active=[];$overlapping=[];
+        foreach ($order as $index) {
+            $event=$items[$index];
+            if (!in_array($event['category'],['breakdown','setup','external'],true) || $event['clipped_end']<=$event['clipped_start']) continue;
+            foreach ($active as $other=>$previous) {
+                if ((int)$previous['machine_id']!==(int)$event['machine_id'] || $previous['clipped_end']<=$event['clipped_start']) {
+                    unset($active[$other]);
+                    continue;
+                }
+                if ($previous['category']!==$event['category']) {
+                    if (!isset($overlapping[$index])) $items[$index]['issues'][]='Superpuesto con '.$previous['source'].' #'.$previous['id'];
+                    if (!isset($overlapping[$other])) $items[$other]['issues'][]='Superpuesto con '.$event['source'].' #'.$event['id'];
+                    $overlapping[$index]=$overlapping[$other]=true;
+                }
+            }
+            $active[$index]=$event;
+        }
+        return array_values(array_filter($items,static fn($event)=>!empty($event['issues'])));
     }
 
     /** Jornada indicada, independiente de turnos/asistencia o ajustes antiguos.
@@ -283,7 +355,7 @@ final class MaintenanceBonusService
             $end=self::eventEnd($event);
             // Closed historical events do not belong to this bonus period.
             // Eventos historicos ya cerrados no afectan el periodo consultado.
-            if ($end['end']>0 && $end['end']<=$period['start']) continue;
+            if ($end['end']>0 && $end['end']<=$period['start'] && $end['end']>=(int)$event['start_ts']) continue;
             $event['effective_end_ts']=$end['end'];
             $event['end_source']=$end['source'];
             $event['category'] = self::classify($event,$policy['mapping']);
@@ -344,7 +416,8 @@ final class MaintenanceBonusService
         // Simple mean exactly like the reference, not a weighted fleet ratio.
         $real = $complete ? array_sum(array_column($rows,'real'))/count($rows) : null;
         $target = $rows ? array_sum(array_column($rows,'target'))/count($rows) : null;
-        return compact('month','period','calendar','machines','policy','rows','detail','reasons')+
+        $problem_events=self::problemEvents($detail,$period);
+        return compact('month','period','calendar','machines','policy','rows','detail','reasons','problem_events')+
             ['summary'=>['real'=>$real,'target'=>$target,'status'=>!$complete ? 'PENDIENTE' : ($real>=$target ? 'CUMPLE' : 'NO CUMPLE')]];
     }
 

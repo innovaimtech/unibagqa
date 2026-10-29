@@ -46,7 +46,12 @@ final class OpenActivityService
             e.evt_pause_id,e.evt_equipo_mantid,o.id AS ot_id,o.wok_crtdat,o.wok_enddat,
             i.id AS init_id,i.win_wrkid AS worker_id,i.win_equipoid AS machine_id,i.win_crtdat,i.win_enddat,
             w.wrk_firstname,w.wrk_lastname,m.equipo_name AS machine_name,
-            p.pause_name,p.pause_clasifica,p.pause_code,mt.mant_title,a.ag_reqid AS ot_number
+            p.pause_name,p.pause_clasifica,p.pause_code,mt.mant_title,mt.mant_code AS repair_code,a.ag_reqid AS ot_number,
+            (SELECT MIN(ns.win_crtdat) FROM prod_worker_init ns
+                WHERE ns.win_wrkid=i.win_wrkid AND ns.win_crtdat>e.evt_crtdat) AS next_session_ts,
+            (SELECT MIN(pe.evt_crtdat) FROM prod_worker_ot_events pe
+                WHERE pe.evt_prod_worker_otid=o.id AND pe.evt_status>0
+                AND pe.evt_type IN ('prod','prodsericolor') AND pe.evt_crtdat>e.evt_crtdat) AS next_production_ts
             FROM prod_worker_ot_events e INNER JOIN prod_worker_ot o ON o.id=e.evt_prod_worker_otid
             INNER JOIN prod_worker_init i ON i.id=o.wok_init_id
             LEFT JOIN workers w ON w.id=i.win_wrkid LEFT JOIN equipo m ON m.id=i.win_equipoid
@@ -67,7 +72,8 @@ final class OpenActivityService
             $key=$raw['evt_type']==='apertura' ? 'setup'
                 : ($raw['evt_type']==='mantencion' ? 'repair:'.$raw['evt_equipo_mantid'] : 'pause:'.$raw['evt_pause_id']);
             $category=MaintenanceBonusService::classify(['reason_key'=>$key,'source'=>'ERP','event_type'=>$raw['evt_type'],
-                'pause_id'=>$raw['evt_pause_id'],'pause_code'=>$raw['pause_code'],'classification'=>$raw['pause_clasifica']],[]);
+                'pause_id'=>$raw['evt_pause_id'],'pause_code'=>$raw['pause_code'],'classification'=>$raw['pause_clasifica'],
+                'repair_code'=>$raw['repair_code']],[]);
             $type=$category==='lunch' ? 'lunch' : ($raw['evt_type']==='mantencion' ? 'maintenance' : $raw['evt_type']);
             $reason=$raw['evt_type']==='apertura' ? 'Apertura / Alistamiento'
                 : ($raw['evt_type']==='mantencion' ? 'Mantencion: '.($raw['mant_title']?:'Sin tipo registrado') : ($raw['pause_name']?:'Pausa sin motivo'));
@@ -111,12 +117,22 @@ final class OpenActivityService
             $alert=array_replace($alert,['anomaly'=>true,'label'=>'Evento ERP vinculado inexistente o anulado']);
             $impact.=' Solo se puede corregir la copia local; no se restaura ni modifica el evento ERP anulado.';
         }
+        $suggested=['end'=>0,'source'=>'Sin cierre registrado'];
+        if ($source==='ERP' && $end<=0) {
+            $suggested=MaintenanceBonusService::eventEnd(['end_ts'=>0,'event_type'=>$raw['evt_type'],
+                'ot_end_ts'=>$raw['wok_enddat'],'session_end_ts'=>$raw['win_enddat'],
+                'next_session_ts'=>$raw['next_session_ts'],'next_production_ts'=>$raw['next_production_ts']]);
+            if ($start<$parentStart || $suggested['end']<=$start || $suggested['end']>$now || ($parentEnd>0 && $suggested['end']>$parentEnd)) {
+                $suggested=['end'=>0,'source'=>'Requiere horario verificado'];
+            }
+        }
         return ['source'=>$source,'id'=>$id,'key'=>$source.':'.$id,'type'=>$type,'category'=>$category,
             'reason'=>$reason,'machine_id'=>(int)$raw['machine_id'],'machine_name'=>(string)($raw['machine_name']??''),
             'operator'=>$operator,'worker_id'=>(int)($raw['worker_id']??0),'ot_id'=>(int)($raw['ot_id']??0),
             'ot_number'=>(string)($raw['ot_number']??''),'init_id'=>(int)($raw['init_id']??0),
             'start'=>(int)$start,'end'=>(int)$end,'open'=>$end<=0,'comments'=>$comments,'version'=>$version,
             'parent_start'=>$parentStart,'parent_end'=>$parentEnd,'impact'=>$impact,
+            'suggested_end'=>$suggested['end'],'suggested_end_source'=>$suggested['source'],
             'alert'=>array_replace($alert,$invalid ? ['anomaly'=>true,'label'=>'Termino incompatible con inicio o cierre de OT/sesion'] : []),
             'raw'=>$raw];
     }
@@ -141,19 +157,29 @@ final class OpenActivityService
         return $this->normalize($source,$raw,$now??time());
     }
 
-    public function monitor(?int $now=null,?array $period=null): array
+    public function monitor(?int $now=null,?array $period=null,string $scope='all'): array
     {
         $now=$now??time(); $items=[]; $truncated=false;
         $period=$period??MaintenanceBonusService::period(date('Y-m',$now));
-        $raw=$this->erpRows('COALESCE(e.evt_enddat,0)=0 OR (e.evt_crtdat>=? AND e.evt_crtdat<?
+        if (!in_array($scope,['period','old','all'],true)) throw new RuntimeException('Filtro de actividades no valido.');
+        $scopeSql=$scope==='period' ? ' AND e.evt_crtdat>=? AND e.evt_crtdat<?' : ($scope==='old' ? ' AND e.evt_crtdat<?' : '');
+        $params=[];
+        if ($scope==='period') array_push($params,$period['start'],$period['end']);
+        elseif ($scope==='old') $params[]=$period['start'];
+        $raw=$this->erpRows('(COALESCE(e.evt_enddat,0)=0 OR (e.evt_enddat>0
             AND (e.evt_enddat<e.evt_crtdat OR (o.wok_enddat>0 AND e.evt_enddat>o.wok_enddat)
-                OR (i.win_enddat>0 AND e.evt_enddat>i.win_enddat)))',[$period['start'],$period['end']]);
+                OR (i.win_enddat>0 AND e.evt_enddat>i.win_enddat))))'.$scopeSql,$params);
         if (count($raw)>500) $truncated=true;
         foreach (array_slice($raw,0,500) as $row) { $item=$this->normalize('ERP',$row,$now); $items[$item['key']]=$item; }
         foreach (['STANDBY'=>'production_machine_standby_events','LUNCH'=>'production_operator_lunch_breaks'] as $source=>$table) {
             if (!$this->exists($this->trz,$table)) continue;
             $where=$source==='STANDBY' ? 'COALESCE(ended_at,0)=0 AND (end_time IS NULL OR end_time=\'\')' : 'end_time IS NULL';
-            $raw=$this->trz->query("SELECT * FROM $table WHERE $where ORDER BY id LIMIT 501")->fetchAll(PDO::FETCH_ASSOC);
+            $time=$source==='STANDBY'?'created_at':'start_time';
+            $values=$source==='STANDBY'?[$period['start'],$period['end']]:[date('Y-m-d H:i:s',$period['start']),date('Y-m-d H:i:s',$period['end'])];
+            $conditions=$scope==='period'?" AND $time>=? AND $time<?":($scope==='old'?" AND $time<?":'');
+            $q=$this->trz->prepare("SELECT * FROM $table WHERE $where $conditions ORDER BY id LIMIT 501");
+            $q->execute($scope==='all'?[]:($scope==='old'?[$values[0]]:$values));
+            $raw=$q->fetchAll(PDO::FETCH_ASSOC);
             if (count($raw)>500) $truncated=true;
             foreach (array_slice($raw,0,500) as $row) {
                 if ($source==='LUNCH' && (int)($row['erp_event_id']??0)>0) {
@@ -167,7 +193,7 @@ final class OpenActivityService
         $items=array_values($items);
         usort($items,static fn($a,$b)=>[$b['alert']['anomaly'],$a['start']]<=>[$a['alert']['anomaly'],$b['start']]);
         foreach ($items as &$item) unset($item['raw']);
-        return ['items'=>$items,'server_time'=>$now,'truncated'=>$truncated,'anomalies'=>count(array_filter($items,static fn($i)=>$i['alert']['anomaly']))];
+        return ['items'=>$items,'scope'=>$scope,'server_time'=>$now,'truncated'=>$truncated,'anomalies'=>count(array_filter($items,static fn($i)=>$i['alert']['anomaly']))];
     }
 
     public static function parseDate(string $value): int
@@ -182,6 +208,7 @@ final class OpenActivityService
 
     private function ensureAudit(): void
     {
+        if ($this->exists($this->trz,'production_activity_interventions')) return;
         $id=$this->trz->getAttribute(PDO::ATTR_DRIVER_NAME)==='sqlite' ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY';
         $this->trz->exec("CREATE TABLE IF NOT EXISTS production_activity_interventions (
             id $id,source VARCHAR(20) NOT NULL,event_id BIGINT NOT NULL,action VARCHAR(20) NOT NULL,
@@ -204,6 +231,56 @@ final class OpenActivityService
             $query->bindValue($i+1,$value,is_int($value) ? PDO::PARAM_INT : ($value===null ? PDO::PARAM_NULL : PDO::PARAM_STR));
         }
         $query->execute();
+    }
+
+    /** Cierre por lote con evidencia registrada o horario verificado explicitamente.
+     * Batch closure with recorded evidence or explicitly verified timing. */
+    public function changeBatch(array $input,string $actor): array
+    {
+        if (trim($actor)==='' || !($this->authorize)((string)($input['supervisor']??''),(string)($input['password']??''))) {
+            throw new RuntimeException('Se requiere autorizacion valida de supervisor.');
+        }
+        $items=$input['items']??null;
+        $diagnosis=(string)($input['diagnosis']??'');
+        $notes=trim((string)($input['notes']??''));
+        if (!is_array($items) || !$items || count($items)>50 || ($input['confirmed']??'')!=='1' || !in_array($diagnosis,['forgotten','system_error','verified'],true)
+            || mb_strlen($notes)<5 || mb_strlen($notes)>850) throw new RuntimeException('Selecciona hasta 50 eventos y registra la causa y revision (5 a 850 caracteres).');
+        $verified=[];
+        foreach ($items as $item) {
+            if (!is_array($item)) throw new RuntimeException('Seleccion de eventos no valida.');
+            $current=$this->get((string)($item['source']??''),(int)($item['id']??0));
+            if (isset($verified[$current['key']])) throw new RuntimeException('No se permite seleccionar el mismo evento dos veces.');
+            if (!hash_equals($current['version'],(string)($item['version']??''))) throw new RuntimeException('Un evento cambio. Actualiza la lista antes de confirmar.');
+            if (!$current['open']) throw new RuntimeException('El evento '.$current['key'].' ya esta cerrado; revisalo individualmente.');
+            if (!is_string($item['end']??'')) throw new RuntimeException('El termino debe tener formato dd/mm/aaaa hh:mm:ss.');
+            $requested=trim($item['end']??'');
+            $end=$requested!==''?self::parseDate($requested):$current['suggested_end'];
+            if (!$end || $end<$current['start'] || $end>time() || $current['start']<$current['parent_start']
+                || $current['start']>time() || ($current['parent_end']>0 && $end>$current['parent_end'])) {
+                throw new RuntimeException('Indica un termino verificado y compatible con OT/sesion para '.$current['key'].'.');
+            }
+            $current['batch_end']=$end;
+            $current['batch_end_source']=$end===$current['suggested_end']?$current['suggested_end_source']:'horario verificado manualmente';
+            $verified[$current['key']]=$current;
+        }
+        // MyISAM cannot provide an atomic multi-event transaction: report every outcome.
+        // MyISAM no permite un lote atomico: informar el resultado de cada evento.
+        $authorized=new self($this->erp,$this->trz,static fn()=>true);
+        $results=[];$applied=0;
+        foreach ($verified as $current) {
+            try {
+                $result=$authorized->change(['source'=>$current['source'],'id'=>$current['id'],'version'=>$current['version'],
+                    'action'=>'close','end'=>date('d/m/Y H:i:s',$current['batch_end']),'diagnosis'=>$diagnosis,
+                    'notes'=>$notes.'; cierre respaldado por '.$current['batch_end_source'],
+                    'supervisor'=>$input['supervisor'],'password'=>''],$actor);
+                $results[]=['key'=>$current['key'],'ok'=>true,'message'=>$result['message'],'warning'=>$result['warning']];
+                $applied++;
+            } catch (Throwable $e) {
+                error_log('Batch activity '.$current['key'].': '.$e->getMessage());
+                $results[]=['key'=>$current['key'],'ok'=>false,'message'=>$e instanceof PDOException?'No se pudo aplicar el cierre.':$e->getMessage()];
+            }
+        }
+        return ['ok'=>true,'applied'=>$applied,'failed'=>count($results)-$applied,'results'=>$results];
     }
 
     public function change(array $input,string $actor): array

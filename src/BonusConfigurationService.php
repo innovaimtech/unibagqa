@@ -436,6 +436,32 @@ final class BonusConfigurationService
             if (json_encode($before,JSON_THROW_ON_ERROR) !== $json) {
                 $this->audit($month,'bonomantencion',$before?:null,$policy,$actor);
             }
+            // Propagar solo campos modificados, conservando los meses anteriores.
+            // Propagate changed fields only; earlier monthly history stays untouched.
+            $changes=[];
+            foreach ($policy['machines']??[] as $id=>$settings) {
+                foreach ($settings as $field=>$value) {
+                    if (!array_key_exists($field,$before['machines'][$id]??[]) || $before['machines'][$id][$field]!=$value) {
+                        $changes[$id][$field]=$value;
+                    }
+                }
+            }
+            if ($changes) {
+                $future=$this->pdo->prepare('SELECT month_key,policy_json FROM bonus_process_configs
+                    WHERE bonus_code=? AND month_key>? ORDER BY month_key'.$lock);
+                $future->execute(['bonomantencion',$month]);
+                foreach ($future->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $old=json_decode($row['policy_json'],true,512,JSON_THROW_ON_ERROR);
+                    $next=$old;
+                    foreach ($changes as $id=>$fields) {
+                        $next['machines'][$id]=array_replace($next['machines'][$id]??[],$fields);
+                    }
+                    if ($next===$old) continue;
+                    $this->pdo->prepare('UPDATE bonus_process_configs SET policy_json=? WHERE bonus_code=? AND month_key=?')
+                        ->execute([json_encode($next,JSON_THROW_ON_ERROR),'bonomantencion',$row['month_key']]);
+                    $this->audit($row['month_key'],'bonomantencion',$old,$next,$actor.' (vigencia desde '.$month.')');
+                }
+            }
             $this->pdo->commit();
         } catch (Throwable $e) {
             $this->pdo->rollBack();

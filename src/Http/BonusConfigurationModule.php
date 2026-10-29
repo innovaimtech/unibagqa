@@ -49,6 +49,17 @@ function canEditBonusConfiguration(): bool
     return unibagIsAuthenticated() && unibagCanUserPerformModifications();
 }
 
+/** Mantencion: identidad ERP exacta, no coincidencias parciales de nombres.
+ * Maintenance: exact authenticated ERP identity, never partial name matching. */
+function canManageMaintenanceBonus(): bool
+{
+    if (!unibagIsAuthenticated()) return false;
+    $auth=(int)($_SESSION['auth_user_id']??0);
+    $legacy=(int)($_SESSION['user_id']??0);
+    if ($auth>0 && $legacy>0 && $auth!==$legacy) return false;
+    return in_array($auth?:$legacy,[4129,4077],true);
+}
+
 function requireBonusConfigurationEditAccess(): void
 {
     if (canEditBonusConfiguration()) return;

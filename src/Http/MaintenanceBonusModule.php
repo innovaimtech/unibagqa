@@ -164,28 +164,66 @@ function maintenanceBonusHistory(array $entries, array $machines): string
     return $html ?: '<p>Sin modificaciones en este mes.</p>';
 }
 
+/** Lista exclusiva de eventos a corregir / Only records requiring review. */
+function maintenanceBonusProblemEvents(array $report): string
+{
+    $events=$report['problem_events']??MaintenanceBonusService::problemEvents($report['detail'],$report['period']);
+    $editable=canManageMaintenanceBonus();
+    $html='<div class="maintenance-toolbar"><label>Buscar <input type="search" data-maintenance-problem-filter placeholder="Maquina, CC, operario o problema"></label>'
+        .'<span data-maintenance-problem-count role="status">'.count($events).' eventos con problemas</span></div>'
+        .'<p>Periodo: '.date('d/m/Y',$report['period']['start']).' al '.date('d/m/Y',$report['period']['end']-1).'</p>'
+        .'<div class="maintenance-scroll"><table class="maintenance-table maintenance-problems"><thead><tr>'
+        .'<th>Maquina</th><th>Evento</th><th>CC</th><th>Operario</th><th>Motivo</th><th>Inicio</th><th>Termino registrado</th><th>Duracion</th><th>Problema</th><th>Acciones</th></tr></thead><tbody>';
+    foreach ($events as $event) {
+        $issues=implode('; ',array_unique($event['issues']));
+        $search=implode(' ',[$event['machine_name'],$event['source'].' #'.$event['id'],$event['ot_number']??'',
+            $event['operator']??'',$event['reason'],$issues]);
+        $html.='<tr data-maintenance-problem-search="'.h($search).'">';
+        foreach ([$event['machine_name'],$event['source'].' #'.$event['id'],$event['ot_number']??'Sin OT',
+            $event['operator']??'',$event['reason'],date('d/m/Y H:i:s',(int)$event['start_ts']),
+            (int)$event['end_ts']>0?date('d/m/Y H:i:s',(int)$event['end_ts']):'Sin finalizar',
+            $event['review_seconds']===null?'Sin determinar':MaintenanceBonusService::duration($event['review_seconds'])] as $value) {
+            $html.='<td class="text-cell">'.h((string)$value).'</td>';
+        }
+        $html.='<td class="text-cell maintenance-problem-cause">'.h($issues).'</td><td>';
+        $actions=['detail'=>'Revisar'];
+        if ($editable) $actions+=['edit'=>'Editar'];
+        if ($editable && (int)$event['end_ts']<=0) $actions+=['close'=>'Finalizar'];
+        foreach ($actions as $mode=>$label) {
+            $html.='<button type="button" class="btn secondary" data-activity-detail-source="'.($event['source']==='ERP'?'ERP':'STANDBY')
+                .'" data-activity-detail-id="'.(int)$event['id'].'" data-activity-detail-mode="'.$mode.'">'.$label.'</button>';
+        }
+        $html.='</td></tr>';
+    }
+    $html.='<tr data-maintenance-problem-empty'.($events?' hidden':'').'><td colspan="10">'
+        .($events?'Sin eventos para esta busqueda.':'Sin eventos con problemas en este periodo. Los pendientes de configuracion se revisan en Configuracion.')
+        .'</td></tr>';
+    return $html.'</tbody></table></div>';
+}
+
 /** Aviso agrupado reutilizado despues de recalcular / Reusable grouped pending notice. */
-function maintenanceBonusPending(array $rows): string
+function maintenanceBonusPending(array $rows, int $problemCount=0): string
 {
     $pending=array_filter($rows,static fn($row)=>$row['warnings']);
-    if (!$pending) return '';
+    if (!$pending && !$problemCount) return '';
     $causes=[];
     foreach ($pending as $row) {
         foreach (array_unique($row['warnings']) as $warning) $causes[$warning]=($causes[$warning]??0)+1;
     }
-    $html='<div class="maintenance-notice-copy"><strong>'.count($pending).' '
-        .(count($pending)===1?'máquina pendiente':'máquinas pendientes').'</strong><div class="maintenance-causes">';
+    $html='<div class="maintenance-notice-copy"><strong>'
+        .($problemCount ? $problemCount.' eventos con problemas' : count($pending).' '.(count($pending)===1?'máquina pendiente':'máquinas pendientes'))
+        .'</strong><div class="maintenance-causes">';
     foreach ($causes as $warning=>$count) {
         $html.='<span class="maintenance-cause">'.h($warning).'<b>'.$count.'</b></span>';
     }
-    return $html.'</div></div><button type="button" class="btn btn-filter-secondary" data-maintenance-open="detail">Ver pendientes</button>';
+    return $html.'</div></div><button type="button" class="btn btn-filter-secondary" data-maintenance-open="problems">Ver pendientes</button>';
 }
 
 function renderMaintenanceBonus(array $report, BonusConfigurationService $config): string
 {
     $month=$report['month'];
     $policy=$report['policy'];
-    $editable=canEditBonusConfiguration();
+    $editable=canManageMaintenanceBonus();
     $disabled=$editable ? '' : ' disabled';
     $summaryClass=$report['summary']['status']==='CUMPLE'?'yes':($report['summary']['status']==='NO CUMPLE'?'no':'pending');
     $html=bonusFilterStyles().'<style>
@@ -234,6 +272,9 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
         .maintenance-table td:nth-child(2),.maintenance-table .text-cell{text-align:left}
         .maintenance-table .maintenance-ready td{background:#dcfce7;color:#166534}
         .maintenance-table .maintenance-ready td:first-child,.maintenance-table .maintenance-ready td:last-child{font-weight:800}
+        .maintenance-problems .maintenance-problem-cause{white-space:normal;min-width:240px;color:#991b1b;font-weight:700}
+        .maintenance-problems td:last-child .btn{margin:2px}
+        .maintenance-config-actions{position:sticky;top:0;z-index:3;background:#fff;padding:12px 0;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
         .maintenance-table tfoot{background:#f1f5f9;font-weight:800}
         .maintenance-status{font-weight:800;padding:4px 7px;border-radius:6px;display:inline-block}
         .maintenance-status.yes{color:#166534;background:#dcfce7}.maintenance-status.no{color:#991b1b;background:#fee2e2}
@@ -257,6 +298,7 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
         $html.='<button type="button" class="btn btn-filter-secondary" data-maintenance-open="'.$id.'">'.$label
             .($id==='activities'?'<span class="maintenance-activity-count" data-activity-count hidden></span>':'').'</button>';
     }
+    $html.='<button type="button" class="btn btn-filter-secondary" data-maintenance-open="activities" data-maintenance-activity-scope="old">Antiguos</button>';
     $html.='</div></div><div class="maintenance-meta">'
         .'<div class="maintenance-meta-item"><span>Período</span><strong>'.date('d/m/Y',$report['period']['start']).' al '.date('d/m/Y',$report['period']['end']-1).'</strong></div>'
         .'<div class="maintenance-meta-item"><span>Días hábiles</span><strong>'.$report['calendar']['days'].'</strong></div>'
@@ -265,14 +307,18 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
     $error=trim((string)($_GET['error']??''));
     if ($error!=='') $html.='<div class="maintenance-card" style="color:#991b1b">'.h($error).'</div>';
     if (isset($_GET['saved'])) $html.='<div class="maintenance-card">Configuracion guardada.</div>';
-    $pendingHtml=maintenanceBonusPending($report['rows']);
+    $pendingHtml=maintenanceBonusPending($report['rows'],count($report['problem_events']??[]));
     $html.='<div id="maintenance-pending" class="maintenance-notice" role="status"'.($pendingHtml===''?' hidden':'').'>'.$pendingHtml.'</div>';
     $html.='<div id="maintenance-results" class="maintenance-card maintenance-scroll">'.maintenanceBonusTable($report).'</div>';
-    $contents=['activities'=>renderOpenActivityPanel($report),'detail'=>maintenanceBonusDetail($report),'sources'=>maintenanceBonusSources(),
+    $contents=['activities'=>renderOpenActivityPanel($report),'detail'=>maintenanceBonusDetail($report),
+        'problems'=>maintenanceBonusProblemEvents($report),'sources'=>maintenanceBonusSources(),
         'history'=>maintenanceBonusHistory($config->listHistory($month,'bonomantencion'),$report['machines'])];
     $form='<p>Vigencia desde '.h(substr($month,5,2).'/'.substr($month,0,4)).'. Metas, preventivo y clasificaciones se mantienen hacia adelante; los meses anteriores no cambian.</p>'
-        .'<form method="post" action="/bonificaciones/config/maintenance-save"><input type="hidden" name="_csrf" value="'.h(csrfToken()).'">'
+        .'<form id="maintenance-config-form" method="post" action="/bonificaciones/config/maintenance-save"><input type="hidden" name="_csrf" value="'.h(csrfToken()).'">'
         .'<input type="hidden" name="month" value="'.h($month).'">'
+        .'<div class="maintenance-config-actions"><button class="btn" type="submit"'.$disabled.'>Guardar</button>'
+        .'<button class="btn secondary" type="button" id="maintenance-config-discard" hidden>Descartar</button>'
+        .'<span id="maintenance-config-state" role="status">'.(!empty($policy['effective_from'])?'Configuracion vigente desde '.h(substr($policy['effective_from'],5,2).'/'.substr($policy['effective_from'],0,4)):'Configuracion pendiente de confirmar').'</span></div>'
         .'<p>Dias y colacion automaticos: '.$report['calendar']['days'].' dias habiles x 30 minutos = '
         .h(MaintenanceBonusService::duration($report['calendar']['lunch_seconds'])).'. No se pueden modificar.</p>'
         .'<p>Jornada automatica: 42 / 5 = 8:24:00 por dia. Los valores sugeridos de preventivo y meta deben confirmarse. La vista previa se actualiza al editar; Guardar aplica los cambios al informe y al Excel.</p>'
@@ -283,7 +329,7 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
         $row=$policy['machines'][$id];
         $prefix='machines['.$id.']';
         $form.='<tr data-maintenance-days="'.$programmed['days'].'" data-maintenance-daily="'.$programmed['daily']
-            .'" data-maintenance-lunch="'.$programmed['lunch'].'"><td><input type="checkbox" name="'.$prefix.'[active]" value="1"'.(!empty($row['active'])?' checked':'').$disabled.'></td>'
+            .'" data-maintenance-lunch="'.$programmed['lunch'].'"><td><input type="hidden" name="'.$prefix.'[active]" value="0"><input type="checkbox" name="'.$prefix.'[active]" value="1"'.(!empty($row['active'])?' checked':'').$disabled.'></td>'
             .'<td class="text-cell">'.h($machine['name']).'</td>';
         foreach (['preventive_hours'=>$row['preventive_hours'],'target_percent'=>$row['target_percent']] as $field=>$value) {
             $labels=['preventive_hours'=>'Preventivo programado','target_percent'=>'Meta'];
@@ -313,17 +359,24 @@ function renderMaintenanceBonus(array $report, BonusConfigurationService $config
         .(!$editable ? '<p>Solo Javier y Hector pueden modificar la configuracion.</p>' : '').'</form>';
     $contents['config']=$form;
     foreach ($contents as $id=>$content) {
-        $titles=['activities'=>'Actividades abiertas','detail'=>'Detalle','sources'=>'Cálculo y fuentes','history'=>'Historial','config'=>'Configuración'];
+        $titles=['activities'=>'Actividades abiertas','detail'=>'Detalle','problems'=>'Ver pendientes','sources'=>'Cálculo y fuentes','history'=>'Historial','config'=>'Configuración'];
         $html.='<dialog class="maintenance-dialog" id="maintenance-'.$id.'"><div class="maintenance-dialog-head">'
             .'<b>Bono mantención: '.$titles[$id].'</b><button type="button" class="btn secondary" data-maintenance-close>Cerrar</button></div>'
             .'<div class="maintenance-dialog-body">'.$content.'</div></dialog>';
     }
-    $html.='<script>(function(){document.addEventListener("click",function(e){var b=e.target.closest("[data-maintenance-open]");if(b){document.getElementById("maintenance-"+b.dataset.maintenanceOpen).showModal();return;}b=e.target.closest("[data-maintenance-close]");if(b)b.closest("dialog").close();});'
+    $html.='<script>(function(){document.addEventListener("click",function(e){var b=e.target.closest("[data-maintenance-open]");if(b){document.getElementById("maintenance-"+b.dataset.maintenanceOpen).showModal();return;}b=e.target.closest("[data-maintenance-close]");if(b){var dialog=b.closest("dialog");if(dialog.id==="maintenance-config"&&dialog.dataset.dirty==="1"){document.getElementById("maintenance-config-state").textContent="Guarda los cambios o pulsa Descartar antes de cerrar.";return;}dialog.close();}});'
+        .'document.addEventListener("input",function(e){if(!e.target.matches("[data-maintenance-problem-filter]"))return;var body=e.target.closest(".maintenance-dialog-body"),search=e.target.value.trim().toLocaleLowerCase("es"),count=0;body.querySelectorAll("[data-maintenance-problem-search]").forEach(function(row){row.hidden=!row.dataset.maintenanceProblemSearch.toLocaleLowerCase("es").includes(search);if(!row.hidden)count++;});body.querySelector("[data-maintenance-problem-count]").textContent=count+" eventos con problemas";body.querySelector("[data-maintenance-problem-empty]").hidden=count>0;});'
         .'function duration(s){var n=Math.round(Math.abs(s));return (s<0?"-":"")+Math.floor(n/3600)+":"+String(Math.floor(n%3600/60)).padStart(2,"0")+":"+String(n%60).padStart(2,"0");}'
         .'document.querySelectorAll("[data-maintenance-preventive]").forEach(function(input){function update(){var row=input.closest("tr"),raw=input.value.trim().replace(",","."),hours=Number(raw),total=Number(row.dataset.maintenanceDays)*Number(row.dataset.maintenanceDaily);'
         .'var valid=/^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/.test(raw)&&Number.isFinite(hours)&&hours>=0&&hours<=744;'
         .'row.querySelector("[data-maintenance-total]").textContent=duration(total);row.querySelector("[data-maintenance-available]").textContent=valid?duration(total-Number(row.dataset.maintenanceLunch)-hours*3600):"Dato no valido";}'
         .'input.addEventListener("input",update);input.addEventListener("change",update);update();});';
+    $html.='var cfg=document.getElementById("maintenance-config"),cfgForm=document.getElementById("maintenance-config-form"),cfgState=document.getElementById("maintenance-config-state"),discard=document.getElementById("maintenance-config-discard");'
+        .'cfgForm.addEventListener("input",function(){cfg.dataset.dirty="1";cfgState.textContent="Cambios sin guardar";discard.hidden=false;});cfgForm.addEventListener("change",function(){cfg.dataset.dirty="1";cfgState.textContent="Cambios sin guardar";discard.hidden=false;});'
+        .'cfg.addEventListener("cancel",function(e){if(cfg.dataset.dirty==="1"){e.preventDefault();cfgState.textContent="Guarda los cambios o pulsa Descartar antes de cerrar.";}});'
+        .'discard.addEventListener("click",function(){cfgForm.reset();cfg.dataset.dirty="0";discard.hidden=true;cfgState.textContent="Cambios descartados";document.querySelectorAll("[data-maintenance-preventive]").forEach(function(i){i.dispatchEvent(new Event("input"));});cfg.dataset.dirty="0";discard.hidden=true;cfgState.textContent="Cambios descartados";});'
+        .'document.addEventListener("click",function(e){var link=e.target.closest("a");if(link&&cfg.dataset.dirty==="1"){e.preventDefault();if(!cfg.open)cfg.showModal();cfgState.textContent="Guarda los cambios o pulsa Descartar antes de salir.";}});';
+    $html.='document.addEventListener("submit",function(e){if(e.target!==cfgForm&&cfg.dataset.dirty==="1"){e.preventDefault();if(!cfg.open)cfg.showModal();cfgState.textContent="Guarda los cambios o pulsa Descartar antes de cambiar el periodo.";}});';
     if (($_GET['view']??'')==='configuracion') $html.='document.getElementById("maintenance-config").showModal();';
     return $html.'})();</script>';
 }
@@ -358,24 +411,30 @@ function handleMaintenanceBonusRoutes(string $path, string $method, PDO $erp, PD
         return true;
     }
     $defaultMonth=BonusConfigurationService::monthForDate(date('Y-m-d'),date('Y-m'));
-    $month=(string)($save ? ($_POST['month']??'') : ($_GET['month']??$defaultMonth));
+    $month=(string)($save ? ($_POST['month']??'') : ($_GET['month']??$_SESSION['maintenance_bonus_month']??$defaultMonth));
     $config=new BonusConfigurationService($trz);
     $service=new MaintenanceBonusService($erp,$trz,$config);
     if ($save) {
-        requireBonusConfigurationEditAccess();
+        if (!canManageMaintenanceBonus()) {
+            http_response_code(403);
+            render('Bonificaciones','<div class="card">Solo Javier y Hector pueden modificar la configuracion de mantencion.</div>');
+            return true;
+        }
         requireCsrf();
         try {
             $service->save($month,$_POST,bonusConfigurationActor());
+            $_SESSION['maintenance_bonus_month']=$month;
             header('Location: /bonificaciones?'.http_build_query(['view'=>'bonomantencion','month'=>$month,'saved'=>1]));
         } catch (Throwable $e) {
             error_log('Maintenance bonus configuration: '.$e->getMessage());
             $message=$e instanceof PDOException ? 'No se pudo guardar la configuracion.' : $e->getMessage();
-            header('Location: /bonificaciones?'.http_build_query(['view'=>'bonomantencion','month'=>$month,'error'=>$message]));
+            header('Location: /bonificaciones?'.http_build_query(['view'=>'configuracion','bonus'=>'bonomantencion','month'=>$month,'error'=>$message]));
         }
         return true;
     }
     try {
         $report=$service->report($month);
+        if ($page) $_SESSION['maintenance_bonus_month']=$month;
         if ($export) {
             SimpleXlsx::stream('bono_mantencion_'.$month.'.xlsx',buildMaintenanceBonusExcel($report));
             return true;
