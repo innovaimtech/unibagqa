@@ -385,6 +385,10 @@
       var serialPrinterSig = lsGet(LS_KEYS.serialPrinterVidPid, "");
       var preferredSig = lsGet(LS_KEYS.scaleVidPid, "");
       var candidate = null;
+      // Con la impresora por COM y sin balanza recordada, no se adivina: se podría abrir el COM de la impresora.
+      if (!preferredSig && lsGet(LS_KEYS.printTransport, "auto") === "webserial") {
+        return false;
+      }
 
       for (var i = 0; i < ports.length; i++) {
         var sig = portSignature(ports[i]);
@@ -1090,6 +1094,47 @@
     }
   }
 
+  // Reabre sin diálogo el puerto COM de la impresora ya autorizado en este navegador.
+  var serialPrinterReconnecting = null;
+  async function autoReconnectSerialPrinter() {
+    if (printerState.serialPrinterPort && printerState.serialPrinterPort.writable) return true;
+    if (!scaleState.supported) return false;
+    if (serialPrinterReconnecting) return serialPrinterReconnecting;
+    serialPrinterReconnecting = (async function () {
+      try {
+        var ports = await navigator.serial.getPorts();
+        var sig = lsGet(LS_KEYS.serialPrinterVidPid, "");
+        var candidates = [];
+        for (var i = 0; i < (ports || []).length; i++) {
+          if (scaleState.port && ports[i] === scaleState.port) continue;
+          candidates.push(ports[i]);
+        }
+        var chosen = null;
+        if (sig) {
+          for (var j = 0; j < candidates.length; j++) {
+            if (portSignature(candidates[j]) === sig) { chosen = candidates[j]; break; }
+          }
+        }
+        // Los COM Bluetooth no exponen VID/PID: si queda un solo puerto autorizado, es el de la impresora.
+        if (!chosen && candidates.length === 1) chosen = candidates[0];
+        if (!chosen) return false;
+        if (!chosen.writable) {
+          var baud = parseInt(lsGet(LS_KEYS.serialPrinterBaud, "9600"), 10) || 9600;
+          await chosen.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none" });
+        }
+        printerState.serialPrinterPort = chosen;
+        syncPageBridgeBadge(true);
+        updateHardwareUi();
+        return true;
+      } catch (_) {
+        return false;
+      } finally {
+        serialPrinterReconnecting = null;
+      }
+    })();
+    return serialPrinterReconnecting;
+  }
+
   async function disconnectSerialPrinter() {
     var p = printerState.serialPrinterPort;
     printerState.serialPrinterPort = null;
@@ -1162,6 +1207,10 @@
         showInteractivePrintFallbackToast(job, opts.fallbackUrl || "", msg);
       }
       return { ok: false, ambiguous: true, error: msg };
+    }
+
+    if (preferred === "webserial" && !printerState.serialPrinterPort) {
+      await autoReconnectSerialPrinter();
     }
 
     // 1. Si el usuario configuró explícitamente WebUSB o WebSerial primero
@@ -1714,7 +1763,7 @@
           "  </select>" +
           "</div>"
         : '<div style="margin-top:8px;padding:8px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;font-size:11.5px;color:#334155">' +
-          "💡 Para impresoras USB con driver estándar de Windows (HPRT / Barpos / Zebra), ejecuta una sola vez <code>instalar_servicio_impresora_silencioso.bat</code> en esta PC (queda oculto y automático al encender Windows), o vincula directo por WebUSB/Serial abajo." +
+          "💡 Para imprimir sin instalar nada: pulsa <b>Impresora Serial (COM)</b> y elige el puerto de la impresora (una sola vez; el navegador lo recuerda). Alternativa: el servicio <code>instalar_servicio_impresora_silencioso.bat</code> en esta PC." +
           "</div>") +
       '  <div class="unibag-hw-row">' +
       (printerState.webUsbSupported
@@ -1823,6 +1872,8 @@
 
     if (INITIAL_QUEUE.length > 0) {
       processInitialPrintQueue();
+    } else if (lsGet(LS_KEYS.printTransport, "auto") === "webserial") {
+      autoReconnectSerialPrinter();
     }
   }
 

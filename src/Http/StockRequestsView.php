@@ -179,7 +179,7 @@ function mrAlerts(string $ok, string $error, bool $operational): string
 
 function mrPageHeader(string $title, string $subtitle, string $backHref, string $backLabel): string
 {
-    return '<div class="mr-card mr-pad"><div class="mr-top"><div><h1>' . h($title) . '</h1><p class="mr-sub">' . h($subtitle) . '</p></div>'
+    return '<div class="mr-card mr-pad"><div class="mr-top"><div><h1>' . h($title) . '</h1>' . ($subtitle !== '' ? '<p class="mr-sub">' . h($subtitle) . '</p>' : '') . '</div>'
         . '<div class="mr-links"><a class="mr-link" href="' . h($backHref) . '">' . h($backLabel) . '</a></div></div></div>';
 }
 

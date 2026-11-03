@@ -48,14 +48,46 @@ if ($path === '/stock/material-requests' && $method === 'GET') {
         'delivered' => 'Entregadas',
     ];
     $body = mrStyles() . '<div class="mr"><div class="mr-card mr-pad">
-        <div class="mr-top"><div><h1>Solicitudes de materiales</h1>
-        <p class="mr-sub">Pedidos de material de producción a Bodega 3000. Pulsa «Atender» para aceptar y entregar.</p></div>
+        <div class="mr-top"><div><h1>Solicitudes de materiales</h1></div>
         <div class="mr-links"><a class="mr-link" href="/mobile/picking">📱 Vista móvil</a><a class="mr-link" href="/stock">← Inventario</a></div></div>
         <div class="mr-tabs">';
     foreach ($statusTabs as $tabKey => $tabLabel) {
         $body .= '<a class="mr-tab' . ($statusView === $tabKey ? ' active' : '') . '" href="' . h(withQuery('/stock/material-requests', ['status_view' => $tabKey])) . '"><b>' . (int)($statusCounters[$tabKey] ?? 0) . '</b><span>' . h($tabLabel) . '</span></a>';
     }
     $body .= '</div></div>';
+
+    // Pedidos que hacen los operadores desde su módulo (production_supply_requests): se atienden en /stock/material-supply.
+    $operatorRows = [];
+    try {
+        require_once __DIR__ . '/../MaterialSupplyService.php';
+        $operatorRows = array_values(array_filter(
+            (new MaterialSupplyService(Db::erpPdo(), Db::trzPdo()))->requests(),
+            static fn(array $r): bool => (int)($r['source_storehouse_id'] ?? 0) !== 16
+                && in_array((string)($r['status'] ?? ''), ['PENDING', 'ACCEPTED', 'DISPATCHED'], true)
+        ));
+    } catch (Throwable $e) {
+        error_log('Solicitudes de operadores: ' . $e->getMessage());
+    }
+    if ($operatorRows !== []) {
+        $opLabels = ['PENDING' => 'Sin tomar', 'ACCEPTED' => 'En preparación', 'DISPATCHED' => 'Por recibir'];
+        $body .= '<div class="mr-card tbl"><div class="mr-search"><b>Pedidos de operadores a Bodega (' . count($operatorRows) . ')</b></div>
+            <table class="mr-table mr-op"><thead><tr><th>Material solicitado</th><th>Máquina / OT</th><th>Cantidad</th><th>Estado</th><th>Fecha</th><th></th></tr></thead><tbody>';
+        foreach ($operatorRows as $r) {
+            $ctx = json_decode((string)($r['context'] ?? ''), true) ?: [];
+            $actor = json_decode((string)($r['requested_by'] ?? ''), true) ?: [];
+            $machine = (string)($ctx['machine_name'] ?? ('Máquina #' . (int)($ctx['win_equipoid'] ?? 0)));
+            $ot = (string)($ctx['planned_ot_number'] ?? '');
+            $unit = (string)($r['unit'] ?? 'Unid.');
+            $st = (string)$r['status'];
+            $body .= '<tr><td class="main"><div class="mr-item">' . h((string)($r['description'] ?? $r['sku'] ?? '')) . '</div><div class="mr-muted">' . h((string)($r['sku'] ?? '')) . ' · Solicita: ' . h((string)($actor['name'] ?? '-')) . '</div></td>';
+            $body .= '<td data-label="Máquina / OT"><b>' . h($machine) . '</b>' . ($ot !== '' ? '<div class="mr-muted">OT ' . h($ot) . '</div>' : '') . '</td>';
+            $body .= '<td data-label="Cantidad">' . mrProgress((float)($r['requested_qty'] ?? 0), (float)($r['delivered_qty'] ?? 0), $unit) . '</td>';
+            $body .= '<td data-label="Estado"><span class="mr-badge ' . ($st === 'PENDING' ? 'pend' : ($st === 'ACCEPTED' ? 'acc' : 'part')) . '">' . h($opLabels[$st] ?? $st) . '</span></td>';
+            $body .= '<td data-label="Fecha">' . h(mrDate((string)($r['created_at'] ?? ''))) . '</td>';
+            $body .= '<td class="act"><a class="mr-btn" href="/stock/material-supply?open=' . h((string)$r['request_key']) . '">' . ($st === 'DISPATCHED' ? 'Ver' : 'Atender') . '</a></td></tr>';
+        }
+        $body .= '</tbody></table></div>';
+    }
 
     $body .= '<div class="mr-card tbl"><div class="mr-search"><input type="search" id="mr-search" placeholder="Buscar por material, OT o quién solicita…" aria-label="Buscar solicitudes"><small id="mr-count">' . count($requests) . ' solicitudes</small></div>
         <table class="mr-table"><thead><tr><th>Material solicitado</th><th>OT</th><th>Avance</th><th>Estado</th><th>Fecha</th><th>Última entrega</th><th></th></tr></thead><tbody>';
@@ -81,7 +113,7 @@ if ($path === '/stock/material-requests' && $method === 'GET') {
     if ($requests === []) {
         $body .= '<div class="mr-empty">No hay solicitudes en este estado.</div>';
     }
-    $body .= '</div></div><script>(function(){var i=document.getElementById("mr-search"),c=document.getElementById("mr-count");if(!i)return;i.addEventListener("input",function(){var q=i.value.trim().toLowerCase(),n=0;document.querySelectorAll(".mr-table tbody tr").forEach(function(r){var ok=!q||(r.dataset.s||"").indexOf(q)>-1;r.style.display=ok?"":"none";if(ok)n++;});c.textContent=n+" solicitudes";});})();</script>';
+    $body .= '</div></div><script>(function(){var i=document.getElementById("mr-search"),c=document.getElementById("mr-count");if(!i)return;i.addEventListener("input",function(){var q=i.value.trim().toLowerCase(),n=0;document.querySelectorAll(".mr-table:not(.mr-op) tbody tr").forEach(function(r){var ok=!q||(r.dataset.s||"").indexOf(q)>-1;r.style.display=ok?"":"none";if(ok)n++;});c.textContent=n+" solicitudes";});})();</script>';
 
     render('Solicitudes', $body);
     exit;
@@ -94,7 +126,7 @@ if ($path === '/mobile/picking' && $method === 'GET') {
             && workOrderCanReceiveMaterials((string)($request['work_order_status'] ?? ''))
     ));
 
-    $body = mrStyles() . '<div class="mr">' . mrPageHeader('Picking móvil', count($requests) . ' solicitudes por atender. Toca una para empezar.', '/stock/material-requests', 'Vista escritorio');
+    $body = mrStyles() . '<div class="mr">' . mrPageHeader('Picking móvil', count($requests) . ' por atender', '/stock/material-requests', 'Vista escritorio');
     foreach ($requests as $request) {
         $unit = (string)($request['requested_unit'] ?? 'Unid.');
         $body .= '<div class="mr-card mr-pad"><div class="mr-top" style="flex-wrap:nowrap"><div style="min-width:0"><div class="mr-item" style="font-size:16px">' . h((string)$request['requested_item']) . '</div>
@@ -194,7 +226,7 @@ if (preg_match('#^/mobile/picking/(\d+)$#', $path, $m) === 1 && $method === 'GET
     $pendingQty = max(0, $requestedQty - $deliveredQty);
     $requestOperational = workOrderCanReceiveMaterials((string)($request['work_order_status'] ?? ''));
 
-    $body = mrStyles() . '<div class="mr">' . mrPageHeader('Picking móvil', 'Atiende esta solicitud paso a paso.', '/mobile/picking', '← Volver')
+    $body = mrStyles() . '<div class="mr">' . mrPageHeader('Picking móvil', '','/mobile/picking', '← Volver')
         . mrAlerts($flashOk, $flashError, $requestOperational)
         . mrDetailTop($request, $requestOperational, $requestedQty, $deliveredQty, $pendingQty);
     if ($requestOperational && (string)$request['status'] === 'PENDING') {
@@ -412,7 +444,7 @@ if (preg_match('#^/stock/material-requests/(\d+)$#', $path, $m) === 1 && $method
     $pendingQty = max(0, $requestedQty - $deliveredQty);
     $requestOperational = workOrderCanReceiveMaterials((string)($request['work_order_status'] ?? ''));
 
-    $body = mrStyles() . '<div class="mr">' . mrPageHeader('Atención de solicitud', 'Bodega acepta la solicitud y registra el material entregado.', '/stock/material-requests', '← Volver a solicitudes')
+    $body = mrStyles() . '<div class="mr">' . mrPageHeader('Atención de solicitud', '','/stock/material-requests', '← Volver a solicitudes')
         . mrAlerts($flashOk, $flashError, $requestOperational)
         . mrDetailTop($request, $requestOperational, $requestedQty, $deliveredQty, $pendingQty);
     if ($requestOperational && (string)$request['status'] === 'PENDING') {
@@ -655,7 +687,6 @@ if ($path === '/stock/transfers' && $method === 'GET') {
         <div class="ub-filter-header" style="margin-bottom:14px">
           <div>
             <h1 class="ub-filter-title">Traspaso por pistoleo</h1>
-            <p class="ub-filter-sub">Escanea el ID o código de la bobina para moverla de bodega o enviarla a una OT disponible.</p>
           </div>
           <a class="ub-btn-secondary" href="/stock">← Volver a stock</a>
         </div>
@@ -949,7 +980,6 @@ if ($path === '/cut' && $method === 'GET') {
         <div class="ub-filter-header" style="margin-bottom:14px">
           <div>
             <h1 class="ub-filter-title">Proceso de corte</h1>
-            <p class="ub-filter-sub">Escanea la bobina salida de producción y conviértela en unidades, cajas y pallets.</p>
           </div>
           <a class="ub-btn-secondary" href="/pallets">Ver pallets terminados</a>
         </div>
@@ -1218,7 +1248,6 @@ if ($path === '/pallets' && $method === 'GET') {
         <div class="ub-filter-header">
           <div>
             <h1 class="ub-filter-title">Asignación de pallets terminados</h1>
-            <p class="ub-filter-sub">Bandeja de pallets pendientes por asignar a una bodega final.</p>
           </div>
           <a class="ub-btn-secondary" href="' . ($isWarehousePalletArea ? '/stock' : '/cut') . '">← Volver</a>
         </div></div>';
@@ -1474,7 +1503,6 @@ if ($path === '/maquila' && $method === 'GET') {
         <div class="ub-filter-header">
           <div>
             <h1 class="ub-filter-title">Maquila y talleres externos</h1>
-            <p class="ub-filter-sub">Salida a taller externo, retorno parcial o total y conciliación de merma por pallet/OT.</p>
           </div>
           <a class="ub-btn-secondary" href="/stock">← Volver a inventario</a>
         </div>

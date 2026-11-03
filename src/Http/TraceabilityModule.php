@@ -261,9 +261,6 @@ function renderTraceabilityListView(array $searchResult, array $stats, array $fi
                 <div class="trz-title-group">
                     <span class="trz-tag">ERP Unibag</span>
                     <h1 class="trz-title">Trazabilidad 360° de Pedidos & OTs</h1>
-                    <p class="trz-desc">
-                        Seguimiento continuo de todo el proceso productivo: Orden de Compra, Clisés, Pre-prensa, Planificación OT, Fabricación en Planta y Despacho.
-                    </p>
                 </div>
                 <div class="trz-header-actions">
                     <button type="button" class="trz-btn trz-btn-outline" onclick="window.print()">

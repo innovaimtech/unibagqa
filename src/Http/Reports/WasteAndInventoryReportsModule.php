@@ -39,7 +39,6 @@ function unibagRenderInventoryReportsPage(ReceptionService $service): void
         <div class="ub-filter-header">
           <div>
             <div class="ub-filter-title">📋 Informe de Inventario · ERP</div>
-            <div class="ub-filter-sub">Histórico de recuentos físicos (stockcounts) registrados en la base de datos <code>unibag_unibag</code>.</div>
           </div>
           <div class="ub-filter-actions">
             <a class="ub-btn-secondary" href="/stock">Consultar stock actual</a>

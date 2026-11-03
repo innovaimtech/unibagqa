@@ -347,9 +347,6 @@ function unibagRenderStockPage(ReceptionService $service): void
     $body .= '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:16px">
         <div>
           <div style="font-size:22px;font-weight:800;color:#0f172a;letter-spacing:-.02em">Inventario de Bodegas · ERP</div>
-          <div class="muted" style="font-size:13px;margin-top:2px">
-            Conexión directa a base de datos ERP (<code>unibag_unibag</code>) · Ocupación física administrada en Trazabilidad.
-          </div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <a class="btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '" style="background:#00A9A6;display:inline-flex;align-items:center;gap:6px">
@@ -1369,7 +1366,6 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div class="trz-header">';
     $body .= '<div>';
     $body .= '<div class="trz-title"><span>📦</span> Ingreso a Bodega con Código de Trazabilidad</div>';
-    $body .= '<div class="trz-sub">Registro y rotulación de bultos físicos con códigos de trazabilidad únicos para existencias en bodega.</div>';
     $body .= '</div>';
     $body .= '<div style="display:flex;gap:8px;flex-wrap:wrap">';
     $body .= '<a class="btn secondary" href="/stock?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">← Volver a Stock</a>';
@@ -1715,6 +1711,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">';
     $body .= '<button type="button" class="btn secondary" onclick="closePrintLabel()">Cerrar</button>';
     $body .= '<button type="button" class="btn" style="background:#00A9A6" onclick="printLabelNow()">🖨️ Imprimir Todas las Etiquetas</button>';
+    $body .= '<button type="button" class="btn secondary" onclick="printLabelBrowser()" title="Usa el cuadro de impresion del navegador">Imprimir con el navegador</button>';
     $body .= '</div>';
     $body .= '</div>';
     $body .= '</div>';
@@ -1740,6 +1737,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
     // JAVASCRIPT INTERACTIVO
     $body .= '<script>
+        var autoPrintSendNew = ' . ($printCodesParam !== '' && $batchAnchorId === 0 ? 'true' : 'false') . ';
         var autoPrintData = ' . json_encode($autoPrintEntries, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) . ';
         var recentTraceabilityEntries = ' . json_encode($recentEntries, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) . ';
         var currentEntryForSplit = null;
@@ -2202,7 +2200,9 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             "</div>";
         }
 
+        var currentRenderedLabels = [];
         function renderLabelList(list) {
+            currentRenderedLabels = list.slice();
             var container = document.getElementById("printableArea");
             container.innerHTML = list.map(function(data, idx) {
                 return buildLabelCardHtml(data, idx, list.length);
@@ -2295,7 +2295,39 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             setDeleteToolbarVisibility(false);
         }
 
-        function printLabelNow() {
+        var thermalPrintBusy = false;
+        async function printLabelNow() {
+            var popupError = document.getElementById("print_popup_error");
+            if (thermalPrintBusy) return;
+            if (!currentRenderedLabels.length) { printLabelBrowser(); return; }
+            if (!window.UnibagHardware || typeof window.UnibagHardware.printJob !== "function") {
+                popupError.style.display = "block";
+                popupError.textContent = "No se cargo el modulo de impresion termica. Recarga la pagina (Ctrl+F5) o usa Imprimir con el navegador.";
+                return;
+            }
+            thermalPrintBusy = true;
+            popupError.style.display = "none";
+            try {
+                var fd = new FormData();
+                fd.append("_csrf", ' . json_encode(csrfToken()) . ');
+                fd.append("labels", JSON.stringify(currentRenderedLabels));
+                var resp = await fetch("/stock/traceability-entry/print-job", { method: "POST", body: fd, credentials: "same-origin" });
+                var data = await resp.json();
+                if (!data.ok) throw new Error(data.error || "No se pudo preparar la impresion.");
+                var res = await window.UnibagHardware.printJob(data.print_job, { silentFallback: true });
+                if (!res || !res.ok) {
+                    popupError.style.display = "block";
+                    popupError.textContent = "No se pudo imprimir en la termica: " + ((res && res.error) || "sin respuesta del puente local (puerto 8767)") + ". Puedes usar Imprimir con el navegador.";
+                }
+            } catch (err) {
+                popupError.style.display = "block";
+                popupError.textContent = "Error al imprimir: " + (err && err.message ? err.message : err);
+            } finally {
+                thermalPrintBusy = false;
+            }
+        }
+
+        function printLabelBrowser() {
             var printable = document.getElementById("printableArea").innerHTML;
             var win = window.open("", "_blank", "width=520,height=700");
             var popupError = document.getElementById("print_popup_error");
@@ -2362,7 +2394,13 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
         // Si se generaron etiquetas en esta petición, abrir modal automáticamente
         if (autoPrintData && autoPrintData.length > 0) {
-            setTimeout(function() { openPrintLabel(autoPrintData, reprintBatchAnchorId > 0); }, 250);
+            setTimeout(function() {
+                openPrintLabel(autoPrintData, reprintBatchAnchorId > 0);
+                if (autoPrintSendNew) {
+                    try { history.replaceState(null, "", location.pathname + "?bodega=" + encodeURIComponent(new URLSearchParams(location.search).get("bodega") || "")); } catch (e) {}
+                    printLabelNow();
+                }
+            }, 250);
         }
     </script>';
 
@@ -2977,10 +3015,6 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '      <h1 style="margin:0;font-size:24px;font-weight:800;color:#0f172a;letter-spacing:-0.5px">🔄 Traspasos de Bodega</h1>';
     $body .= '      <span style="background:#e0f2fe;color:#0369a1;font-size:12px;font-weight:700;padding:3px 9px;border-radius:12px">Producción y entre bodegas</span>';
     $body .= '    </div>';
-    $body .= '    <p style="margin:6px 0 0;font-size:13.5px;color:#64748b;max-width:820px">';
-    $body .= '      Mueva bobinas con trazabilidad completa. Puede despacharlas a <strong>producción (Bodega 3000)</strong> o hacer un ';
-    $body .= '      <strong>traspaso directo entre bodegas</strong> cuando todavía no exista máquina ni OT definidas.';
-    $body .= '    </p>';
     $body .= '  </div>';
     $isJavierUser = unibagIsUserJavier() || (stripos($currentOperatorName, 'JAVIER') !== false);
     $body .= '  <div style="display:flex;align-items:center;gap:8px">';
@@ -5555,6 +5589,34 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
     }
 
     // POST: Guardar ingreso a bodega con código de trazabilidad
+    // JSON: arma el trabajo de impresión térmica (puente local 8767) con las etiquetas que muestra la pantalla
+    if ($path === '/stock/traceability-entry/print-job' && $method === 'POST') {
+        requireCsrf();
+        header('Content-Type: application/json; charset=utf-8');
+        $labels = json_decode((string)($_POST['labels'] ?? '[]'), true);
+        if (!is_array($labels) || $labels === []) {
+            echo json_encode(['ok' => false, 'error' => 'No hay etiquetas para imprimir.'], JSON_UNESCAPED_UNICODE);
+            return true;
+        }
+        $labels = array_slice(array_values($labels), 0, 300);
+        $thermal = new PrintService($_ENV);
+        $parts = [];
+        foreach ($labels as $row) {
+            if (is_array($row) && trim((string)($row['traceability_code'] ?? '')) !== '') {
+                $parts[] = $thermal->buildTraceabilityEntryCommand($row);
+            }
+        }
+        if ($parts === []) {
+            echo json_encode(['ok' => false, 'error' => 'Las etiquetas no tienen código de trazabilidad.'], JSON_UNESCAPED_UNICODE);
+            return true;
+        }
+        echo json_encode([
+            'ok' => true,
+            'print_job' => $thermal->buildClientJob(implode("\r\n", $parts), 1, count($parts) . ' etiqueta(s) trazables'),
+        ], JSON_UNESCAPED_UNICODE);
+        return true;
+    }
+
     if (($path === '/stock/traceability-entry' || $path === '/stock/ingreso-trazable') && $method === 'POST') {
         requireCsrf();
         $postedWarehouseId = (int)($_POST['warehouse_id'] ?? 0);

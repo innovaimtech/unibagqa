@@ -796,6 +796,94 @@ final class PrintService
         return $this->buildPalletZpl($pallet, $boxes);
     }
 
+    /**
+     * Etiqueta 100x70 mm de un ingreso a bodega con código de trazabilidad.
+     *
+     * @param array<string, mixed> $e traceability_code, item_code, item_description, quantity,
+     *        unit_name, package_number, total_packages, warehouse_name, operator_name, created_at, entity_type
+     */
+    public function buildTraceabilityEntryCommand(array $e): string
+    {
+        $code = $this->t((string)($e['traceability_code'] ?? ''));
+        $type = strtoupper($this->t((string)($e['entity_type'] ?? 'PRODUCT')));
+        $sku = strtoupper($this->t((string)($e['item_code'] ?? '')));
+        $desc = strtoupper($this->t(mb_substr((string)($e['item_description'] ?? ''), 0, 44)));
+        $qtyNum = (float)($e['quantity'] ?? 0);
+        $qty = rtrim(rtrim(number_format($qtyNum, 2, '.', ''), '0'), '.');
+        $unit = strtoupper($this->t((string)($e['unit_name'] ?? '')));
+        $pkgNo = (int)($e['package_number'] ?? 1);
+        $pkgTotal = (int)($e['total_packages'] ?? 1);
+        $pkg = $pkgNo > 0 && $pkgTotal > 0 ? ($pkgNo . '/' . $pkgTotal) : '1/1';
+        $wh = strtoupper($this->t((string)($e['warehouse_name'] ?? '')));
+        $op = strtoupper($this->t((string)($e['operator_name'] ?? '')));
+        $date = $this->t($this->formatLabelDate((string)($e['created_at'] ?? '')));
+        $qtyLine = 'CANTIDAD: ' . $qty . ' ' . $unit;
+        $lang = $this->getPrintLanguage();
+
+        if ($lang === 'tspl') {
+            return $this->buildTsplHeader() . "\r\n"
+                . 'BAR 20,160,760,2' . "\r\n"
+                . 'TEXT 20,18,"3",0,1,1,"UNIBAG"' . "\r\n"
+                . 'TEXT 20,50,"2",0,1,1,"INGRESO TRAZABLE - ' . $type . '"' . "\r\n"
+                . 'TEXT 20,84,"4",0,1,1,"' . $sku . '"' . "\r\n"
+                . 'TEXT 20,124,"2",0,1,1,"' . $desc . '"' . "\r\n"
+                . 'TEXT 20,176,"2",0,1,1,"' . $qtyLine . '"' . "\r\n"
+                . 'TEXT 420,176,"2",0,1,1,"BULTO: ' . $pkg . '"' . "\r\n"
+                . 'TEXT 20,208,"2",0,1,1,"BODEGA: ' . $wh . '"' . "\r\n"
+                . 'TEXT 20,240,"2",0,1,1,"OPERADOR: ' . $op . '"' . "\r\n"
+                . 'TEXT 420,240,"2",0,1,1,"' . $date . '"' . "\r\n"
+                . 'BARCODE 42,290,"128",100,0,0,3,3,"' . $code . '"' . "\r\n"
+                . 'TEXT 42,410,"4",0,1,1,"' . $code . '"' . "\r\n"
+                . 'PRINT 1,1';
+        }
+        if ($lang === 'epl') {
+            return implode("\r\n", [
+                'N',
+                'q812',
+                'Q560,24',
+                ...$this->buildEplDeviceSettings(),
+                'LO20,160,750,2',
+                'A20,14,0,3,1,1,N,"UNIBAG"',
+                'A20,44,0,2,1,1,N,"INGRESO TRAZABLE - ' . $type . '"',
+                'A20,78,0,4,1,1,N,"' . $sku . '"',
+                'A20,122,0,2,1,1,N,"' . $desc . '"',
+                'A20,176,0,2,1,1,N,"' . $qtyLine . '"',
+                'A420,176,0,2,1,1,N,"BULTO: ' . $pkg . '"',
+                'A20,208,0,2,1,1,N,"BODEGA: ' . $wh . '"',
+                'A20,240,0,2,1,1,N,"OPERADOR: ' . $op . '"',
+                'A420,240,0,2,1,1,N,"' . $date . '"',
+                'B42,290,0,1,3,8,100,N,"' . $code . '"',
+                'A42,410,0,4,1,1,N,"' . $code . '"',
+                'P1',
+            ]) . "\r\n";
+        }
+        return "^XA
+^CI28
+^PW812
+^LL560
+^PR3
+^MD" . $this->getZplDarkness() . "
+^CF0,30
+^FO20,16^FDUNIBAG^FS
+^CF0,22
+^FO20,50^FDINGRESO TRAZABLE - {$type}^FS
+^CF0,38
+^FO20,80^FD{$sku}^FS
+^CF0,24
+^FO20,124^FB770,1,0,L,0^FD{$desc}^FS
+^FO20,160^GB772,2,2^FS
+^FO20,176^FD{$qtyLine}^FS
+^FO420,176^FDBULTO: {$pkg}^FS
+^FO20,208^FDBODEGA: {$wh}^FS
+^FO20,240^FDOPERADOR: {$op}^FS
+^FO420,240^FD{$date}^FS
+^BY3,2,100
+^FO42,290^BCN,100,N,N,N^FD{$code}^FS
+^CF0,36
+^FO42,410^FD{$code}^FS
+^XZ";
+    }
+
     private function buildZpl(array $roll): string
     {
         $id = (string)($roll['id'] ?? '');
