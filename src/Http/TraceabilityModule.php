@@ -42,6 +42,70 @@ function handleTraceabilityRoutes(
         return true;
     }
 
+    // Sub-route: descarga en Word (.docx) del informe 360° o de la ficha de una máquina
+    if ($cleanPath === '/trazabilidad/word' || $cleanPath === '/trazabilidad/word-maquina') {
+        $sendDocx = static function (string $binary, string $fileName): void {
+            while (ob_get_level() > 0) {
+                ob_end_clean();
+            }
+            header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+            header('Content-Disposition: attachment; filename="' . $fileName . '"');
+            header('Content-Length: ' . strlen($binary));
+            header('Cache-Control: max-age=0, no-cache, must-revalidate');
+            header('Pragma: public');
+            echo $binary;
+            exit;
+        };
+        $trzForDocx = null;
+        try {
+            $trzForDocx = Db::trzPdo();
+        } catch (Throwable) {
+            $trzForDocx = null; // opcional: sin TRZ faltan tintas, clichés asignados y alistamiento
+        }
+        $dossiers = new FabricationDossierService($pdo, $trzForDocx);
+        try {
+            if ($cleanPath === '/trazabilidad/word-maquina') {
+                $evtId = (int)($_GET['id'] ?? 0);
+                $dossier = $evtId > 0 ? $dossiers->forEvent($evtId) : null;
+                if ($dossier === null) {
+                    http_response_code(404);
+                    echo 'No se encontró la máquina de este evento.';
+                    return true;
+                }
+                $name = preg_replace('/[^A-Za-z0-9_-]+/', '_', 'Ficha_' . (string)($dossier['plan']['machine'] ?? 'maquina') . '_OT' . (string)($dossier['plan']['ot'] ?? '')) ?: 'Ficha_maquina';
+                $sendDocx(TraceabilityDocxReport::buildMachineReport($dossier), $name . '_' . date('Ymd') . '.docx');
+            }
+            $orderId = (int)($_GET['id'] ?? 0);
+            $detail = $orderId > 0 ? $traceService->getOrderDetail($orderId) : null;
+            if (!$detail) {
+                http_response_code(404);
+                echo 'No se encontró el pedido.';
+                return true;
+            }
+            $agendaIds = [];
+            foreach ($detail['events'] as $evRow) {
+                $agendaIds[(int)($evRow['agenda_id'] ?? 0)] = true;
+            }
+            $machineDossiers = [];
+            foreach ($detail['agendas'] as $agRow) {
+                $agId = (int)($agRow['id'] ?? 0);
+                if ($agId > 0 && isset($agendaIds[$agId])) {
+                    $dossier = $dossiers->forAgenda($agId);
+                    if ($dossier !== null) {
+                        $machineDossiers[] = $dossier;
+                    }
+                }
+            }
+            $name = preg_replace('/[^A-Za-z0-9_-]+/', '_', 'Trazabilidad_NV' . trim((string)$detail['order']['req_number'])) ?: 'Trazabilidad';
+            $sendDocx(TraceabilityDocxReport::buildOrderReport($detail, $machineDossiers), $name . '_' . date('Ymd') . '.docx');
+        } catch (Throwable $e) {
+            error_log('Informe Word de trazabilidad: ' . $e->getMessage());
+            http_response_code(500);
+            echo 'No se pudo generar el informe en Word.';
+        }
+        return true;
+    }
+
     // Sub-route: API Ficha técnica de fabricación por máquina (JSON para el modal de detalle)
     if ($cleanPath === '/trazabilidad/api/fabricacion') {
         header('Content-Type: application/json; charset=utf-8');
@@ -641,6 +705,7 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
                 Volver a la búsqueda de Trazabilidad
             </a>
             <div class="trz-back-actions">
+                <a class="trz-btn trz-btn-primary" href="/trazabilidad/word?id=<?= (int)$orderId ?>" title="Descargar el informe completo en Word">📄 Descargar Word</a>
                 <button type="button" class="trz-btn trz-btn-outline" onclick="window.print()">
                     <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/></svg>
                     Imprimir Informe 360°
@@ -1568,6 +1633,7 @@ function renderTrzProdModalHtml(): void
 
             <div class="trz-modal-footer">
                 <span class="trz-modal-hint">Presione <strong>Escape</strong> para cerrar esta ventana flotante</span>
+                <a id="trzProdWordLink" class="trz-btn trz-btn-primary trz-btn-sm" href="#" title="Descargar la ficha técnica de esta máquina en Word">📄 Descargar Word de esta máquina</a>
                 <button type="button" class="trz-btn trz-btn-outline trz-btn-sm" onclick="closeTrzProdModal(event)">Cerrar</button>
             </div>
         </div>
@@ -1643,6 +1709,8 @@ function renderTrzProdModalHtml(): void
             document.getElementById('trzProdPlanned').textContent = plannedAmt > 0 ? (plannedAmt.toLocaleString('es-CL') + ' un.') : 'No especificado';
 
             loadTrzDossier(ev.id);
+            var wordLink = document.getElementById('trzProdWordLink');
+            if (wordLink) { wordLink.href = ev.id ? ('/trazabilidad/word-maquina?id=' + encodeURIComponent(ev.id)) : '#'; }
 
             var commentsBox = document.getElementById('trzProdCommentsBox');
             var commentsEl = document.getElementById('trzProdCommentsText');

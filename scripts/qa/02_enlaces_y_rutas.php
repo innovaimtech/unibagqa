@@ -72,7 +72,7 @@ foreach ($targets as $t => $where) {
 // Falsos positivos revisados a mano (rutas dinamicas que este analisis estatico no puede resolver):
 //  - /123 .............. URL armada con una expresion PHP (stock?bodega=... / purchase-orders?...)
 //  - /trazabilidad* .... TraceabilityModule la resuelve con $cleanPath, no con $path
-foreach (['/123', '/trazabilidad', '/trazabilidad/detalle'] as $ok) { unset($bad[$ok]); }
+foreach (['/123', '/trazabilidad', '/trazabilidad/detalle', '/trazabilidad/word'] as $ok) { unset($bad[$ok]); }
 ksort($bad);
 echo "Rutas registradas: exactas=" . count($exact) . " prefijos=" . count($prefix) . " regex=" . count($regex) . "\n";
 echo "Destinos internos unicos analizados: " . count($targets) . "\n";

@@ -311,9 +311,10 @@ function handleWorkOrderLifecycleRoutes(
                 $aniloxInkRows[] = $row;
             }
 
-            $inkRes = $prodService->saveFlexoAniloxInkConfig($agId, $reqId, $workerOtId, $aniloxInkRows);
+            $inkRes = $prodService->saveFlexoAniloxInkConfig($agId, $reqId, $workerOtId, $aniloxInkRows, (int)($_SESSION['user_id'] ?? 0));
             if (!($inkRes['ok'] ?? false)) {
-                $res = $inkRes;
+                // El anilox ya quedó guardado en el ERP; se avisa que faltan las tintas para que reintente sin perder lo escrito.
+                $res = ['ok' => false, 'error' => 'El anilox se guardó, pero las tintas NO. No cierre la pantalla y vuelva a presionar "Registrar Anilox". Detalle: ' . (string)($inkRes['error'] ?? '')];
             }
         }
         $isAjax = (!empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')

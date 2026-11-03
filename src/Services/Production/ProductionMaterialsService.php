@@ -3806,6 +3806,27 @@ trait ProductionMaterialsServiceTrait
                     KEY idx_flexo_anilox_ink_worker_ot (worker_ot_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             ");
+            // Historial de cambios de anilox/tintas: nada se pierde aunque la configuración se reescriba.
+            $this->trzPdo->exec("
+                CREATE TABLE IF NOT EXISTS flexo_anilox_change_log (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    ag_id BIGINT UNSIGNED NOT NULL,
+                    worker_ot_id BIGINT UNSIGNED NULL,
+                    unidad INT NOT NULL,
+                    action VARCHAR(20) NOT NULL,
+                    anilox_id BIGINT UNSIGNED NULL,
+                    previous_anilox_id BIGINT UNSIGNED NULL,
+                    color_label VARCHAR(180) NULL,
+                    ink_item_id BIGINT UNSIGNED NULL,
+                    loaded_kg DECIMAL(10,3) NULL,
+                    leftover_kg DECIMAL(10,3) NULL,
+                    detail VARCHAR(255) NULL,
+                    user_id BIGINT NULL,
+                    created_at BIGINT NOT NULL,
+                    PRIMARY KEY (id),
+                    KEY idx_flexo_anilox_log_ag (ag_id, created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            ");
             $this->trzPdo->exec("
                 CREATE TABLE IF NOT EXISTS flexo_anilox_ink_mix_components (
                     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -3823,6 +3844,90 @@ trait ProductionMaterialsServiceTrait
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             ");
         } catch (Throwable) {}
+    }
+
+    /** Registra un cambio de anilox/tintas. Nunca interrumpe el guardado principal. */
+    private function logFlexoAniloxChange(
+        int $agId,
+        int $unidad,
+        string $action,
+        ?int $aniloxId,
+        ?int $previousAniloxId,
+        string $colorLabel = '',
+        ?int $inkItemId = null,
+        ?float $loadedKg = null,
+        ?float $leftoverKg = null,
+        string $detail = '',
+        int $userId = 0,
+        ?int $workerOtId = null
+    ): void {
+        if ($this->trzPdo === null || $agId <= 0) {
+            return;
+        }
+        try {
+            $this->trzPdo->prepare("
+                INSERT INTO flexo_anilox_change_log
+                    (ag_id, worker_ot_id, unidad, action, anilox_id, previous_anilox_id, color_label, ink_item_id, loaded_kg, leftover_kg, detail, user_id, created_at)
+                VALUES
+                    (:ag, :wot, :unidad, :action, :anilox, :prev, :color, :ink, :loaded, :leftover, :detail, :user, :now)
+            ")->execute([
+                ':ag' => $agId,
+                ':wot' => $workerOtId !== null && $workerOtId > 0 ? $workerOtId : null,
+                ':unidad' => $unidad,
+                ':action' => $action,
+                ':anilox' => $aniloxId !== null && $aniloxId > 0 ? $aniloxId : null,
+                ':prev' => $previousAniloxId !== null && $previousAniloxId > 0 ? $previousAniloxId : null,
+                ':color' => $colorLabel !== '' ? mb_substr($colorLabel, 0, 180) : null,
+                ':ink' => $inkItemId !== null && $inkItemId > 0 ? $inkItemId : null,
+                ':loaded' => $loadedKg,
+                ':leftover' => $leftoverKg,
+                ':detail' => $detail !== '' ? mb_substr($detail, 0, 255) : null,
+                ':user' => $userId > 0 ? $userId : null,
+                ':now' => time(),
+            ]);
+        } catch (Throwable $e) {
+            error_log('Historial de anilox: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Intercambia entre dos unidades TODO lo registrado en la base local (tinta, cargas, mezcla, color y anilox),
+     * para que siga a la unidad cuando el operador la mueve (el ERP intercambia color y anilox por su lado).
+     *
+     * @return bool|null true = intercambió, false = no había nada que intercambiar, null = error (no se cambió nada)
+     */
+    private function swapFlexoAniloxInkUnits(int $agId, int $unitA, int $unitB): ?bool
+    {
+        if ($this->trzPdo === null || $agId <= 0 || $unitA <= 0 || $unitB <= 0 || $unitA === $unitB) {
+            return false;
+        }
+        try {
+            $this->ensureFlexoAniloxInkSchema();
+            $count = $this->trzPdo->prepare('SELECT COUNT(*) FROM flexo_anilox_ink_configs WHERE ag_id = :ag AND unidad IN (:a, :b)');
+            $count->execute([':ag' => $agId, ':a' => $unitA, ':b' => $unitB]);
+            if ((int)$count->fetchColumn() === 0) {
+                return false;
+            }
+            $temp = -1000 - $unitA;
+            $own = !$this->trzPdo->inTransaction();
+            if ($own) {
+                $this->trzPdo->beginTransaction();
+            }
+            $upd = $this->trzPdo->prepare('UPDATE flexo_anilox_ink_configs SET unidad = :to, posicion = :to WHERE ag_id = :ag AND unidad = :from');
+            $upd->execute([':to' => $temp, ':ag' => $agId, ':from' => $unitA]);
+            $upd->execute([':to' => $unitA, ':ag' => $agId, ':from' => $unitB]);
+            $upd->execute([':to' => $unitB, ':ag' => $agId, ':from' => $temp]);
+            if ($own) {
+                $this->trzPdo->commit();
+            }
+            return true;
+        } catch (Throwable $e) {
+            if ($this->trzPdo->inTransaction()) {
+                $this->trzPdo->rollBack();
+            }
+            error_log('Intercambio de tintas de anilox: ' . $e->getMessage());
+            return null;
+        }
     }
 
     /**
@@ -3912,7 +4017,8 @@ trait ProductionMaterialsServiceTrait
         int $agId,
         int $reqId,
         int $workerOtId,
-        array $rows
+        array $rows,
+        int $userId = 0
     ): array {
         if ($agId <= 0) {
             return ['ok' => false, 'error' => 'No se pudo identificar la agenda de anilox para guardar las tintas.'];
@@ -3970,10 +4076,17 @@ trait ProductionMaterialsServiceTrait
             $this->trzPdo->beginTransaction();
 
             $stmtConfigIds = $this->trzPdo->prepare("
-                SELECT id FROM flexo_anilox_ink_configs WHERE ag_id = :ag_id
+                SELECT id, unidad, created_at, anilox_id, ink_item_id, loaded_kg, leftover_kg, is_mixed
+                FROM flexo_anilox_ink_configs WHERE ag_id = :ag_id
             ");
             $stmtConfigIds->execute([':ag_id' => $agId]);
-            $existingConfigIds = array_map('intval', $stmtConfigIds->fetchAll(PDO::FETCH_COLUMN) ?: []);
+            $previousRows = $stmtConfigIds->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            $existingConfigIds = array_map(static fn(array $r): int => (int)$r['id'], $previousRows);
+            $previousByUnit = [];
+            foreach ($previousRows as $prevRow) {
+                $previousByUnit[(int)$prevRow['unidad']] = $prevRow;
+            }
+            $savedUnits = [];
             if ($existingConfigIds !== []) {
                 $placeholders = [];
                 $params = [];
@@ -4065,10 +4178,25 @@ trait ProductionMaterialsServiceTrait
                     ':consumed_kg' => $consumedKg,
                     ':is_mixed' => $isMixed,
                     ':mixture_notes' => $mixtureNotes !== '' ? $mixtureNotes : null,
-                    ':created_at' => $now,
+                    ':created_at' => (int)($previousByUnit[$unidad]['created_at'] ?? $now), // conserva cuándo se creó
                     ':updated_at' => $now,
                 ]);
                 $configId = (int)$this->trzPdo->lastInsertId();
+                $savedUnits[$unidad] = true;
+
+                // Historial: solo si algo cambió respecto de lo guardado antes
+                $prev = $previousByUnit[$unidad] ?? null;
+                $changed = $prev === null
+                    || (int)($prev['anilox_id'] ?? 0) !== (int)($row['anilox_id'] ?? 0)
+                    || (int)($prev['ink_item_id'] ?? 0) !== $inkItemId
+                    || abs((float)($prev['loaded_kg'] ?? 0) - $loadedKg) > 0.0004
+                    || abs((float)($prev['leftover_kg'] ?? 0) - $leftoverKg) > 0.0004
+                    || (int)($prev['is_mixed'] ?? 0) !== $isMixed;
+                if ($changed) {
+                    $this->logFlexoAniloxChange($agId, $unidad, 'SAVE', (int)($row['anilox_id'] ?? 0), $prev !== null ? (int)($prev['anilox_id'] ?? 0) : null,
+                        $colorLabel, $inkItemId, $loadedKg, $leftoverKg,
+                        ($isMixed === 1 ? 'Mezcla. ' : '') . $mixtureNotes, $userId, $workerOtId);
+                }
 
                 foreach ($components as $component) {
                     $stmtInsertComponent->execute([
@@ -4081,6 +4209,15 @@ trait ProductionMaterialsServiceTrait
                         ':created_at' => $now,
                         ':updated_at' => $now,
                     ]);
+                }
+            }
+
+            // Unidades que tenían datos y ahora se vaciaron: queda registrado qué había
+            foreach ($previousByUnit as $prevUnit => $prevRow) {
+                if (!isset($savedUnits[$prevUnit])) {
+                    $this->logFlexoAniloxChange($agId, (int)$prevUnit, 'CLEAR', null, (int)($prevRow['anilox_id'] ?? 0), '',
+                        (int)($prevRow['ink_item_id'] ?? 0), (float)($prevRow['loaded_kg'] ?? 0), (float)($prevRow['leftover_kg'] ?? 0),
+                        'Tintas vaciadas', $userId, $workerOtId);
                 }
             }
 
@@ -4790,6 +4927,20 @@ trait ProductionMaterialsServiceTrait
                 }
             }
 
+            // Estado anterior, para dejar historial de lo que cambió
+            $previous = [];
+            try {
+                $stmtPrev = $this->erpPdo->prepare(
+                    "SELECT paow_unidad, paow_anilox, paow_color FROM prod_anilox_ot_worker WHERE paow_ot_worker_id = :stk_id"
+                );
+                $stmtPrev->execute([':stk_id' => $stkId]);
+                foreach ($stmtPrev->fetchAll(PDO::FETCH_ASSOC) ?: [] as $pr) {
+                    $previous[(int)$pr['paow_unidad']] = $pr;
+                }
+            } catch (Throwable) {
+                $previous = [];
+            }
+
             $stmtUpd = $this->erpPdo->prepare(
                 "UPDATE prod_anilox_ot_worker
                  SET paow_anilox = :aid
@@ -4801,6 +4952,13 @@ trait ProductionMaterialsServiceTrait
                     ':stk_id' => $stkId,
                     ':unidad' => (int)$unidad,
                 ]);
+                $oldAnilox = (int)($previous[(int)$unidad]['paow_anilox'] ?? 0);
+                if ($oldAnilox !== (int)$aniloxId) {
+                    $this->ensureFlexoAniloxInkSchema();
+                    $this->logFlexoAniloxChange($agId, (int)$unidad, 'ANILOX', (int)$aniloxId, $oldAnilox,
+                        (string)($previous[(int)$unidad]['paow_color'] ?? ''), null, null, null,
+                        $oldAnilox > 0 ? 'Cambio de anilox' : 'Anilox asignado', $userId);
+                }
             }
 
             $now = time();
@@ -4870,40 +5028,27 @@ trait ProductionMaterialsServiceTrait
                     return ['ok' => false, 'error' => 'No puede Mover, estas en la primera posición'];
                 }
                 $targetUnidad = $unidad - 1;
-                if (!isset($byUnidad[$targetUnidad])) {
-                    return ['ok' => false, 'error' => 'Unidad destino no existe.'];
-                }
-                $target = $byUnidad[$targetUnidad];
-
-                // Intercambiar color y anilox
-                $stmtUpd = $this->erpPdo->prepare(
-                    "UPDATE prod_anilox_ot_worker
-                     SET paow_color = :color, paow_anilox = :anilox
-                     WHERE paow_ot_worker_id = :stk_id AND paow_unidad = :unidad"
-                );
-                $stmtUpd->execute([
-                    ':color' => $target['paow_color'],
-                    ':anilox' => (int)$target['paow_anilox'],
-                    ':stk_id' => $stkId,
-                    ':unidad' => $unidad,
-                ]);
-                $stmtUpd->execute([
-                    ':color' => $curr['paow_color'],
-                    ':anilox' => (int)$curr['paow_anilox'],
-                    ':stk_id' => $stkId,
-                    ':unidad' => $targetUnidad,
-                ]);
             } elseif ($direction === 2) { // Mover abajo
-                $maximo = count($byUnidad);
-                if ($unidad >= $maximo) {
+                if ($unidad >= count($byUnidad)) {
                     return ['ok' => false, 'error' => 'No puede Mover, estas en la última posición'];
                 }
                 $targetUnidad = $unidad + 1;
-                if (!isset($byUnidad[$targetUnidad])) {
-                    return ['ok' => false, 'error' => 'Unidad destino no existe.'];
-                }
-                $target = $byUnidad[$targetUnidad];
+            } else {
+                return ['ok' => false, 'error' => 'Dirección de movimiento inválida.'];
+            }
+            if (!isset($byUnidad[$targetUnidad])) {
+                return ['ok' => false, 'error' => 'Unidad destino no existe.'];
+            }
+            $target = $byUnidad[$targetUnidad];
 
+            // 1) Las tintas/cargas/mezclas locales viajan con la unidad (antes quedaban en la unidad vieja).
+            $inkSwapped = $this->swapFlexoAniloxInkUnits($agId, $unidad, $targetUnidad);
+            if ($inkSwapped === null) {
+                return ['ok' => false, 'error' => 'No se pudo mover: error al intercambiar las tintas de las unidades. No se cambió nada.'];
+            }
+
+            // 2) Color y anilox en el ERP. Si falla, se devuelve lo local a su lugar para no perder coherencia.
+            try {
                 $stmtUpd = $this->erpPdo->prepare(
                     "UPDATE prod_anilox_ot_worker
                      SET paow_color = :color, paow_anilox = :anilox
@@ -4921,7 +5066,18 @@ trait ProductionMaterialsServiceTrait
                     ':stk_id' => $stkId,
                     ':unidad' => $targetUnidad,
                 ]);
+            } catch (Throwable $e) {
+                if ($inkSwapped === true) {
+                    $this->swapFlexoAniloxInkUnits($agId, $unidad, $targetUnidad);
+                }
+                throw $e;
             }
+
+            $this->ensureFlexoAniloxInkSchema();
+            $this->logFlexoAniloxChange($agId, $unidad, 'MOVE', (int)$target['paow_anilox'], (int)$curr['paow_anilox'],
+                (string)$target['paow_color'], null, null, null, 'Intercambio con unidad ' . $targetUnidad);
+            $this->logFlexoAniloxChange($agId, $targetUnidad, 'MOVE', (int)$curr['paow_anilox'], (int)$target['paow_anilox'],
+                (string)$curr['paow_color'], null, null, null, 'Intercambio con unidad ' . $unidad);
 
             return ['ok' => true];
         } catch (Throwable $e) {
