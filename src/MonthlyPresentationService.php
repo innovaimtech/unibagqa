@@ -13,114 +13,229 @@ class MonthlyPresentationService
         $this->erpPdo = $erpPdo;
     }
 
+    /** Ruta del historial mensual de KPIs (cifras ya publicadas + meses calculados). */
+    private function historyPath(): string
+    {
+        return __DIR__ . '/../data/kpi_historial_2026.json';
+    }
+
     /**
-     * Obtiene todos los indicadores calculados para el mes especificado.
+     * Lee el historial mensual. Estructura: ['meses' => ['2026-01' => [...], ...]].
      *
-     * @param string $monthKey Formato 'YYYY-MM', ej: '2026-09'
+     * @return array<string, array<string, mixed>>
+     */
+    private function loadHistory(): array
+    {
+        $path = $this->historyPath();
+        if (!is_file($path)) {
+            return [];
+        }
+        $decoded = json_decode((string)file_get_contents($path), true);
+        return is_array($decoded['meses'] ?? null) ? $decoded['meses'] : [];
+    }
+
+    /** Guarda el historial conservando el comentario y el orden cronológico. */
+    private function saveHistory(array $months): void
+    {
+        ksort($months);
+        $path = $this->historyPath();
+        $current = is_file($path) ? json_decode((string)file_get_contents($path), true) : [];
+        $payload = ['_comentario' => (string)($current['_comentario'] ?? ''), 'meses' => $months];
+        @file_put_contents($path, json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX);
+    }
+
+    /**
+     * Calcula con datos EN VIVO del ERP los indicadores de un ciclo (26 del mes anterior al 25 del mes).
+     * Se usa el mismo ciclo para producción, nivel de servicio y merma: es el que reproduce exactamente
+     * las cifras de la plantilla (ej. sep-26: 883.422 unid., 202/162 CC, 0,68 % de merma).
+     *
      * @return array<string, mixed>
      */
-    public function getMonthlyMetrics(string $monthKey = '2026-09'): array
+    private function computeLiveCycle(string $monthKey): array
     {
-        if (!preg_match('/^\d{4}-\d{2}$/', $monthKey)) {
-            $monthKey = date('Y-m');
-        }
+        $period = $this->receptionService->resolveBonusFilterPeriod('period', $monthKey);
+        $startDate = (string)$period['start_date'] . ' 00:00:00';
+        $endDate = (string)$period['end_date'] . ' 23:59:59';
 
-        $startDate = $monthKey . '-01 00:00:00';
-        $daysInMonth = (int)date('t', strtotime($startDate));
-        $endDate = $monthKey . '-' . str_pad((string)$daysInMonth, 2, '0', STR_PAD_LEFT) . ' 23:59:59';
-        $startTs = strtotime($startDate);
-        $endTs = strtotime($endDate);
-
-        // 1. Producción Real en el mes: Se mide por lo que pasó por CORTE Y SELLADO
-        $cysPeriod = $this->receptionService->resolveBonusFilterPeriod('period', $monthKey);
-        $cysRes = $this->receptionService->listErpCysProductionForBonusPeriod($cysPeriod);
+        // 1. Producción real: lo que pasó por CORTE Y SELLADO.
+        $cysRes = $this->receptionService->listErpCysProductionForBonusPeriod($period);
         $prodUnits = 0.0;
         foreach ((array)($cysRes['rows'] ?? []) as $r) {
             $prodUnits += (float)($r['produced_units'] ?? 0);
         }
-        if ($prodUnits <= 0) {
-            $prodUnits = 903219.0; // Total real ciclo 26-08 a 25-09
-        }
 
-        $prodMeta = 1000000.0;
-        $prodCumpl = $prodMeta > 0 ? ($prodUnits / $prodMeta * 100.0) : 0.0;
-
-        // 2. Nivel de Servicio (OTIF)
+        // 2. Nivel de servicio. Cada fila trae 'is_on_time' y 'dispatched_units' (no existe 'is_delayed':
+        //    antes se buscaba ese campo, nunca se encontraba y todo mes mostraba 708.572 atrasadas).
         $slReport = $this->receptionService->getServiceLevelReport($startDate, $endDate, null, null, 'all', '');
         $slSummary = (array)($slReport['summary'] ?? []);
-        $slTotalCc = (int)($slSummary['total_dispatches'] ?? 202);
-        $slDelayedCc = (int)($slSummary['delayed_dispatches'] ?? 162);
-        $slPercentCc = (float)($slSummary['service_level_percent'] ?? 19.8);
-        $slTotalUnits = (float)($slSummary['total_dispatched_units'] ?? 883422.0);
+        $slTotalUnits = 0.0;
         $slDelayedUnits = 0.0;
-        $delayedOrders = [];
-
+        $lateRows = [];
         foreach ((array)($slReport['rows'] ?? []) as $r) {
-            $isDelayed = (bool)($r['is_delayed'] ?? false);
             $u = (float)($r['dispatched_units'] ?? 0);
-            if ($isDelayed) {
+            $slTotalUnits += $u;
+            if (empty($r['is_on_time'])) {
                 $slDelayedUnits += $u;
-                if (count($delayedOrders) < 12) {
-                    $delayedOrders[] = [
-                        'cc_number' => (string)($r['cc_number'] ?? '-'),
-                        'ot_number' => (string)($r['ot_number'] ?? '-'),
-                        'customer_name' => (string)($r['customer_name'] ?? '-'),
-                        'product_type' => (string)($r['product_name'] ?? (string)($r['product_type'] ?? '-')),
-                        'units' => $u,
-                        'required_date' => (string)($r['required_date'] ?? '-'),
-                        'delay_days' => (int)($r['delay_days'] ?? 0),
-                    ];
-                }
+                $lateRows[] = $r;
             }
         }
-        if ($slDelayedUnits <= 0) {
-            $slDelayedUnits = 708572.0;
+        usort($lateRows, static function (array $a, array $b): int {
+            return [(int)($b['delay_days'] ?? 0), (float)($b['dispatched_units'] ?? 0)] <=> [(int)($a['delay_days'] ?? 0), (float)($a['dispatched_units'] ?? 0)];
+        });
+        $delayedOrders = [];
+        foreach (array_slice($lateRows, 0, 12) as $r) {
+            $delayedOrders[] = [
+                'cc_number' => (string)($r['cc_number'] ?? '-'),
+                'ot_number' => '-', // el informe de nivel de servicio no trae el N° de OT
+                'customer_name' => (string)($r['customer_name'] ?? '-'),
+                'product_type' => (string)($r['product_code'] ?? '-'),
+                'units' => (float)($r['dispatched_units'] ?? 0),
+                'required_date' => (string)($r['committed_date'] ?? '-'),
+                'delay_days' => (int)($r['delay_days'] ?? 0),
+            ];
         }
-        $slPercentUnits = $slTotalUnits > 0 ? max(0.0, min(100.0, (($slTotalUnits - $slDelayedUnits) / $slTotalUnits) * 100.0)) : 19.79;
 
-        // 3. Mermas por Proceso
+        // 3. Merma global del período.
         $wasteReport = $this->receptionService->getErpOperatorWasteReport($startDate, $endDate);
         $wasteSummary = (array)($wasteReport['summary'] ?? []);
-        $globalWastePercent = (float)($wasteSummary['global_waste_percent'] ?? 0.68);
-        $totalWasteKg = (float)($wasteSummary['total_waste_kg'] ?? 425.4);
 
         return [
-            'month_key' => $monthKey,
             'start_date' => $startDate,
             'end_date' => $endDate,
+            'period_label' => (string)($period['label'] ?? ''),
             'prod_units' => $prodUnits,
-            'prod_meta' => $prodMeta,
-            'prod_cumpl' => $prodCumpl,
             'sl_total_units' => $slTotalUnits,
             'sl_delayed_units' => $slDelayedUnits,
-            'sl_percent_units' => $slPercentUnits,
-            'sl_total_cc' => $slTotalCc,
-            'sl_delayed_cc' => $slDelayedCc,
-            'sl_percent_cc' => $slPercentCc,
+            'sl_total_cc' => (int)($slSummary['total_dispatches'] ?? 0),
+            'sl_delayed_cc' => (int)($slSummary['delayed_dispatches'] ?? 0),
+            'sl_percent_cc' => (float)($slSummary['service_level_percent'] ?? 0),
             'delayed_orders' => $delayedOrders,
-            'global_waste_percent' => $globalWastePercent,
-            'total_waste_kg' => $totalWasteKg,
-            'flexo_prog_kg' => 45200.0,
-            'flexo_proc_kg' => 44850.0,
-            'flexo_waste_kg' => 412.0,
-            'seri_prog_kg' => 3200.0,
-            'seri_proc_kg' => 3150.0,
-            'seri_waste_kg' => 18.5,
-            'cys_prog_kg' => 52100.0,
-            'cys_proc_kg' => 52350.0,
-            'cys_waste_kg' => 118.0,
-            'emb_prog_kg' => 52400.0,
-            'emb_proc_kg' => 52600.0,
-            'emb_waste_kg' => 6.2,
+            'waste_pct' => (float)($wasteSummary['global_waste_percent'] ?? 0),
+            'total_waste_kg' => (float)($wasteSummary['total_waste_kg'] ?? 0),
         ];
+    }
+
+    /**
+     * Obtiene todos los indicadores del mes y el historial (enero a ese mes) para los gráficos.
+     *
+     * Reglas (automatización):
+     * - El mes pedido se calcula SIEMPRE en vivo con el ERP.
+     * - Los meses anteriores salen del historial (data/kpi_historial_2026.json): cifras ya publicadas.
+     * - Si falta un mes anterior, se calcula en vivo y se guarda en el historial (origen 'calculado'),
+     *   así el informe del mes siguiente lo encuentra solo.
+     * - No hay valores de respaldo inventados: si no hay datos, se informa en 'warnings'.
+     *
+     * @param string $monthKey Formato 'YYYY-MM' (mes en que TERMINA el ciclo 26-25)
+     * @return array<string, mixed>
+     */
+    public function getMonthlyMetrics(string $monthKey = ''): array
+    {
+        if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $monthKey)) {
+            $monthKey = date('Y-m');
+        }
+        $year = (int)substr($monthKey, 0, 4);
+        $monthNum = (int)substr($monthKey, 5, 2);
+        $warnings = [];
+        $capacityDefault = (float)(Env::get('PPTX_CAPACIDAD_MENSUAL_UNIDADES', '1345000') ?? 1345000);
+
+        $stored = $this->loadHistory();
+        $storedChanged = false;
+        $live = $this->computeLiveCycle($monthKey);
+
+        $history = [];
+        for ($m = 1; $m <= $monthNum; $m++) {
+            $key = sprintf('%04d-%02d', $year, $m);
+            if ($key === $monthKey) {
+                $entry = [
+                    'origen' => 'calculado',
+                    'prod_units' => $live['prod_units'],
+                    'prod_cap' => (float)($stored[$key]['prod_cap'] ?? $capacityDefault),
+                    'sl_total_units' => $live['sl_total_units'],
+                    'sl_delayed_units' => $live['sl_delayed_units'],
+                    'sl_total_cc' => $live['sl_total_cc'],
+                    'sl_delayed_cc' => $live['sl_delayed_cc'],
+                    'waste_pct' => $live['waste_pct'],
+                ];
+                if (isset($stored[$key]['procesos'])) {
+                    $entry['procesos'] = $stored[$key]['procesos'];
+                }
+            } elseif (isset($stored[$key])) {
+                $entry = $stored[$key];
+            } else {
+                $past = $this->computeLiveCycle($key);
+                $entry = [
+                    'origen' => 'calculado',
+                    'prod_units' => $past['prod_units'],
+                    'prod_cap' => $capacityDefault,
+                    'sl_total_units' => $past['sl_total_units'],
+                    'sl_delayed_units' => $past['sl_delayed_units'],
+                    'sl_total_cc' => $past['sl_total_cc'],
+                    'sl_delayed_cc' => $past['sl_delayed_cc'],
+                    'waste_pct' => $past['waste_pct'],
+                ];
+                $stored[$key] = $entry;
+                $storedChanged = true;
+            }
+            $entry['month_key'] = $key;
+            $history[] = $entry;
+        }
+        if ($storedChanged) {
+            $this->saveHistory($stored);
+        }
+
+        $prodUnits = (float)$live['prod_units'];
+        $prodMeta = 1000000.0;
+        if ($prodUnits <= 0) {
+            $warnings[] = 'El ERP no devolvió producción de Corte y Sellado para el ciclo ' . $live['period_label'] . '.';
+        }
+        if ((int)$live['sl_total_cc'] <= 0) {
+            $warnings[] = 'El ERP no devolvió despachos para el ciclo ' . $live['period_label'] . '.';
+        }
+        $slPercentUnits = $live['sl_total_units'] > 0
+            ? max(0.0, min(100.0, (($live['sl_total_units'] - $live['sl_delayed_units']) / $live['sl_total_units']) * 100.0))
+            : 0.0;
+
+        $metrics = [
+            'month_key' => $monthKey,
+            'start_date' => $live['start_date'],
+            'end_date' => $live['end_date'],
+            'period_label' => $live['period_label'],
+            'prod_units' => $prodUnits,
+            'prod_meta' => $prodMeta,
+            'prod_cumpl' => $prodMeta > 0 ? ($prodUnits / $prodMeta * 100.0) : 0.0,
+            'prod_cap' => (float)end($history)['prod_cap'],
+            'sl_total_units' => $live['sl_total_units'],
+            'sl_delayed_units' => $live['sl_delayed_units'],
+            'sl_percent_units' => $slPercentUnits,
+            'sl_total_cc' => $live['sl_total_cc'],
+            'sl_delayed_cc' => $live['sl_delayed_cc'],
+            'sl_percent_cc' => $live['sl_percent_cc'],
+            'delayed_orders' => $live['delayed_orders'],
+            'global_waste_percent' => $live['waste_pct'],
+            'total_waste_kg' => $live['total_waste_kg'],
+            'history' => $history,
+            'has_process_balance' => isset($stored[$monthKey]['procesos']),
+            'warnings' => $warnings,
+        ];
+        // Balance de masa por proceso: solo si el mes lo trae en el historial (no hay fuente automática).
+        foreach (['flexo', 'seri', 'cys', 'emb'] as $p) {
+            $pr = $stored[$monthKey]['procesos'][$p] ?? null;
+            if (is_array($pr)) {
+                $metrics[$p . '_prog_kg'] = (float)($pr['prog'] ?? 0);
+                $metrics[$p . '_proc_kg'] = (float)($pr['proc'] ?? 0);
+                $metrics[$p . '_waste_kg'] = (float)($pr['waste'] ?? 0);
+            }
+        }
+        return $metrics;
     }
 
     /**
      * Genera la presentación PowerPoint en disco y retorna la ruta completa al archivo generado.
      */
-    public function generatePresentation(string $monthKey = '2026-09'): string
+    public function generatePresentation(string $monthKey = ''): string
     {
         $metrics = $this->getMonthlyMetrics($monthKey);
+        $monthKey = (string)$metrics['month_key'];
         
         $templatePath = __DIR__ . '/../data/KP´S OPERACIONES AGOSTO 2026.pptx';
         if (!file_exists($templatePath)) {
@@ -131,9 +246,6 @@ class MonthlyPresentationService
         file_put_contents($tmpJson, json_encode($metrics, JSON_UNESCAPED_UNICODE));
 
         $outputFilename = 'KPIS_OPERACIONES_' . strtoupper(date('F_Y', strtotime($monthKey . '-01'))) . '.pptx';
-        if ($monthKey === '2026-09') {
-            $outputFilename = 'KPIS_OPERACIONES_SEPTIEMBRE_2026.pptx';
-        }
         $targetDataPath = __DIR__ . '/../data/' . $outputFilename;
         $uniqueOutput = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'kpis_pres_' . $monthKey . '_' . uniqid() . '.pptx';
 

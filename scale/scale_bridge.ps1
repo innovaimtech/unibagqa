@@ -72,31 +72,66 @@ function Resolve-ComPort() {
   return $null
 }
 
+# -----------------------------------------------------------------------------
+# Interpreta la ULTIMA trama completa recibida de la balanza.
+# Devuelve $null si la trama no es un peso valido, o un hashtable:
+#   @{ weight = [decimal] kg (3 decimales); stable = [bool] }
+# Reglas de seguridad (el peso invalido NUNCA debe llegar a una etiqueta):
+#   - Solo se evalua la ultima linea: jamas se recurre a una lectura anterior.
+#   - Sobrecarga (OL) o error (ERR) => invalido.
+#   - Peso negativo => invalido (antes el signo se perdia y quedaba positivo).
+#   - Unidades g / lb se convierten a kg; sin unidad se asume kg.
+#   - Estable salvo que la trama diga US / UNSTABLE / MOTION / MOT.
+# -----------------------------------------------------------------------------
 function Parse-WeightKg([string]$raw) {
   if ([string]::IsNullOrWhiteSpace($raw)) {
     return $null
   }
-  # Dividir por saltos de linea e inspeccionar desde la ultima linea no vacia hacia atras
-  $lines = @($raw -split "[\r\n]+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  # Se separa por CR, LF y STX/ETX; solo cuenta la ultima trama completa.
+  $lines = @($raw -split '[\r\n\x02\x03]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   if ($lines.Count -eq 0) {
     return $null
   }
+  $line = $lines[$lines.Count - 1].Trim()
 
-  for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-    $target = $lines[$i]
-    # Extraer numeros con signo opcional y decimales (. o ,)
-    $m = [regex]::Match($target, '[-+]?\s*(\d+(?:[.,]\d+)?)')
-    if ($m.Success) {
-      $s = $m.Groups[1].Value.Replace(',', '.')
-      try {
-        $v = [double]::Parse($s, [System.Globalization.CultureInfo]::InvariantCulture)
-        if ($v -ge 0) {
-          return [Math]::Round($v, 3)
-        }
-      } catch {}
-    }
+  # Si la lectura termino a mitad de trama (sin salto de linea final y sin unidad al
+  # final) la ultima linea esta incompleta: se descarta para no leer "18.4" de "18.450".
+  $terminated = ($raw -match '[\r\n\x03]\s*$')
+  if (-not $terminated -and $line -notmatch '(?i)(kg|g|lb)$') {
+    if ($lines.Count -lt 2) { return $null }
+    $line = $lines[$lines.Count - 2].Trim()
   }
-  return $null
+
+  # Sobrecarga o error de la balanza: lectura invalida.
+  if ($line -match '(?i)\b(OL|OVERLOAD|ERR|ERROR)\b') {
+    return $null
+  }
+
+  # Signo opcional, numero con punto o coma decimal y unidad opcional.
+  $m = [regex]::Match($line, '(?i)([-+])?\s*(\d+(?:[.,]\d+)?)\s*(kg|g|lb)?\b')
+  if (-not $m.Success) {
+    return $null
+  }
+  # Peso negativo: invalido (nunca se convierte a positivo).
+  if ($m.Groups[1].Value -eq '-') {
+    return $null
+  }
+
+  try {
+    $v = [decimal]::Parse($m.Groups[2].Value.Replace(',', '.'), [System.Globalization.CultureInfo]::InvariantCulture)
+  } catch {
+    return $null
+  }
+  switch ($m.Groups[3].Value.ToLowerInvariant()) {
+    'g'  { $v = $v / 1000 }
+    'lb' { $v = $v * [decimal]0.45359237 }
+  }
+
+  $unstable = ($line -match '(?i)\b(US|UNSTABLE|MOTION|MOT)\b')
+  return @{
+    weight = [Math]::Round($v, 3)
+    stable = (-not $unstable)
+  }
 }
 
 function Read-WeightKgStub() {
@@ -229,7 +264,8 @@ function Read-WeightKgSerial() {
     }
   }
 
-  $w = Parse-WeightKg $raw
+  $parsed = Parse-WeightKg $raw
+  $w = if ($null -ne $parsed) { $parsed.weight } else { $null }
   if ($w -eq $null) {
     $msg = if ([string]::IsNullOrWhiteSpace($raw)) {
       "Puerto $script:activeComPort abierto pero sin datos transmitidos. En la balanza LP-7516 verifica: C18=4 (Envío continuo) y C19=3 (9600 baudios), o presiona PRINT si está en modo manual."
@@ -251,6 +287,7 @@ function Read-WeightKgSerial() {
   return @{
     ok = $true
     weight_kg = $w
+    stable = $parsed.stable
     raw = $raw.Trim()
     error = $null
     model = 'LP-7516'
@@ -278,8 +315,12 @@ try {
     foreach ($conn in $existing) {
       $p = $conn.OwningProcess
       if ($p -gt 4 -and $p -ne $PID) {
-        Write-Host ("Liberando puerto 8765 ocupado por proceso previo PID {0}..." -f $p) -ForegroundColor Yellow
-        Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+        # Solo se cierra una instancia previa de PowerShell; nunca un proceso ajeno.
+        $oldProc = Get-Process -Id $p -ErrorAction SilentlyContinue
+        if ($null -ne $oldProc -and $oldProc.ProcessName -match '^(powershell|pwsh)$') {
+          Write-Host ("Liberando puerto 8765 ocupado por proceso previo PID {0}..." -f $p) -ForegroundColor Yellow
+          Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+        }
       }
     }
     Start-Sleep -Milliseconds 600
@@ -317,7 +358,9 @@ try {
     # Habilitar CORS
     $res.AddHeader('Access-Control-Allow-Origin', '*')
     $res.AddHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
-    $res.AddHeader('Access-Control-Allow-Headers', 'Content-Type')
+    $res.AddHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, X-Requested-With')
+    $res.AddHeader('Access-Control-Allow-Private-Network', 'true')
+    $res.AddHeader('Access-Control-Max-Age', '86400')
 
     if ($req.HttpMethod -eq 'OPTIONS') {
       $res.StatusCode = 200

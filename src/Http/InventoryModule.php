@@ -342,7 +342,7 @@ function unibagRenderStockPage(ReceptionService $service): void
     $stockError = trim((string)($_GET['error'] ?? ''));
     $activeMainTab = (isset($_GET['tab']) && (string)$_GET['tab'] === 'rolls') ? 'rolls' : 'items';
 
-    $body = '<div class="erp-prod-shell" style="max-width:1440px;margin:0 auto">';
+    $body = '<div class="erp-prod-shell" style="width:100%">';
 
     $body .= '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:16px">
         <div>
@@ -354,10 +354,6 @@ function unibagRenderStockPage(ReceptionService $service): void
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <a class="btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '" style="background:#00A9A6;display:inline-flex;align-items:center;gap:6px">
             <span style="font-size:15px">📦</span> Ingresar con Trazabilidad
-          </a>
-          <a class="btn secondary" href="/reports/inventory" style="display:inline-flex;align-items:center;gap:6px">
-            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-            Informe de inventario
           </a>
           <a class="btn secondary" href="/stock/inventory-counts?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">
             <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
@@ -374,7 +370,7 @@ function unibagRenderStockPage(ReceptionService $service): void
     }
 
     // Filtro y selección de bodega
-    $body .= '<div class="card" style="margin-bottom:16px;border-radius:14px;padding:18px 20px;box-shadow:0 2px 10px rgba(15,23,42,.03)">
+    $body .= '<div class="ub-filter-card" style="margin-bottom:16px">
         <form method="get" action="/stock" class="row" style="align-items:flex-end;gap:14px;flex-wrap:wrap">
           <input type="hidden" name="tab" id="hidden_active_tab" value="' . h($activeMainTab) . '">
           <div style="flex:2;min-width:260px">
@@ -393,7 +389,7 @@ function unibagRenderStockPage(ReceptionService $service): void
             </label>
           </div>
           <div style="display:flex;gap:8px;align-items:center;height:40px">
-            <button class="btn secondary" type="submit" style="height:40px;padding:0 16px">Buscar</button>
+            <button class="ub-btn-primary" type="submit">🔍 Buscar</button>
             <a class="btn secondary" href="/stock?bodega=' . $storehouseId . '&search=' . rawurlencode($search) . '&only_stock=' . ($onlyWithStock ? '1' : '0') . '&download=excel" style="height:40px;display:inline-flex;align-items:center;gap:6px;padding:0 16px" title="Exportar existencias ERP a Excel">
               <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
               Excel ERP
@@ -515,14 +511,12 @@ function unibagRenderStockPage(ReceptionService $service): void
         if ($isFullyTagged) {
             $trzButton = '<div style="display:inline-flex;align-items:center;gap:6px">';
             $trzButton .= '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11.5px;font-weight:700;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0" title="Todo el stock físico está rotulado con código de trazabilidad (' . number_format($alreadyTagged, 1, ',', '.') . ' / ' . number_format($inv, 1, ',', '.') . ' ' . h((string)$it['unit_name']) . ')">✅ Rotulado</span>';
-            $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:3px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver todos los códigos de trazabilidad registrados para ' . h($sku) . '">🔎 Códigos</a>';
-            $trzButton .= '<a class="btn" href="' . $viewCodesUrl . '" style="padding:3px 7px;font-size:11px;font-weight:700;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver y borrar bultos registrados por error para ' . h($sku) . '">🗑️ Borrar</a>';
+            $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:3px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver los códigos de trazabilidad de ' . h($sku) . ' (desde ahí también se pueden borrar bultos registrados por error)">🔎 Códigos</a>';
             $trzButton .= '</div>';
         } elseif ($isPartiallyTagged) {
             $trzButton = '<div style="display:inline-flex;align-items:center;gap:6px">';
             $trzButton .= '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#fffbeb;color:#b45309;border:1px solid #fde68a;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Faltan ' . number_format($pendingQty, 1, ',', '.') . ' por rotular de ' . number_format($inv, 1, ',', '.') . '">📦 +Trazable <span style="font-size:10px;background:#fef3c7;padding:1px 5px;border-radius:4px">(' . number_format($pendingQty, 0, ',', '.') . ' pend)</span></a>';
-            $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:4px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver todos los códigos de trazabilidad ya rotulados para ' . h($sku) . '">🔎 Códigos</a>';
-            $trzButton .= '<a class="btn" href="' . $viewCodesUrl . '" style="padding:4px 7px;font-size:11px;font-weight:700;background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver y borrar bultos ya rotulados de este artículo">🗑️</a>';
+            $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:4px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver los códigos de trazabilidad ya rotulados de ' . h($sku) . ' (desde ahí también se pueden borrar bultos)">🔎 Códigos</a>';
             $trzButton .= '</div>';
         } elseif ($inv > 0) {
             $trzButton = '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#f0fdfa;color:#0f766e;border:1px solid #ccfbf1;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Ingresar bulto a bodega con código de trazabilidad">📦 +Trazable</a>';
@@ -589,7 +583,7 @@ function unibagRenderStockPage(ReceptionService $service): void
             <input id="stock-rolls-live-filter" type="text" placeholder="🔍 Filtrar bobina, trazabilidad, SKU, contenedor..." style="height:36px;padding:0 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;width:260px" oninput="filterStockRollsTable(this.value)">
             <a class="btn secondary" href="/stock?bodega=' . $storehouseId . '&download=rolls_excel" style="height:36px;display:inline-flex;align-items:center;gap:6px;padding:0 14px;font-size:12px">
               <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-              Descargar Excel
+              Exportar Excel
             </a>
             <a class="btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '" style="background:#00A9A6;height:36px;display:inline-flex;align-items:center;gap:6px;padding:0 14px;font-size:12px">
               📦 + Ingreso Trazable
@@ -904,7 +898,7 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
     $_SESSION['inventory_count_requests'] = array_slice((array)($_SESSION['inventory_count_requests'] ?? []), -19, null, true);
     $_SESSION['inventory_count_requests'][$request] = ['warehouse' => $storehouseId, 'items' => count($draftItems)];
 
-    $body = '<div class="erp-prod-shell" style="max-width:1440px;margin:0 auto">';
+    $body = '<div class="erp-prod-shell" style="width:100%">';
 
     $body .= '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:16px">
         <div>
@@ -915,7 +909,7 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
         </div>
         <div style="display:flex;gap:8px">
           <a class="btn secondary" href="/' . (userCanAccessArea('ERP', sessionAreaPermissions()) ? 'stock?bodega=' . $storehouseId : 'purchase-orders?status=active&supplier_type=NATIONAL') . '">Volver</a>
-          ' . (userCanAccessArea('ERP', sessionAreaPermissions()) ? '<a class="btn secondary" href="/reports/inventory">Historial</a>' : '') . '
+
         </div>
       </div>';
 
@@ -926,7 +920,7 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
         $body .= '<div class="err" style="margin-bottom:14px;padding:12px 16px;font-weight:600;border-radius:10px">' . h($stockError) . '</div>';
     }
 
-    $body .= '<div class="card" style="margin-bottom:16px;border-radius:14px;padding:18px 20px">
+    $body .= '<div class="ub-filter-card" style="margin-bottom:16px">
         <form method="get" action="/stock/inventory-counts" class="row" style="align-items:flex-end;gap:14px">
           <div style="flex:2;min-width:280px">
             <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;margin-bottom:6px;display:block">Seleccionar bodega a inventariar</label>
@@ -935,7 +929,7 @@ function unibagRenderInventoryCountsPage(ReceptionService $service): void
             '</select>
           </div>
           <div style="display:flex;align-items:flex-end;height:40px">
-            <button class="btn secondary" type="submit">Cargar planilla</button>
+            <button class="ub-btn-primary" type="submit">Cargar planilla</button>
           </div>
         </form>
       </div>';
@@ -1294,7 +1288,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     }
 
     $body = '<style>
-        .trz-shell { max-width: 1440px; margin: 0 auto; width: 100%; box-sizing: border-box; }
+        .trz-shell { max-width: 100%; margin: 0; width: 100%; box-sizing: border-box; }
         .trz-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 20px; }
         .trz-title { font-size: 22px; font-weight: 800; color: #0f172a; letter-spacing: -.02em; display: flex; align-items: center; gap: 10px; }
         .trz-sub { font-size: 13px; color: #64748b; margin-top: 3px; }
@@ -2965,7 +2959,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         return strcasecmp((string)($a['name'] ?? ''), (string)($b['name'] ?? ''));
     });
 
-    $body = '<div class="transfers-shell" style="max-width:1280px;margin:0 auto;padding:12px 16px 40px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
+    $body = '<div class="transfers-shell" style="width:100%;margin:0;padding:4px 0 32px;font-family:system-ui,-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
 
     // Encabezado
     $body .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e2e8f0">';
@@ -2984,8 +2978,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     if ($isJavierUser) {
         $body .= '    <a href="/stock/bajas" class="btn" style="background:#7c3aed;color:#fff;font-size:13px;font-weight:700;padding:8px 14px;border-radius:6px;text-decoration:none" title="Módulo exclusivo Javier Perozo">🗑️ Baja de Bobinas (Javier)</a>';
     }
-    $body .= '    <a href="/stock" class="btn secondary" style="font-size:13px;padding:8px 14px">📦 Consulta de Stock</a>';
-    $body .= '    <a href="/stock/traceability" class="btn secondary" style="font-size:13px;padding:8px 14px">Trazabilidad</a>';
+    // Los botones 'Consulta de Stock' y 'Trazabilidad' se quitaron: ya están en el menú Bodega (no se repiten).
     $body .= '  </div>';
     $body .= '</div>';
 
@@ -3261,7 +3254,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '        </div>';
 
     $body .= '        <div style="padding-top:18px">';
-    $body .= '          <button type="button" class="btn secondary" onclick="resetMassFilters()" style="padding:10px 16px;font-size:13px;font-weight:600;white-space:nowrap">✕ Limpiar Filtros</button>';
+    $body .= '          <button type="button" class="btn secondary" onclick="resetMassFilters()" style="padding:10px 16px;font-size:13px;font-weight:600;white-space:nowrap">✕ Limpiar</button>';
     $body .= '        </div>';
     $body .= '      </div>';
 
@@ -4189,8 +4182,8 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         btn.innerHTML = "<span>⏳ Leyendo...</span>";
         btn.disabled = true;
         try {
-          var res = await fetch("/api/scale/weight", { cache: "no-store" });
-          var data = await res.json();
+          // Lectura con estabilidad: varias lecturas iguales, estables y > 0 (no se acepta peso en movimiento).
+          var data = await (window.UnibagHardware ? window.UnibagHardware.readStableWeight() : fetch("/api/scale/weight", { cache: "no-store" }).then(function (r) { return r.json(); }));
           if (data && data.ok && data.weight_kg !== undefined) {
             var w = parseFloat(data.weight_kg);
             inp.value = w.toFixed(2);
@@ -4449,7 +4442,7 @@ function unibagRenderRollsDecommissionPage(ReceptionService $service, ?Productio
     }
     uasort($originWhCounts, static fn(array $a, array $b): int => $b['count'] <=> $a['count']);
 
-    $body = '<div class="decom-shell" style="max-width:1320px;margin:0 auto;padding:14px 18px 45px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
+    $body = '<div class="decom-shell" style="width:100%;max-width:100%;margin:0;box-sizing:border-box;padding:14px 0 45px;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif">';
 
     // Encabezado
     $body .= '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid #e2e8f0">';
@@ -4626,7 +4619,7 @@ function unibagRenderRollsDecommissionPage(ReceptionService $service, ?Productio
     $body .= '        </div>';
 
     $body .= '        <div style="display:flex;gap:6px">';
-    $body .= '          <button type="button" class="btn secondary" onclick="resetDecomFilters()" style="height:38px;padding:0 14px;font-size:13px;border-radius:8px">✕ Limpiar Filtros</button>';
+    $body .= '          <button type="button" class="btn secondary" onclick="resetDecomFilters()" style="height:38px;padding:0 14px;font-size:13px;border-radius:8px">✕ Limpiar</button>';
     $body .= '        </div>';
     $body .= '      </div>';
 
@@ -4788,7 +4781,7 @@ function unibagRenderRollsDecommissionPage(ReceptionService $service, ?Productio
     $body .= '              <td colspan="9" style="text-align:center;padding:40px 20px;color:#94a3b8">';
     $body .= '                <div style="font-size:28px;margin-bottom:6px">🔍</div>';
     $body .= '                <div style="font-size:14px;font-weight:700;color:#475569">No hay bobinas que coincidan con los filtros aplicados.</div>';
-    $body .= '                <button type="button" class="btn secondary" onclick="resetDecomFilters()" style="margin-top:10px;font-size:12px;padding:4px 12px">✕ Limpiar Filtros</button>';
+    $body .= '                <button type="button" class="btn secondary" onclick="resetDecomFilters()" style="margin-top:10px;font-size:12px;padding:4px 12px">✕ Limpiar</button>';
     $body .= '              </td>';
     $body .= '            </tr>';
 

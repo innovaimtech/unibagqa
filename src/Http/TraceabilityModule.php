@@ -1659,7 +1659,7 @@ function renderTraceabilityStyles(): void
     <style>
         /* Container */
         .trz-container {
-            max-width: 1340px;
+            max-width: 100%;
             margin: 0 auto;
             padding: 20px 16px 60px;
             font-family: inherit;
@@ -1745,13 +1745,13 @@ function renderTraceabilityStyles(): void
             color: #0f172a;
         }
         .trz-btn-submit {
-            background: #0f172a;
+            background: linear-gradient(135deg, #00A9A6 0%, #0D9488 100%);
             color: #fff;
             padding: 0 20px;
-            height: 44px;
+            height: 42px;
         }
         .trz-btn-submit:hover {
-            background: #1e293b;
+            background: linear-gradient(135deg, #008F8D 0%, #0F766E 100%);
             color: #fff;
         }
         .trz-btn-toggle {
@@ -2028,8 +2028,8 @@ function renderTraceabilityStyles(): void
             font-size: 13px;
         }
         .trz-table th {
-            background: #0f172a;
-            color: #fff;
+            background: #f1f5f9;
+            color: #1e293b;
             font-size: 11px;
             font-weight: 800;
             text-transform: uppercase;
@@ -2057,8 +2057,8 @@ function renderTraceabilityStyles(): void
         .trz-oc-pill {
             display: inline-flex;
             align-items: center;
-            background: #0f172a;
-            color: #fff;
+            background: #f1f5f9;
+            color: #1e293b;
             border-radius: 6px;
             overflow: hidden;
             font-size: 12px;

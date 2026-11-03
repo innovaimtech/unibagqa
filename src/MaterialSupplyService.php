@@ -80,11 +80,59 @@ final class MaterialSupplyService
             delivered_by TEXT NOT NULL, received_by TEXT NULL,
             created_at BIGINT NOT NULL, delivered_at BIGINT NULL, received_at BIGINT NULL'
             . ($engine === '' ? '' : ', INDEX idx_supply_dispatch_request (request_key,state)') . ')' . $engine);
+        // ---- Traspasos entre bodegas: estados de la solicitud, escaneos y auditoría ----
+        // Estados de la solicitud (columna status):
+        //   PENDING    = recién creada por el operador, espera a la bodega de origen
+        //   ACCEPTED   = aceptada: el encargado está preparando (escaneando bobinas)
+        //   REJECTED   = rechazada por bodega (con motivo)
+        //   CANCELLED  = cancelada antes de despachar (con motivo)
+        //   DISPATCHED = despachada: el stock ya pasó a la Bodega 3000
+        //   RECEIVED   = recepción confirmada
+        $newRequestColumns = [
+            'status' => "VARCHAR(24) NOT NULL DEFAULT 'PENDING'",
+            'accepted_by' => 'TEXT NULL', 'accepted_at' => 'BIGINT NULL',
+            'rejected_by' => 'TEXT NULL', 'rejected_at' => 'BIGINT NULL', 'reject_reason' => 'TEXT NULL',
+            'cancelled_by' => 'TEXT NULL', 'cancelled_at' => 'BIGINT NULL', 'cancel_reason' => 'TEXT NULL',
+        ];
+        $statusColumnIsNew = !$this->columnExists('production_supply_requests', 'status');
+        foreach ($newRequestColumns as $column => $definition) {
+            if (!$this->columnExists('production_supply_requests', $column)) {
+                $this->trz->exec('ALTER TABLE production_supply_requests ADD COLUMN ' . $column . ' ' . $definition);
+            }
+        }
+        if ($statusColumnIsNew) {
+            // Solicitudes anteriores a este módulo: se les asigna el estado según sus despachos.
+            $this->trz->exec("UPDATE production_supply_requests SET status='ACCEPTED' WHERE EXISTS (
+                SELECT 1 FROM production_supply_dispatches d WHERE d.request_key=production_supply_requests.request_key AND d.state!='CANCELLED')");
+            $this->trz->exec("UPDATE production_supply_requests SET status='DISPATCHED' WHERE EXISTS (
+                SELECT 1 FROM production_supply_dispatches d WHERE d.request_key=production_supply_requests.request_key AND d.state='DISPATCHED')");
+            $this->trz->exec("UPDATE production_supply_requests SET status='RECEIVED' WHERE
+                (SELECT COALESCE(SUM(d.quantity),0) FROM production_supply_dispatches d WHERE d.request_key=production_supply_requests.request_key AND d.state='RECEIVED') >= requested_qty");
+        }
+        // Un escaneo por bobina: active_code lleva el código mientras el escaneo está vigente (NULL si se anula
+        // o ya se recibió). El índice UNIQUE impide que dos personas preparen la misma bobina.
+        $this->trz->exec('CREATE TABLE IF NOT EXISTS production_supply_scans (
+            scan_key VARCHAR(32) PRIMARY KEY, request_key VARCHAR(32) NOT NULL, dispatch_key VARCHAR(32) NULL,
+            roll_id BIGINT NOT NULL, code VARCHAR(60) NOT NULL, quantity DECIMAL(12,3) NOT NULL,
+            state VARCHAR(16) NOT NULL, active_code VARCHAR(60) NULL,
+            scanned_by TEXT NOT NULL, scanned_at BIGINT NOT NULL, received_by TEXT NULL, received_at BIGINT NULL,
+            voided_by TEXT NULL, voided_at BIGINT NULL, void_reason TEXT NULL,
+            UNIQUE (active_code)' . ($engine === '' ? '' : ', INDEX idx_supply_scan_request (request_key,state), INDEX idx_supply_scan_dispatch (dispatch_key)')
+            . ')' . $engine);
+        // Kardex / auditoría: solo se inserta, nunca se actualiza ni se borra.
+        $this->trz->exec('CREATE TABLE IF NOT EXISTS production_supply_audit (
+            audit_key VARCHAR(32) PRIMARY KEY, created_at BIGINT NOT NULL, actor TEXT NOT NULL,
+            action VARCHAR(30) NOT NULL, request_key VARCHAR(32) NOT NULL, dispatch_key VARCHAR(32) NULL,
+            from_warehouse VARCHAR(40) NULL, to_warehouse VARCHAR(40) NULL, sku VARCHAR(100) NULL,
+            code VARCHAR(60) NULL, quantity DECIMAL(12,3) NULL,
+            state_from VARCHAR(24) NULL, state_to VARCHAR(24) NULL, detail TEXT NULL'
+            . ($engine === '' ? '' : ', INDEX idx_supply_audit_request (request_key), INDEX idx_supply_audit_date (created_at)')
+            . ')' . $engine);
         if (!$this->sqlite($this->trz)) {
             $tables = $this->trz->query("SHOW TABLE STATUS WHERE Name IN
                 ('production_supply_requests','production_supply_dispatches','rolls',
-                 'traceability_warehouse_entries','movements','events')")->fetchAll(PDO::FETCH_ASSOC);
-            if (count($tables) !== 6) throw new RuntimeException('No se pudieron verificar las tablas TRZ.');
+                 'traceability_warehouse_entries','movements','events','production_supply_scans','production_supply_audit')")->fetchAll(PDO::FETCH_ASSOC);
+            if (count($tables) !== 8) throw new RuntimeException('No se pudieron verificar las tablas TRZ.');
             foreach ($tables as $table) {
                 if (strcasecmp($table['Engine'], 'InnoDB') !== 0) {
                     throw new RuntimeException('Las tablas TRZ de solicitudes y stock deben usar InnoDB.');
@@ -350,6 +398,8 @@ final class MaterialSupplyService
         $this->key($key);
         $who = $this->actor($actor);
         $this->ensureSchema();
+        // Los códigos pegados en el formulario se registran como escaneos antes de despachar.
+        $this->prescanCodes($key, $requestKey, $codes, $actor);
         $this->trz->beginTransaction();
         try {
             $r = $this->requestRow($requestKey);
@@ -366,10 +416,18 @@ final class MaterialSupplyService
             if ((int)$r['source_storehouse_id'] === 16) {
                 throw new RuntimeException('Crea una nueva solicitud de tintas desde Bodega 900, 910 o 920.');
             }
+            // Solo se despacha una solicitud ACEPTADA por bodega (EN PREPARACION).
+            if ($r['status'] !== 'ACCEPTED') {
+                throw new RuntimeException('La solicitud debe estar aceptada por bodega antes de despachar (estado actual: ' . $this->statusLabel((string)$r['status']) . ').');
+            }
             if (str_starts_with(strtoupper($r['sku']),'TIN') && trim($codes) !== '') {
                 throw new RuntimeException('La entrega de tintas usa la cantidad del articulo, no codigos de bobina.');
             }
             $qty = self::quantity($qty,str_starts_with(strtoupper($r['sku']),'TEL'));
+            // El despacho debe ser COMPLETO: la cantidad entregada es la solicitada.
+            if (abs($qty - (float)$r['requested_qty']) > 0.000001) {
+                throw new RuntimeException('El despacho debe ser completo: se solicitaron ' . (float)$r['requested_qty'] . ' ' . $r['unit'] . '.');
+            }
             $pending = $this->one($this->trz,"SELECT dispatch_key FROM production_supply_dispatches
                 WHERE request_key=? AND state='PENDING'",[$requestKey]);
             if ($pending) throw new RuntimeException('Primero resuelve el despacho pendiente.');
@@ -378,10 +436,15 @@ final class MaterialSupplyService
             if ((float)$sum['qty']+$qty > (float)$r['requested_qty']+0.000001) throw new RuntimeException('La entrega supera lo solicitado.');
             $destination = $this->one($this->trz,'SELECT id FROM warehouses WHERE code=3000 AND erp_storehouse_id=16 ORDER BY id LIMIT 1');
             if (!$destination) throw new RuntimeException('No existe Bodega 3000 vinculada al ERP 16.');
-            $codeList = array_values(array_filter(preg_split('/[\s,;]+/',trim($codes)) ?: []));
-            if (count(array_unique($codeList)) !== count($codeList)) throw new RuntimeException('Hay codigos repetidos.');
-            if (str_starts_with(strtoupper($r['sku']),'TEL') && count($codeList) !== (int)$qty) {
-                throw new RuntimeException('Escanea un codigo individual por cada bobina entregada.');
+            // Las bobinas a despachar son las ESCANEADAS (registradas) para esta solicitud.
+            $codeList = [];
+            if (str_starts_with(strtoupper($r['sku']),'TEL')) {
+                $scanStmt = $this->trz->prepare("SELECT code FROM production_supply_scans WHERE request_key=? AND state='SCANNED' ORDER BY scanned_at,scan_key");
+                $scanStmt->execute([$requestKey]);
+                $codeList = array_column($scanStmt->fetchAll(PDO::FETCH_ASSOC), 'code');
+                if (count($codeList) !== (int)$qty) {
+                    throw new RuntimeException('Faltan bobinas por escanear: escaneadas ' . count($codeList) . ' de ' . (int)$qty . '.');
+                }
             }
             $rolls = [];
             $total = 0.0;
@@ -401,6 +464,9 @@ final class MaterialSupplyService
             $this->trz->prepare('INSERT INTO production_supply_dispatches
                 (dispatch_key,request_key,quantity,state,payload,delivered_by,created_at) VALUES (?,?,?,\'PENDING\',?,?,?)')
                 ->execute([$key,$requestKey,$qty,json_encode($payload,JSON_THROW_ON_ERROR),$who,time()]);
+            // Las bobinas escaneadas quedan ligadas a este despacho.
+            $this->trz->prepare("UPDATE production_supply_scans SET dispatch_key=? WHERE request_key=? AND state='SCANNED'")
+                ->execute([$key,$requestKey]);
             $this->trz->commit();
         } catch (Throwable $e) {
             if ($this->trz->inTransaction()) $this->trz->rollBack();
@@ -444,7 +510,13 @@ final class MaterialSupplyService
                 $this->trz->prepare("INSERT INTO movements(entity_type,entity_id,movement_type,from_warehouse_id,to_warehouse_id,payload)
                     VALUES ('ROLL',?,'TRANSFER',?,?,?)")->execute([$roll['id'],$roll['warehouse_id'],
                         $payload['destination_id'],json_encode($movement,JSON_THROW_ON_ERROR)]);
+                $this->audit($r,'DISPATCH',$actor,'ACCEPTED','DISPATCHED',$key,$roll['code'],(float)$roll['quantity'],'Traspaso ERP ' . $transferId);
             }
+            if (!$payload['rolls']) {
+                $this->audit($r,'DISPATCH',$actor,'ACCEPTED','DISPATCHED',$key,null,(float)$d['quantity'],'Traspaso ERP ' . $transferId);
+            }
+            $this->trz->prepare("UPDATE production_supply_scans SET state='DISPATCHED' WHERE dispatch_key=? AND state='SCANNED'")->execute([$key]);
+            $this->trz->prepare("UPDATE production_supply_requests SET status='DISPATCHED' WHERE request_key=? AND status='ACCEPTED'")->execute([$r['request_key']]);
             $this->event('SUPPLY_DISPATCHED',['request_key'=>$r['request_key'],'dispatch_key'=>$key,
                 'erp_transfer_id'=>$transferId,'quantity'=>(float)$d['quantity'],'detail'=>$payload]);
             $this->trz->prepare("UPDATE production_supply_dispatches SET state='DISPATCHED',
@@ -476,15 +548,362 @@ final class MaterialSupplyService
             if ($otId > 0 && (int)$r['worker_ot_id'] !== $otId) throw new RuntimeException('La entrega no pertenece a esta OT.');
             if ($d['state'] === 'RECEIVED') { $this->trz->commit(); return; }
             if ($d['state'] !== 'DISPATCHED') throw new RuntimeException('Primero se debe completar el despacho.');
-            $this->trz->prepare("UPDATE production_supply_dispatches SET state='RECEIVED',received_by=?,received_at=?
-                WHERE dispatch_key=?")->execute([$who,time(),$key]);
-            $this->event('SUPPLY_RECEIVED',['request_key'=>$r['request_key'],'dispatch_key'=>$key,'actor'=>$actor,
-                'quantity'=>(float)$d['quantity'],'erp_transfer_id'=>(int)$d['erp_transfer_id']]);
+            $this->finishReceipt($d,$r,$actor,$who,'OPERADOR');
             $this->trz->commit();
         } catch (Throwable $e) {
             if ($this->trz->inTransaction()) $this->trz->rollBack();
             throw $e;
         }
+    }
+
+    // =========================================================================
+    // TRASPASOS ENTRE BODEGAS: aceptar / rechazar / escanear / recibir
+    // =========================================================================
+
+    private function columnExists(string $table, string $column): bool
+    {
+        if ($this->sqlite($this->trz)) {
+            foreach ($this->trz->query('PRAGMA table_info(' . $table . ')')->fetchAll(PDO::FETCH_ASSOC) as $c) {
+                if (strcasecmp((string)$c['name'], $column) === 0) return true;
+            }
+            return false;
+        }
+        $stmt = $this->trz->prepare('SHOW COLUMNS FROM ' . $table . ' LIKE ?');
+        $stmt->execute([$column]);
+        return (bool)$stmt->fetch();
+    }
+
+    /** Etiqueta legible de una bodega ERP para el kardex. */
+    private function warehouseLabel(int $erpStorehouseId): string
+    {
+        return match ($erpStorehouseId) {
+            5 => 'Bodega 100', 11 => 'Bodega 200', 7 => 'Bodega 900', 24 => 'Bodega 910',
+            28 => 'Bodega 920', 16 => 'Bodega 3000', default => 'ERP ' . $erpStorehouseId,
+        };
+    }
+
+    /**
+     * Registra un asiento en el kardex (production_supply_audit). Se llama SIEMPRE dentro de la
+     * misma transacción del cambio que documenta: si el cambio se revierte, el asiento también.
+     *
+     * @param array<string,mixed> $r Fila de la solicitud.
+     * @param array<string,mixed> $actor Usuario que ejecuta la acción.
+     */
+    private function audit(array $r, string $action, array $actor, ?string $from, ?string $to,
+        ?string $dispatchKey = null, ?string $code = null, ?float $qty = null, string $detail = ''): void
+    {
+        $this->trz->prepare('INSERT INTO production_supply_audit
+            (audit_key,created_at,actor,action,request_key,dispatch_key,from_warehouse,to_warehouse,sku,code,quantity,state_from,state_to,detail)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')->execute([
+            bin2hex(random_bytes(16)), time(), json_encode($actor, JSON_UNESCAPED_UNICODE), $action, $r['request_key'], $dispatchKey,
+            $this->warehouseLabel((int)$r['source_storehouse_id']), $this->warehouseLabel(16), $r['sku'], $code, $qty,
+            $from, $to, $detail !== '' ? $detail : null,
+        ]);
+    }
+
+    private function statusLabel(string $status): string
+    {
+        return ['PENDING' => 'Pendiente', 'ACCEPTED' => 'En preparación', 'REJECTED' => 'Rechazada',
+            'CANCELLED' => 'Cancelada', 'DISPATCHED' => 'Despachada', 'RECEIVED' => 'Recibida'][$status] ?? $status;
+    }
+
+    private function assertWarehouseRequest(array $r): void
+    {
+        if ((int)$r['source_storehouse_id'] === 16) {
+            throw new RuntimeException('Registro anterior: crea una nueva solicitud desde las bodegas 100, 200, 900, 910 o 920.');
+        }
+    }
+
+    /** El encargado de la bodega de origen ACEPTA la solicitud: pasa a EN PREPARACIÓN. */
+    public function accept(string $requestKey, array $actor): void
+    {
+        $who = $this->actor($actor);
+        $this->ensureSchema();
+        $this->trz->beginTransaction();
+        try {
+            $r = $this->requestRow($requestKey);
+            $this->assertWarehouseRequest($r);
+            if ($r['status'] !== 'PENDING') {
+                throw new RuntimeException('La solicitud ya no está pendiente (estado actual: ' . $this->statusLabel((string)$r['status']) . ').');
+            }
+            $upd = $this->trz->prepare("UPDATE production_supply_requests SET status='ACCEPTED',accepted_by=?,accepted_at=?
+                WHERE request_key=? AND status='PENDING'");
+            $upd->execute([$who, time(), $requestKey]);
+            if ($upd->rowCount() !== 1) throw new RuntimeException('Otra persona ya tomó esta solicitud.');
+            $this->audit($r, 'ACCEPT', $actor, 'PENDING', 'ACCEPTED');
+            $this->event('SUPPLY_ACCEPTED', ['request_key' => $requestKey, 'actor' => $actor]);
+            $this->trz->commit();
+        } catch (Throwable $e) {
+            if ($this->trz->inTransaction()) $this->trz->rollBack();
+            throw $e;
+        }
+    }
+
+    /** RECHAZA una solicitud pendiente. El motivo es obligatorio. */
+    public function reject(string $requestKey, string $reason, array $actor): void
+    {
+        $who = $this->actor($actor);
+        $reason = trim($reason);
+        if ($reason === '') throw new RuntimeException('Indica el motivo del rechazo.');
+        $this->ensureSchema();
+        $this->trz->beginTransaction();
+        try {
+            $r = $this->requestRow($requestKey);
+            $this->assertWarehouseRequest($r);
+            if ($r['status'] !== 'PENDING') {
+                throw new RuntimeException('Solo se pueden rechazar solicitudes pendientes (estado actual: ' . $this->statusLabel((string)$r['status']) . ').');
+            }
+            $upd = $this->trz->prepare("UPDATE production_supply_requests SET status='REJECTED',rejected_by=?,rejected_at=?,reject_reason=?
+                WHERE request_key=? AND status='PENDING'");
+            $upd->execute([$who, time(), $reason, $requestKey]);
+            if ($upd->rowCount() !== 1) throw new RuntimeException('La solicitud cambió de estado; actualiza la pantalla.');
+            $this->audit($r, 'REJECT', $actor, 'PENDING', 'REJECTED', null, null, null, $reason);
+            $this->event('SUPPLY_REJECTED', ['request_key' => $requestKey, 'actor' => $actor, 'reason' => $reason]);
+            $this->trz->commit();
+        } catch (Throwable $e) {
+            if ($this->trz->inTransaction()) $this->trz->rollBack();
+            throw $e;
+        }
+    }
+
+    /**
+     * CANCELA una solicitud pendiente o en preparación (antes de despachar). Libera las bobinas
+     * ya escaneadas. No se puede cancelar si ya hay un despacho; en ese caso se cancela el despacho.
+     */
+    public function cancelRequest(string $requestKey, string $reason, array $actor): void
+    {
+        $who = $this->actor($actor);
+        $reason = trim($reason);
+        if ($reason === '') throw new RuntimeException('Indica el motivo de la cancelación.');
+        $this->ensureSchema();
+        $this->trz->beginTransaction();
+        try {
+            $r = $this->requestRow($requestKey);
+            $this->assertWarehouseRequest($r);
+            if (!in_array($r['status'], ['PENDING', 'ACCEPTED'], true)) {
+                throw new RuntimeException('No se puede cancelar una solicitud en estado ' . $this->statusLabel((string)$r['status']) . '.');
+            }
+            $open = $this->one($this->trz, "SELECT dispatch_key FROM production_supply_dispatches WHERE request_key=? AND state!='CANCELLED'", [$requestKey]);
+            if ($open) throw new RuntimeException('La solicitud ya tiene un despacho. Resuelve o cancela primero el despacho.');
+            $scans = $this->trz->prepare("SELECT scan_key,code,quantity FROM production_supply_scans WHERE request_key=? AND state='SCANNED'");
+            $scans->execute([$requestKey]);
+            foreach ($scans->fetchAll(PDO::FETCH_ASSOC) as $s) {
+                $this->trz->prepare("UPDATE production_supply_scans SET state='VOIDED',active_code=NULL,voided_by=?,voided_at=?,void_reason=? WHERE scan_key=?")
+                    ->execute([$who, time(), 'Solicitud cancelada: ' . $reason, $s['scan_key']]);
+                $this->audit($r, 'SCAN_VOID', $actor, 'SCANNED', 'VOIDED', null, $s['code'], (float)$s['quantity'], 'Solicitud cancelada');
+            }
+            $this->trz->prepare("UPDATE production_supply_requests SET status='CANCELLED',cancelled_by=?,cancelled_at=?,cancel_reason=? WHERE request_key=?")
+                ->execute([$who, time(), $reason, $requestKey]);
+            $this->audit($r, 'CANCEL', $actor, (string)$r['status'], 'CANCELLED', null, null, null, $reason);
+            $this->event('SUPPLY_REQUEST_CANCELLED', ['request_key' => $requestKey, 'actor' => $actor, 'reason' => $reason]);
+            $this->trz->commit();
+        } catch (Throwable $e) {
+            if ($this->trz->inTransaction()) $this->trz->rollBack();
+            throw $e;
+        }
+    }
+
+    /**
+     * Registra el ESCANEO de una bobina para una solicitud en preparación. Si cualquier validación
+     * falla se lanza un mensaje claro y NO se registra nada.
+     */
+    public function scan(string $requestKey, string $code, array $actor): void
+    {
+        $who = $this->actor($actor);
+        $code = trim($code);
+        if ($code === '') throw new RuntimeException('Escanea o escribe un código de trazabilidad.');
+        if (!preg_match('/^[A-Za-z0-9._\-\/]{3,60}$/D', $code)) {
+            throw new RuntimeException('El código contiene caracteres no válidos: ' . mb_substr($code, 0, 40));
+        }
+        $this->ensureSchema();
+        $this->trz->beginTransaction();
+        try {
+            $r = $this->requestRow($requestKey);
+            $this->assertWarehouseRequest($r);
+            if ($r['status'] !== 'ACCEPTED') {
+                throw new RuntimeException('La solicitud debe estar aceptada para escanear (estado actual: ' . $this->statusLabel((string)$r['status']) . ').');
+            }
+            if (!str_starts_with(strtoupper((string)$r['sku']), 'TEL')) {
+                throw new RuntimeException('Este material (' . $r['sku'] . ') se entrega por cantidad; no requiere escanear códigos.');
+            }
+            $roll = $this->roll($code);
+            $already = $this->one($this->trz, 'SELECT request_key,state FROM production_supply_scans WHERE active_code=?', [$code]);
+            if ($already) {
+                throw new RuntimeException('El código ' . $code . ' ya fue escaneado' . ($already['request_key'] === $requestKey
+                    ? ' en esta solicitud.' : ' en la solicitud ' . substr((string)$already['request_key'], 0, 8) . '.'));
+            }
+            if ($roll['status'] !== 'RECEIVED') {
+                throw new RuntimeException('El código ' . $code . ' no está disponible (estado ' . $roll['status'] . ': bloqueado, en proceso o consumido).');
+            }
+            if (!empty($roll['current_work_order_id'])) {
+                throw new RuntimeException('El código ' . $code . ' está asignado a una OT; no se puede traspasar.');
+            }
+            if ($roll['sku'] !== $r['sku']) {
+                throw new RuntimeException('El código ' . $code . ' corresponde a otro producto (' . $roll['sku'] . '); se solicitó ' . $r['sku'] . '.');
+            }
+            if ((int)$roll['erp_storehouse_id'] !== (int)$r['source_storehouse_id']) {
+                throw new RuntimeException('El código ' . $code . ' no está en la bodega de origen (' . $this->warehouseLabel((int)$r['source_storehouse_id']) . ').');
+            }
+            $sum = $this->one($this->trz, "SELECT COALESCE(SUM(quantity),0) AS qty FROM production_supply_scans WHERE request_key=? AND state IN ('SCANNED','DISPATCHED','RECEIVED')", [$requestKey]);
+            if ((float)$sum['qty'] + (float)$roll['received_qty'] > (float)$r['requested_qty'] + 0.000001) {
+                throw new RuntimeException('Con este código se supera la cantidad solicitada (' . (float)$r['requested_qty'] . ').');
+            }
+            $this->trz->prepare("INSERT INTO production_supply_scans
+                (scan_key,request_key,roll_id,code,quantity,state,active_code,scanned_by,scanned_at) VALUES (?,?,?,?,?,'SCANNED',?,?,?)")
+                ->execute([bin2hex(random_bytes(16)), $requestKey, (int)$roll['id'], $code, (float)$roll['received_qty'], $code, $who, time()]);
+            $this->audit($r, 'SCAN', $actor, null, 'SCANNED', null, $code, (float)$roll['received_qty']);
+            $this->trz->commit();
+        } catch (PDOException $e) {
+            if ($this->trz->inTransaction()) $this->trz->rollBack();
+            // Violación del índice UNIQUE(active_code): otra persona escaneó la misma bobina al mismo tiempo.
+            if ((string)$e->getCode() === '23000') throw new RuntimeException('El código ' . $code . ' ya fue escaneado por otra persona.', 0, $e);
+            throw $e;
+        } catch (Throwable $e) {
+            if ($this->trz->inTransaction()) $this->trz->rollBack();
+            throw $e;
+        }
+    }
+
+    /** Anula un escaneo todavía no despachado (se pidió corregir). Queda registrado con su motivo. */
+    public function voidScan(string $scanKey, string $reason, array $actor): void
+    {
+        $who = $this->actor($actor);
+        $reason = trim($reason);
+        if ($reason === '') throw new RuntimeException('Indica el motivo de la anulación.');
+        $this->ensureSchema();
+        $this->trz->beginTransaction();
+        try {
+            $s = $this->one($this->trz, 'SELECT * FROM production_supply_scans WHERE scan_key=?' . $this->lock(), [$scanKey]);
+            if (!$s) throw new RuntimeException('Escaneo no encontrado.');
+            $r = $this->requestRow($s['request_key']);
+            if ($s['state'] !== 'SCANNED') throw new RuntimeException('Solo se pueden anular escaneos aún no despachados.');
+            $pending = $this->one($this->trz, "SELECT dispatch_key FROM production_supply_dispatches WHERE dispatch_key=? AND state='PENDING'", [(string)$s['dispatch_key']]);
+            if ($pending) throw new RuntimeException('Hay un despacho pendiente con esta bobina; resuélvelo primero.');
+            $this->trz->prepare("UPDATE production_supply_scans SET state='VOIDED',active_code=NULL,voided_by=?,voided_at=?,void_reason=? WHERE scan_key=?")
+                ->execute([$who, time(), $reason, $scanKey]);
+            $this->audit($r, 'SCAN_VOID', $actor, 'SCANNED', 'VOIDED', null, $s['code'], (float)$s['quantity'], $reason);
+            $this->trz->commit();
+        } catch (Throwable $e) {
+            if ($this->trz->inTransaction()) $this->trz->rollBack();
+            throw $e;
+        }
+    }
+
+    /** Escaneos de una solicitud (para la pantalla de preparación). */
+    public function scans(string $requestKey): array
+    {
+        $this->ensureSchema();
+        $stmt = $this->trz->prepare("SELECT * FROM production_supply_scans WHERE request_key=? AND state!='VOIDED' ORDER BY scanned_at,scan_key");
+        $stmt->execute([$requestKey]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Cierra la recepción de un despacho (dentro de la transacción del llamador): actualiza el despacho,
+     * los escaneos, el estado de la solicitud y el kardex. $via indica quién confirmó.
+     */
+    private function finishReceipt(array $d, array $r, array $actor, string $who, string $via): void
+    {
+        $now = time();
+        $this->trz->prepare("UPDATE production_supply_dispatches SET state='RECEIVED',received_by=?,received_at=? WHERE dispatch_key=?")
+            ->execute([$who, $now, $d['dispatch_key']]);
+        $this->trz->prepare("UPDATE production_supply_scans SET state='RECEIVED',active_code=NULL,received_by=?,received_at=?
+            WHERE dispatch_key=? AND state='DISPATCHED'")->execute([$who, $now, $d['dispatch_key']]);
+        $scans = $this->trz->prepare("SELECT code,quantity FROM production_supply_scans WHERE dispatch_key=? AND state='RECEIVED'");
+        $scans->execute([$d['dispatch_key']]);
+        $rows = $scans->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as $s) {
+            $this->audit($r, 'RECEIVE', $actor, 'DISPATCHED', 'RECEIVED', $d['dispatch_key'], $s['code'], (float)$s['quantity'], $via);
+        }
+        if (!$rows) $this->audit($r, 'RECEIVE', $actor, 'DISPATCHED', 'RECEIVED', $d['dispatch_key'], null, (float)$d['quantity'], $via);
+        $sum = $this->one($this->trz, "SELECT COALESCE(SUM(quantity),0) AS qty FROM production_supply_dispatches WHERE request_key=? AND state='RECEIVED'", [$r['request_key']]);
+        if ((float)$sum['qty'] + 0.000001 >= (float)$r['requested_qty']) {
+            $this->trz->prepare("UPDATE production_supply_requests SET status='RECEIVED' WHERE request_key=? AND status='DISPATCHED'")
+                ->execute([$r['request_key']]);
+        }
+        $this->event('SUPPLY_RECEIVED', ['request_key' => $r['request_key'], 'dispatch_key' => $d['dispatch_key'], 'actor' => $actor,
+            'quantity' => (float)$d['quantity'], 'erp_transfer_id' => (int)$d['erp_transfer_id'], 'via' => $via]);
+    }
+
+    /**
+     * El ENCARGADO confirma la recepción de un despacho (el stock ya pasó a la Bodega 3000 al despachar).
+     * Es idempotente: confirmar dos veces no duplica nada.
+     */
+    public function receiveByWarehouse(string $dispatchKey, array $actor): void
+    {
+        $who = $this->actor($actor);
+        $this->ensureSchema();
+        $this->trz->beginTransaction();
+        try {
+            $d = $this->one($this->trz, 'SELECT * FROM production_supply_dispatches WHERE dispatch_key=?' . $this->lock(), [$dispatchKey]);
+            if (!$d) throw new RuntimeException('Despacho no encontrado.');
+            $r = $this->requestRow($d['request_key']);
+            if ($d['state'] === 'RECEIVED') { $this->trz->commit(); return; }
+            if ($d['state'] !== 'DISPATCHED') throw new RuntimeException('Primero se debe completar el despacho.');
+            $this->finishReceipt($d, $r, $actor, $who, 'ENCARGADO');
+            $this->trz->commit();
+        } catch (Throwable $e) {
+            if ($this->trz->inTransaction()) $this->trz->rollBack();
+            throw $e;
+        }
+    }
+
+    /**
+     * Escanea los códigos pegados en el formulario de despacho (uno por línea) antes de despachar.
+     * Los que ya estaban escaneados en esta misma solicitud se omiten; cualquier otro error se informa.
+     */
+    private function prescanCodes(string $dispatchKey, string $requestKey, string $codes, array $actor): void
+    {
+        if (trim($codes) === '') return;
+        if ($this->one($this->trz, 'SELECT dispatch_key FROM production_supply_dispatches WHERE dispatch_key=?', [$dispatchKey])) return;
+        foreach (array_values(array_unique(array_filter(preg_split('/[\s,;]+/', trim($codes)) ?: []))) as $code) {
+            if ($this->one($this->trz, "SELECT scan_key FROM production_supply_scans WHERE request_key=? AND code=? AND state='SCANNED'", [$requestKey, $code])) continue;
+            $this->scan($requestKey, $code, $actor);
+        }
+    }
+
+    // =========================================================================
+    // REPORTES
+    // =========================================================================
+
+    /**
+     * Reportes mínimos del periodo [$from,$to] (timestamps):
+     *  - 'response': por bodega de origen, solicitudes, pendientes y tiempo medio de respuesta (aceptar/rechazar).
+     *  - 'movements': unidades despachadas por producto y bodega.
+     *  - 'differences': solicitado vs despachado vs recibido por solicitud.
+     *
+     * @return array{response: array, movements: array, differences: array}
+     */
+    public function report(int $from, int $to): array
+    {
+        $this->ensureSchema();
+        $target = $this->target();
+        $q = function (string $sql, array $params): array {
+            $stmt = $this->trz->prepare($sql);
+            $stmt->execute($params);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        };
+        $response = $q("SELECT source_storehouse_id,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status='PENDING' THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN status='REJECTED' THEN 1 ELSE 0 END) AS rejected,
+                SUM(CASE WHEN status='CANCELLED' THEN 1 ELSE 0 END) AS cancelled,
+                AVG(CASE WHEN accepted_at IS NOT NULL THEN accepted_at-created_at
+                         WHEN rejected_at IS NOT NULL THEN rejected_at-created_at END) AS avg_response_seconds
+            FROM production_supply_requests WHERE erp_target=? AND created_at BETWEEN ? AND ?
+            GROUP BY source_storehouse_id ORDER BY source_storehouse_id", [$target, $from, $to]);
+        $movements = $q("SELECT r.sku, r.description, r.source_storehouse_id, r.unit,
+                COUNT(DISTINCT d.dispatch_key) AS dispatches, SUM(d.quantity) AS quantity
+            FROM production_supply_dispatches d JOIN production_supply_requests r ON r.request_key=d.request_key
+            WHERE r.erp_target=? AND d.state IN ('DISPATCHED','RECEIVED') AND d.delivered_at BETWEEN ? AND ?
+            GROUP BY r.sku, r.description, r.source_storehouse_id, r.unit ORDER BY r.sku, r.source_storehouse_id", [$target, $from, $to]);
+        $differences = $q("SELECT r.request_key, r.sku, r.source_storehouse_id, r.status, r.requested_qty,
+                COALESCE((SELECT SUM(d.quantity) FROM production_supply_dispatches d WHERE d.request_key=r.request_key AND d.state IN ('DISPATCHED','RECEIVED')),0) AS dispatched_qty,
+                COALESCE((SELECT SUM(d.quantity) FROM production_supply_dispatches d WHERE d.request_key=r.request_key AND d.state='RECEIVED'),0) AS received_qty
+            FROM production_supply_requests r WHERE r.erp_target=? AND r.created_at BETWEEN ? AND ?
+              AND r.status IN ('ACCEPTED','DISPATCHED','RECEIVED')
+            ORDER BY r.created_at DESC LIMIT 500", [$target, $from, $to]);
+        return ['response' => $response, 'movements' => $movements, 'differences' => $differences];
     }
 
     public function cancelPending(string $key, string $reason, array $actor): void
@@ -511,6 +930,9 @@ final class MaterialSupplyService
             $payload['cancellation_reason']=trim($reason);
             $this->trz->prepare("UPDATE production_supply_dispatches SET state='CANCELLED',payload=?,error_message=NULL WHERE dispatch_key=?")
                 ->execute([json_encode($payload,JSON_THROW_ON_ERROR),$key]);
+            // Las bobinas escaneadas se desligan del despacho cancelado (siguen escaneadas, listas para reintentar).
+            $this->trz->prepare("UPDATE production_supply_scans SET dispatch_key=NULL WHERE dispatch_key=? AND state='SCANNED'")->execute([$key]);
+            $this->audit($this->requestRow($d['request_key']),'DISPATCH_CANCEL',$actor,'PENDING','CANCELLED',$key,null,(float)$d['quantity'],trim($reason));
             $this->event('SUPPLY_DISPATCH_CANCELLED',['dispatch_key'=>$key,'request_key'=>$d['request_key'],'actor'=>$actor,'reason'=>trim($reason)]);
             $this->trz->commit();
         } catch (Throwable $e) {

@@ -1,0 +1,1146 @@
+/* ==========================================================================
+   UNIBAG ERP & TRAZABILIDAD · SISTEMA DE DISEÑO CORPORATIVO UNIFICADO
+   Archivo: public/assets/css/unibag-ui.css
+   Objetivo:
+   1. Ocupación fluida del 100% del ancho útil de pantalla sin topes dispares.
+   2. Formato único de cabeceras, barras de filtro, botones, KPIs y tablas.
+   3. Contraste garantizado WCAG AA (> 7:1): cero letras blancas o invisibles
+      en selectores <select>/<option>, datepickers, placeholders o botones.
+   4. Consolidación de componentes de Reportes, Dashboard, Bonos y Bodegas
+      para eliminar bloques <style> duplicados en módulos PHP.
+   ========================================================================== */
+
+:root {
+    --ub-brand: #00A9A6;
+    --ub-brand-hover: #008F8D;
+    --ub-brand-dark: #0F766E;
+    --ub-brand-soft: #F0FDFA;
+    --ub-brand-border: #99F6E4;
+
+    --ub-excel: #059669;
+    --ub-excel-hover: #047857;
+
+    --ub-danger: #DC2626;
+    --ub-warning: #D97706;
+
+    --ub-bg: #F1F5F9;
+    --ub-surface: #FFFFFF;
+    --ub-surface-alt: #F8FAFC;
+    --ub-border: #CBD5E1;
+    --ub-border-soft: #E2E8F0;
+
+    --ub-text: #0F172A;
+    --ub-text-secondary: #334155;
+    --ub-text-muted: #64748B;
+
+    --ub-radius-card: 14px;
+    --ub-radius-control: 9px;
+    --ub-control-height: 40px;
+    --ub-shadow-card: 0 4px 14px rgba(15, 23, 42, 0.04);
+    --ub-focus-ring: 0 0 0 3px rgba(0, 169, 166, 0.18);
+}
+
+/* --------------------------------------------------------------------------
+   1. LAYOUT FLUIDO AL 100% Y ALINEACIÓN DE BORDES (CERO ESPACIO DESPERDICIADO)
+   -------------------------------------------------------------------------- */
+html, body {
+    background-color: var(--ub-bg);
+    color: var(--ub-text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", sans-serif;
+}
+
+.topbar .inner,
+.subbar .inner {
+    width: 100%;
+    max-width: 100%;
+    padding-left: 24px;
+    padding-right: 24px;
+    box-sizing: border-box;
+}
+
+html body > main {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 18px 24px 32px !important;
+    box-sizing: border-box !important;
+}
+
+/* Eliminar topes dispares (1100px–1600px) y estandarizar shells verticales */
+html body > main .dashboard-shell,
+html body > main .report-shell,
+html body > main .daily-shell,
+html body > main .rec-shell,
+html body > main .erp-prod-shell,
+html body > main .erp-graph-shell,
+html body > main .trz-container,
+html body > main .trz-shell,
+html body > main .transfers-shell,
+html body > main .lunch-page-wrap {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    box-sizing: border-box !important;
+}
+
+html body > main .dashboard-shell,
+html body > main .report-shell,
+html body > main .daily-shell,
+html body > main .erp-prod-shell,
+html body > main .erp-graph-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+html body > main .lunch-page-wrap,
+html body > main .trz-container,
+html body > main .transfers-shell {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+}
+
+.text-center { text-align: center; }
+.text-right { text-align: right; }
+.text-left { text-align: left; }
+
+/* --------------------------------------------------------------------------
+   2. NAVEGACIÓN SUPERIOR Y SUB-BARRA CON ESTADO ACTIVO CLARO
+   -------------------------------------------------------------------------- */
+.topbar {
+    background: linear-gradient(90deg, #009795 0%, #00A9A6 55%, #0D9488 100%);
+    color: #FFFFFF;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+.topbar .menu {
+    gap: 6px;
+}
+
+.topbar .menu a {
+    color: #FFFFFF;
+    font-weight: 700;
+    font-size: 13.5px;
+    padding: 8px 13px;
+    border-radius: 8px;
+    transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.topbar .menu a:hover {
+    background: rgba(255, 255, 255, 0.16);
+    color: #FFFFFF;
+}
+
+.topbar .menu a.active {
+    background: #FFFFFF;
+    color: var(--ub-text);
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.14);
+}
+
+.topbar .top-right select,
+.topbar .top-right select:disabled {
+    width: auto;
+    height: 34px;
+    background-color: rgba(15, 23, 42, 0.24) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    opacity: 1 !important;
+    border: 1px solid rgba(255, 255, 255, 0.38) !important;
+    padding: 4px 10px !important;
+    border-radius: 7px !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+}
+
+.topbar .top-right .pill {
+    background: rgba(15, 23, 42, 0.18);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    color: #FFFFFF !important;
+    font-weight: 700;
+    font-size: 12.5px;
+    padding: 6px 11px;
+    border-radius: 7px;
+}
+
+.topbar .top-right .pill:hover {
+    background: rgba(15, 23, 42, 0.28);
+}
+
+.subbar {
+    background: #FFFFFF;
+    border-bottom: 1px solid var(--ub-border);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
+}
+
+.subbar .inner {
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
+.subbar .submenu {
+    gap: 6px;
+}
+
+.subbar .subitem {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    color: var(--ub-text-secondary);
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 13px;
+    border: 1px solid transparent;
+    transition: all 0.15s ease;
+}
+
+.subbar .subitem:hover {
+    background: var(--ub-bg);
+    color: var(--ub-text);
+    border-color: var(--ub-border);
+    text-decoration: none;
+}
+
+.subbar .subitem.active {
+    background: var(--ub-brand);
+    color: #FFFFFF !important;
+    border-color: var(--ub-brand-hover);
+    box-shadow: 0 2px 6px rgba(0, 169, 166, 0.24);
+}
+
+/* --------------------------------------------------------------------------
+   3. BLINDAJE UNIVERSAL DE CONTRASTE (CERO LETRAS INVISIBLES EN SELECT/INPUT)
+   -------------------------------------------------------------------------- */
+select option,
+select optgroup {
+    background-color: #FFFFFF !important;
+    color: #0F172A !important;
+    -webkit-text-fill-color: #0F172A !important;
+    font-weight: 600;
+}
+
+input::placeholder,
+textarea::placeholder {
+    color: #64748B !important;
+    -webkit-text-fill-color: #64748B !important;
+    opacity: 1 !important;
+    font-weight: 500;
+}
+
+html body > main input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]),
+html body > main select,
+html body > main textarea,
+html body > main input[data-unibag-datepicker-visible="1"] {
+    background-color: #FFFFFF;
+    color: var(--ub-text);
+    -webkit-text-fill-color: var(--ub-text);
+    border: 1px solid var(--ub-border);
+    border-radius: var(--ub-radius-control);
+    font-size: 13px;
+    font-weight: 600;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+html body > main input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):focus,
+html body > main select:focus,
+html body > main textarea:focus,
+html body > main input[data-unibag-datepicker-visible="1"]:focus {
+    background-color: #FFFFFF !important;
+    color: var(--ub-text) !important;
+    border-color: var(--ub-brand) !important;
+    box-shadow: var(--ub-focus-ring) !important;
+    outline: none !important;
+}
+
+html body > main input:disabled,
+html body > main select:disabled,
+html body > main textarea:disabled {
+    background-color: #F1F5F9 !important;
+    color: #475569 !important;
+    -webkit-text-fill-color: #475569 !important;
+    border-color: #CBD5E1 !important;
+    opacity: 1 !important;
+    cursor: not-allowed;
+}
+
+/* --------------------------------------------------------------------------
+   4. SISTEMA UNIFICADO DE TARJETAS Y BARRAS DE FILTRO
+   -------------------------------------------------------------------------- */
+html body > main .ub-filter-card,
+html body > main .erp-filter-card,
+html body > main .rec-filter-card,
+html body > main .trz-filter-card,
+html body > main .daily-head-card,
+html body > main .lunch-page-wrap .toolbar {
+    width: 100% !important;
+    box-sizing: border-box !important;
+    background: var(--ub-surface) !important;
+    border: 1px solid var(--ub-border) !important;
+    border-top: 3px solid var(--ub-brand) !important;
+    border-radius: var(--ub-radius-card) !important;
+    padding: 18px 22px !important;
+    box-shadow: var(--ub-shadow-card) !important;
+}
+
+html body > main .erp-filter-card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+/* Cuando .erp-filter-card tiene solo 2 hijos directos (título + form en línea) */
+html body > main .erp-filter-card:has(> .erp-filter-form):not(:has(> .erp-filter-header)) {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+html body > main .ub-filter-header,
+html body > main .erp-filter-header,
+html body > main .rec-header-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px;
+    width: 100%;
+}
+
+html body > main .erp-filter-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+html body > main .erp-filter-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: var(--ub-brand-soft);
+    color: var(--ub-brand-dark);
+    border: 1px solid var(--ub-brand-border);
+    border-radius: 8px;
+    font-size: 12.5px;
+    font-weight: 700;
+}
+
+html body > main .rec-header-card {
+    background: var(--ub-surface);
+    border: 1px solid var(--ub-border);
+    border-radius: var(--ub-radius-card);
+    padding: 16px 22px;
+    box-shadow: var(--ub-shadow-card);
+}
+
+html body > main .ub-filter-title,
+html body > main .erp-filter-title,
+html body > main .rec-title-group h1,
+html body > main .lunch-title-group h1 {
+    font-size: 20px !important;
+    font-weight: 800 !important;
+    color: var(--ub-text) !important;
+    letter-spacing: -0.02em;
+    margin: 0;
+}
+
+html body > main .ub-filter-sub,
+html body > main .erp-filter-sub,
+html body > main .rec-title-group p,
+html body > main .lunch-title-group p {
+    font-size: 13px !important;
+    color: var(--ub-text-muted) !important;
+    font-weight: 500;
+    margin-top: 3px;
+}
+
+/* Grillas elásticas de filtros para ocupar todo el ancho sin huecos muertos */
+html body > main .ub-filter-grid,
+html body > main .rec-filter-grid-nat,
+html body > main .rec-filter-grid-imp,
+html body > main .dashboard-filters-grid,
+html body > main .trz-advanced-filters {
+    display: grid !important;
+    grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)) !important;
+    gap: 12px !important;
+    align-items: end !important;
+    width: 100% !important;
+}
+
+html body > main .erp-filter-form {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+html body > main .erp-filter-header + .erp-filter-form {
+    padding-top: 14px;
+    border-top: 1px solid var(--ub-border-soft);
+}
+
+/* Cuando .erp-filter-form ocupa fila propia debajo del header, expandir campos armoniosamente */
+html body > main .erp-filter-header + .erp-filter-form,
+html body > main .erp-filter-card > form.erp-filter-form:only-child,
+html body > main .erp-filter-card > .muted + form.erp-filter-form {
+    width: 100%;
+}
+
+html body > main .erp-filter-header + .erp-filter-form > .erp-filter-field:not(.erp-filter-actions),
+html body > main .erp-filter-card > .muted + form.erp-filter-form > .erp-filter-field:not(.erp-filter-actions) {
+    flex: 1 1 175px;
+    min-width: 155px;
+}
+
+/* Etiquetas y controles dentro de cualquier barra de filtros */
+html body > main .ub-field,
+html body > main .erp-filter-field,
+html body > main .rec-field,
+html body > main .erp-prod-field,
+html body > main .dashboard-field,
+html body > main .bonus-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+}
+
+html body > main .erp-filter-field.is-hidden,
+html body > main .erp-prod-field.is-hidden,
+html body > main .ub-field.is-hidden {
+    display: none !important;
+}
+
+html body > main .ub-field label,
+html body > main .erp-filter-field label,
+html body > main .rec-field label,
+html body > main .erp-prod-field label,
+html body > main .dashboard-field label,
+html body > main .bonus-field label,
+html body > main .trz-filter-card label {
+    font-size: 11px !important;
+    font-weight: 800 !important;
+    color: var(--ub-text-secondary) !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.04em !important;
+    margin: 0 !important;
+    line-height: 1.25;
+}
+
+html body > main .ub-field input:not([type="checkbox"]):not([type="radio"]),
+html body > main .ub-field select,
+html body > main .erp-filter-field input:not([type="checkbox"]):not([type="radio"]),
+html body > main .erp-filter-field select,
+html body > main .rec-field input:not([type="checkbox"]):not([type="radio"]),
+html body > main .rec-field select,
+html body > main .erp-prod-field input:not([type="checkbox"]):not([type="radio"]),
+html body > main .erp-prod-field select,
+html body > main .dashboard-field input:not([type="checkbox"]):not([type="radio"]),
+html body > main .dashboard-field select,
+html body > main .bonus-field input:not([type="checkbox"]):not([type="radio"]),
+html body > main .bonus-field select,
+html body > main .trz-advanced-filters input:not([type="checkbox"]):not([type="radio"]),
+html body > main .trz-advanced-filters select {
+    width: 100% !important;
+    height: var(--ub-control-height) !important;
+    min-height: var(--ub-control-height) !important;
+    padding: 0 12px !important;
+    background-color: #FFFFFF !important;
+    color: var(--ub-text) !important;
+    -webkit-text-fill-color: var(--ub-text) !important;
+    border: 1px solid var(--ub-border) !important;
+    border-radius: var(--ub-radius-control) !important;
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    box-sizing: border-box !important;
+}
+
+/* Buscador principal de Trazabilidad con ícono izquierdo y botón limpiar derecho */
+html body > main .trz-search-input {
+    height: 42px !important;
+    padding: 0 38px 0 42px !important;
+    background-color: #FFFFFF !important;
+    color: var(--ub-text) !important;
+    -webkit-text-fill-color: var(--ub-text) !important;
+    border: 1px solid var(--ub-border) !important;
+    border-radius: var(--ub-radius-control) !important;
+    font-weight: 600 !important;
+}
+
+/* --------------------------------------------------------------------------
+   5. BOTONES CORPORATIVOS UNIFICADOS (PRIMARIO TURQUESA / SECUNDARIO / EXCEL)
+   -------------------------------------------------------------------------- */
+
+/* Normalización suave de .btn y .btn.secondary generales (sin !important para respetar estilos inline semánticos) */
+html body > main .btn:not(.secondary):not(.legacy-setup-finish-btn):not(.finish-grey-btn):not(.finish-red-btn):not(.finish-yellow-btn) {
+    background: linear-gradient(135deg, var(--ub-brand) 0%, #0D9488 100%);
+    color: #FFFFFF;
+    border: 1px solid #0D9488;
+    border-radius: var(--ub-radius-control);
+    font-size: 13px;
+    font-weight: 700;
+    gap: 6px;
+    box-shadow: 0 2px 8px rgba(0, 169, 166, 0.20);
+    transition: all 0.15s ease;
+}
+
+html body > main .btn:not(.secondary):not(.legacy-setup-finish-btn):not(.finish-grey-btn):not(.finish-red-btn):not(.finish-yellow-btn):hover {
+    background: linear-gradient(135deg, var(--ub-brand-hover) 0%, var(--ub-brand-dark) 100%);
+    color: #FFFFFF;
+}
+
+html body > main .btn.secondary {
+    background: #FFFFFF;
+    color: #1E293B;
+    border: 1.5px solid var(--ub-border);
+    border-radius: var(--ub-radius-control);
+    font-size: 13px;
+    font-weight: 700;
+    gap: 6px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    transition: all 0.15s ease;
+}
+
+html body > main .btn.secondary:hover {
+    background: #F1F5F9;
+    color: var(--ub-text);
+    border-color: #94A3B8;
+}
+
+/* Botón Primario Unibag (#00A9A6) - Reemplaza azules #2563eb, negros #0f172a y naranjas */
+html body > main .ub-btn-primary,
+html body > main .btn-filter-apply,
+html body > main button.btn.btn-filter-apply,
+html body > main a.btn.btn-filter-apply,
+html body > main .rec-btn-filter,
+html body > main .trz-btn-submit,
+html body > main .btn-modern.primary,
+html body > main .btn-modern.blue,
+html body > main .btn-sl-primary {
+    height: var(--ub-control-height) !important;
+    min-height: var(--ub-control-height) !important;
+    padding: 0 18px !important;
+    border-radius: var(--ub-radius-control) !important;
+    background: linear-gradient(135deg, var(--ub-brand) 0%, #0D9488 100%) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    border: 1px solid #0D9488 !important;
+    font-size: 13px !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    box-shadow: 0 3px 10px rgba(0, 169, 166, 0.22) !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    text-decoration: none !important;
+    white-space: nowrap;
+    box-sizing: border-box !important;
+    transition: all 0.15s ease !important;
+}
+
+html body > main .ub-btn-primary:hover,
+html body > main .btn-filter-apply:hover,
+html body > main button.btn.btn-filter-apply:hover,
+html body > main a.btn.btn-filter-apply:hover,
+html body > main .rec-btn-filter:hover,
+html body > main .btn-modern.primary:hover,
+html body > main .btn-modern.blue:hover,
+html body > main .btn-sl-primary:hover {
+    background: linear-gradient(135deg, var(--ub-brand-hover) 0%, var(--ub-brand-dark) 100%) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    transform: translateY(-1px);
+    box-shadow: 0 5px 14px rgba(0, 169, 166, 0.30) !important;
+}
+
+/* Botón Secundario / Limpiar / Volver (Contraste nítido oscuro sobre blanco) */
+html body > main .ub-btn-secondary,
+html body > main .btn-filter-secondary,
+html body > main a.btn.btn-filter-secondary,
+html body > main button.btn.btn-filter-secondary,
+html body > main .rec-btn-clear,
+html body > main .btn-modern.secondary {
+    height: var(--ub-control-height) !important;
+    min-height: var(--ub-control-height) !important;
+    padding: 0 16px !important;
+    border-radius: var(--ub-radius-control) !important;
+    background: #FFFFFF !important;
+    color: #1E293B !important;
+    -webkit-text-fill-color: #1E293B !important;
+    border: 1.5px solid var(--ub-border) !important;
+    font-size: 13px !important;
+    font-weight: 700 !important;
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04) !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    text-decoration: none !important;
+    white-space: nowrap;
+    box-sizing: border-box !important;
+    transition: all 0.15s ease !important;
+}
+
+html body > main .ub-btn-secondary:hover,
+html body > main .btn-filter-secondary:hover,
+html body > main a.btn.btn-filter-secondary:hover,
+html body > main button.btn.btn-filter-secondary:hover,
+html body > main .rec-btn-clear:hover,
+html body > main .btn-modern.secondary:hover {
+    background: #F1F5F9 !important;
+    color: var(--ub-text) !important;
+    -webkit-text-fill-color: var(--ub-text) !important;
+    border-color: #94A3B8 !important;
+}
+
+/* Botón Corporativo Excel / Descarga XLS (#059669 Esmeralda en todas las pantallas) */
+html body > main .ub-btn-excel,
+html body > main .btn-filter-excel,
+html body > main .btn-export-excel,
+html body > main .rec-btn-excel,
+html body > main a[href*="export-xls"].btn-filter-secondary,
+html body > main a[href*="export-xls"].btn,
+html body > main a[href*="/excel"].btn-filter-secondary,
+html body > main a[href*="/excel"].btn,
+html body > main a[href*="download=excel"].btn,
+html body > main a[href*="download=rolls_excel"].btn {
+    height: var(--ub-control-height) !important;
+    min-height: var(--ub-control-height) !important;
+    padding: 0 16px !important;
+    border-radius: var(--ub-radius-control) !important;
+    background: linear-gradient(135deg, var(--ub-excel) 0%, var(--ub-excel-hover) 100%) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    border: 1px solid var(--ub-excel-hover) !important;
+    font-size: 13px !important;
+    font-weight: 700 !important;
+    cursor: pointer;
+    box-shadow: 0 3px 10px rgba(5, 150, 105, 0.22) !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    text-decoration: none !important;
+    white-space: nowrap;
+    box-sizing: border-box !important;
+}
+
+html body > main .ub-btn-excel:hover,
+html body > main .btn-filter-excel:hover,
+html body > main .btn-export-excel:hover,
+html body > main .rec-btn-excel:hover,
+html body > main a[href*="export-xls"].btn-filter-secondary:hover,
+html body > main a[href*="export-xls"].btn:hover,
+html body > main a[href*="/excel"].btn-filter-secondary:hover,
+html body > main a[href*="/excel"].btn:hover,
+html body > main a[href*="download=excel"].btn:hover,
+html body > main a[href*="download=rolls_excel"].btn:hover {
+    background: linear-gradient(135deg, var(--ub-excel-hover) 0%, #065F46 100%) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    transform: translateY(-1px);
+}
+
+/* Botón compacto Excel en filas de tabla */
+html body > main td a[href*="/excel"].btn {
+    height: 30px !important;
+    min-height: 30px !important;
+    padding: 0 10px !important;
+    font-size: 12px !important;
+}
+
+/* Alerta especial de mantención mantiene su semántica roja */
+html body > main .maintenance-header-actions .maintenance-alert-button {
+    background: #FFF1F2 !important;
+    color: #9F1239 !important;
+    -webkit-text-fill-color: #9F1239 !important;
+    border-color: #FDA4AF !important;
+}
+
+/* --------------------------------------------------------------------------
+   6. PÍLDORAS / TABS RÁPIDOS, HERO EJECUTIVO Y TABLAS UNIFICADAS
+   -------------------------------------------------------------------------- */
+html body > main .report-tabs {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+html body > main .rec-filter-pill,
+html body > main .filter-chip,
+html body > main .report-tab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    text-decoration: none;
+    background: #FFFFFF;
+    color: var(--ub-text-secondary);
+    border: 1px solid var(--ub-border);
+    font-weight: 700;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+    transition: all 0.15s ease;
+}
+
+html body > main .report-tab-badge {
+    background: rgba(15, 23, 42, 0.08);
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 800;
+}
+
+html body > main .report-tab-btn.active .report-tab-badge {
+    background: rgba(255, 255, 255, 0.25);
+    color: #FFFFFF;
+}
+
+html body > main .rec-filter-pill:hover:not(.active),
+html body > main .filter-chip:hover:not(.active):not(.active-alert):not(.active-success),
+html body > main .report-tab-btn:hover:not(.active) {
+    background: var(--ub-surface-alt);
+    color: var(--ub-text);
+    border-color: #94A3B8;
+}
+
+html body > main .rec-filter-pill.active,
+html body > main .filter-chip.active,
+html body > main .report-tab-btn.active,
+html body > main .rec-nav-tab.active,
+html body > main .rec-page-btn.active,
+html body > main .trz-tab.active {
+    background: var(--ub-brand) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    border-color: var(--ub-brand-hover) !important;
+    box-shadow: 0 2px 8px rgba(0, 169, 166, 0.25);
+}
+
+/* Hero Ejecutivo con Identidad Corporativa Unibag */
+html body > main .erp-prod-hero {
+    background: linear-gradient(135deg, #0F172A 0%, #134E4A 58%, #00A9A6 100%) !important;
+    color: #FFFFFF;
+    border-radius: 16px !important;
+    padding: 24px 28px;
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.18);
+}
+
+html body > main .erp-prod-hero .btn.secondary {
+    background: rgba(255, 255, 255, 0.16) !important;
+    color: #FFFFFF !important;
+    -webkit-text-fill-color: #FFFFFF !important;
+    border: 1px solid rgba(255, 255, 255, 0.35) !important;
+}
+
+html body > main .erp-prod-hero .btn.secondary:hover {
+    background: rgba(255, 255, 255, 0.26) !important;
+}
+
+/* Cabeceras de Tabla Corporativas Unificadas */
+html body > main .ub-table-card,
+html body > main .rec-table-card {
+    background: var(--ub-surface);
+    border: 1px solid var(--ub-border);
+    border-radius: var(--ub-radius-card);
+    box-shadow: var(--ub-shadow-card);
+    overflow: hidden;
+}
+
+html body > main .erp-prod-table th,
+html body > main .table-premium th,
+html body > main .table-dispatches thead th,
+html body > main .table-daily th,
+html body > main .slide-preview-table th,
+html body > main .rec-table thead th,
+html body > main .table-lunch thead th,
+html body > main .trz-table th,
+html body > main .trace-table thead th,
+html body > main .ub-table-card table thead th,
+html body > main .card > table:not(.legacy-sheet-table):not(.autocontrol-table) thead th,
+html body > main .table-wrap > table:not(.legacy-sheet-table):not(.autocontrol-table) thead th {
+    background: #F1F5F9 !important;
+    color: #1E293B !important;
+    font-size: 11.5px !important;
+    font-weight: 800 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 2px solid #CBD5E1 !important;
+    padding: 11px 12px;
+}
+
+/* --------------------------------------------------------------------------
+   7. COMPONENTES COMPARTIDOS DE REPORTES, DASHBOARD, BODEGAS Y BONOS
+   -------------------------------------------------------------------------- */
+.dashboard-kpis-grid {
+    width: 100%;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(235px, 1fr));
+    gap: 16px;
+}
+
+.kpi-card-premium {
+    background: #FFFFFF;
+    border: 1px solid var(--ub-border-soft);
+    border-radius: 16px;
+    padding: 20px 22px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: var(--ub-shadow-card);
+    transition: all 0.2s ease;
+    text-decoration: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 145px;
+    box-sizing: border-box;
+}
+
+.kpi-card-premium:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.07);
+}
+
+.kpi-card-premium::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+}
+
+.kpi-card-premium.blue::before,
+.kpi-card-premium.c-blue::before { background: linear-gradient(90deg, #0284C7, #38BDF8); }
+.kpi-card-premium.cyan::before { background: linear-gradient(90deg, #00A9A6, #2DD4BF); }
+.kpi-card-premium.green::before,
+.kpi-card-premium.c-green::before { background: linear-gradient(90deg, #059669, #34D399); }
+.kpi-card-premium.amber::before,
+.kpi-card-premium.c-amber::before { background: linear-gradient(90deg, #D97706, #FBBF24); }
+.kpi-card-premium.red::before { background: linear-gradient(90deg, #EF4444, #F87171); }
+.kpi-card-premium.purple::before,
+.kpi-card-premium.c-purple::before { background: linear-gradient(90deg, #7C3AED, #A78BFA); }
+
+.kpi-card-premium.active {
+    border-color: var(--ub-brand);
+    box-shadow: 0 0 0 2px var(--ub-brand), 0 8px 24px rgba(0, 169, 166, 0.15);
+}
+
+.kpi-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+    width: 100%;
+}
+
+.kpi-tag {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 3px 8px;
+    border-radius: 6px;
+}
+
+.kpi-card-premium.blue .kpi-tag { background: #E0F2FE; color: #0369A1; }
+.kpi-card-premium.cyan .kpi-tag { background: #F0FDFA; color: #0D9488; }
+.kpi-card-premium.green .kpi-tag { background: #ECFDF5; color: #047857; }
+.kpi-card-premium.amber .kpi-tag { background: #FFFBEB; color: #B45309; }
+.kpi-card-premium.red .kpi-tag { background: #FEF2F2; color: #B91C1C; }
+
+.kpi-num {
+    font-size: 32px;
+    font-weight: 800;
+    color: var(--ub-text);
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    text-align: center;
+}
+
+.kpi-desc {
+    font-size: 12.5px;
+    color: var(--ub-text-muted);
+    margin-top: 5px;
+    font-weight: 500;
+    text-align: center;
+}
+
+.kpi-footer-hint {
+    margin-top: 10px;
+    font-size: 11.5px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+}
+
+.alert-card-premium {
+    width: 100%;
+    box-sizing: border-box;
+    background: #FFFFFF;
+    border: 1px solid #FED7AA;
+    border-left: 5px solid var(--ub-danger);
+    border-radius: 16px;
+    padding: 20px 24px;
+    box-shadow: 0 6px 20px rgba(220, 38, 38, 0.06);
+}
+
+.alert-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.alert-badge {
+    background: #FEE2E2;
+    color: var(--ub-danger);
+    border: 1px solid #FCA5A5;
+    font-size: 12px;
+    font-weight: 800;
+    padding: 4px 12px;
+    border-radius: 999px;
+}
+
+.table-premium,
+.slide-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0;
+    font-size: 12.5px;
+}
+
+.table-premium th.text-center, .table-premium td.text-center { text-align: center; }
+.table-premium th.text-right, .table-premium td.text-right { text-align: right; }
+.table-premium td,
+.slide-preview-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #F1F5F9;
+    color: #1E293B;
+    vertical-align: middle;
+}
+
+.table-premium tbody tr:hover,
+.slide-preview-table tr:hover {
+    background: #F8FAFC;
+}
+
+.proc-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.proc-badge.flexo { background: #E0F2FE; color: #0369A1; }
+.proc-badge.sellado { background: #FEF3C7; color: #B45309; }
+.proc-badge.seri { background: #F3E8FF; color: #7E22CE; }
+.proc-badge.pulpo { background: #FCE7F3; color: #BE185D; }
+.proc-badge.embalaje { background: #DCFCE7; color: #15803D; }
+.proc-badge.rebo { background: #E2E8F0; color: #334155; }
+.proc-badge.otros { background: #F1F5F9; color: #475569; }
+
+.rate-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-weight: 800;
+    font-size: 11.5px;
+}
+.rate-badge.green { background: #ECFDF5; color: #047857; border: 1px solid #A7F3D0; }
+.rate-badge.yellow { background: #FEF3C7; color: #B45309; border: 1px solid #FDE68A; }
+.rate-badge.red { background: #FEE2E2; color: #B91C1C; border: 1px solid #FCA5A5; }
+
+.btn-pptx-download {
+    height: 42px;
+    padding: 0 22px;
+    border-radius: var(--ub-radius-control);
+    background: linear-gradient(135deg, #D97706, #B45309);
+    color: #FFFFFF !important;
+    font-weight: 800;
+    font-size: 13.5px;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(217, 119, 6, 0.28);
+    transition: all 0.15s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+    white-space: nowrap;
+}
+.btn-pptx-download:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(217, 119, 6, 0.38);
+    background: linear-gradient(135deg, #B45309, #92400E);
+}
+
+.badge-dynamic { background: #DCFCE7; color: #15803D; padding: 3px 8px; border-radius: 6px; font-weight: 700; font-size: 11px; }
+.badge-static { background: #F1F5F9; color: #475569; padding: 3px 8px; border-radius: 6px; font-weight: 700; font-size: 11px; }
+
+/* Paneles ejecutivos y modales de Producción / Bodegas */
+.erp-prod-hero-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.erp-prod-title { font-size: 28px; font-weight: 800; line-height: 1.1; margin-bottom: 8px; text-transform: uppercase; }
+.erp-prod-subtitle { max-width: 760px; color: rgba(255, 255, 255, 0.85); font-size: 14px; }
+.erp-prod-badges { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.erp-prod-badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px; background: rgba(255, 255, 255, 0.14); border: 1px solid rgba(255, 255, 255, 0.22); font-size: 12px; font-weight: 700; color: #F1F5F9; }
+.erp-prod-hero-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.erp-prod-panel, .erp-graph-panel { background: #FFFFFF; border: 1px solid var(--ub-border); border-radius: var(--ub-radius-card); box-shadow: var(--ub-shadow-card); overflow: hidden; }
+.erp-prod-panel-header, .erp-graph-panel-header { padding: 18px 22px 0 22px; }
+.erp-prod-panel-head, .erp-graph-panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; padding: 16px 22px 10px 22px; }
+.erp-prod-panel-title, .erp-graph-panel-title { font-size: 17px; font-weight: 800; color: var(--ub-text); }
+.erp-prod-panel-sub, .erp-graph-panel-sub { font-size: 13px; color: var(--ub-text-muted); margin-top: 3px; }
+.erp-prod-panel-body, .erp-graph-panel-body { padding: 16px 22px 20px 22px; }
+.erp-collapse-toggle { appearance: none; border: 1px solid var(--ub-border-soft); background: var(--ub-surface-alt); color: var(--ub-text); border-radius: 999px; padding: 0 12px; height: 34px; min-width: 34px; cursor: pointer; font-size: 12px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.erp-collapse-toggle .chev { transition: transform 0.18s ease; font-size: 14px; line-height: 1; }
+.erp-prod-panel.is-collapsed .erp-collapse-toggle .chev,
+.erp-graph-panel.is-collapsed .erp-collapse-toggle .chev { transform: rotate(-90deg); }
+.erp-prod-panel.is-collapsed .erp-prod-panel-body,
+.erp-prod-panel.is-collapsed .erp-prod-panel-sub,
+.erp-graph-panel.is-collapsed .erp-graph-panel-body,
+.erp-graph-panel.is-collapsed .erp-graph-panel-sub { display: none; }
+.erp-prod-toolbar, .erp-prod-panel-filter { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.erp-prod-warehouse-row { cursor: pointer; transition: background-color 0.18s ease, box-shadow 0.18s ease; }
+.erp-prod-warehouse-row:hover { background: var(--ub-brand-soft); }
+.erp-prod-warehouse-row:focus { outline: none; box-shadow: inset 0 0 0 2px var(--ub-brand); }
+.erp-prod-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.erp-prod-kpi { background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%); border: 1px solid var(--ub-border-soft); border-radius: 16px; padding: 18px 18px 16px 18px; box-shadow: var(--ub-shadow-card); }
+.erp-prod-kpi-button { width: 100%; appearance: none; text-align: left; cursor: pointer; font: inherit; transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; }
+.erp-prod-kpi-button:hover { transform: translateY(-2px); box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08); border-color: var(--ub-brand-border); }
+.erp-prod-kpi-label { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ub-text-muted); margin-bottom: 10px; }
+.erp-prod-kpi-value { font-size: 30px; font-weight: 800; color: var(--ub-text); line-height: 1; }
+.erp-prod-kpi-sub { margin-top: 10px; color: #475569; font-size: 13px; }
+.erp-prod-kpi-accent { display: inline-block; margin-top: 12px; padding: 5px 10px; border-radius: 999px; background: var(--ub-brand-soft); color: var(--ub-brand-dark); font-size: 12px; font-weight: 700; }
+.erp-prod-kpi-hint { margin-top: 12px; font-size: 12px; font-weight: 700; color: var(--ub-brand-dark); }
+.erp-prod-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.85fr); gap: 18px; }
+.erp-prod-callout { background: linear-gradient(180deg, #F8FAFC 0%, #F0FDFA 100%); border: 1px solid var(--ub-brand-border); border-radius: 16px; padding: 16px; }
+.erp-prod-callout-title { font-size: 13px; font-weight: 800; color: #334155; text-transform: uppercase; letter-spacing: 0.04em; }
+.erp-prod-callout-value { font-size: 32px; font-weight: 800; color: var(--ub-text); margin-top: 8px; }
+.erp-prod-callout-sub { font-size: 13px; color: #475569; margin-top: 8px; }
+.erp-prod-mini-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.erp-prod-mini { background: #FFFFFF; border: 1px solid var(--ub-border-soft); border-radius: 14px; padding: 14px; }
+.erp-prod-mini-label { font-size: 12px; color: var(--ub-text-muted); font-weight: 700; }
+.erp-prod-mini-value { margin-top: 8px; font-size: 22px; font-weight: 800; color: var(--ub-text); }
+.erp-prod-chip { display: inline-flex; align-items: center; padding: 5px 10px; border-radius: 999px; background: var(--ub-brand-soft); color: var(--ub-brand-dark); font-weight: 700; font-size: 12px; }
+.erp-prod-chip-success { background: #DCFCE7; color: #166534; }
+.erp-prod-chip-warning { background: #FEF3C7; color: #92400E; }
+.erp-prod-chip-neutral { background: #E2E8F0; color: #334155; }
+.erp-prod-occupancy { min-width: 180px; }
+.erp-prod-bar { height: 10px; background: #E2E8F0; border-radius: 999px; overflow: hidden; margin-top: 6px; }
+.erp-prod-bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--ub-brand) 0%, #0EA5E9 100%); }
+.erp-prod-table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.erp-prod-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12.5px; }
+.erp-prod-table th { white-space: nowrap; vertical-align: middle; }
+.erp-prod-table td { padding: 11px 12px; border-bottom: 1px solid #EEF2F7; color: var(--ub-text); vertical-align: middle; }
+.erp-prod-table tbody tr:hover { background: var(--ub-surface-alt); }
+.erp-prod-code { font-weight: 800; color: var(--ub-text); }
+.erp-prod-muted { color: var(--ub-text-muted); font-size: 12px; }
+.erp-prod-empty { padding: 20px; border: 1px dashed var(--ub-border); border-radius: 16px; background: var(--ub-surface-alt); color: var(--ub-text-muted); text-align: center; }
+.text-center { text-align: center; }
+.text-right { text-align: right; }
+.text-left { text-align: left; }
+.erp-prod-modal[hidden] { display: none; }
+.erp-prod-modal { position: fixed; inset: 0; z-index: 1200; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.erp-prod-modal-backdrop { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.62); }
+.erp-prod-modal-dialog { position: relative; z-index: 1; width: min(920px, 100%); max-height: 90vh; overflow: auto; background: #FFFFFF; border-radius: 20px; border: 1px solid var(--ub-border-soft); box-shadow: 0 24px 80px rgba(15, 23, 42, 0.24); padding: 22px; }
+.erp-prod-modal-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.erp-prod-modal-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.erp-prod-modal-title { font-size: 22px; font-weight: 800; color: var(--ub-text); line-height: 1.1; }
+.erp-prod-modal-sub { margin-top: 6px; font-size: 13px; color: var(--ub-text-muted); }
+.erp-prod-modal-close { appearance: none; border: 1px solid var(--ub-border); background: #FFFFFF; color: var(--ub-text); border-radius: 999px; width: 38px; height: 38px; font-size: 20px; cursor: pointer; }
+.erp-prod-modal-section { margin-top: 18px; }
+.erp-prod-modal-section-title { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ub-text-muted); margin-bottom: 10px; }
+.erp-prod-modal-note { margin-top: 16px; padding: 14px 16px; border-radius: 14px; background: var(--ub-surface-alt); border: 1px solid var(--ub-border-soft); color: #475569; font-size: 13px; }
+
+/* Diálogos de Configuración de Bonos */
+.bonus-config-dialog { width: min(1100px, 96vw); max-height: 92vh; border: 1px solid var(--ub-border-soft); border-radius: 14px; padding: 0; color: var(--ub-text); box-shadow: 0 24px 80px rgba(15, 23, 42, 0.35); }
+.bonus-config-dialog::backdrop { background: rgba(15, 23, 42, 0.65); }
+.bonus-config-head { padding: 14px 18px; display: flex; gap: 12px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--ub-border-soft); background: linear-gradient(180deg, #F8FAFC, #FFFFFF); }
+.bonus-config-head h2 { font-size: 18px; margin: 0; font-weight: 900; }
+.bonus-config-body { padding: 18px; overflow: auto; max-height: calc(92vh - 80px); }
+.bonus-config-dialog input, .bonus-config-dialog select { padding: 9px 10px; border: 1px solid var(--ub-border); border-radius: 8px; max-width: 100%; box-sizing: border-box; background: #FFFFFF; color: var(--ub-text); }
+.bonus-config-dialog input:focus, .bonus-config-dialog select:focus { outline: none; border-color: var(--ub-brand); box-shadow: var(--ub-focus-ring); }
+.bonus-config-dialog table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.bonus-config-dialog td, .bonus-config-dialog th { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--ub-border-soft); }
+.bonus-config-dialog th { background: #F1F5F9; color: #334155; font-weight: 800; }
+.bonus-config-dialog tr:nth-child(even) { background: #F8FAFC; }
+.bonus-config-toolbar { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 16px; }
+.bonus-config-note { padding: 10px 14px; background: var(--ub-brand-soft); color: var(--ub-brand-dark); border: 1px solid var(--ub-brand-border); border-radius: 8px; margin-bottom: 16px; font-size: 13px; font-weight: 600; }
+.bonus-rule-editor { padding: 14px; background: #F8FAFC; border: 1px solid var(--ub-border-soft); border-radius: 10px; margin-bottom: 16px; }
+.bonus-rule-editor label { font-size: 12px; font-weight: 700; color: #475569; }
+.bonus-rule-editor input, .bonus-rule-editor select { display: block; margin-top: 5px; width: 100%; }
+.bonus-config-state { display: inline-block; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; background: #E2E8F0; color: #475569; }
+.bonus-config-state.adjusted { background: #DCFCE7; color: #166534; }
+.bonus-history-entry { border: 1px solid var(--ub-border-soft); border-radius: 10px; margin-bottom: 12px; overflow: hidden; }
+.bonus-history-summary { padding: 12px 14px; background: #F8FAFC; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+/* --------------------------------------------------------------------------
+   8. RESPONSIVE ADAPTATIVO (TABLETS Y MÓVILES)
+   -------------------------------------------------------------------------- */
+@media (max-width: 1024px) {
+    .topbar .inner,
+    .subbar .inner {
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+
+    html body > main {
+        padding: 14px 14px 24px !important;
+    }
+
+    .erp-prod-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 768px) {
+    html body > main {
+        padding: 10px 10px 20px !important;
+    }
+
+    html body > main .ub-filter-card,
+    html body > main .erp-filter-card,
+    html body > main .rec-filter-card,
+    html body > main .trz-filter-card,
+    html body > main .daily-head-card {
+        padding: 14px !important;
+    }
+
+    html body > main .erp-filter-header,
+    html body > main .erp-filter-form {
+        flex-direction: column;
+        align-items: stretch;
+        width: 100%;
+    }
+
+    html body > main .erp-filter-field,
+    html body > main .ub-btn-primary,
+    html body > main .ub-btn-secondary,
+    html body > main .ub-btn-excel,
+    html body > main .btn-filter-apply,
+    html body > main .btn-filter-secondary,
+    html body > main .btn-filter-excel {
+        width: 100%;
+    }
+
+    .bonus-config-dialog { width: 96vw; }
+    .bonus-config-body { padding: 12px; }
+    .bonus-rule-editor label { flex: 1 1 100%; }
+    .bonus-config-dialog .table-wrap { overflow: auto; }
+}

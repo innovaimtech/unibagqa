@@ -1,9 +1,10 @@
 .vercel/
+vendor/
 
 # Entorno local y secretos
 .env
 .env.*
-!.env.example
+.env.example
 
 # Artefactos temporales del proyecto
 .tmp_*
@@ -13,12 +14,16 @@
 .tmp_perf/
 .tmp_prod_check/
 .tmp_prod_shell/
+scratch/
 
-# Sesiones y runtime local
+# Sesiones, respaldos de auditoría y runtime local
 storage/sessions/*
 !storage/sessions/.keep
 storage/logs/
 storage/calendar/
+storage/audits/
+src/Http/docs_cache/
+public/docs_cache/
 
 # Salidas locales no versionables
 *.log
@@ -33,18 +38,9 @@ backups/
 cookies.txt
 cookies_*.txt
 
-# Informes y documentos operativos generados
-CHECKLIST_FASES_CIERRE_*.md
-INFORME_*.md
-RESUMEN_EJECUTIVO_*.md
-MAPA_COMPLETO_*.md
-PLAN_*.md
-DEPLOY_*.md
-GUIA_*.md
-*.md
+# Documentación versionada
 !README.md
-!INICIO_RAPIDO.md
-!ACTUALIZAR_VPS.md
+!docs/*.md
 
 # Archivos de datos generados
 data/*.pptx
@@ -62,17 +58,5 @@ __pycache__/
 .DS_Store
 Thumbs.db
 desktop.ini
-
-
 container_279_rolls.sql
 container_279_rolls_fixed.sql
-.env
-.env.example
-scratch/fix_test_records.php
-scratch/inspect_1014_full.php
-scratch/inspect_1014.php
-scratch/inspect_recent.php
-scratch/test_flow_complete.php
-scratch/test_res_1014.php
-scratch/verify_sc.php
-iniciar_proyecto.bat

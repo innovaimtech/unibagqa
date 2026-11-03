@@ -111,14 +111,189 @@ final class PrintService
 
     public function isEnabled(): bool
     {
-        $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
-        return $mode !== '' && $mode !== 'none' && $mode !== 'off';
+        $mode = strtolower(trim((string)($this->env['PRINT_MODE'] ?? 'none')));
+        return !in_array($mode, ['', 'none', 'off', 'disabled'], true);
+    }
+
+    /**
+     * Determina si la petición HTTP proviene de una estación cliente distinta al servidor PHP.
+     */
+    public static function isRemoteClientRequest(): bool
+    {
+        $remoteAddr = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+        if ($remoteAddr === '') {
+            return false;
+        }
+        return !in_array($remoteAddr, ['127.0.0.1', '::1', 'localhost'], true);
+    }
+
+    /**
+     * Encola un trabajo de impresión crudo (EPL/TSPL/ZPL) para despacho inmediato desde el navegador del operador.
+     *
+     * @param array<string, mixed> $job
+     */
+    public static function enqueueClientJob(array $job): void
+    {
+        if (session_status() !== PHP_SESSION_ACTIVE) {
+            return;
+        }
+        if (!isset($_SESSION['unibag_client_print_queue']) || !is_array($_SESSION['unibag_client_print_queue'])) {
+            $_SESSION['unibag_client_print_queue'] = [];
+        }
+        $_SESSION['unibag_client_print_queue'][] = $job;
+        while (count($_SESSION['unibag_client_print_queue']) > 300) {
+            array_shift($_SESSION['unibag_client_print_queue']);
+        }
+    }
+
+    /**
+     * Extrae el último trabajo encolado (usado en respuestas AJAX que entregan print_job en línea).
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function popLastClientJob(): ?array
+    {
+        if (
+            session_status() !== PHP_SESSION_ACTIVE
+            || empty($_SESSION['unibag_client_print_queue'])
+            || !is_array($_SESSION['unibag_client_print_queue'])
+        ) {
+            return null;
+        }
+        $job = array_pop($_SESSION['unibag_client_print_queue']);
+        return is_array($job) ? $job : null;
+    }
+
+    /**
+     * Obtiene y vacía todos los trabajos pendientes para inyectarlos en la siguiente vista HTML.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public static function drainClientJobs(): array
+    {
+        if (
+            session_status() !== PHP_SESSION_ACTIVE
+            || empty($_SESSION['unibag_client_print_queue'])
+            || !is_array($_SESSION['unibag_client_print_queue'])
+        ) {
+            return [];
+        }
+        $jobs = array_values($_SESSION['unibag_client_print_queue']);
+        $_SESSION['unibag_client_print_queue'] = [];
+        return $jobs;
+    }
+
+    /**
+     * Construye el payload estandarizado de impresión térmica para despacho cliente (WebUSB / WebSerial / Puente Local).
+     *
+     * @return array{printer: string, profile: string, language: string, copies: int, content: string, label: string}
+     */
+    public function buildClientJob(string $command, ?int $copies = null, string $label = ''): array
+    {
+        $resolvedCopies = $copies ?? (int)($this->env['PRINT_COPIES'] ?? 1);
+        if ($resolvedCopies <= 0) {
+            $resolvedCopies = 1;
+        }
+        $printerName = $this->getConfiguredPrinterName();
+        return [
+            'printer' => $printerName !== '' ? $printerName : 'DEFAULT',
+            'profile' => $this->getPrintProfile(),
+            'language' => $this->getPrintLanguage(),
+            'copies' => $resolvedCopies,
+            'content' => $command,
+            'label' => $label,
+            // Identificador único del trabajo: el puente de impresión ignora repeticiones.
+            'job_id' => $this->newJobId(),
+        ];
+    }
+
+    /**
+     * Resuelve endpoint TCP/IP directo (puerto 9100 JetDirect/RAW) si la impresora es de red.
+     *
+     * @return array{host: string, port: int}|null
+     */
+    private function getConfiguredTcpEndpoint(): ?array
+    {
+        $profile = $this->getPrintProfile();
+        $host = '';
+        $port = (int)($this->env['PRINT_TCP_PORT'] ?? 9100);
+        if ($profile === 'zebra') {
+            $host = trim((string)($this->env['PRINT_ZEBRA_TCP_HOST'] ?? ''));
+            $pPort = (int)($this->env['PRINT_ZEBRA_TCP_PORT'] ?? 0);
+            if ($pPort > 0) {
+                $port = $pPort;
+            }
+        } elseif ($profile === 'barpos') {
+            $host = trim((string)($this->env['PRINT_BARPOS_TCP_HOST'] ?? ''));
+            $pPort = (int)($this->env['PRINT_BARPOS_TCP_PORT'] ?? 0);
+            if ($pPort > 0) {
+                $port = $pPort;
+            }
+        }
+        if ($host === '') {
+            $host = trim((string)($this->env['PRINT_TCP_HOST'] ?? ''));
+        }
+        $rawUrl = trim((string)($this->env['PRINT_HTTP_URL'] ?? ''));
+        if ($host === '' && str_starts_with(strtolower($rawUrl), 'tcp://')) {
+            $parsedHost = (string)(parse_url($rawUrl, PHP_URL_HOST) ?? '');
+            $parsedPort = (int)(parse_url($rawUrl, PHP_URL_PORT) ?: 9100);
+            if ($parsedHost !== '') {
+                $host = $parsedHost;
+                $port = $parsedPort;
+            }
+        }
+        if ($host === '') {
+            return null;
+        }
+        return ['host' => $host, 'port' => $port > 0 ? $port : 9100];
+    }
+
+    /** Genera un identificador único para un trabajo de impresión. */
+    private function newJobId(): string
+    {
+        try {
+            return 'p' . bin2hex(random_bytes(8));
+        } catch (Throwable) {
+            return 'p' . str_replace('.', '', uniqid('', true));
+        }
+    }
+
+    /**
+     * Escribe TODOS los bytes en el socket (fwrite puede escribir menos de lo pedido).
+     * Devuelve false si no se logró enviar el contenido completo.
+     *
+     * @param resource $fp
+     */
+    private function writeAll($fp, string $data): bool
+    {
+        $total = strlen($data);
+        $sent = 0;
+        while ($sent < $total) {
+            $n = @fwrite($fp, substr($data, $sent));
+            if ($n === false || $n === 0) {
+                return false;
+            }
+            $sent += $n;
+        }
+        return true;
     }
 
     public function checkBridgeStatus(): array
     {
         if (!$this->isEnabled()) {
             return ['online' => false, 'message' => 'Impresión térmica deshabilitada'];
+        }
+        $tcp = $this->getConfiguredTcpEndpoint();
+        if ($tcp !== null) {
+            $fp = @stream_socket_client('tcp://' . $tcp['host'] . ':' . $tcp['port'], $errno, $errstr, 0.5);
+            if (is_resource($fp)) {
+                fclose($fp);
+                return ['online' => true, 'message' => 'Impresora de red conectada (' . $tcp['host'] . ':' . $tcp['port'] . ')'];
+            }
+            return ['online' => false, 'message' => 'Impresora de red sin respuesta (' . $tcp['host'] . ':' . $tcp['port'] . ')'];
+        }
+        if (self::isRemoteClientRequest()) {
+            return ['online' => false, 'client_mode' => true, 'message' => 'Modo cliente navegador activo'];
         }
         if (!function_exists('curl_init')) {
             return ['online' => false, 'message' => 'cURL no disponible en PHP'];
@@ -132,8 +307,8 @@ final class PrintService
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_IPRESOLVE => defined('CURL_IPRESOLVE_V4') ? CURL_IPRESOLVE_V4 : 1,
-            CURLOPT_CONNECTTIMEOUT_MS => 400,
-            CURLOPT_TIMEOUT_MS => 600,
+            CURLOPT_CONNECTTIMEOUT_MS => 350,
+            CURLOPT_TIMEOUT_MS => 500,
         ]);
         $res = curl_exec($ch);
         $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -142,141 +317,183 @@ final class PrintService
         if ($res !== false && $httpCode === 200) {
             return ['online' => true, 'message' => 'Puente conectado (puerto 8767)'];
         }
-        return ['online' => false, 'message' => 'Puente desconectado (puerto 8767)'];
+        return ['online' => false, 'message' => 'Listo para impresión desde navegador'];
     }
 
     public function printRollLabel(array $roll): array
     {
-        $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
-        if ($mode !== 'http') {
+        if (!$this->isEnabled()) {
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = $this->getConfiguredPrinterName();
-        if ($printerName === '') {
-            return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
-        }
+        $copies = max(1, (int)($this->env['PRINT_COPIES'] ?? 1));
+        $labelCode = trim((string)($roll['roll_code'] ?? ('#' . ($roll['id'] ?? ''))));
 
-        $copies = (int)($this->env['PRINT_COPIES'] ?? 1);
-        if ($copies <= 0) {
-            $copies = 1;
+        try {
+            $command = $this->buildRollCommand($roll);
+        } catch (InvalidArgumentException $e) {
+            // Peso inválido: la etiqueta no se genera ni se envía a ninguna impresora.
+            return ['ok' => false, 'error' => $e->getMessage()];
         }
+        return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage(), $labelCode);
+    }
 
-        $command = $this->buildRollCommand($roll);
-        return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage());
+    public function buildRollsBatchCommand(array $rolls): string
+    {
+        $chunks = [];
+        foreach ($rolls as $roll) {
+            if (!empty($roll) && is_array($roll)) {
+                $chunks[] = trim($this->buildRollCommand($roll), "\r\n");
+            }
+        }
+        return $chunks === [] ? '' : (implode("\r\n", $chunks) . "\r\n");
     }
 
     public function printRollLabels(array $rolls): array
     {
-        $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
-        if ($mode !== 'http') {
+        if (!$this->isEnabled()) {
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = $this->getConfiguredPrinterName();
-        if ($printerName === '') {
-            return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
-        }
+        $copies = max(1, (int)($this->env['PRINT_COPIES'] ?? 1));
 
-        $copies = (int)($this->env['PRINT_COPIES'] ?? 1);
-        if ($copies <= 0) {
-            $copies = 1;
+        try {
+            $combinedCommand = $this->buildRollsBatchCommand($rolls);
+        } catch (InvalidArgumentException $e) {
+            // Si una sola etiqueta del lote tiene peso inválido no se imprime NINGUNA del lote.
+            return ['ok' => false, 'error' => $e->getMessage()];
         }
-
-        $combinedCommand = '';
-        foreach ($rolls as $roll) {
-            if (!empty($roll)) {
-                $combinedCommand .= $this->buildRollCommand($roll) . "\n";
-            }
-        }
-
         if (trim($combinedCommand) === '') {
             return ['ok' => false, 'error' => 'No hay etiquetas para imprimir.'];
         }
 
-        return $this->sendRaw($combinedCommand, $copies, $printerName, $url, $this->getPrintLanguage());
+        $count = count($rolls);
+        $labelDesc = $count === 1
+            ? trim((string)($rolls[0]['roll_code'] ?? 'Etiqueta'))
+            : ('Lote de ' . $count . ' etiquetas');
+
+        return $this->sendRaw($combinedCommand, $copies, $printerName, $url, $this->getPrintLanguage(), $labelDesc);
     }
 
     public function printWorkOrderBoxLabel(array $workOrder, ?array $finish = null): array
     {
-        $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
-        if ($mode !== 'http') {
+        if (!$this->isEnabled()) {
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = $this->getConfiguredPrinterName();
-        if ($printerName === '') {
-            return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
-        }
-
-        $copies = (int)($this->env['PRINT_COPIES'] ?? 1);
-        if ($copies <= 0) {
-            $copies = 1;
-        }
+        $copies = max(1, (int)($this->env['PRINT_COPIES'] ?? 1));
+        $labelCode = 'Caja OT ' . trim((string)($workOrder['ot_code'] ?? ''));
 
         $command = $this->buildWorkOrderBoxCommand($workOrder, $finish);
-        return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage());
+        return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage(), $labelCode);
     }
 
     public function printBoxLabel(array $box): array
     {
-        $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
-        if ($mode !== 'http') {
+        if (!$this->isEnabled()) {
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = $this->getConfiguredPrinterName();
-        if ($printerName === '') {
-            return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
-        }
-
-        $copies = (int)($this->env['PRINT_COPIES'] ?? 1);
-        if ($copies <= 0) {
-            $copies = 1;
-        }
+        $copies = max(1, (int)($this->env['PRINT_COPIES'] ?? 1));
+        $labelCode = 'Caja ' . trim((string)($box['box_code'] ?? ''));
 
         $command = $this->buildBoxCommand($box);
-        return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage());
+        return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage(), $labelCode);
     }
 
     public function printPalletLabel(array $pallet, array $boxes = []): array
     {
-        $mode = strtolower((string)($this->env['PRINT_MODE'] ?? 'none'));
-        if ($mode !== 'http') {
+        if (!$this->isEnabled()) {
             return ['ok' => false, 'error' => 'Impresión deshabilitada (PRINT_MODE).'];
         }
 
         $url = (string)($this->env['PRINT_HTTP_URL'] ?? 'http://127.0.0.1:8767/print');
         $printerName = $this->getConfiguredPrinterName();
-        if ($printerName === '') {
-            return ['ok' => false, 'error' => 'Falta PRINT_PRINTER_NAME.'];
-        }
-
-        $copies = (int)($this->env['PRINT_COPIES'] ?? 1);
-        if ($copies <= 0) {
-            $copies = 1;
-        }
+        $copies = max(1, (int)($this->env['PRINT_COPIES'] ?? 1));
+        $labelCode = 'Pallet ' . trim((string)($pallet['pallet_code'] ?? ''));
 
         $command = $this->buildPalletCommand($pallet, $boxes);
-        return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage());
+        return $this->sendRaw($command, $copies, $printerName, $url, $this->getPrintLanguage(), $labelCode);
     }
 
-    private function sendRaw(string $content, int $copies, string $printerName, string $url, string $language): array
+    private function sendRaw(string $content, int $copies, string $printerName, string $url, string $language, string $jobLabel = ''): array
     {
+        $mode = strtolower(trim((string)($this->env['PRINT_MODE'] ?? 'none')));
+        $effectivePrinter = $printerName !== '' ? $printerName : 'DEFAULT';
+        $job = [
+            'printer' => $effectivePrinter,
+            'profile' => $this->getPrintProfile(),
+            'language' => $language,
+            'copies' => max(1, $copies),
+            'content' => $content,
+            'label' => $jobLabel,
+            'job_id' => $this->newJobId(),
+        ];
+
+        // 1. Impresión directa por Red TCP/IP (Puerto 9100 RAW / JetDirect) si está configurada
+        $tcp = $this->getConfiguredTcpEndpoint();
+        if ($mode === 'tcp' || $tcp !== null) {
+            if ($tcp === null) {
+                self::enqueueClientJob($job);
+                return ['ok' => false, 'client_queued' => true, 'print_job' => $job, 'error' => null];
+            }
+            $fp = @stream_socket_client('tcp://' . $tcp['host'] . ':' . $tcp['port'], $errno, $errstr, 1.8);
+            if (is_resource($fp)) {
+                stream_set_timeout($fp, 3);
+                // Todas las copias se envían en una sola escritura continua.
+                $okTcp = $this->writeAll($fp, str_repeat($content, max(1, $copies)));
+                @fclose($fp);
+                if ($okTcp) {
+                    return ['ok' => true, 'error' => null, 'transport' => 'tcp'];
+                }
+                // La conexión se abrió pero el envío falló a mitad de camino: puede haber
+                // salido parte de las etiquetas. NO se reenvía por otra vía (duplicaría).
+                return [
+                    'ok' => false,
+                    'error' => 'Falló el envío a la impresora de red a mitad del trabajo. Revisa qué etiquetas salieron antes de reimprimir.',
+                    'ambiguous' => true,
+                ];
+            }
+            // Si la impresora TCP no es alcanzable desde el servidor (ej. VPS fuera de LAN), delegar al navegador cliente
+            self::enqueueClientJob($job);
+            return ['ok' => false, 'client_queued' => true, 'print_job' => $job, 'error' => null];
+        }
+
+        // 2. Modo explícito de despacho en navegador (WebUSB / WebSerial / Puente Cliente)
+        if (in_array($mode, ['client', 'browser', 'usb', 'webusb'], true)) {
+            self::enqueueClientJob($job);
+            return ['ok' => false, 'client_queued' => true, 'print_job' => $job, 'error' => null];
+        }
+
+        // 3. Si la URL apunta a loopback (127.0.0.1 / localhost) pero el usuario accede desde otra PC (LAN o VPS),
+        //    no intentar conectar al 127.0.0.1 del servidor: delegar en 0 ms al navegador de la PC del operador.
+        $urlHost = strtolower((string)(parse_url($url, PHP_URL_HOST) ?? '127.0.0.1'));
+        $isLoopbackBridge = in_array($urlHost, ['127.0.0.1', 'localhost', '::1'], true);
+        if ($isLoopbackBridge && self::isRemoteClientRequest()) {
+            self::enqueueClientJob($job);
+            return ['ok' => false, 'client_queued' => true, 'print_job' => $job, 'error' => null];
+        }
+
         if (!function_exists('curl_init')) {
-            return ['ok' => false, 'error' => 'cURL no está disponible en PHP.'];
+            self::enqueueClientJob($job);
+            return ['ok' => false, 'client_queued' => true, 'print_job' => $job, 'error' => null];
         }
 
         $payload = json_encode([
-            'printer' => $printerName,
-            'copies' => $copies,
+            'printer' => $effectivePrinter,
+            'copies' => max(1, $copies),
             'language' => $language,
             'content' => $content,
             'zpl' => $language === 'zpl' ? $content : null,
+            'job_id' => $job['job_id'],
         ], JSON_UNESCAPED_UNICODE);
 
         $headers = ['Content-Type: application/json; charset=utf-8'];
@@ -289,8 +506,8 @@ final class PrintService
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_IPRESOLVE => defined('CURL_IPRESOLVE_V4') ? CURL_IPRESOLVE_V4 : 1,
-            CURLOPT_CONNECTTIMEOUT_MS => 1500,
-            CURLOPT_TIMEOUT_MS => 4000,
+            CURLOPT_CONNECTTIMEOUT_MS => 500,
+            CURLOPT_TIMEOUT_MS => 2500,
             CURLOPT_FAILONERROR => false,
             CURLOPT_POST => true,
             CURLOPT_HTTPHEADER => $headers,
@@ -298,45 +515,118 @@ final class PrintService
         ]);
         $raw = curl_exec($ch);
         $err = curl_error($ch);
+        $curlErrNo = curl_errno($ch);
         $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
+        // Tiempo de espera agotado (cURL 28): el puente pudo haber imprimido igualmente.
+        // No se reenvía al navegador para no duplicar la etiqueta.
+        if ($raw === false && $curlErrNo === 28) {
+            return [
+                'ok' => false,
+                'error' => 'El servicio de impresión no respondió a tiempo. Revisa si la etiqueta salió antes de reimprimir.',
+                'ambiguous' => true,
+            ];
+        }
+
+        // Si el puente en el servidor local no está corriendo, delegar al navegador (permite WebUSB / WebSerial directo)
         if ($raw === false) {
-            $curlMsg = $err !== '' ? " ($err)" : '';
-            return ['ok' => false, 'error' => 'No se pudo conectar al puente de impresión local (puerto 8767). Asegúrate de que el script print_bridge.ps1 esté iniciado.' . $curlMsg];
+            self::enqueueClientJob($job);
+            return [
+                'ok' => false,
+                'client_queued' => true,
+                'print_job' => $job,
+                'error' => null,
+            ];
         }
 
         $data = json_decode((string)$raw, true);
         if ($httpCode < 200 || $httpCode >= 300) {
             $msg = is_array($data) && isset($data['error']) ? (string)$data['error'] : ('Error en puente de impresión (HTTP ' . $httpCode . ')');
-            return ['ok' => false, 'error' => $msg, 'raw' => (string)$raw];
+            self::enqueueClientJob($job);
+            return ['ok' => false, 'client_queued' => true, 'error' => $msg, 'raw' => (string)$raw, 'print_job' => $job];
         }
 
         if (!is_array($data) || ($data['ok'] ?? false) !== true) {
             $msg = is_array($data) && isset($data['error']) ? (string)$data['error'] : 'Respuesta inválida del servicio de impresión.';
-            return ['ok' => false, 'error' => $msg, 'raw' => (string)$raw];
+            self::enqueueClientJob($job);
+            return ['ok' => false, 'client_queued' => true, 'error' => $msg, 'raw' => (string)$raw, 'print_job' => $job];
         }
 
-        return ['ok' => true, 'error' => null];
+        return ['ok' => true, 'error' => null, 'transport' => 'server-bridge'];
     }
 
+    /**
+     * Texto del peso que se imprime en la etiqueta de bobina.
+     *
+     * - Sin peso (no_weight): "-".
+     * - Peso mayor a 0: kilos con 2 decimales (ej. "18.45 KG").
+     * - Recepción por unidades (QUANTITY o sin modo informado): "1 UNID".
+     * - Recepción por PESO con peso <= 0 o inválido: se rechaza la etiqueta. Un peso
+     *   inválido NUNCA debe imprimirse (antes salía como "1 UNID").
+     *
+     * @throws InvalidArgumentException si el peso es inválido en una recepción por peso.
+     */
+    private function rollWeightText(array $roll, bool $noWeight): string
+    {
+        if ($noWeight) {
+            return '-';
+        }
+        $weightKg = (float)($roll['weight_kg'] ?? 0);
+        if (!is_finite($weightKg)) {
+            throw new InvalidArgumentException('Peso inválido para la etiqueta de ' . ($roll['roll_code'] ?? 'bobina') . '.');
+        }
+        if ($weightKg > 0) {
+            return number_format(round($weightKg, 2), 2, '.', '') . ' KG';
+        }
+        if (strtoupper((string)($roll['reception_mode'] ?? '')) === 'WEIGHT') {
+            throw new InvalidArgumentException('La bobina ' . ($roll['roll_code'] ?? '') . ' no tiene un peso válido; no se imprime la etiqueta.');
+        }
+        return '1 UNID';
+    }
+
+    /**
+     * Limpia un texto para usarlo dentro de un comando ZPL (^FD...).
+     *
+     * Se eliminan los caracteres que ZPL interpreta como comando: "^" (inicio de comando)
+     * y "~" (comando de control, p. ej. ~JA cancela la impresión), además de la barra
+     * invertida y los caracteres de control. Evita etiquetas rotas o inyección de
+     * comandos desde datos como la descripción del producto.
+     */
     private function z(string $value): string
     {
-        $value = str_replace(["\r", "\n"], ' ', $value);
-        $value = str_replace('^', ' ', $value);
+        $value = preg_replace('/[\x00-\x1F\x7F]+/', ' ', $value) ?? '';
+        $value = str_replace(['^', '~', '\\'], [' ', ' ', '/'], $value);
         return $value;
     }
 
     private function t(string $value): string
     {
         $value = $this->z($value);
+        $value = strtr($value, [
+            'Á' => 'A', 'É' => 'E', 'Í' => 'I', 'Ó' => 'O', 'Ú' => 'U', 'Ü' => 'U', 'Ñ' => 'N',
+            'á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u', 'ü' => 'u', 'ñ' => 'n',
+            '°' => ' ', 'º' => ' ', 'ª' => ' ', '·' => '-', '•' => '-',
+        ]);
+        // Las comillas dobles cierran el texto en TSPL/EPL: se reemplazan por comilla simple.
         return str_replace('"', "'", $value);
     }
 
+    /**
+     * Resolución fija de las impresoras de etiquetas (HPRT, Barpos, Zebra): 203 dpi
+     * = 8 puntos por milímetro. Es una constante a propósito: toda la geometría de las
+     * etiquetas (coordenadas en puntos) está diseñada para esta resolución, por lo que
+     * la variable PRINT_DPI ya no se utiliza.
+     */
+    private const LABEL_DPI = 203;
+
+    /** Tamaño físico fijo de TODAS las etiquetas: 100 x 70 mm (812 x 560 puntos a 203 dpi). */
+    private const LABEL_WIDTH_MM = 100.0;
+    private const LABEL_HEIGHT_MM = 70.0;
+
     private function printDpi(): int
     {
-        $dpi = (int)($this->env['PRINT_DPI'] ?? 203);
-        return $dpi > 0 ? $dpi : 203;
+        return self::LABEL_DPI;
     }
 
     private function dotsPerMm(): float
@@ -351,14 +641,12 @@ final class PrintService
 
     private function getLabelWidthMm(): float
     {
-        $value = (float)($this->env['PRINT_LABEL_WIDTH_MM'] ?? 100);
-        return $value > 0 ? $value : 100.0;
+        return self::LABEL_WIDTH_MM;
     }
 
     private function getLabelHeightMm(): float
     {
-        $value = (float)($this->env['PRINT_LABEL_HEIGHT_MM'] ?? 70);
-        return $value > 0 ? $value : 70.0;
+        return self::LABEL_HEIGHT_MM;
     }
 
     private function getLabelGapMm(): float
@@ -472,7 +760,7 @@ final class PrintService
         return $this->buildZpl($roll);
     }
 
-    private function buildWorkOrderBoxCommand(array $workOrder, ?array $finish = null): string
+    public function buildWorkOrderBoxCommand(array $workOrder, ?array $finish = null): string
     {
         $lang = $this->getPrintLanguage();
         if ($lang === 'tspl') {
@@ -484,7 +772,7 @@ final class PrintService
         return $this->buildWorkOrderBoxZpl($workOrder, $finish);
     }
 
-    private function buildBoxCommand(array $box): string
+    public function buildBoxCommand(array $box): string
     {
         $lang = $this->getPrintLanguage();
         if ($lang === 'tspl') {
@@ -496,7 +784,7 @@ final class PrintService
         return $this->buildBoxZpl($box);
     }
 
-    private function buildPalletCommand(array $pallet, array $boxes = []): string
+    public function buildPalletCommand(array $pallet, array $boxes = []): string
     {
         $lang = $this->getPrintLanguage();
         if ($lang === 'tspl') {
@@ -522,8 +810,7 @@ final class PrintService
         $warehouseName = $this->z((string)($roll['warehouse_name'] ?? ''));
 
         $noWeight = !empty($roll['no_weight']) || (isset($roll['weight_str']) && trim((string)$roll['weight_str']) === '-');
-        $weightKg = round((float)($roll['weight_kg'] ?? 0), 2);
-        $weightStr = $noWeight ? '-' : ($weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID');
+        $weightStr = $this->rollWeightText($roll, $noWeight);
 
         $metersVal = (float)($roll['meters'] ?? 0);
         $metersStr = $metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' m' : '-';
@@ -651,8 +938,7 @@ final class PrintService
         $arrivalDate = $this->t($this->resolveRollDate($roll));
         $warehouseCode = $this->t((string)($roll['warehouse_code'] ?? '-'));
         $noWeight = !empty($roll['no_weight']) || (isset($roll['weight_str']) && trim((string)$roll['weight_str']) === '-');
-        $weightKg = round((float)($roll['weight_kg'] ?? 0), 2);
-        $weightStr = $noWeight ? '-' : ($weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID');
+        $weightStr = $this->rollWeightText($roll, $noWeight);
         $metersVal = (float)($roll['meters'] ?? 0);
         $metersStr = $metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' m' : '-';
         $widthMm = (float)($roll['width_mm'] ?? 0);
@@ -704,9 +990,6 @@ final class PrintService
 
     private function buildRollEpl(array $roll): string
     {
-        // #region debug-point A:raw-settings
-        @file_get_contents('http://127.0.0.1:7777/event', false, stream_context_create(['http' => ['method' => 'POST', 'header' => "Content-Type: application/json\r\n", 'content' => json_encode(['sessionId' => 'hprt-raw-noise', 'runId' => 'post-fix', 'hypothesisId' => 'A', 'location' => 'PrintService::buildRollEpl', 'msg' => '[DEBUG] RAW settings', 'data' => ['settings' => $this->buildEplDeviceSettings(), 'printer' => $this->getConfiguredPrinterName(), 'media' => 'Q560,24']]), 'timeout' => 0.2]]));
-        // #endregion
         $id = (string)($roll['id'] ?? '');
         $rollCode = trim((string)($roll['roll_code'] ?? ''));
         $barcodeValue = strtoupper($this->t($rollCode !== '' ? $rollCode : $id));
@@ -715,8 +998,7 @@ final class PrintService
         $arrivalDate = strtoupper($this->t($this->resolveRollDate($roll)));
         $warehouseCode = strtoupper($this->t((string)($roll['warehouse_code'] ?? '-')));
         $noWeight = !empty($roll['no_weight']) || (isset($roll['weight_str']) && trim((string)$roll['weight_str']) === '-');
-        $weightKg = round((float)($roll['weight_kg'] ?? 0), 2);
-        $weightStr = $noWeight ? '-' : strtoupper($this->t($weightKg > 0 ? number_format($weightKg, 2, '.', '') . ' KG' : '1 UNID'));
+        $weightStr = strtoupper($this->t($this->rollWeightText($roll, $noWeight)));
         $metersVal = (float)($roll['meters'] ?? 0);
         $metersStr = strtoupper($this->t($metersVal > 0 ? number_format($metersVal, 0, ',', '.') . ' M' : '-'));
         $widthMm = (float)($roll['width_mm'] ?? 0);
@@ -740,7 +1022,7 @@ final class PrintService
 
         return implode("\r\n", [
             'N',
-            'q800',
+            'q812',
             'Q560,24',
             ...$this->buildEplDeviceSettings(),
             'LO18,80,776,2',
@@ -782,8 +1064,8 @@ final class PrintService
 
         return "^XA
 ^CI28
-^PW600
-^LL500
+^PW812
+^LL560
 ^PR3
 ^MD" . $this->getZplDarkness() . "
 ^CF0,32
@@ -791,8 +1073,8 @@ final class PrintService
 ^CF0,22
 ^FO20,58^FDCAJA PRODUCTO TERMINADO^FS
 ^CF0,34
-^FO20,92^FB560,2,0,L,0^FD{$product}^FS
-^FO20,146^GB560,2,2^FS
+^FO20,92^FB770,2,0,L,0^FD{$product}^FS
+^FO20,146^GB772,2,2^FS
 
 ^CF0,24
 ^FO20,166^FDOT: {$otCode}^FS
@@ -803,7 +1085,7 @@ final class PrintService
 ^BY3,2,96
 ^FO56,292^BCN,96,N,N,N^FD{$barcodeValue}^FS
 ^CF0,32
-^FO0,418^FB600,1,0,C,0^FD{$barcodeValue}^FS
+^FO0,418^FB812,1,0,C,0^FD{$barcodeValue}^FS
 ^XZ";
     }
 
@@ -827,8 +1109,8 @@ final class PrintService
 
         return "^XA
 ^CI28
-^PW600
-^LL610
+^PW812
+^LL560
 ^PR3
 ^MD" . $this->getZplDarkness() . "
 ^CF0,32
@@ -836,8 +1118,8 @@ final class PrintService
 ^CF0,22
 ^FO20,58^FDCAJA TRAZABLE^FS
 ^CF0,34
-^FO20,92^FB560,2,0,L,0^FD{$product}^FS
-^FO20,146^GB560,2,2^FS
+^FO20,92^FB770,2,0,L,0^FD{$product}^FS
+^FO20,146^GB772,2,2^FS
 
 ^CF0,24
 ^FO20,166^FDCAJA: {$boxCode}^FS
@@ -851,7 +1133,7 @@ final class PrintService
 ^BY3,2,96
 ^FO42,378^BCN,96,N,N,N^FD{$boxCode}^FS
 ^CF0,32
-^FO0,514^FB600,1,0,C,0^FD{$boxCode}^FS
+^FO0,514^FB812,1,0,C,0^FD{$boxCode}^FS
 ^XZ";
     }
 
@@ -890,8 +1172,8 @@ final class PrintService
 
         return "^XA
 ^CI28
-^PW600
-^LL630
+^PW812
+^LL560
 ^PR3
 ^MD" . $this->getZplDarkness() . "
 ^CF0,32
@@ -899,8 +1181,8 @@ final class PrintService
 ^CF0,22
 ^FO20,58^FDPALLET TRAZABLE^FS
 ^CF0,34
-^FO20,92^FB560,2,0,L,0^FD{$product}^FS
-^FO20,146^GB560,2,2^FS
+^FO20,92^FB770,2,0,L,0^FD{$product}^FS
+^FO20,146^GB772,2,2^FS
 
 ^CF0,24
 ^FO20,166^FDPALLET: {$palletCode}^FS
@@ -909,12 +1191,12 @@ final class PrintService
 ^FO20,250^FDCAJAS: {$boxCount}^FS
 ^FO20,278^FDOPERADOR: {$operator}^FS
 ^FO20,306^FDDESTINO: {$destinationLabel}^FS
-^FO20,334^FB560,2,0,L,0^FDCODIGOS CAJA: {$boxSummary}^FS
+^FO20,334^FB770,2,0,L,0^FDCODIGOS CAJA: {$boxSummary}^FS
 
 ^BY3,2,96
 ^FO42,388^BCN,96,N,N,N^FD{$palletCode}^FS
 ^CF0,32
-^FO0,532^FB600,1,0,C,0^FD{$palletCode}^FS
+^FO0,496^FB812,1,0,C,0^FD{$palletCode}^FS
 ^XZ";
     }
 
@@ -1034,7 +1316,7 @@ final class PrintService
 
         return implode("\r\n", [
             'N',
-            'q800',
+            'q812',
             'Q560,24',
             ...$this->buildEplDeviceSettings(),
             'LO20,68,750,2',
@@ -1073,12 +1355,11 @@ final class PrintService
 
         return implode("\r\n", [
             'N',
-            'q800',
+            'q812',
             'Q560,24',
             ...$this->buildEplDeviceSettings(),
             'LO20,68,750,2',
             'LO20,136,750,1',
-            'LO20,286,750,1',
             'LO20,286,750,1',
             'A20,18,0,3,1,1,N,"UNIBAG"',
             'A20,44,0,2,1,1,N,"CAJA TRAZABLE"',
@@ -1131,7 +1412,7 @@ final class PrintService
 
         return implode("\r\n", [
             'N',
-            'q800',
+            'q812',
             'Q560,24',
             ...$this->buildEplDeviceSettings(),
             'LO20,68,750,2',

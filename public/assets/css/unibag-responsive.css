@@ -1,0 +1,80 @@
+/* ==========================================================================
+   UNIBAG · Estándar responsivo (computador, tablet y celular Android)
+   Se carga DESPUÉS de unibag-ui.css y de los estilos del layout.
+   Quiebres: celular <= 640px · tablet 641–1024px · computador >= 1025px.
+   Solo presentación: no cambia lógica ni nombres de campos.
+   ========================================================================== */
+
+/* ---- Base común ---- */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { max-width: 100%; overflow-x: hidden; }
+img, video, canvas, svg, iframe { max-width: 100%; }
+img, video { height: auto; }
+.nav-toggle { display: none; }
+
+/* Utilidad: contenedor con desplazamiento horizontal propio (tablas anchas) */
+.ub-scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+
+/* ---- Tablet (641–1024): objetivos táctiles cómodos ---- */
+@media (min-width: 641px) and (max-width: 1024px) {
+  main .btn, main button, main .ub-btn-primary, main .ub-btn-secondary,
+  main .mr-btn, main .mr-link, main .btn-filter-apply, main .btn-filter-secondary { min-height: 44px; }
+  main input:not([type=checkbox]):not([type=radio]), main select { min-height: 42px; }
+  main input[type=checkbox], main input[type=radio] { width: 20px; height: 20px; }
+  .subitem, .menu a { min-height: 40px; display: inline-flex; align-items: center; }
+  .dashboard-kpis-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .modal-card, dialog { max-width: calc(100vw - 24px); }
+}
+
+/* ---- Celular (<= 640) ---- */
+@media (max-width: 640px) {
+  /* Menú hamburguesa */
+  .topbar .inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .nav-toggle {
+    display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 14px;
+    border: 1px solid rgba(255,255,255,.45); border-radius: 10px; background: rgba(0,0,0,.14);
+    color: #fff; font-size: 15px; font-weight: 800; cursor: pointer; font-family: inherit;
+  }
+  .nav-toggle .bars { font-size: 20px; line-height: 1; }
+  .topbar .menu, .topbar .top-right, .subbar { display: none !important; }
+  body.nav-open .topbar .menu,
+  body.nav-open .topbar .top-right { display: flex !important; flex-direction: column; align-items: stretch; width: 100%; overflow: visible; gap: 4px; }
+  body.nav-open .subbar { display: block !important; }
+  body.nav-open .subbar .submenu { display: flex; flex-direction: column; align-items: stretch; width: 100%; overflow: visible; gap: 4px; }
+  body.nav-open .topbar .menu a,
+  body.nav-open .subitem { min-height: 46px; display: flex; align-items: center; font-size: 15px; padding: 0 12px; border-radius: 10px; }
+  body.nav-open .top-right .pill, body.nav-open .top-right select { min-height: 44px; width: 100%; white-space: normal; }
+
+  /* Contenido */
+  main { padding: 12px 14px 28px; }
+  main .btn, main button, main .mr-btn, main .mr-link,
+  main .btn-filter-apply, main .btn-filter-secondary { min-height: 46px; }
+  main input:not([type=checkbox]):not([type=radio]), main select, main textarea { font-size: 16px; min-height: 44px; }
+  .dashboard-kpis-grid { grid-template-columns: 1fr; }
+  .erp-filter-card, .ub-filter-card { padding: 14px; }
+  .erp-filter-form { flex-direction: column; align-items: stretch; width: 100%; }
+  .erp-filter-field { width: 100%; }
+  .erp-filter-field input, .erp-filter-field select { width: 100%; }
+  .btn-filter-apply, .btn-filter-secondary { width: 100%; justify-content: center; }
+
+  /* Ventanas a pantalla completa */
+  dialog, .modal-card, .wm-modal { width: 100vw !important; max-width: 100vw !important; max-height: 100vh !important; height: auto; margin: 0; border-radius: 0 !important; }
+  dialog[open] { inset: 0; }
+  .wm-modal-backdrop, .modal-backdrop { padding: 0 !important; align-items: stretch !important; }
+
+  /* Tablas: tarjetas opcionales con la clase .table-cards (data-label en cada celda) */
+  .table-cards thead { display: none; }
+  .table-cards, .table-cards tbody, .table-cards tr, .table-cards td { display: block; width: 100%; }
+  .table-cards tr { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; margin-bottom: 10px; padding: 6px 12px; }
+  .table-cards td { display: flex; justify-content: space-between; gap: 12px; border: 0; padding: 6px 0; text-align: right; }
+  .table-cards td::before { content: attr(data-label); font-size: 11px; font-weight: 800; text-transform: uppercase; color: #64748b; text-align: left; }
+}
+
+/* ---- Pantallas muy angostas ---- */
+@media (max-width: 380px) {
+  main { padding: 10px; }
+  .kpi-num { font-size: 26px; }
+}
+
+/* ---- Computador: la barra superior nunca muestra el botón de menú ---- */
+@media (min-width: 641px) { .nav-toggle { display: none !important; } }

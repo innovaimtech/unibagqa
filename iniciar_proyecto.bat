@@ -1,47 +1,53 @@
 @echo off
 rem ==============================================================================
-rem INICIADOR PRINCIPAL DEL SISTEMA UNIBAG (Trazabilidad, Balanza e Impresión)
+rem INICIADOR PRINCIPAL DEL SISTEMA UNIBAG (Web ERP/TRZ + Hardware Silencioso)
 rem ==============================================================================
-rem Este archivo levanta concurrentemente los tres servicios esenciales:
-rem 1. Puente de Impresión Térmica USB (Puerto 8767 vía PowerShell)
-rem 2. Puente de Balanza Industrial RS-232 / USB (Puerto 8765 vía PowerShell)
-rem 3. Servidor Web Local PHP 8 (Puerto 8000 con XAMPP y router.php)
-rem
-rem Finalmente abre de forma automática el navegador en http://localhost:8000/reception.
+rem - Verifica si el Servicio Silencioso de Impresión (Puerto 8767) ya está activo;
+rem   si no lo está, lo inicia en segundo plano sin abrir ventanas molestas.
+rem - La Balanza opera directamente desde el navegador por Web Serial API nativa
+rem   (y levanta el puente 8765 en segundo plano como respaldo local opcional).
+rem - Inicia el Servidor Web PHP en http://localhost:8000 y abre el navegador.
 rem ==============================================================================
 
-title Iniciar Unibag Trazabilidad, Balanza y Puente de Impresion
+title Iniciar Sistema Unibag ERP y Trazabilidad
 echo ========================================================
-echo   Iniciando Sistema Unibag Trazabilidad
+echo   Iniciando Sistema Unibag ERP ^& Trazabilidad
 echo ========================================================
 echo.
 
-rem Posicionarse en el directorio del script
 cd /d "%~dp0"
 
-rem [1/3] Levantar el puente de impresión térmica en segundo plano
-echo [1/3] Iniciando Puente de Impresion (puerto 8767)...
-start "Unibag Print Bridge (Puerto 8767)" powershell -ExecutionPolicy Bypass -NoExit -File "%~dp0print\print_bridge.ps1"
+rem [1/3] Servicio de Impresión Térmica (puerto 8767) en segundo plano si no está activo
+netstat -ano | findstr ":8767 " | findstr "LISTENING" >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [1/3] Activando Spooler de Impresion Termica en segundo plano ^(puerto 8767^)...
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""%~dp0print\print_bridge.ps1""'"
+) else (
+    echo [1/3] Spooler de Impresion Termica ya activo ^(puerto 8767^).
+)
 
-rem [2/3] Levantar el puente de lectura serie de balanza en segundo plano
-echo [2/3] Iniciando Puente de Balanza RS-232/USB (puerto 8765)...
-start "Unibag Scale Bridge (Puerto 8765)" powershell -ExecutionPolicy Bypass -NoExit -File "%~dp0scale\scale_bridge.ps1" -Mode serial -ComPort AUTO
+rem [2/3] Puente local opcional de Balanza (puerto 8765) oculto como respaldo a Web Serial
+netstat -ano | findstr ":8765 " | findstr "LISTENING" >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [2/3] Preparando respaldo local de Balanza ^(puerto 8765^)...
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""%~dp0scale\scale_bridge.ps1"" -Mode serial -ComPort AUTO'"
+) else (
+    echo [2/3] Respaldo local de Balanza ya activo ^(puerto 8765^).
+)
 
-rem [3/3] Levantar el servidor web local con el binario de PHP de XAMPP
-echo [3/3] Iniciando Servidor Web PHP (puerto 8000)...
-start "Unibag Web Server (Puerto 8000)" C:\xampp\php\php.exe -S 127.0.0.1:8000 router.php
+rem [3/3] Servidor Web Local PHP (puerto 8000)
+netstat -ano | findstr ":8000 " | findstr "LISTENING" >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [3/3] Iniciando Servidor Web PHP ^(http://localhost:8000^)...
+    start "Unibag Web Server (Puerto 8000)" C:\xampp\php\php.exe -S 127.0.0.1:8000 router.php
+) else (
+    echo [3/3] Servidor Web PHP ya activo en puerto 8000.
+)
 
 echo.
 echo ========================================================
-echo   Servicios levantados con exito!
-echo   - Web: http://localhost:8000
-echo   - Puente Impresora: http://localhost:8767
-echo   - Puente Balanza: http://localhost:8765
+echo   Sistema listo! Abriendo navegador en http://localhost:8000
 echo ========================================================
-echo.
-
-rem Esperar 3 segundos para que los puertos terminen de inicializar y abrir navegador
-timeout /t 3 >nul
+timeout /t 2 >nul
 start http://localhost:8000/reception
 exit
-

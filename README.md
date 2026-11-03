@@ -1,101 +1,80 @@
-# Unibag - Sistema Operativo de Producción y Trazabilidad (PHP 8.4 + MySQL)
+# Unibag · Plataforma ERP, Producción en Planta y Trazabilidad
 
-Este repositorio contiene la plataforma integrada de **Producción en Planta**, **Trazabilidad**, **Recepción e Inventario de Bobinas** y **Control de Operarios** para Unibag.
-
----
-
-## 🏛️ Arquitectura del Sistema
-
-El sistema opera con dos conexiones de base de datos simultáneas gestionadas a través de [`src/Db.php`](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/src/Db.php):
-
-1. **ERP (Producción y Planificación)**:
-   - Conexión principal remota a la base del ERP (`unibag_unibag` en `149.50.129.154`).
-   - Contiene la lógica operativa viva: máquinas (`equipo`), asignaciones de turno (`prod_worker_init`), órdenes de trabajo (`prod_header`, `prod_agenda`), bitácora de eventos (`prod_worker_ot_events`), autocontrol de calidad (`equipo_puntos_autocontrol`, `prod_worker_ot_autocontrol`) y operarios (`workers`, `user`).
-2. **TRZ (Trazabilidad y Bodegas)**:
-   - Base de datos local/específica de trazabilidad (`unibag_trazabilidad`).
-   - Alberga el ciclo de vida unitario de bobinas (Roll IDs), pesajes de balanza física, traspasos de bodega (100/200/300/400) y tomas de inventario.
+Plataforma corporativa integrada de **Unibag Chile** para **Gestión ERP e Informes Ejecutivos**, **Producción en Planta**, **Recepción Metrológica con Balanza Digital e Impresión Térmica**, **Bodegas e Inventario** y **Bonificaciones**.
 
 ---
 
-## 🚀 Módulos Principales
-
-### 1. Producción en Planta (`/production/*`)
-- **Gestión de Máquinas y Turnos** (`/production/machines`): Apertura de turno por operario en máquinas de confección, flexografía y serigrafía. Pausa automática de puestos previos (`win_status = 3`).
-- **Apertura de OTs** (`/production/work-orders/new`): Carga de órdenes agendadas para la máquina activa con ficha técnica (medidas, clichés, colores, cliente, requerimiento).
-- **Consola del Operador** (`/production/work-orders/{agId}/operate`):
-  - **Apertura / Setup**: Registro de setup de rodillos, clichés y ajuste de medidas.
-  - **Avance de Producción**: Registro incremental de metros lineales, metros máquina, kilos y unidades.
-  - **Pausas y Mantenciones**: Justificación clasificada de paradas operativas y fallas mecánicas/eléctricas.
-  - **Consumo de Materiales**: Registro de bobinas e insumos consumidos.
-  - **Autocontrol de Calidad**: Checklist de verificación técnica por tipo de máquina.
-- **Cierre con Validación de Supervisor**: Autorización con credenciales de usuario del grupo supervisor (rol 31 o admin) para finalizar la orden.
-- **Monitoreo en Tiempo Real e Historial** (`/production/work-orders/active` y `/history`): Seguimiento de OTs en curso y auditoría de turnos cerrados.
-
-### 2. Recepción de Bobinas e Inventario (`/reception`, `/inventory`, `/warehouses`)
-- Alta de bobinas con lectura directa de balanza (puerto COM o bridge HTTP).
-- Identificador único de bobina (`ROLL-XXXXX`).
-- Traspasos entre bodegas y tomas de inventario físicas.
-
-### 3. Reportes e Integración ERP (`/reports/*`)
-- Informes de bonificación por operario (Flexografía, Serigrafía, CYS).
-- Análisis de mermas y KPIs de rendimiento.
-
----
-
-## ⚙️ Estructura de Directorios
+## 📂 Estructura Ordenada del Proyecto
 
 ```text
-├── api/                  # Endpoints y puente para despliegues Serverless / Vercel
-├── database/             # Esquemas SQL iniciales y migraciones versionadas
-│   ├── migrations/       # Migraciones incrementales
-│   └── schema.sql        # Esquema inicial TRZ
-├── print/                # Scripts puente para impresoras térmicas de etiquetas (Zebra/Argox/Barpos)
-├── public/               # Raíz pública del servidor web
-│   ├── index.php         # Router central HTTP y layout maestro
-│   └── js/               # Librerías estáticas (Chart.js)
-├── scale/                # Bridge PowerShell para lectura de balanza serie LP-7516
-├── scripts/              # Utilidades de mantenimiento y sincronización
-├── src/                  # Capa de lógica de negocio y servicios
-│   ├── Db.php            # Factoría PDO con auto-reconexión y tolerancia a fallos
-│   ├── Env.php           # Parser seguro de variables de entorno .env
-│   ├── InventoryCountService.php # Servicio de tomas de inventario
-│   ├── PrintService.php  # Servicio de generación y formateo de etiquetas ZPL/ESC
-│   ├── ProductionService.php     # Núcleo de producción (máquinas, OTs, eventos, calidad)
-│   ├── ReceptionService.php      # Núcleo de recepción, bobinas, stock y bonos
-│   ├── RollReceptionService.php  # Subservicio de recepción de bobinas
-│   ├── ScaleService.php  # Conector para balanzas físicas
-│   └── Http/             # Controladores HTTP modulares
-│       ├── ApiModule.php         # Rutas de API REST
-│       ├── AuthModule.php        # Autenticación y control de sesiones
-│       ├── ErpReportsModule.php  # Vistas de reportes y bonificaciones ERP
-│       ├── InventoryModule.php   # Vistas de tomas y conteo de inventario
-│       ├── ProductionModule.php  # Vistas y flujos operativos de producción
-│       └── WarehousesModule.php  # Vistas de bodegas y transferencias
-└── .env                  # Configuración local de entorno (no versionado)
+├── api/                          # Entrypoint serverless compatible con Vercel (delega a public/index.php)
+├── data/                         # Plantillas base de reportes ejecutivos (PPTX mensual)
+├── database/                     # Esquema SQL base y migraciones incrementales
+├── deploy/                       # Configuraciones de despliegue VPS / Nginx
+├── docs/                         # Documentación técnica, manuales e informes del proyecto
+│   ├── INICIO_RAPIDO.md
+│   ├── ACTUALIZAR_VPS.md
+│   ├── INFORME_IMPLEMENTACION_IMPRESORAS_Y_BALANZAS.md
+│   ├── PLAN_MODERNIZACION_Y_ARQUITECTURA_UNIBAG.md
+│   ├── PLAN_MODULARIZACION_Y_SEPARACION_PHP.md
+│   └── Informe_horas_laborales_ERP_octubre_2026.md
+├── print/                        # Spooler silencioso Windows (puerto 8767 + PNA) para impresoras térmicas
+├── public/                       # Raíz pública web
+│   ├── index.php                 # Front Controller limpio (~160 líneas)
+│   └── assets/
+│       ├── css/unibag-ui.css     # Sistema de Diseño Corporativo Unificado (100% pantalla + contraste WCAG AA)
+│       └── js/
+│           ├── unibag-hardware.js# Motor Web Serial (Balanza nativa) + Impresión Térmica (Spooler/WebUSB)
+│           └── unibag-ui.js      # Comportamiento UI compartido de filtros y controles
+├── scale/                        # Puente opcional de respaldo serie RS-232/USB (puerto 8765 + PNA)
+├── scripts/                      # Utilidades CLI de sincronización, PPTX y scripts archivados (legacy-bat/)
+├── src/                          # Código fuente modularizado
+│   ├── bootstrap.php             # Autoloader PSR-4 / mapa de clases y cargador ordenado de módulos
+│   ├── Db.php                    # Conexiones PDO duales (ERP unibag_unibag + TRZ unibag_trazabilidad)
+│   ├── PrintService.php          # Generación EPL/TSPL/ZPL, TCP 9100 directo y cola cliente remota
+│   ├── ScaleService.php          # Integración de pesaje sin bloqueo para clientes locales y remotos
+│   ├── ProductionService.php     # Fachada hacia servicios de dominio en src/Services/Production/
+│   ├── ReceptionService.php      # Fachada hacia servicios de dominio en src/Services/Reception/
+│   ├── Services/                 # Servicios de dominio desacoplados (Production/ y Reception/)
+│   ├── Http/                     # Módulos y routers HTTP organizados por dominio funcional
+│   │   ├── Bonuses/              # Bonificaciones ERP (Router, Flexo, Seri, Mantención, Ayudantes)
+│   │   ├── Reports/              # Informes ERP (Router, Dashboards, Merma, Máquinas, OTIF, Auditoría)
+│   │   ├── Reception/            # Enrutador y pantallas de Recepción metrológica
+│   │   ├── Production/           # Enrutador y pantallas de Producción en Planta
+│   │   ├── WorkOrders/           # Órdenes de Trabajo ERP y Aprobación de Setup
+│   │   ├── Waste/                # Gestión de Mermas
+│   │   └── Chemicals/            # Pesaje y Control de Tintas
+│   └── Views/                    # Layouts globales (layouts/) y vistas desacopladas (production/, reception/)
+├── storage/                      # Sesiones activas (sessions/), calendarios y respaldos (audits/)
+├── composer.json                 # Configuración PSR-4 y herramientas de calidad (PHPStan / PHPUnit)
+├── iniciar_proyecto.bat          # Iniciador local 1-clic (Web + servicios en segundo plano)
+├── instalar_servicio_impresora_silencioso.bat # Instalador permanente sin ventanas para estaciones con impresora USB
+└── router.php                    # Router estático/dinámico para servidor local PHP
 ```
 
 ---
 
-## 🛠️ Puesta en Marcha Local
+## 🚀 Inicio Rápido y Hardware (Balanzas e Impresoras)
 
-### Requisitos
-- PHP 8.2 o superior (con extensiones `pdo`, `pdo_mysql`, `curl`, `mbstring`).
-- Servidor MySQL local para TRZ y acceso de red al ERP remoto.
+1. **Estaciones con Balanza Digital (RS-232 / USB-Serial):**
+   - Funciona **sin instalar programas ni abrir consolas** en Chrome o Edge (tanto en local como conectado al servidor remoto/VPS).
+   - Al entrar a cualquier pantalla de pesaje, haz clic una sola vez en el botón flotante **`⚖️ Balanza`** (abajo a la derecha) → **Conectar Puerto COM**. El navegador recordará el puerto automáticamente.
+2. **Estaciones con Impresora Térmica USB (`HPRT` / `Barpos` / `Zebra`):**
+   - Ejecuta **una sola vez** [`instalar_servicio_impresora_silencioso.bat`](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/instalar_servicio_impresora_silencioso.bat). Quedará registrado en Windows iniciando en segundo plano con 0 ventanas visibles y compatible con el servidor en la nube/LAN (Private Network Access).
+   - Para impresoras conectadas por cable de red Ethernet, basta configurar `PRINT_MODE=tcp` y `PRINT_TCP_HOST=<IP_IMPRESORA>` en `.env` (impresión directa al puerto `9100` sin usar PC puente).
+3. **Ejecución de Desarrollo Local:**
+   - Doble clic en [`iniciar_proyecto.bat`](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/iniciar_proyecto.bat) o ejecutar en terminal:
+     ```powershell
+     C:\xampp\php\php.exe -S 127.0.0.1:8000 router.php
+     ```
 
-### Pasos
-1. Configurar el archivo `.env`:
-   ```ini
-   APP_ENV=local
-   ERP_DB_HOST=tu_host_erp
-   ERP_DB_NAME=unibag_unibag
-   ...
-   TRZ_DB_HOST=127.0.0.1
-   TRZ_DB_NAME=unibag_trazabilidad
-   ...
-   ```
-2. Iniciar el servidor local de desarrollo:
-   ```bash
-   php -S localhost:8000 -t public
-   ```
-3. Abrir en el navegador:
-   - `http://localhost:8000/production/machines`
+---
+
+## 📚 Índice de Documentación (`docs/`)
+
+- [Guía de Inicio Rápido](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/docs/INICIO_RAPIDO.md)
+- [Guía de Actualización en VPS](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/docs/ACTUALIZAR_VPS.md)
+- [Plan de Unificación Visual (UI/UX) y Ordenamiento](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/docs/PLAN_UNIFICACION_UI_Y_ORDENAMIENTO.md)
+- [Informe de Implementación de Impresoras Térmicas y Balanzas](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/docs/INFORME_IMPLEMENTACION_IMPRESORAS_Y_BALANZAS.md)
+- [Plan Maestro de Modernización y Arquitectura](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/docs/PLAN_MODERNIZACION_Y_ARQUITECTURA_UNIBAG.md)
+- [Plan de Modularización y Separación PHP](file:///c:/Users/Axiliarmu/Desktop/unibag%20proyecto/docs/PLAN_MODULARIZACION_Y_SEPARACION_PHP.md)

@@ -1,0 +1,303 @@
+{
+    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Cada mes se identifica por el mes de TERMINO del ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses 2026-01 a 2026-09 son las cifras YA PUBLICADAS en la plantilla\/informes (origen 'plantilla'); NO se recalculan porque con los datos actuales del ERP no reproducen lo publicado. Los meses nuevos se agregan solos con origen 'calculado' al generar el informe del mes siguiente. Se puede corregir cualquier valor a mano. El bloque 'procesos' (kg programados\/procesados\/merma por proceso) no tiene fuente automatica en el sistema: si un mes no lo trae, el informe omite las 4 diapositivas de Balance de masa.",
+    "meses": {
+        "2026-01": {
+            "origen": "plantilla",
+            "prod_units": 1154072,
+            "prod_cap": 1411725,
+            "sl_total_units": 1180072,
+            "sl_delayed_units": 59703,
+            "sl_total_cc": 100,
+            "sl_delayed_cc": 22,
+            "waste_pct": 1.45,
+            "procesos": {
+                "flexo": {
+                    "prog": 49300,
+                    "proc": 49500,
+                    "waste": 520
+                },
+                "seri": {
+                    "prog": 8650,
+                    "proc": 4750,
+                    "waste": 23.2
+                },
+                "cys": {
+                    "prog": 53800,
+                    "proc": 55000,
+                    "waste": 132
+                },
+                "emb": {
+                    "prog": 57800,
+                    "proc": 55000,
+                    "waste": 99
+                }
+            }
+        },
+        "2026-02": {
+            "origen": "plantilla",
+            "prod_units": 1381920,
+            "prod_cap": 1345556,
+            "sl_total_units": 1387220,
+            "sl_delayed_units": 35530,
+            "sl_total_cc": 78,
+            "sl_delayed_cc": 20,
+            "waste_pct": 1.19,
+            "procesos": {
+                "flexo": {
+                    "prog": 63100,
+                    "proc": 63300,
+                    "waste": 538
+                },
+                "seri": {
+                    "prog": 620,
+                    "proc": 1640,
+                    "waste": 11
+                },
+                "cys": {
+                    "prog": 64500,
+                    "proc": 65500,
+                    "waste": 170
+                },
+                "emb": {
+                    "prog": 61500,
+                    "proc": 62000,
+                    "waste": 74
+                }
+            }
+        },
+        "2026-03": {
+            "origen": "plantilla",
+            "prod_units": 1224388,
+            "prod_cap": 1482509,
+            "sl_total_units": 1243118,
+            "sl_delayed_units": 38754,
+            "sl_total_cc": 111,
+            "sl_delayed_cc": 8,
+            "waste_pct": 1.27,
+            "procesos": {
+                "flexo": {
+                    "prog": 53600,
+                    "proc": 53400,
+                    "waste": 523
+                },
+                "seri": {
+                    "prog": 2800,
+                    "proc": 2900,
+                    "waste": 23.8
+                },
+                "cys": {
+                    "prog": 57800,
+                    "proc": 60000,
+                    "waste": 168
+                },
+                "emb": {
+                    "prog": 59500,
+                    "proc": 60200,
+                    "waste": 48
+                }
+            }
+        },
+        "2026-04": {
+            "origen": "plantilla",
+            "prod_units": 1087851,
+            "prod_cap": 1277703,
+            "sl_total_units": 1095089,
+            "sl_delayed_units": 5376,
+            "sl_total_cc": 92,
+            "sl_delayed_cc": 5,
+            "waste_pct": 1.03,
+            "procesos": {
+                "flexo": {
+                    "prog": 46200,
+                    "proc": 46500,
+                    "waste": 407
+                },
+                "seri": {
+                    "prog": 750,
+                    "proc": 3200,
+                    "waste": 31.4
+                },
+                "cys": {
+                    "prog": 52800,
+                    "proc": 52800,
+                    "waste": 95
+                },
+                "emb": {
+                    "prog": 51200,
+                    "proc": 51200,
+                    "waste": 36
+                }
+            }
+        },
+        "2026-05": {
+            "origen": "plantilla",
+            "prod_units": 981258,
+            "prod_cap": 1209915,
+            "sl_total_units": 993716,
+            "sl_delayed_units": 18993,
+            "sl_total_cc": 91,
+            "sl_delayed_cc": 6,
+            "waste_pct": 1.24,
+            "procesos": {
+                "flexo": {
+                    "prog": 40300,
+                    "proc": 40600,
+                    "waste": 396
+                },
+                "seri": {
+                    "prog": 1380,
+                    "proc": 1420,
+                    "waste": 12.9
+                },
+                "cys": {
+                    "prog": 44500,
+                    "proc": 45000,
+                    "waste": 108
+                },
+                "emb": {
+                    "prog": 47000,
+                    "proc": 47800,
+                    "waste": 48
+                }
+            }
+        },
+        "2026-06": {
+            "origen": "plantilla",
+            "prod_units": 781553,
+            "prod_cap": 1344581,
+            "sl_total_units": 788553,
+            "sl_delayed_units": 1200,
+            "sl_total_cc": 76,
+            "sl_delayed_cc": 2,
+            "waste_pct": 1.16,
+            "procesos": {
+                "flexo": {
+                    "prog": 29500,
+                    "proc": 29500,
+                    "waste": 298
+                },
+                "seri": {
+                    "prog": 1370,
+                    "proc": 1380,
+                    "waste": 10.2
+                },
+                "cys": {
+                    "prog": 34800,
+                    "proc": 35500,
+                    "waste": 89
+                },
+                "emb": {
+                    "prog": 36200,
+                    "proc": 36500,
+                    "waste": 15
+                }
+            }
+        },
+        "2026-07": {
+            "origen": "plantilla",
+            "prod_units": 923649,
+            "prod_cap": 1479976,
+            "sl_total_units": 932249,
+            "sl_delayed_units": 17600,
+            "sl_total_cc": 71,
+            "sl_delayed_cc": 7,
+            "waste_pct": 1.03,
+            "procesos": {
+                "flexo": {
+                    "prog": 36500,
+                    "proc": 37200,
+                    "waste": 331
+                },
+                "seri": {
+                    "prog": 2090,
+                    "proc": 2270,
+                    "waste": 10.4
+                },
+                "cys": {
+                    "prog": 42500,
+                    "proc": 43200,
+                    "waste": 108
+                },
+                "emb": {
+                    "prog": 43200,
+                    "proc": 43500,
+                    "waste": 4
+                }
+            }
+        },
+        "2026-08": {
+            "origen": "plantilla",
+            "prod_units": 1070866,
+            "prod_cap": 1343895,
+            "sl_total_units": 1115859,
+            "sl_delayed_units": 19232,
+            "sl_total_cc": 91,
+            "sl_delayed_cc": 6,
+            "waste_pct": 0.99,
+            "procesos": {
+                "flexo": {
+                    "prog": 41385,
+                    "proc": 40424,
+                    "waste": 355
+                },
+                "seri": {
+                    "prog": 4579,
+                    "proc": 2374,
+                    "waste": 9
+                },
+                "cys": {
+                    "prog": 51214,
+                    "proc": 51514,
+                    "waste": 126
+                },
+                "emb": {
+                    "prog": 51530,
+                    "proc": 51795,
+                    "waste": 7
+                }
+            }
+        },
+        "2026-09": {
+            "origen": "plantilla",
+            "prod_units": 903219,
+            "prod_cap": 1345000,
+            "sl_total_units": 883422,
+            "sl_delayed_units": 708572,
+            "sl_total_cc": 202,
+            "sl_delayed_cc": 162,
+            "waste_pct": 0.68,
+            "procesos": {
+                "flexo": {
+                    "prog": 45200,
+                    "proc": 44850,
+                    "waste": 412
+                },
+                "seri": {
+                    "prog": 3200,
+                    "proc": 3150,
+                    "waste": 18.5
+                },
+                "cys": {
+                    "prog": 52100,
+                    "proc": 52350,
+                    "waste": 118
+                },
+                "emb": {
+                    "prog": 52400,
+                    "proc": 52600,
+                    "waste": 6.2
+                }
+            }
+        },
+        "2026-10": {
+            "origen": "calculado",
+            "prod_units": 816643,
+            "prod_cap": 1345000,
+            "sl_total_units": 653923,
+            "sl_delayed_units": 546851,
+            "sl_total_cc": 161,
+            "sl_delayed_cc": 145,
+            "waste_pct": 0.51
+        }
+    }
+}

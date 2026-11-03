@@ -184,190 +184,161 @@ def draw_delayed_orders_table(orders, width=1227, row_height=22):
     img.save(buf, format='PNG')
     return buf.getvalue()
 
-def generate_prod_chart(sep_prod=903219, sep_cap=1345000):
-    months = ['ene-26', 'feb-26', 'mar-26', 'abr-26', 'may-26', 'jun-26', 'jul-26', 'ago-26', 'sep-26', 'Prom']
-    prod = [1154072, 1381920, 1224388, 1087851, 981258, 781553, 923649, 1070866, int(sep_prod)]
-    cap =  [1411725, 1345556, 1482509, 1277703, 1209915, 1344581, 1479976, 1343895, int(sep_cap)]
+def _finish_chart(plt_module):
+    """Cierra la figura actual y devuelve los bytes PNG."""
+    plt_module.tight_layout()
+    buf = io.BytesIO()
+    plt_module.savefig(buf, format='png', bbox_inches='tight', dpi=150)
+    plt_module.close()
+    buf.seek(0)
+    return buf.getvalue()
 
-    prom_prod = int(np.mean(prod))
-    prom_cap = int(np.mean(cap))
-    prod.append(prom_prod)
-    cap.append(prom_cap)
+
+def _style_axes(ax):
+    """Estilo común de ejes (sin bordes superior/derecho, grilla suave)."""
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_color('#CCCCCC')
+    ax.spines['bottom'].set_color('#CCCCCC')
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='#CCCCCC')
+    ax.set_axisbelow(True)
+
+
+def _mean_present(values):
+    """Promedio ignorando meses sin dato (None)."""
+    present = [float(v) for v in values if v is not None]
+    return float(np.mean(present)) if present else 0.0
+
+
+def generate_prod_chart(labels, prod, cap):
+    """Producción real vs capacidad productiva: una barra doble por mes (enero hasta el mes del informe) + Prom."""
+    months = list(labels) + ['Prom']
+    prod = [int(v) for v in prod]
+    cap = [int(v) for v in cap]
+    prod.append(int(np.mean(prod)))
+    cap.append(int(np.mean(cap)))
 
     x = np.arange(len(months))
     width = 0.38
-
-    fig, ax = plt.subplots(figsize=(7.5, 4.0), dpi=150)
+    fig, ax = plt.subplots(figsize=(7.5 if len(months) <= 10 else 9.0, 4.0), dpi=150)
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
-
     c_cyan = '#22C5C3'
     c_gray = '#B0B0B0'
 
     ax.bar(x - width/2, prod, width, label='Producción Mes', color=c_cyan)
     ax.bar(x + width/2, cap, width, label='Capacidad Productiva Máquinas', color=c_gray)
-
     ax.set_title('Capacidad productiva vs. Producción real', fontsize=14, fontweight='bold', color='#333333', pad=18)
     ax.set_xticks(x)
-    ax.set_xticklabels(months, fontsize=10)
+    ax.set_xticklabels(months, fontsize=10 if len(months) <= 10 else 8.5)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, loc: f"{int(val):,}".replace(',', '.')))
-    ax.set_ylim(0, 1650000)
-
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_color('#CCCCCC')
-    ax.spines['bottom'].set_color('#CCCCCC')
-    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='#CCCCCC')
-    ax.set_axisbelow(True)
-
+    top = max(max(prod), max(cap))
+    ax.set_ylim(0, top * 1.2)
+    _style_axes(ax)
     for i, (p, c) in enumerate(zip(prod, cap)):
-        p_str = f"{p:,}".replace(',', '.')
-        c_str = f"{c:,}".replace(',', '.')
-        ax.text(x[i] - width/2, p + 25000, p_str, ha='center', va='bottom', fontsize=7.5, fontweight='bold', color='#111111')
-        ax.text(x[i] + width/2, c + 25000, c_str, ha='center', va='bottom', fontsize=7.5, color='#444444')
-
+        ax.text(x[i] - width/2, p + top * 0.015, f"{p:,}".replace(',', '.'), ha='center', va='bottom', fontsize=7.5, fontweight='bold', color='#111111')
+        ax.text(x[i] + width/2, c + top * 0.015, f"{c:,}".replace(',', '.'), ha='center', va='bottom', fontsize=7.5, color='#444444')
     ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=2, frameon=False, fontsize=9.5)
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
-    plt.close()
-    buf.seek(0)
-    return buf.getvalue()
+    return _finish_chart(plt)
 
-def generate_sl_units_chart(sep_tot=883422, sep_del=708572, sep_pct=19.79):
-    months = ['ene-26', 'feb-26', 'mar-26', 'abr-26', 'may-26', 'jun-26', 'jul-26', 'ago-26', 'sep-26', 'Prom']
-    tot = [1180072, 1387220, 1243118, 1095089, 993716, 788553, 932249, 1115859, int(sep_tot)]
-    del_u = [59703, 35530, 38754, 5376, 18993, 1200, 17600, 19232, int(sep_del)]
-    pct = [94.94, 97.44, 96.88, 99.51, 98.09, 99.85, 98.11, 98.28, float(sep_pct)]
 
-    prom_tot = int(np.mean(tot))
-    prom_del = int(np.mean(del_u))
-    prom_pct = round(float(np.mean(pct)), 2)
-    tot.append(prom_tot)
-    del_u.append(prom_del)
-    pct.append(prom_pct)
+def generate_sl_units_chart(labels, tot, del_u, pct):
+    """Nivel de servicio en unidades: pedidos totales vs atrasados por mes + % de cumplimiento + Prom."""
+    months = list(labels) + ['Prom']
+    tot = [int(v) for v in tot]
+    del_u = [int(v) for v in del_u]
+    pct = [float(v) for v in pct]
+    tot.append(int(np.mean(tot)))
+    del_u.append(int(np.mean(del_u)))
+    pct.append(round(float(np.mean(pct)), 2))
 
     x = np.arange(len(months))
     width = 0.38
-
-    fig, ax = plt.subplots(figsize=(8.0, 4.2), dpi=150)
+    fig, ax = plt.subplots(figsize=(8.0 if len(months) <= 10 else 9.5, 4.2), dpi=150)
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
-
     c_cyan = '#22C5C3'
     c_gray = '#B0B0B0'
 
     ax.bar(x - width/2, tot, width, label='Total unidades Pedidos Ud/Mes', color=c_cyan)
     ax.bar(x + width/2, del_u, width, label='Total unidades Pedidos Atrasados Ud/Mes', color=c_gray)
-
     ax.set_title('Nivel de servicio total de planta [Unid.]', fontsize=14, fontweight='bold', color='#333333', pad=18)
     ax.set_xticks(x)
-    ax.set_xticklabels(months, fontsize=10)
+    ax.set_xticklabels(months, fontsize=10 if len(months) <= 10 else 8.5)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, loc: f"{int(val):,}".replace(',', '.')))
-    ax.set_ylim(0, 1650000)
-
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_color('#CCCCCC')
-    ax.spines['bottom'].set_color('#CCCCCC')
-    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='#CCCCCC')
-    ax.set_axisbelow(True)
-
+    top = max(max(tot), 1)
+    ax.set_ylim(0, top * 1.2)
+    _style_axes(ax)
     for i in range(len(months)):
-        t_str = f"{tot[i]:,}".replace(',', '.')
-        d_str = f"{del_u[i]:,}".replace(',', '.')
-        p_str = f"{pct[i]:.2f}%".replace('.', ',')
-        ax.text(x[i] - width/2, tot[i] + 25000, t_str, ha='center', va='bottom', fontsize=7.0, fontweight='bold', color='#111111')
-        ax.text(x[i] + width/2, del_u[i] + 25000, d_str, ha='center', va='bottom', fontsize=6.8, color='#444444')
-        ax.text(x[i], 180000, p_str, ha='center', va='center', fontsize=7.2, fontweight='bold', color='#0f766e',
+        ax.text(x[i] - width/2, tot[i] + top * 0.015, f"{tot[i]:,}".replace(',', '.'), ha='center', va='bottom', fontsize=7.0, fontweight='bold', color='#111111')
+        ax.text(x[i] + width/2, del_u[i] + top * 0.015, f"{del_u[i]:,}".replace(',', '.'), ha='center', va='bottom', fontsize=6.8, color='#444444')
+        ax.text(x[i], top * 0.11, f"{pct[i]:.2f}%".replace('.', ','), ha='center', va='center', fontsize=7.2, fontweight='bold', color='#0f766e',
                 bbox=dict(boxstyle='square,pad=0.2', facecolor='white', edgecolor='#22C5C3', alpha=0.9))
-
     ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=2, frameon=False, fontsize=9.5)
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
-    plt.close()
-    buf.seek(0)
-    return buf.getvalue()
+    return _finish_chart(plt)
 
-def generate_sl_cc_chart(sep_tot=202, sep_del=162, sep_pct=19.80):
-    months = ['ene-26', 'feb-26', 'mar-26', 'abr-26', 'may-26', 'jun-26', 'jul-26', 'ago-26', 'sep-26', 'Prom']
-    tot = [100, 78, 111, 92, 91, 76, 71, 91, int(sep_tot)]
-    del_cc = [22, 20, 8, 5, 6, 2, 7, 6, int(sep_del)]
-    pct = [78.0, 74.36, 92.79, 94.57, 93.41, 97.37, 90.14, 93.41, float(sep_pct)]
 
-    prom_tot = int(np.mean(tot))
-    prom_del = int(np.mean(del_cc))
-    prom_pct = round(float(np.mean(pct)), 2)
-    tot.append(prom_tot)
-    del_cc.append(prom_del)
-    pct.append(prom_pct)
+def generate_sl_cc_chart(labels, tot, del_cc, pct):
+    """Nivel de servicio por centro de costo (pedidos): barras totales/atrasados + línea de % + Prom."""
+    months = list(labels) + ['Prom']
+    tot = [int(v) for v in tot]
+    del_cc = [int(v) for v in del_cc]
+    pct = [float(v) for v in pct]
+    tot.append(int(np.mean(tot)))
+    del_cc.append(int(np.mean(del_cc)))
+    pct.append(round(float(np.mean(pct)), 2))
 
     x = np.arange(len(months))
     width = 0.35
-
-    fig, ax1 = plt.subplots(figsize=(8.0, 4.2), dpi=150)
+    fig, ax1 = plt.subplots(figsize=(8.0 if len(months) <= 10 else 9.5, 4.2), dpi=150)
     fig.patch.set_facecolor('white')
     ax1.set_facecolor('white')
-
     ax2 = ax1.twinx()
-
     c_cyan = '#22C5C3'
     c_gray = '#B0B0B0'
     c_orange = '#F59E0B'
 
-    rects1 = ax1.bar(x - width/2, tot, width, label='Total Pedidos  CC/Mes', color=c_cyan)
-    rects2 = ax1.bar(x + width/2, del_cc, width, label='Total Pedidos Atrasados CC/Mes', color=c_gray)
-    line1 = ax2.plot(x, pct, color=c_orange, linewidth=2.5, marker='o', markersize=4, label='Nivel de Servicio.   %')
-
+    ax1.bar(x - width/2, tot, width, label='Total Pedidos  CC/Mes', color=c_cyan)
+    ax1.bar(x + width/2, del_cc, width, label='Total Pedidos Atrasados CC/Mes', color=c_gray)
+    ax2.plot(x, pct, color=c_orange, linewidth=2.5, marker='o', markersize=4, label='Nivel de Servicio.   %')
     ax1.set_title('Nivel de servicio total de planta [C.C.]', fontsize=14, fontweight='bold', color='#333333', pad=18)
     ax1.set_xticks(x)
-    ax1.set_xticklabels(months, fontsize=10)
-    ax1.set_ylim(0, 240)
+    ax1.set_xticklabels(months, fontsize=10 if len(months) <= 10 else 8.5)
+    top = max(max(tot), 1)
+    ax1.set_ylim(0, top * 1.35)
     ax2.set_ylim(0, 120)
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, loc: f"{int(val)}%"))
-
     ax1.spines['top'].set_visible(False)
     ax2.spines['top'].set_visible(False)
     ax1.spines['left'].set_color('#CCCCCC')
     ax1.spines['bottom'].set_color('#CCCCCC')
     ax1.yaxis.grid(True, linestyle='--', alpha=0.4, color='#CCCCCC')
     ax1.set_axisbelow(True)
-
     for i in range(len(months)):
-        ax1.text(x[i] - width/2, tot[i] + 4, str(tot[i]), ha='center', va='bottom', fontsize=7.2, fontweight='bold', color='#111111')
-        ax1.text(x[i] + width/2, del_cc[i] + 4, str(del_cc[i]), ha='center', va='bottom', fontsize=7.0, color='#444444')
+        ax1.text(x[i] - width/2, tot[i] + top * 0.02, str(tot[i]), ha='center', va='bottom', fontsize=7.2, fontweight='bold', color='#111111')
+        ax1.text(x[i] + width/2, del_cc[i] + top * 0.02, str(del_cc[i]), ha='center', va='bottom', fontsize=7.0, color='#444444')
         ax2.text(x[i], pct[i] - 12, f"{pct[i]:.1f}%", ha='center', va='bottom', fontsize=7.2, fontweight='bold', color='#B45309')
+    lines, labs = ax1.get_legend_handles_labels()
+    lines2, labs2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines + lines2, labs + labs2, loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=3, frameon=False, fontsize=9.0)
+    return _finish_chart(plt)
 
-    lines, labels = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines + lines2, labels + labels2, loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=3, frameon=False, fontsize=9.0)
 
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
-    plt.close()
-    buf.seek(0)
-    return buf.getvalue()
-
-def generate_waste_chart(sep_real=0.68):
-    months = ['ene-26', 'feb-26', 'mar-26', 'abr-26', 'may-26', 'jun-26', 'jul-26', 'ago-26', 'sep-26', 'Prom']
+def generate_waste_chart(labels, real):
+    """Total de merma: meta (1,60 %) vs % real vs margen, por mes + Prom."""
+    months = list(labels) + ['Prom']
+    real = [float(v) for v in real]
     target = [1.60] * len(months)
-    real = [1.45, 1.19, 1.27, 1.03, 1.24, 1.16, 1.03, 0.99, float(sep_real)]
-    margin = [round(t - r, 2) for t, r in zip(target[:9], real)]
-
+    margin = [round(t - r, 2) for t, r in zip(target[:len(real)], real)]
     prom_real = round(float(np.mean(real)), 2)
-    prom_margin = round(1.60 - prom_real, 2)
     real.append(prom_real)
-    margin.append(prom_margin)
+    margin.append(round(1.60 - prom_real, 2))
 
     x = np.arange(len(months))
     width = 0.28
-
-    fig, ax = plt.subplots(figsize=(8.0, 4.2), dpi=150)
+    fig, ax = plt.subplots(figsize=(8.0 if len(months) <= 10 else 9.5, 4.2), dpi=150)
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
-
     c_cyan = '#22C5C3'
     c_gray = '#B0B0B0'
     c_yellow = '#F59E0B'
@@ -375,77 +346,63 @@ def generate_waste_chart(sep_real=0.68):
     ax.bar(x - width, target, width, label='% A Cumplir (Merma)', color=c_cyan)
     ax.bar(x, real, width, label='% Real', color=c_gray)
     ax.bar(x + width, margin, width, label='Margen (+/-)', color=c_yellow)
-
     ax.set_title('Total de Merma', fontsize=14, fontweight='bold', color='#333333', pad=18)
     ax.set_xticks(x)
-    ax.set_xticklabels(months, fontsize=10)
+    ax.set_xticklabels(months, fontsize=10 if len(months) <= 10 else 8.5)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, loc: f"{val:.2f}%".replace('.', ',')))
-    ax.set_ylim(0, 1.95)
-
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_color('#CCCCCC')
-    ax.spines['bottom'].set_color('#CCCCCC')
-    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='#CCCCCC')
-    ax.set_axisbelow(True)
-
+    ax.set_ylim(min(0, min(margin) - 0.1), max(1.95, max(real) * 1.2))
+    _style_axes(ax)
     for i in range(len(months)):
         ax.text(x[i] - width, target[i] + 0.03, "1,60%", ha='center', va='bottom', fontsize=6.8, fontweight='bold', color='#111111')
         ax.text(x[i], real[i] + 0.03, f"{real[i]:.2f}%".replace('.', ','), ha='center', va='bottom', fontsize=6.8, color='#333333')
-        ax.text(x[i] + width, margin[i] + 0.03, f"{margin[i]:.2f}%".replace('.', ','), ha='center', va='bottom', fontsize=6.8, fontweight='bold', color='#B45309')
-
+        ax.text(x[i] + width, max(margin[i], 0) + 0.03, f"{margin[i]:.2f}%".replace('.', ','), ha='center', va='bottom', fontsize=6.8, fontweight='bold', color='#B45309')
     ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.14), ncol=3, frameon=False, fontsize=9.5)
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
-    plt.close()
-    buf.seek(0)
-    return buf.getvalue()
+    return _finish_chart(plt)
 
-def generate_process_balance_chart(title_name, label_prog, label_proc, label_waste, label_rate,
-                                   hist_prog, hist_proc, hist_waste,
-                                   sep_prog, sep_proc, sep_waste,
-                                   y1_max, y2_max, col_month='sep-26'):
-    months = ['ene-26', 'feb-26', 'mar-26', 'abr-26', 'may-26', 'jun-26', 'jul-26', 'ago-26', col_month]
-    prog = [float(x) for x in hist_prog] + [float(sep_prog)]
-    proc = [float(x) for x in hist_proc] + [float(sep_proc)]
-    waste = [float(x) for x in hist_waste] + [float(sep_waste)]
-    pct = [w / p * 100.0 if p > 0 else 0.0 for w, p in zip(waste, proc)]
 
-    prom_prog = float(np.mean(prog))
-    prom_proc = float(np.mean(proc))
-    prom_waste = float(np.mean(waste))
-    prom_pct = float(np.mean(pct))
+def generate_process_balance_chart(title_name, labels, label_prog, label_proc, label_waste, label_rate,
+                                   prog, proc, waste, y1_max=None, y2_max=None):
+    """Balance de masa de un proceso: kg programados / procesados / merma por mes + línea de % de merma + Prom.
+    Los meses sin dato vienen como None (se dibujan en cero y no entran al promedio)."""
+    n = len(labels)
+    prog_v = [float(v) if v is not None else 0.0 for v in prog]
+    proc_v = [float(v) if v is not None else 0.0 for v in proc]
+    waste_v = [float(v) if v is not None else 0.0 for v in waste]
+    pct = [w / p * 100.0 if p > 0 else 0.0 for w, p in zip(waste_v, proc_v)]
+    prom_prog = _mean_present(prog)
+    prom_proc = _mean_present(proc)
+    prom_waste = _mean_present(waste)
+    prom_pct = _mean_present([pc if proc[i] is not None else None for i, pc in enumerate(pct)])
+    if y1_max is None:
+        y1_max = max(max(prog_v + proc_v + [prom_prog, prom_proc]), 1.0) * 1.2
+    if y2_max is None:
+        y2_max = max(max(pct + [prom_pct]), 0.1) * 1.5
 
-    x_months = np.arange(9)
-    x_prom = 9.8
+    x_months = np.arange(n)
+    x_prom = n + 0.8
     all_x = list(x_months) + [x_prom]
-    all_labels = months + ['Prom']
+    all_labels = list(labels) + ['Prom']
 
-    fig, ax1 = plt.subplots(figsize=(7.8, 4.2), dpi=150)
+    fig, ax1 = plt.subplots(figsize=(7.8 if n <= 9 else 9.5, 4.2), dpi=150)
     fig.patch.set_facecolor('white')
     ax1.set_facecolor('white')
-
     ax2 = ax1.twinx()
-
     width = 0.25
     c_cyan = '#22C5C3'
     c_gray = '#B0B0B0'
     c_blue = '#3B82F6'
     c_orange = '#F59E0B'
 
-    b_prog = ax1.bar(x_months - width, prog[:9], width, label=label_prog, color=c_cyan)
-    b_proc = ax1.bar(x_months, proc[:9], width, label=label_proc, color=c_gray)
-    b_waste = ax1.bar(x_months + width, waste[:9], width, label=label_waste, color=c_blue)
-
+    b_prog = ax1.bar(x_months - width, prog_v, width, label=label_prog, color=c_cyan)
+    ax1.bar(x_months, proc_v, width, label=label_proc, color=c_gray)
+    b_waste = ax1.bar(x_months + width, waste_v, width, label=label_waste, color=c_blue)
+    b_proc = ax1.containers[1]
     ax1.bar(x_prom - width, prom_prog, width, color=c_cyan)
     ax1.bar(x_prom, prom_proc, width, color=c_gray)
     ax1.bar(x_prom + width, prom_waste, width, color=c_blue)
-
-    l_rate = ax2.plot(x_months, pct[:9], color=c_orange, linewidth=2.8, label=label_rate)[0]
+    l_rate = ax2.plot(x_months, pct, color=c_orange, linewidth=2.8, label=label_rate)[0]
     ax2.plot([x_prom], [prom_pct], color=c_orange, marker='o', markersize=4.5)
-
-    for i in range(9):
+    for i in range(n):
         va_mode = 'bottom' if (i % 2 == 0 or pct[i] > 0.8) else 'top'
         y_offset = (y2_max * 0.04) if va_mode == 'bottom' else -(y2_max * 0.04)
         ax2.text(x_months[i], pct[i] + y_offset, f'{pct[i]:.2f}%'.replace('.', ','), ha='center', va=va_mode, fontsize=7.0, fontweight='bold', color='#111111')
@@ -453,36 +410,22 @@ def generate_process_balance_chart(title_name, label_prog, label_proc, label_was
 
     ax1.set_title(title_name, fontsize=13, fontweight='bold', color='#333333', pad=14)
     ax1.set_xticks(all_x)
-    ax1.set_xticklabels(all_labels, fontsize=9)
-    ax1.set_xlim(-0.7, 10.7)
+    ax1.set_xticklabels(all_labels, fontsize=9 if n <= 9 else 8)
+    ax1.set_xlim(-0.7, n + 1.7)
     ax1.set_ylim(0, y1_max)
     ax2.set_ylim(0, y2_max)
-
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, loc: f'{int(val):,}'.replace(',', '.')))
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, loc: f'{val:.2f}%'.replace('.', ',')))
-
-    ax1.spines['top'].set_visible(False)
-    ax2.spines['top'].set_visible(False)
-    ax1.spines['left'].set_color('#CCCCCC')
-    ax2.spines['left'].set_color('#CCCCCC')
-    ax1.spines['right'].set_color('#CCCCCC')
-    ax2.spines['right'].set_color('#CCCCCC')
-    ax1.spines['bottom'].set_color('#CCCCCC')
-    ax2.spines['bottom'].set_color('#CCCCCC')
-
+    for axis in (ax1, ax2):
+        axis.spines['top'].set_visible(False)
+        for side in ('left', 'right', 'bottom'):
+            axis.spines[side].set_color('#CCCCCC')
     ax1.yaxis.grid(True, linestyle='--', alpha=0.4, color='#CCCCCC')
     ax1.set_axisbelow(True)
+    ax1.legend([b_prog, b_waste, b_proc, l_rate], [label_prog, label_waste, label_proc, label_rate],
+               loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=2, frameon=False, fontsize=8.0)
+    return _finish_chart(plt)
 
-    legend_handles = [b_prog, b_waste, b_proc, l_rate]
-    legend_labels = [label_prog, label_waste, label_proc, label_rate]
-    ax1.legend(legend_handles, legend_labels, loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=2, frameon=False, fontsize=8.0)
-
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
-    plt.close()
-    buf.seek(0)
-    return buf.getvalue()
 
 def update_text_in_shape(shape, old_text, new_text):
     if shape.has_text_frame:
@@ -680,12 +623,38 @@ def replace_picture_with_delayed_table(slide, picture_name, orders, fallback_png
                         r.font.color.rgb = txt_color
     return True
 
+MESES_ABR = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+MESES_NOM = ['ENERO', 'FEBRERO', 'MARZO', 'ABRIL', 'MAYO', 'JUNIO', 'JULIO', 'AGOSTO', 'SEPTIEMBRE', 'OCTUBRE', 'NOVIEMBRE', 'DICIEMBRE']
+
+
+def month_info(month_key):
+    """('NOVIEMBRE 2026', 'nov-26') para cualquier mes 'YYYY-MM' (antes solo existían agosto, septiembre y octubre)."""
+    year, month = month_key.split('-')
+    year, month = int(year), int(month)
+    return f"{MESES_NOM[month - 1]} {year}", f"{MESES_ABR[month - 1]}-{str(year)[2:]}"
+
+
+def fmt_int(value):
+    """Entero con separador de miles chileno: 1.234.567"""
+    return f"{int(round(float(value))):,}".replace(',', '.')
+
+
+def fmt_pct(value, decimals=2):
+    """Porcentaje con coma decimal: 12,34%"""
+    return f"{float(value):.{decimals}f}%".replace('.', ',')
+
+
+def fmt_dec(value, decimals=1):
+    """Decimal con coma: 12,3"""
+    return f"{float(value):.{decimals}f}".replace('.', ',')
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generador Mensual PPTX Unibag")
     parser.add_argument("--template", default=os.path.join("data", "KP´S OPERACIONES AGOSTO 2026.pptx"))
-    parser.add_argument("--month", default="2026-09")
+    parser.add_argument("--month", default="")
     parser.add_argument("--data", default="")
-    parser.add_argument("--output", default=os.path.join("data", "KPIS_OPERACIONES_SEPTIEMBRE_2026.pptx"))
+    parser.add_argument("--output", default=os.path.join("data", "KPIS_OPERACIONES.pptx"))
     parser.add_argument("--all-slides", action="store_true", default=False, help="Incluir todas las diapositivas del template en vez de solo las modificadas")
     args = parser.parse_args()
 
@@ -703,208 +672,153 @@ def main():
         except Exception:
             data = {}
 
-    month_str = args.month
-    month_name = "SEPTIEMBRE 2026"
-    month_col = "sep-26"
-    if month_str == "2026-10":
-        month_name = "OCTUBRE 2026"
-        month_col = "oct-26"
-    elif month_str == "2026-08":
-        month_name = "AGOSTO 2026"
-        month_col = "ago-26"
+    # El historial (enero hasta el mes del informe) lo entrega el sistema: nunca se inventan cifras.
+    hist = data.get("history") or []
+    month_key = args.month or str(data.get("month_key", ""))
+    if not hist or not month_key:
+        print("Error: faltan datos (history / month). Genere el informe desde el sistema para que se calculen desde el ERP.")
+        sys.exit(1)
 
-    print(f"Generando presentacion para: {month_name} ({month_col})")
+    month_name, month_col = month_info(month_key)
+    labels = [month_info(h["month_key"])[1] for h in hist]
+    n_months = len(hist)
+    print(f"Generando presentacion para: {month_name} ({month_col}) con {n_months} meses de historial")
     prs = Presentation(args.template)
+    missing = []  # imágenes de la plantilla que no se encontraron (si hay alguna, el informe quedaría desactualizado)
 
-    # 1. Update text titles across all slides
-    for slide_idx, slide in enumerate(prs.slides):
+    # 1. Títulos: la plantilla trae "AGOSTO 2026"; se reemplaza por el mes pedido.
+    for slide in prs.slides:
         for shape in slide.shapes:
             update_text_in_shape(shape, "AGOSTO 2026", month_name)
             update_text_in_shape(shape, "Agosto 2026", month_name.capitalize())
             update_text_in_shape(shape, "REPORTE DE OPERACIONES AGOSTO 2026", f"REPORTE DE OPERACIONES {month_name}")
 
-    # 2. Extract metrics (Producción se mide por lo que pasó por CORTE Y SELLADO)
-    prod_units = float(data.get("prod_units", 903219))
+    def put_chart(slide_idx, picture_name, png):
+        if not replace_picture_blob(prs.slides[slide_idx], picture_name, png):
+            missing.append(f"diapositiva {slide_idx + 1}: {picture_name} (gráfico)")
+
+    def put_table(slide_idx, picture_name, rows, green_rows=None, red_cells=None):
+        png = draw_kpi_table(col_month=month_col, rows=rows, green_rows=green_rows, red_cells=red_cells)
+        if not replace_picture_with_native_table(prs.slides[slide_idx], picture_name, month_col, rows,
+                                                 green_rows=green_rows, red_cells=red_cells, fallback_png=png):
+            missing.append(f"diapositiva {slide_idx + 1}: {picture_name} (tabla)")
+
+    red_row0 = [(1, 2), (1, 3), (1, 4), (1, 5), (1, 6)]
+
+    # ---------------- Producción (diapositiva 2) ----------------
+    prod = [float(h["prod_units"]) for h in hist]
+    cap = [float(h.get("prod_cap", data.get("prod_cap", 0))) for h in hist]
+    prod_units = prod[-1]
     prod_meta = float(data.get("prod_meta", 1000000))
     prod_cumpl = (prod_units / prod_meta * 100.0) if prod_meta > 0 else 0.0
-
-    # Gestión 2026 acumulados (8 meses anteriores + septiembre)
-    prev_prod_total_8m = 8605557
-    curr_prod_total_9m = prev_prod_total_8m + prod_units
-    curr_prod_prom_9m = curr_prod_total_9m / 9.0
-    curr_cumpl_prom_9m = (curr_prod_prom_9m / prod_meta * 100.0)
-
-    # Slide 2: Table Producción (Imagen 6) -> NATIVE EDITABLE TABLE
+    ytd_prod_total = sum(prod)
+    ytd_prod_prom = ytd_prod_total / n_months
+    ytd_cumpl = (ytd_prod_prom / prod_meta * 100.0) if prod_meta > 0 else 0.0
     prod_rows = [
-        ["Meta Planta reflejada en Unidades", "Un/Mes", f"{int(prod_meta):,}".replace(',', '.'), "1.000.000", "12.000.000", "958.333", "11.500.000"],
-        ["% cumplimiento Meta", "%", f"{prod_cumpl:.2f}%".replace('.', ','), f"{curr_cumpl_prom_9m:.2f}%".replace('.', ','), f"{curr_cumpl_prom_9m:.2f}%".replace('.', ','), "100,60%", "100,60%"],
-        ["Producción Mes", "Und", f"{int(prod_units):,}".replace(',', '.'), f"{int(curr_prod_prom_9m):,}".replace(',', '.'), f"{int(curr_prod_total_9m):,}".replace(',', '.'), "964.880", "11.569.083"]
+        ["Meta Planta reflejada en Unidades", "Un/Mes", fmt_int(prod_meta), "1.000.000", "12.000.000", "958.333", "11.500.000"],
+        ["% cumplimiento Meta", "%", fmt_pct(prod_cumpl), fmt_pct(ytd_cumpl), fmt_pct(ytd_cumpl), "100,60%", "100,60%"],
+        ["Producción Mes", "Und", fmt_int(prod_units), fmt_int(ytd_prod_prom), fmt_int(ytd_prod_total), "964.880", "11.569.083"],
     ]
-    t2_png = draw_kpi_table(col_month=month_col, rows=prod_rows, green_rows=[2], red_cells=[(1, 2), (1, 3), (1, 4), (1, 5), (1, 6)])
-    replace_picture_with_native_table(prs.slides[1], 'Imagen 6', month_col, prod_rows, green_rows=[2], red_cells=[(1, 2), (1, 3), (1, 4), (1, 5), (1, 6)], fallback_png=t2_png)
+    put_table(1, 'Imagen 6', prod_rows, green_rows=[2], red_cells=red_row0)
+    put_chart(1, 'Imagen 9', generate_prod_chart(labels, prod, cap))
 
-    # Slide 2: Chart Producción (Imagen 9)
-    c2_png = generate_prod_chart(sep_prod=prod_units, sep_cap=1345000)
-    replace_picture_blob(prs.slides[1], 'Imagen 9', c2_png)
-
-    # Slide 5: Nivel de Servicio [Und.] (Imagen 8: Tabla, Imagen 10: Gráfico)
-    sl_total_units = float(data.get("sl_total_units", 883422))
-    sl_delayed_units = float(data.get("sl_delayed_units", 708572))
-    sl_percent_units = float(data.get("sl_percent_units", 19.79))
-    prev_sl_tot_units = 8735876 + sl_total_units
-    prev_sl_del_units = 196388 + sl_delayed_units
-    curr_sl_prom_units = prev_sl_tot_units / 9.0
-    curr_sl_del_prom = prev_sl_del_units / 9.0
-
-    # Slide 5: Table Nivel de Servicio [Und.] (Imagen 8) -> NATIVE EDITABLE TABLE
+    # ---------------- Nivel de servicio en unidades (diapositiva 5) ----------------
+    sl_tot = [float(h["sl_total_units"]) for h in hist]
+    sl_del = [float(h["sl_delayed_units"]) for h in hist]
+    sl_pct = [((t - d) / t * 100.0) if t > 0 else 0.0 for t, d in zip(sl_tot, sl_del)]
+    ytd_tot, ytd_del = sum(sl_tot), sum(sl_del)
+    ytd_sl_pct = ((ytd_tot - ytd_del) / ytd_tot * 100.0) if ytd_tot > 0 else 0.0
     sl_u_rows = [
-        ["Total unidades Pedidos", "Ud/Mes", f"{int(sl_total_units):,}".replace(',', '.'), f"{int(curr_sl_prom_units):,}".replace(',', '.'), f"{int(prev_sl_tot_units):,}".replace(',', '.'), "971.715", "11.660.579"],
-        ["Total unidades Pedidos Atrasados", "Ud/Mes", f"{int(sl_delayed_units):,}".replace(',', '.'), f"{int(curr_sl_del_prom):,}".replace(',', '.'), f"{int(prev_sl_del_units):,}".replace(',', '.'), "16.937", "203.243"],
-        ["Nivel de Servicio.", "%", f"{sl_percent_units:.2f}%".replace('.', ','), "88,14%", "88,14%", "98,42%", "1181,01%"]
+        ["Total unidades Pedidos", "Ud/Mes", fmt_int(sl_tot[-1]), fmt_int(ytd_tot / n_months), fmt_int(ytd_tot), "971.715", "11.660.579"],
+        ["Total unidades Pedidos Atrasados", "Ud/Mes", fmt_int(sl_del[-1]), fmt_int(ytd_del / n_months), fmt_int(ytd_del), "16.937", "203.243"],
+        ["Nivel de Servicio.", "%", fmt_pct(sl_pct[-1]), fmt_pct(ytd_sl_pct), fmt_pct(ytd_sl_pct), "98,42%", "1181,01%"],
     ]
-    t5_png = draw_kpi_table(col_month=month_col, rows=sl_u_rows, green_rows=[2], red_cells=[(1, 2), (1, 3), (1, 4), (1, 5), (1, 6)])
-    replace_picture_with_native_table(prs.slides[4], 'Imagen 8', month_col, sl_u_rows, green_rows=[2], red_cells=[(1, 2), (1, 3), (1, 4), (1, 5), (1, 6)], fallback_png=t5_png)
+    put_table(4, 'Imagen 8', sl_u_rows, green_rows=[2], red_cells=red_row0)
+    put_chart(4, 'Imagen 10', generate_sl_units_chart(labels, sl_tot, sl_del, sl_pct))
 
-    c5_png = generate_sl_units_chart(sep_tot=sl_total_units, sep_del=sl_delayed_units, sep_pct=sl_percent_units)
-    replace_picture_blob(prs.slides[4], 'Imagen 10', c5_png)
-
-    # Slide 6: Nivel de Servicio [C.C.] (Imagen 9: Tabla, Imagen 11: Gráfico)
-    sl_total_cc = int(data.get("sl_total_cc", 202))
-    sl_delayed_cc = int(data.get("sl_delayed_cc", 162))
-    sl_percent_cc = float(data.get("sl_percent_cc", 19.80))
-    # Slide 6: Nivel de Servicio [C.C.] (Imagen 9) -> NATIVE EDITABLE TABLE
+    # ---------------- Nivel de servicio por pedidos / C.C. (diapositiva 6) ----------------
+    cc_tot = [int(h["sl_total_cc"]) for h in hist]
+    cc_del = [int(h["sl_delayed_cc"]) for h in hist]
+    cc_pct = [((t - d) / t * 100.0) if t > 0 else 0.0 for t, d in zip(cc_tot, cc_del)]
+    ytd_cc_tot, ytd_cc_del = sum(cc_tot), sum(cc_del)
+    ytd_cc_pct = ((ytd_cc_tot - ytd_cc_del) / ytd_cc_tot * 100.0) if ytd_cc_tot > 0 else 0.0
     sl_cc_rows = [
-        ["Total Pedidos", "CC/Mes", str(sl_total_cc), "101", f"{710 + sl_total_cc}", "78", "940"],
-        ["Total Pedidos Atrasados", "CC/Mes", str(sl_delayed_cc), "26", f"{76 + sl_delayed_cc}", "5", "54"],
-        ["Nivel de Servicio.", "%", f"{sl_percent_cc:.2f}%".replace('.', ','), "81,50%", "81,50%", "94,85%", "94,26%"]
+        ["Total Pedidos", "CC/Mes", str(cc_tot[-1]), fmt_int(ytd_cc_tot / n_months), str(ytd_cc_tot), "78", "940"],
+        ["Total Pedidos Atrasados", "CC/Mes", str(cc_del[-1]), fmt_int(ytd_cc_del / n_months), str(ytd_cc_del), "5", "54"],
+        ["Nivel de Servicio.", "%", fmt_pct(cc_pct[-1]), fmt_pct(ytd_cc_pct), fmt_pct(ytd_cc_pct), "94,85%", "94,26%"],
     ]
-    t6_png = draw_kpi_table(col_month=month_col, rows=sl_cc_rows, green_rows=[2], red_cells=[(1, 2), (1, 3), (1, 4), (1, 5), (1, 6)])
-    replace_picture_with_native_table(prs.slides[5], 'Imagen 9', month_col, sl_cc_rows, green_rows=[2], red_cells=[(1, 2), (1, 3), (1, 4), (1, 5), (1, 6)], fallback_png=t6_png)
+    put_table(5, 'Imagen 9', sl_cc_rows, green_rows=[2], red_cells=red_row0)
+    put_chart(5, 'Imagen 11', generate_sl_cc_chart(labels, cc_tot, cc_del, cc_pct))
 
-    c6_png = generate_sl_cc_chart(sep_tot=sl_total_cc, sep_del=sl_delayed_cc, sep_pct=sl_percent_cc)
-    replace_picture_blob(prs.slides[5], 'Imagen 11', c6_png)
-
-    # Slide 7: Detalle Atrasados (Imagen 7) -> NATIVE EDITABLE TABLE
+    # ---------------- Detalle de pedidos atrasados (diapositiva 7) ----------------
     delayed_orders = data.get("delayed_orders", [])
     t7_png = draw_delayed_orders_table(delayed_orders)
-    replace_picture_with_delayed_table(prs.slides[6], 'Imagen 7', delayed_orders, fallback_png=t7_png)
+    if not replace_picture_with_delayed_table(prs.slides[6], 'Imagen 7', delayed_orders, fallback_png=t7_png):
+        missing.append("diapositiva 7: Imagen 7 (tabla de atrasados)")
 
-    # Slide 8: Mermas Flexo (Imagen 9: Tabla, Imagen 12: Gráfico) -> NATIVE EDITABLE TABLE
-    flexo_prog = float(data.get("flexo_prog_kg", 45200))
-    flexo_proc = float(data.get("flexo_proc_kg", 44850))
-    flexo_waste = float(data.get("flexo_waste_kg", 412))
-    flexo_rate = (flexo_waste / flexo_proc * 100.0) if flexo_proc > 0 else 0.92
-    flexo_rows = [
-        ["Kgs programados en Impresión (Flexos)", "kgs", f"{int(flexo_prog):,}".replace(',', '.'), "44.882", "403.977", "38.423", "461.073"],
-        ["Kgs procesados en Impresión (Flexos)", "kgs", f"{int(flexo_proc):,}".replace(',', '.'), "44.918", "404.258", "38.372", "460.460"],
-        ["Kgs Merma en Flexos", "kgs", f"{int(flexo_waste):,}".replace(',', '.'), "905", "8.141", "264", "3.172"],
-        ["% de merma en Flexos", "%", f"{flexo_rate:.2f}%".replace('.', ','), "2,01%", "18,08%", "0,70%", "8,37%"]
+    # ---------------- Balance de masa por proceso (diapositivas 8 a 11) ----------------
+    # No existe una fuente automática de kg programados/procesados por proceso: se usan solo si el mes
+    # los trae en data/kpi_historial_2026.json; si no, esas 4 diapositivas se omiten (no se muestran cifras viejas).
+    process_defs = [
+        # clave, diapositiva, título, rótulos, filas de tabla
+        ('flexo', 7, 'Balance de masa [Flexografia]', 'Kgs programados en Impresión (Flexos)', 'Kgs procesados en Impresión (Flexos)', 'Kgs Merma en Flexos', '% de merma en Flexos', 0),
+        ('seri', 8, 'Balance de masa [Serigrafia]', 'Kgs programados en Impresión (Seris)', 'Kgs procesados en Impresión (Seris)', 'Kgs Merma en Seris', '% de merma en Seris', 1),
+        ('cys', 9, 'Balance de masa [Corte y Sellado]', 'Kgs programados en Corte y Sellado', 'Kgs procesados en Corte y Sellado', 'Kgs Merma en Cortadoras', '% de merma en Corte y Sellado', 0),
+        ('emb', 10, 'Balance de masa [Embalaje]', 'Kgs programados en Embalaje', 'Kgs procesados en Embalaje', 'Kgs Merma Embalaje', '% de merma Embalaje', 1),
     ]
-    t8_png = draw_kpi_table(col_month=month_col, rows=flexo_rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)])
-    replace_picture_with_native_table(prs.slides[7], 'Imagen 9', month_col, flexo_rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)], fallback_png=t8_png)
-    c8_png = generate_process_balance_chart(
-        title_name='Balance de masa [Flexografia]',
-        label_prog='Kgs programados en Impresión (Flexos) kgs',
-        label_proc='Kgs procesados en Impresión (Flexos) kgs',
-        label_waste='Kgs Merma en Flexos kgs',
-        label_rate='% de merma en Flexos %',
-        hist_prog=[49300, 63100, 53600, 46200, 40300, 29500, 36500, 41385],
-        hist_proc=[49500, 63300, 53400, 46500, 40600, 29500, 37200, 40424],
-        hist_waste=[520, 538, 523, 407, 396, 298, 331, 355],
-        sep_prog=flexo_prog, sep_proc=flexo_proc, sep_waste=flexo_waste,
-        y1_max=70000, y2_max=1.35, col_month=month_col
-    )
-    replace_picture_blob(prs.slides[7], 'Imagen 12', c8_png)
+    # Columnas "Gestión 2025" (valores históricos fijos de la plantilla, no se recalculan):
+    # por proceso, 4 filas (programados, procesados, merma, % merma) con (promedio 2025, total 2025).
+    gestion_2025 = {
+        'flexo': [("38.423", "461.073"), ("38.372", "460.460"), ("264", "3.172"), ("0,70%", "8,37%")],
+        'seri': [("3.216", "38.597"), ("3.138", "37.660"), ("19", "229"), ("0,69%", "8,26%")],
+        'cys': [("44.025", "528.294"), ("44.528", "534.336"), ("123", "1.474"), ("0,28%", "3,32%")],
+        'emb': [("43.587", "523.047"), ("43.661", "523.926"), ("115", "1.385"), ("0,27%", "3,24%")],
+    }
+    has_process = bool(data.get("has_process_balance"))
+    if has_process:
+        for key, slide_idx, title, l_prog, l_proc, l_waste, l_rate, waste_decimals in process_defs:
+            def series(field):
+                return [(h.get("procesos") or {}).get(key, {}).get(field) for h in hist]
+            prog, proc, waste = series("prog"), series("proc"), series("waste")
+            cur_prog, cur_proc, cur_waste = float(prog[-1] or 0), float(proc[-1] or 0), float(waste[-1] or 0)
+            rate = (cur_waste / cur_proc * 100.0) if cur_proc > 0 else 0.0
+            ok_idx = [i for i in range(n_months) if proc[i] is not None]
+            sum_prog = sum(float(prog[i] or 0) for i in ok_idx)
+            sum_proc = sum(float(proc[i] or 0) for i in ok_idx)
+            sum_waste = sum(float(waste[i] or 0) for i in ok_idx)
+            cnt = max(len(ok_idx), 1)
+            pct_list = [(float(waste[i] or 0) / float(proc[i]) * 100.0) if float(proc[i] or 0) > 0 else 0.0 for i in ok_idx]
+            prom_pct = (sum(pct_list) / len(pct_list)) if pct_list else 0.0
+            tot_pct = (sum_waste / sum_proc * 100.0) if sum_proc > 0 else 0.0
+            waste_fmt = (lambda v: fmt_dec(v, 1)) if waste_decimals else fmt_int
+            g25 = gestion_2025[key]
+            rows = [
+                [l_prog, "kgs", fmt_int(cur_prog), fmt_int(sum_prog / cnt), fmt_int(sum_prog), *g25[0]],
+                [l_proc, "kgs", fmt_int(cur_proc), fmt_int(sum_proc / cnt), fmt_int(sum_proc), *g25[1]],
+                [l_waste, "kgs", waste_fmt(cur_waste), waste_fmt(sum_waste / cnt), waste_fmt(sum_waste), *g25[2]],
+                [l_rate, "%", fmt_pct(rate), fmt_pct(prom_pct), fmt_pct(tot_pct), *g25[3]],
+            ]
+            put_table(slide_idx, 'Imagen 9', rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)])
+            put_chart(slide_idx, 'Imagen 12', generate_process_balance_chart(
+                title, labels, f"{l_prog} kgs", f"{l_proc} kgs", f"{l_waste} kgs", f"{l_rate} %", prog, proc, waste))
+    else:
+        print("AVISO: el mes no tiene kg programados/procesados por proceso en el historial: se omiten las diapositivas de Balance de masa.")
 
-    # Slide 9: Mermas Seri (Imagen 9: Tabla, Imagen 12: Gráfico) -> NATIVE EDITABLE TABLE
-    seri_prog = float(data.get("seri_prog_kg", 3200))
-    seri_proc = float(data.get("seri_proc_kg", 3150))
-    seri_waste = float(data.get("seri_waste_kg", 18.5))
-    seri_rate = (seri_waste / seri_proc * 100.0) if seri_proc > 0 else 0.58
-    seri_rows = [
-        ["Kgs programados en Impresión (Seris)", "kgs", f"{int(seri_prog):,}".replace(',', '.'), "2.806", "25.259", "3.216", "38.597"],
-        ["Kgs procesados en Impresión (Seris)", "kgs", f"{int(seri_proc):,}".replace(',', '.'), "2.545", "22.907", "3.138", "37.660"],
-        ["Kgs Merma en Seris", "kgs", f"{seri_waste:.1f}".replace('.', ','), "16,2", "143,5", "19", "229"],
-        ["% de merma en Seris", "%", f"{seri_rate:.2f}%".replace('.', ','), "0,65%", "5,44%", "0,69%", "8,26%"]
-    ]
-    t9_png = draw_kpi_table(col_month=month_col, rows=seri_rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)])
-    replace_picture_with_native_table(prs.slides[8], 'Imagen 9', month_col, seri_rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)], fallback_png=t9_png)
-    c9_png = generate_process_balance_chart(
-        title_name='Balance de masa [Serigrafia]',
-        label_prog='Kgs programados en Impresión (Seris) kgs',
-        label_proc='Kgs procesados en Impresión (Seris) kgs',
-        label_waste='Kgs Merma en Seris kgs',
-        label_rate='% de merma en Seris %',
-        hist_prog=[8650, 620, 2800, 750, 1380, 1370, 2090, 4579],
-        hist_proc=[4750, 1640, 2900, 3200, 1420, 1380, 2270, 2374],
-        hist_waste=[23.2, 11.0, 23.8, 31.4, 12.9, 10.2, 10.4, 9.0],
-        sep_prog=seri_prog, sep_proc=seri_proc, sep_waste=seri_waste,
-        y1_max=10000, y2_max=1.35, col_month=month_col
-    )
-    replace_picture_blob(prs.slides[8], 'Imagen 12', c9_png)
+    # ---------------- Total de merma (diapositiva 12) ----------------
+    waste_series = [float(h["waste_pct"]) for h in hist]
+    put_chart(11, 'Imagen 9', generate_waste_chart(labels, waste_series))
 
-    # Slide 10: Mermas Corte y Sellado (Imagen 9: Tabla, Imagen 12: Gráfico) -> NATIVE EDITABLE TABLE
-    cys_prog = float(data.get("cys_prog_kg", 52100))
-    cys_proc = float(data.get("cys_proc_kg", 52350))
-    cys_waste = float(data.get("cys_waste_kg", 118))
-    cys_rate = (cys_waste / cys_proc * 100.0) if cys_proc > 0 else 0.23
-    cys_rows = [
-        ["Kgs programados en Corte y Sellado", "kgs", f"{int(cys_prog):,}".replace(',', '.'), "50.313", "452.821", "44.025", "528.294"],
-        ["Kgs procesados en Corte y Sellado", "kgs", f"{int(cys_proc):,}".replace(',', '.'), "51.027", "459.243", "44.528", "534.336"],
-        ["Kgs Merma en Cortadoras", "kgs", f"{int(cys_waste):,}".replace(',', '.'), "122", "1.098", "123", "1.474"],
-        ["% de merma en Corte y Sellado", "%", f"{cys_rate:.2f}%".replace('.', ','), "0,24%", "1,95%", "0,28%", "3,32%"]
-    ]
-    t10_png = draw_kpi_table(col_month=month_col, rows=cys_rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)])
-    replace_picture_with_native_table(prs.slides[9], 'Imagen 9', month_col, cys_rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)], fallback_png=t10_png)
-    c10_png = generate_process_balance_chart(
-        title_name='Balance de masa [Corte y Sellado]',
-        label_prog='Kgs programados en Corte y Sellado kgs',
-        label_proc='Kgs procesados en Corte y Sellado kgs',
-        label_waste='Kgs Merma en Cortadoras kgs',
-        label_rate='% de merma en Corte y Sellado %',
-        hist_prog=[53800, 64500, 57800, 52800, 44500, 34800, 42500, 51214],
-        hist_proc=[55000, 65500, 60000, 52800, 45000, 35500, 43200, 51514],
-        hist_waste=[132, 170, 168, 95, 108, 89, 108, 126],
-        sep_prog=cys_prog, sep_proc=cys_proc, sep_waste=cys_waste,
-        y1_max=70000, y2_max=0.35, col_month=month_col
-    )
-    replace_picture_blob(prs.slides[9], 'Imagen 12', c10_png)
+    if missing:
+        print("ERROR: la plantilla no contiene estos elementos, el informe quedaría desactualizado:")
+        for item in missing:
+            print("  - " + item)
+        sys.exit(2)
 
-    # Slide 11: Mermas Embalaje (Imagen 9: Tabla, Imagen 12: Gráfico) -> NATIVE EDITABLE TABLE
-    emb_prog = float(data.get("emb_prog_kg", 52400))
-    emb_proc = float(data.get("emb_proc_kg", 52600))
-    emb_waste = float(data.get("emb_waste_kg", 6.2))
-    emb_rate = (emb_waste / emb_proc * 100.0) if emb_proc > 0 else 0.01
-    emb_rows = [
-        ["Kgs programados en Embalaje", "kgs", f"{int(emb_prog):,}".replace(',', '.'), "51.052", "459.472", "43.587", "523.047"],
-        ["Kgs procesados en Embalaje", "kgs", f"{int(emb_proc):,}".replace(',', '.'), "51.093", "459.843", "43.661", "523.926"],
-        ["Kgs Merma Embalaje", "kgs", f"{emb_waste:.1f}".replace('.', ','), "37", "337", "115", "1.385"],
-        ["% de merma Embalaje", "%", f"{emb_rate:.2f}%".replace('.', ','), "0,07%", "0,61%", "0,27%", "3,24%"]
-    ]
-    t11_png = draw_kpi_table(col_month=month_col, rows=emb_rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)])
-    replace_picture_with_native_table(prs.slides[10], 'Imagen 9', month_col, emb_rows, red_cells=[(3, 2), (3, 3), (3, 4), (3, 5), (3, 6)], fallback_png=t11_png)
-    c11_png = generate_process_balance_chart(
-        title_name='Balance de masa [Embalaje]',
-        label_prog='Kgs programados en Embalaje kgs',
-        label_proc='Kgs procesados en Embalaje kgs',
-        label_waste='Kgs Merma Embalaje kgs',
-        label_rate='% de merma Embalaje %',
-        hist_prog=[57800, 61500, 59500, 51200, 47000, 36200, 43200, 51530],
-        hist_proc=[55000, 62000, 60200, 51200, 47800, 36500, 43500, 51795],
-        hist_waste=[99, 74, 48, 36, 48, 15, 4, 7],
-        sep_prog=emb_prog, sep_proc=emb_proc, sep_waste=emb_waste,
-        y1_max=70000, y2_max=0.22, col_month=month_col
-    )
-    replace_picture_blob(prs.slides[10], 'Imagen 12', c11_png)
-
-    # Slide 12: Total de Merma (Imagen 9: Gráfico)
-    global_waste = float(data.get("global_waste_percent", 0.68))
-    c12_png = generate_waste_chart(sep_real=global_waste)
-    replace_picture_blob(prs.slides[11], 'Imagen 9', c12_png)
-
-    # Conservar únicamente las diapositivas que fueron modificadas (10 diapositivas clave de operaciones)
+    # Conservar únicamente las diapositivas de operaciones (sin Balance de masa si no hay datos).
     if not args.all_slides:
-        keep_indices = {0, 1, 4, 5, 6, 7, 8, 9, 10, 11}
+        keep_indices = {0, 1, 4, 5, 6, 11}
+        if has_process:
+            keep_indices |= {7, 8, 9, 10}
         for i in range(len(prs.slides) - 1, -1, -1):
             if i not in keep_indices:
                 rId = prs.slides._sldIdLst[i].rId
@@ -920,6 +834,7 @@ def main():
         prs.save(saved_path)
 
     print(f"Presentacion generada con exito: {saved_path} ({os.path.getsize(saved_path)} bytes, {len(prs.slides)} diapositivas)")
+
 
 if __name__ == "__main__":
     main()

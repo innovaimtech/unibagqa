@@ -18,7 +18,14 @@ declare(strict_types=1);
  *    - /stock/material-supply: Bandeja de entrada de solicitudes pendientes en bodega.
  *    - /stock/material-supply/dispatch: Registro del despacho físico de bobinas con códigos RB-*.
  *    - /stock/material-supply/resume: Reanudación de despachos en borrador.
- *    - /stock/material-supply/cancel: Cancelación justificada de solicitudes.
+ *    - /stock/material-supply/cancel: Cancelación justificada de un despacho pendiente.
+ *    - /stock/material-supply/accept: El encargado ACEPTA la solicitud (pasa a EN PREPARACIÓN).
+ *    - /stock/material-supply/reject: RECHAZA la solicitud (motivo obligatorio).
+ *    - /stock/material-supply/scan: Registra el escaneo de una bobina (una por vez, con validaciones).
+ *    - /stock/material-supply/scan-void: Anula un escaneo aún no despachado (motivo obligatorio).
+ *    - /stock/material-supply/cancel-request: Cancela la solicitud antes de despachar (motivo obligatorio).
+ *    - /stock/material-supply/receive: El encargado confirma la recepción en Bodega 3000.
+ *    - /stock/material-supply/reports: Reportes de traspasos entre bodegas.
  */
 
 require_once __DIR__ . '/../MaterialSupplyService.php';
@@ -43,7 +50,10 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
     $isOperator = $path === '/production/materials/request' || $path === '/production/materials/request/assign'
         || $path === '/production/materials/receive';
     $isWarehouse = $path === '/stock/material-supply' || $path === '/stock/material-supply/dispatch'
-        || $path === '/stock/material-supply/resume' || $path === '/stock/material-supply/cancel';
+        || $path === '/stock/material-supply/resume' || $path === '/stock/material-supply/cancel'
+        || in_array($path, ['/stock/material-supply/accept','/stock/material-supply/reject','/stock/material-supply/scan',
+            '/stock/material-supply/scan-void','/stock/material-supply/cancel-request','/stock/material-supply/receive',
+            '/stock/material-supply/reports'], true);
     if (!$isOperator && !$isWarehouse) return false;
     $actor = supplySessionActor($name);
     $service = new MaterialSupplyService(Db::erpPdo(),Db::trzPdo());
@@ -60,7 +70,21 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
             requireCsrf();
             if ($isOperator && isErpProductionReadOnlyMode($path)) throw new RuntimeException('Esta vista de produccion es de solo lectura.');
             if ($isWarehouse) {
-                if ($path === '/stock/material-supply/resume') {
+                $requestKey = (string)($_POST['request_key']??'');
+                if ($path === '/stock/material-supply/accept') {
+                    $service->accept($requestKey,$actor);
+                } elseif ($path === '/stock/material-supply/reject') {
+                    $service->reject($requestKey,(string)($_POST['reason']??''),$actor);
+                } elseif ($path === '/stock/material-supply/scan') {
+                    $service->scan($requestKey,(string)($_POST['code']??''),$actor);
+                } elseif ($path === '/stock/material-supply/scan-void') {
+                    $service->voidScan((string)($_POST['scan_key']??''),(string)($_POST['reason']??''),$actor);
+                } elseif ($path === '/stock/material-supply/cancel-request') {
+                    $service->cancelRequest($requestKey,(string)($_POST['reason']??''),$actor);
+                } elseif ($path === '/stock/material-supply/receive') {
+                    if (empty($_POST['receipt_confirmed'])) throw new RuntimeException('Confirma la recepción de la cantidad y los códigos.');
+                    $service->receiveByWarehouse((string)($_POST['dispatch_key']??''),$actor);
+                } elseif ($path === '/stock/material-supply/resume') {
                     $service->resume((string)($_POST['dispatch_key']??''),$actor);
                 } elseif ($path === '/stock/material-supply/cancel') {
                     $service->cancelPending((string)($_POST['dispatch_key']??''),(string)($_POST['reason']??''),$actor);
@@ -81,10 +105,22 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
                         supplyPostedQuantity(),(string)($_POST['notes']??''),$agId);
                 }
             }
-            redirectResponse($back . ($isWarehouse?'?':'&') . 'saved=1');
+            $reopen = '';
+            if ($isWarehouse && in_array($path, ['/stock/material-supply/accept','/stock/material-supply/scan','/stock/material-supply/scan-void'], true)
+                && preg_match('/^[a-f0-9]{32}$/D', (string)($_POST['request_key']??'')) === 1) {
+                $reopen = '&open=' . $_POST['request_key'];
+            }
+            redirectResponse($back . ($isWarehouse?'?':'&') . 'saved=1' . $reopen);
             return true;
         }
         if ($method !== 'GET') return false;
+        if ($path === '/stock/material-supply/reports') {
+            ob_start();
+            renderSupplyReports($service,(string)($_GET['from']??date('Y-m-d',strtotime('-30 days'))),(string)($_GET['to']??date('Y-m-d')));
+            $body = ob_get_clean();
+            render('Reportes de Traspasos',$body);
+            return true;
+        }
         if ($isWarehouse) {
             ob_start();
             renderSupplyRequestHistory($service,$service->requests(),0,true);
@@ -97,7 +133,14 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
             renderSupplyOperatorScreen($service,$context,$name,$orders,$kind);
         }
     } catch (Throwable $e) {
-        if ($method === 'POST') redirectResponse($back . ($isWarehouse?'?':'&') . 'error=' . rawurlencode($e->getMessage()));
+        if ($method === 'POST') {
+            $reopenOnError = '';
+            if ($isWarehouse && in_array($path, ['/stock/material-supply/scan','/stock/material-supply/scan-void'], true)
+                && preg_match('/^[a-f0-9]{32}$/D', (string)($_POST['request_key']??'')) === 1) {
+                $reopenOnError = '&open=' . $_POST['request_key'];
+            }
+            redirectResponse($back . ($isWarehouse?'?':'&') . 'error=' . rawurlencode($e->getMessage()) . $reopenOnError);
+        }
         $body='<div style="padding:20px;color:#991b1b">' . htmlspecialchars($e->getMessage(),ENT_QUOTES,'UTF-8') . '</div>';
         if ($isWarehouse) render('Solicitudes de Materiales',$body);
         else renderProdwrkShell('Solicitar Materiales',$body,7,$name,(string)($_SESSION['planta_name']??'PLANTA'));
@@ -284,18 +327,29 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
     ?>
     <div class="supply-panel">
     <h3><?=$warehouse?'Solicitudes de Materiales':'Solicitudes de la Maquina'?></h3>
-    <?php if ($warehouse): ?><a href="/stock/transfers" class="btnblue">Traspasos</a><?php endif; ?>
+    <?php if ($warehouse): ?><a href="/stock/transfers" class="btnblue">Traspasos</a> <a href="/stock/material-supply/reports" class="btnblue">Reportes</a><?php endif; ?>
     <div style="overflow:auto;margin-top:12px">
     <table class="supply-table"><thead><tr><th>Solicitud / Maquina</th><th>Material</th><th>Origen → Destino</th><th>Cantidades</th><th>Solicitado por</th><th>Opciones</th></tr></thead>
     <tbody>
     <?php foreach ($requests as $i=>$r): $remaining=max(0,(float)$r['requested_qty']-(float)$r['allocated_qty']);$details='supply_details_'.$i;$ctx=json_decode($r['context'],true)?:[]; ?>
-    <tr><td><b><?=supplyEscape(substr($r['request_key'],0,8))?></b><br><?=supplyEscape($ctx['machine_name']??('Maquina #'.($ctx['win_equipoid']??0)))?><?php if (!empty($ctx['planned_ot_number'])): ?><br>OT <?=supplyEscape($ctx['planned_ot_number'])?><?php elseif ((int)$r['worker_ot_id']>0): ?><br>OT asignacion #<?=(int)$r['worker_ot_id']?><?php endif; ?><br><?=supplyDate($r['created_at'])?></td>
+    <tr><td><b><?=supplyEscape(substr($r['request_key'],0,8))?></b><br><?=supplyEscape($ctx['machine_name']??('Maquina #'.($ctx['win_equipoid']??0)))?><?php if (!empty($ctx['planned_ot_number'])): ?><br>OT <?=supplyEscape($ctx['planned_ot_number'])?><?php elseif ((int)$r['worker_ot_id']>0): ?><br>OT asignacion #<?=(int)$r['worker_ot_id']?><?php endif; ?><br><?=supplyDate($r['created_at'])?><br><?=supplyStatusBadge($r)?></td>
         <td><b><?=supplyEscape($r['sku'])?></b><br><?=supplyEscape($r['description'])?><br><?=supplyEscape($r['notes'])?></td>
         <td><?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?> → <?=(int)$r['source_storehouse_id']===16?'Maquina':'3000'?></td>
         <td>Solicitado: <?=supplyEscape($r['requested_qty'])?><br>Entregado: <?=supplyEscape($r['delivered_qty'])?><br>Recibido: <?=supplyEscape($r['received_qty'])?><br><?=supplyEscape($r['unit'])?></td>
         <td><?=supplyEscape(supplyActorLabel($r['requested_by']))?></td>
         <td><button type="button" class="btnblue" onclick="supplyOpen('<?=$details?>')">Detalle</button>
-        <?php if ($warehouse && $remaining>0 && (int)$r['source_storehouse_id']!==16): ?><button type="button" class="btngreen" onclick="supplyOpen('supply_dispatch_<?=$i?>')">Entregar</button><?php endif; ?>
+        <?php if ($warehouse && (int)$r['source_storehouse_id']!==16): ?>
+            <?php if ($r['status']==='PENDING'): ?>
+            <form method="post" action="/stock/material-supply/accept" style="display:inline">
+                <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
+                <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
+                <button class="btngreen">Aceptar</button>
+            </form>
+            <button type="button" class="btngrey" style="color:#991b1b" onclick="supplyOpen('supply_reject_<?=$i?>')">Rechazar</button>
+            <?php elseif ($r['status']==='ACCEPTED' && $remaining>0): ?>
+            <button type="button" class="btngreen" onclick="supplyOpen('supply_dispatch_<?=$i?>')">Preparar y despachar</button>
+            <?php endif; ?>
+        <?php endif; ?>
         <?php if ((int)$r['source_storehouse_id']===16 && $remaining>0): ?><p>Registro anterior: crea una solicitud desde 900, 910 o 920.</p><?php endif; ?></td>
     </tr>
     <?php endforeach; ?>
@@ -333,27 +387,143 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
             <p>Solo si todavia no existe movimiento ERP.</p>
         </form>
         <?php endif; ?>
+        <?php endif; ?>
+        <?php if ($warehouse && $d['state']==='DISPATCHED'): ?>
+        <form method="post" action="/stock/material-supply/receive">
+            <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
+            <input type="hidden" name="dispatch_key" value="<?=supplyEscape($d['dispatch_key'])?>">
+            <label><input type="checkbox" name="receipt_confirmed" value="1" required> Confirmo la recepción en Bodega 3000 de esta cantidad y estos códigos.</label>
+            <button class="btngreen">Confirmar recepción</button>
+        </form>
         <?php endif; ?></td></tr>
         <?php endforeach; ?>
         </tbody></table></div>
         <div class="supply-actions"><button type="button" class="btngrey" onclick="this.closest('dialog').close()">Volver</button></div>
     </dialog>
-    <?php if ($warehouse && $remaining>0 && (int)$r['source_storehouse_id']!==16): ?>
+    <?php if ($warehouse && (int)$r['source_storehouse_id']!==16 && $r['status']==='PENDING'): ?>
+    <dialog id="supply_reject_<?=$i?>" class="supply-dialog">
+        <h2>Rechazar solicitud</h2>
+        <b><?=supplyEscape($r['sku'])?> · <?=supplyEscape(substr($r['request_key'],0,8))?></b>
+        <form method="post" action="/stock/material-supply/reject">
+            <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
+            <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
+            <label>Motivo del rechazo (obligatorio)</label>
+            <input name="reason" required maxlength="250" placeholder="Ej.: sin stock físico en la bodega">
+            <div class="supply-actions"><button type="button" class="btngrey" onclick="this.closest('dialog').close()">Volver</button><button class="btngrey" style="color:#991b1b;font-weight:700">Rechazar solicitud</button></div>
+        </form>
+    </dialog>
+    <?php endif; ?>
+    <?php if ($warehouse && (int)$r['source_storehouse_id']!==16 && $r['status']==='ACCEPTED' && $remaining>0):
+        $isRoll=str_starts_with(strtoupper($r['sku']),'TEL'); $reqQty=(float)$r['requested_qty']; $scans=$isRoll?$service->scans($r['request_key']):[]; ?>
     <dialog id="supply_dispatch_<?=$i?>" class="supply-dialog">
-        <h2>Entregar Materiales</h2><b><?=supplyEscape($r['sku'])?></b>
-        <p>La entrega mueve stock de <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?> a 3000 y genera el traspaso ERP.</p>
+        <h2>Preparar y despachar</h2>
+        <b><?=supplyEscape($r['sku'])?></b> <?=supplyEscape($r['description'])?>
+        <p>Se solicitaron <b><?=supplyEscape($r['requested_qty'])?> <?=supplyEscape($r['unit'])?></b> desde la Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?>. El despacho debe ser completo. Al despachar se descuenta el stock de origen, se carga en la Bodega 3000 y se genera el traspaso ERP.</p>
+        <?php if ($isRoll): ?>
+        <form method="post" action="/stock/material-supply/scan" autocomplete="off">
+            <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
+            <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
+            <label>Escanea el código de trazabilidad de la bobina (<?=count($scans)?> de <?=(int)$reqQty?>)</label>
+            <input name="code" required maxlength="60" autofocus placeholder="Escanea aquí; el lector envía Enter">
+            <div class="supply-actions"><button class="btnblue">Registrar escaneo</button></div>
+        </form>
+        <?php if ($scans): ?>
+        <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Código</th><th>Escaneado por</th><th>Fecha</th><th>Estado</th><th></th></tr></thead><tbody>
+        <?php foreach ($scans as $s): ?>
+        <tr><td><b><?=supplyEscape($s['code'])?></b></td><td><?=supplyEscape(supplyActorLabel($s['scanned_by']))?></td><td><?=supplyDate($s['scanned_at'])?></td>
+            <td><?=supplyEscape(['SCANNED'=>'Escaneada','DISPATCHED'=>'Despachada','RECEIVED'=>'Recibida'][$s['state']]??$s['state'])?></td>
+            <td><?php if ($s['state']==='SCANNED'): ?>
+            <form method="post" action="/stock/material-supply/scan-void" style="display:flex;gap:6px">
+                <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
+                <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
+                <input type="hidden" name="scan_key" value="<?=supplyEscape($s['scan_key'])?>">
+                <input name="reason" required maxlength="200" placeholder="Motivo de anulación">
+                <button class="btngrey">Anular</button>
+            </form><?php endif; ?></td></tr>
+        <?php endforeach; ?>
+        </tbody></table></div>
+        <?php endif; ?>
+        <?php else: ?><p>Este material se entrega por cantidad: no requiere escanear códigos.</p><?php endif; ?>
         <form method="post" action="/stock/material-supply/dispatch">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
             <input type="hidden" name="dispatch_key" value="<?=bin2hex(random_bytes(16))?>">
-            <label>Cantidad a entregar (<?=supplyEscape($r['unit'])?>)</label>
-            <input type="number" name="quantity" min="<?=str_starts_with(strtoupper($r['sku']),'TEL')?'1':'0.001'?>" max="<?=$remaining?>" step="<?=str_starts_with(strtoupper($r['sku']),'TEL')?'1':'0.001'?>" value="<?=$remaining?>" required>
-            <?php if (!str_starts_with(strtoupper($r['sku']),'TIN')): ?><label>Codigos de trazabilidad</label>
-            <textarea name="codes" rows="5" placeholder="Un codigo por linea" <?=str_starts_with(strtoupper($r['sku']),'TEL')?'required':''?>></textarea>
-            <p>En bobinas, escanea cada codigo individual. Puedes hacer varias entregas parciales.</p>
-            <?php endif; ?>
-            <div class="supply-actions"><button type="button" class="btngrey" onclick="this.closest('dialog').close()">Volver</button><button class="btngreen">Entregar</button></div>
+            <input type="hidden" name="quantity" value="<?=supplyEscape($r['requested_qty'])?>">
+            <div class="supply-actions"><button class="btngreen" <?=($isRoll && count($scans)!==(int)$reqQty)?'disabled title="Faltan bobinas por escanear"':''?>>Despachar a Bodega 3000</button></div>
+        </form>
+        <form method="post" action="/stock/material-supply/cancel-request" style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px">
+            <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
+            <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
+            <label>Cancelar esta solicitud (motivo obligatorio)</label>
+            <input name="reason" required maxlength="250">
+            <div class="supply-actions"><button type="button" class="btngrey" onclick="this.closest('dialog').close()">Volver</button><button class="btngrey">Cancelar solicitud</button></div>
         </form>
     </dialog>
-    <?php endif; endforeach;
+    <?php endif;
+    endforeach;
+    if ($warehouse && !empty($_GET['open'])) {
+        foreach ($requests as $i=>$r) {
+            if ($r['request_key']===(string)$_GET['open']) {
+                echo '<script>document.addEventListener("DOMContentLoaded",function(){var d=document.getElementById("supply_dispatch_'.(int)$i.'");'
+                    .'if(d&&d.showModal){d.showModal();var f=d.querySelector("input[name=code]");if(f)f.focus();}});</script>';
+            }
+        }
+    }
 }
+
+/** Etiqueta de estado de la solicitud (con motivo de rechazo o cancelación si corresponde). */
+function supplyStatusBadge(array $r): string
+{
+    $status = (string)($r['status'] ?? 'PENDING');
+    $labels = ['PENDING'=>['Pendiente','#92400e','#fef3c7'],'ACCEPTED'=>['En preparación','#1e40af','#dbeafe'],
+        'REJECTED'=>['Rechazada','#991b1b','#fee2e2'],'CANCELLED'=>['Cancelada','#475569','#e2e8f0'],
+        'DISPATCHED'=>['Despachada','#0f766e','#ccfbf1'],'RECEIVED'=>['Recibida','#166534','#dcfce7']];
+    [$text,$color,$bg] = $labels[$status] ?? [$status,'#334155','#f1f5f9'];
+    $html = '<span style="display:inline-block;margin-top:4px;padding:2px 8px;border-radius:10px;font-size:12px;font-weight:700;color:'.$color.';background:'.$bg.'">'.supplyEscape($text).'</span>';
+    if ($status === 'REJECTED' && !empty($r['reject_reason'])) $html .= '<br><small>Motivo: '.supplyEscape($r['reject_reason']).'</small>';
+    if ($status === 'CANCELLED' && !empty($r['cancel_reason'])) $html .= '<br><small>Motivo: '.supplyEscape($r['cancel_reason']).'</small>';
+    return $html;
+}
+
+/** Pantalla de reportes de traspasos: respuesta por bodega, movimientos y diferencias. */
+function renderSupplyReports(MaterialSupplyService $service, string $from, string $to): void
+{
+    supplyAssets();
+    $fromTs = strtotime($from . ' 00:00:00') ?: strtotime('-30 days');
+    $toTs = strtotime($to . ' 23:59:59') ?: time();
+    $rep = $service->report($fromTs, $toTs);
+    ?>
+    <div class="supply-panel">
+    <h3>Reportes de Traspasos de Bodega</h3>
+    <a href="/stock/material-supply" class="btnblue">Volver a solicitudes</a>
+    <form method="get" style="display:flex;gap:10px;align-items:end;margin:12px 0;flex-wrap:wrap">
+        <div><label>Desde</label><input type="date" name="from" value="<?=supplyEscape(date('Y-m-d',$fromTs))?>"></div>
+        <div><label>Hasta</label><input type="date" name="to" value="<?=supplyEscape(date('Y-m-d',$toTs))?>"></div>
+        <button class="btnblue">🔍 Aplicar Filtros</button>
+    </form>
+    <h4>Solicitudes y tiempo de respuesta por bodega de origen</h4>
+    <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Bodega</th><th>Solicitudes</th><th>Pendientes</th><th>Rechazadas</th><th>Canceladas</th><th>Tiempo medio de respuesta</th></tr></thead><tbody>
+    <?php foreach ($rep['response'] as $row): $sec=$row['avg_response_seconds']; ?>
+    <tr><td><?=supplyWarehouseLabel((int)$row['source_storehouse_id'])?></td><td><?=(int)$row['total']?></td><td><?=(int)$row['pending']?></td><td><?=(int)$row['rejected']?></td><td><?=(int)$row['cancelled']?></td>
+        <td><?=$sec===null?'-':supplyEscape(floor((float)$sec/3600).' h '.floor(fmod((float)$sec,3600)/60).' min')?></td></tr>
+    <?php endforeach; if (!$rep['response']): ?><tr><td colspan="6">Sin solicitudes en el periodo.</td></tr><?php endif; ?>
+    </tbody></table></div>
+    <h4 style="margin-top:20px">Movimientos por producto y bodega</h4>
+    <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Producto</th><th>Bodega origen</th><th>Despachos</th><th>Cantidad</th></tr></thead><tbody>
+    <?php foreach ($rep['movements'] as $row): ?>
+    <tr><td><b><?=supplyEscape($row['sku'])?></b><br><?=supplyEscape($row['description'])?></td><td><?=supplyWarehouseLabel((int)$row['source_storehouse_id'])?> → 3000</td><td><?=(int)$row['dispatches']?></td><td><?=supplyEscape($row['quantity'])?> <?=supplyEscape($row['unit'])?></td></tr>
+    <?php endforeach; if (!$rep['movements']): ?><tr><td colspan="4">Sin movimientos en el periodo.</td></tr><?php endif; ?>
+    </tbody></table></div>
+    <h4 style="margin-top:20px">Diferencias: solicitado, despachado y recibido</h4>
+    <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Solicitud</th><th>Producto</th><th>Bodega</th><th>Estado</th><th>Solicitado</th><th>Despachado</th><th>Recibido</th><th>Diferencia</th></tr></thead><tbody>
+    <?php foreach ($rep['differences'] as $row): $diff=(float)$row['dispatched_qty']-(float)$row['received_qty']; $short=(float)$row['requested_qty']-(float)$row['dispatched_qty']; ?>
+    <tr><td><?=supplyEscape(substr($row['request_key'],0,8))?></td><td><?=supplyEscape($row['sku'])?></td><td><?=supplyWarehouseLabel((int)$row['source_storehouse_id'])?></td>
+        <td><?=supplyEscape(['ACCEPTED'=>'En preparación','DISPATCHED'=>'Despachada','RECEIVED'=>'Recibida'][$row['status']]??$row['status'])?></td>
+        <td><?=supplyEscape($row['requested_qty'])?></td><td><?=supplyEscape($row['dispatched_qty'])?></td><td><?=supplyEscape($row['received_qty'])?></td>
+        <td style="<?=(abs($diff)>0.000001||abs($short)>0.000001)?'color:#991b1b;font-weight:700':''?>"><?=abs($diff)>0.000001?'Sin recibir: '.supplyEscape($diff):(abs($short)>0.000001?'Falta despachar: '.supplyEscape($short):'OK')?></td></tr>
+    <?php endforeach; if (!$rep['differences']): ?><tr><td colspan="8">Sin solicitudes en el periodo.</td></tr><?php endif; ?>
+    </tbody></table></div>
+    </div>
+    <?php
+}
+

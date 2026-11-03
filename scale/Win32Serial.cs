@@ -89,6 +89,9 @@ namespace Unibag.Serial {
         public bool IsOpen { get { return _handle != null && !_handle.IsInvalid && !_handle.IsClosed; } }
         public string PortName { get; private set; }
 
+        /// <summary>Advertencia (si hubo) al aplicar la configuración 8N1 del puerto.</summary>
+        public string ConfigWarning { get; private set; }
+
         public bool Open(string portName, int baudRate = 9600) {
             Close();
             PortName = portName;
@@ -109,15 +112,30 @@ namespace Unibag.Serial {
             };
             SetCommTimeouts(_handle, ref timeouts);
 
-            // Intentar SetCommState pero tolerar si el driver CH340 devuelve 31
+            // Configuración completa del puerto: 8 bits de datos, sin paridad, 1 bit de parada
+            // (8N1, igual que el modo Web Serial del navegador) y SIN control de flujo ni
+            // líneas DTR/RTS activas. Antes solo se aplicaban los baudios.
+            // Se tolera el error 31 de algunos drivers CH340, pero queda registrado en
+            // ConfigWarning para poder diagnosticarlo.
+            ConfigWarning = "";
             try {
                 DCB dcb = new DCB();
                 dcb.DCBlength = Marshal.SizeOf(typeof(DCB));
                 if (GetCommState(_handle, ref dcb)) {
                     dcb.BaudRate = (uint)baudRate;
-                    SetCommState(_handle, ref dcb);
+                    dcb.ByteSize = 8;          // bits de datos
+                    dcb.Parity = 0;            // NOPARITY
+                    dcb.StopBits = 0;          // ONESTOPBIT
+                    dcb.Flags = 0x0001;        // solo fBinary: sin flujo, DTR/RTS deshabilitados
+                    if (!SetCommState(_handle, ref dcb)) {
+                        ConfigWarning = "SetCommState falló (código " + Marshal.GetLastWin32Error() + "); se usa la configuración actual del driver.";
+                    }
+                } else {
+                    ConfigWarning = "GetCommState falló (código " + Marshal.GetLastWin32Error() + ").";
                 }
-            } catch {}
+            } catch (Exception ex) {
+                ConfigWarning = "Error configurando el puerto: " + ex.Message;
+            }
 
             // Limpiar buffers
             try { PurgeComm(_handle, 0x0004 | 0x0008); } catch {}

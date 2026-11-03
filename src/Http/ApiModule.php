@@ -85,7 +85,8 @@ function handleApiRoutes(
         $lineId = isset($_POST['purchase_order_line_id']) ? (int)$_POST['purchase_order_line_id'] : 0;
         $containerItemId = isset($_POST['import_container_item_id']) ? (int)$_POST['import_container_item_id'] : 0;
         $warehouseId = isset($_POST['warehouse_id']) ? (int)$_POST['warehouse_id'] : 0;
-        $weight = isset($_POST['weight_kg']) ? (float)$_POST['weight_kg'] : 0.0;
+        // Se acepta coma o punto decimal ("15,5" o "15.5"). Antes "15,5" se leía como 15.
+        $weight = isset($_POST['weight_kg']) ? (float)str_replace(',', '.', trim((string)$_POST['weight_kg'])) : 0.0;
         $receivedQty = isset($_POST['received_qty']) ? (float)$_POST['received_qty'] : 1.0;
         $receptionMode = isset($_POST['reception_mode']) ? (string)$_POST['reception_mode'] : 'QUANTITY';
 
@@ -119,6 +120,11 @@ function handleApiRoutes(
             ? '/reception/labels/' . $batch['token']
             : '/rolls/' . $rollId . '/label';
 
+        $clientQueued = ($savedBatch['client_queued'] ?? '0') === '1';
+        $inlinePrintJob = ($batch['printed'] !== '1' && $clientQueued)
+            ? PrintService::popLastClientJob()
+            : null;
+
         echo json_encode([
             'ok' => true,
             'id' => $rollId,
@@ -128,7 +134,9 @@ function handleApiRoutes(
             'print_url' => $labelUrl . '?auto_print=1',
             'server_print_url' => '/rolls/' . $rollId . '/label?server_print=1',
             'printed' => $batch['printed'] === '1',
-            'print_error' => $savedBatch['print_error'],
+            'client_print' => $inlinePrintJob !== null,
+            'print_job' => $inlinePrintJob,
+            'print_error' => $inlinePrintJob !== null ? '' : $savedBatch['print_error'],
             'sync_error' => $result['sync_error'] ?? null,
         ], JSON_UNESCAPED_UNICODE);
         return true;

@@ -154,7 +154,7 @@ function unibagRenderWarehousesPage(ReceptionService $service): void
         </div>
         <div style="background:#fff;padding:14px 16px;border-radius:10px;border:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
           <div class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase">Stock real total (unid)</div>
-          <div style="font-size:22px;font-weight:800;color:#2563eb;margin-top:2px">' . h(number_format($totalStockUnits, 0, ',', '.')) . '</div>
+          <div style="font-size:22px;font-weight:800;color:#0f766e;margin-top:2px">' . h(number_format($totalStockUnits, 0, ',', '.')) . '</div>
           <div class="muted" style="font-size:11px">Existencias en inventario ERP</div>
         </div>
         <div style="background:#fff;padding:14px 16px;border-radius:10px;border:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
@@ -179,11 +179,11 @@ function unibagRenderWarehousesPage(ReceptionService $service): void
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <a class="btn secondary" href="/warehouses?download=excel" style="display:inline-flex;align-items:center;gap:6px" title="Exportar listado completo de bodegas y existencias a Excel">
+            <a class="ub-btn-excel" href="/warehouses?download=excel" title="Exportar listado completo de bodegas y existencias a Excel">
               <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-              Descargar Excel
+              Exportar Excel
             </a>
-            ' . ($canEdit ? '<a class="btn" href="/warehouses/new">+ Nueva bodega</a>' : '<span class="muted" style="font-size:11px;padding:6px 10px;background:#f1f5f9;border-radius:6px" title="Modificaciones permitidas únicamente para HECTOR y JAVIER">🔒 Bloqueado</span>') . '
+            ' . ($canEdit ? '<a class="ub-btn-primary" href="/warehouses/new">+ Nueva bodega</a>' : '<span class="muted" style="font-size:11px;padding:6px 10px;background:#f1f5f9;border-radius:6px" title="Modificaciones permitidas únicamente para HECTOR y JAVIER">🔒 Bloqueado</span>') . '
           </div>
         </div>
         <div class="erp-prod-panel-body" style="padding:14px">';
@@ -196,7 +196,7 @@ function unibagRenderWarehousesPage(ReceptionService $service): void
     }
 
     $body .= '<div class="table-wrap" style="margin-top:0"><table class="erp-prod-table" style="width:100%;border-collapse:collapse;font-size:13px">
-      <thead style="background:#0f172a;color:#fff">
+      <thead>
         <tr>
           <th style="padding:8px 10px;text-align:left">Código</th>
           <th style="padding:8px 10px;text-align:left">Nombre</th>
@@ -267,7 +267,7 @@ function unibagRenderWarehousesPage(ReceptionService $service): void
 
         if ($erpStorehouseId > 0 && $stockUnitsTotal > 0) {
             $stockHtml = '<div style="font-weight:800;font-size:14px">
-                <a href="/stock?bodega=' . $erpStorehouseId . '" style="color:#2563eb;text-decoration:none" title="Ver artículos de esta bodega en Inventario ERP">
+                <a href="/stock?bodega=' . $erpStorehouseId . '" style="color:#00A9A6;text-decoration:none" title="Ver artículos de esta bodega en Inventario ERP">
                   ' . h(number_format($stockUnitsTotal, 0, ',', '.')) . '
                 </a>
               </div>';
@@ -420,7 +420,7 @@ function unibagRenderWarehouseFormPage(ReceptionService $service, ?int $id = nul
     $title = $isEdit ? 'Editar bodega #' . (int)$id : 'Nueva bodega';
     $submitLabel = $isEdit ? 'Guardar cambios' : 'Crear bodega';
 
-    $body = '<div class="erp-prod-shell" style="max-width:780px;margin:0 auto">
+    $body = '<div style="max-width:960px;width:100%;margin:0 auto">
       <div class="erp-prod-panel">
         <div class="erp-prod-panel-head" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid #e5e7eb;background:#f8fafc;border-radius:10px 10px 0 0">
           <div style="display:flex;align-items:center;gap:8px">

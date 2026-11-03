@@ -57,6 +57,22 @@ final class ScaleService
         // Caso 2: Modo producción con puente HTTP hacia el puerto COM de la balanza
         if ($mode === 'http') {
             $url = (string)($this->env['SCALE_HTTP_URL'] ?? 'http://127.0.0.1:8765/weight');
+            $parsedHost = strtolower((string)(parse_url($url, PHP_URL_HOST) ?? ''));
+            $isLoopbackBridge = in_array($parsedHost, ['127.0.0.1', 'localhost', '::1'], true);
+            $isRemoteClient = class_exists('PrintService')
+                ? PrintService::isRemoteClientRequest()
+                : !in_array(trim((string)($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1')), ['', '127.0.0.1', '::1', 'localhost'], true);
+
+            if ($isRemoteClient && $isLoopbackBridge) {
+                return [
+                    'ok' => false,
+                    'weight_kg' => null,
+                    'raw' => null,
+                    'client_serial_required' => true,
+                    'error' => 'Conecta la balanza USB directamente en tu navegador desde el botón "⚖️ Balanza USB".',
+                ];
+            }
+
             return $this->readFromHttp($url);
         }
 
@@ -148,6 +164,9 @@ final class ScaleService
         }
 
         // Retornar lectura limpia y redondeada a 3 decimales (precisión de gramos)
-        return ['ok' => true, 'weight_kg' => round($weight, 3), 'raw' => (string)$raw, 'error' => null];
+        // "stable" viene del puente (null si el puente no lo informa). Las pantallas lo usan
+        // para no aceptar un peso en movimiento.
+        $stable = array_key_exists('stable', $data) ? (bool)$data['stable'] : null;
+        return ['ok' => true, 'weight_kg' => round($weight, 3), 'stable' => $stable, 'raw' => (string)$raw, 'error' => null];
     }
 }

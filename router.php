@@ -20,12 +20,21 @@ declare(strict_types=1);
  * 2. Si la petición corresponde a un archivo estático real existente en /public
  *    (ej. CSS, JavaScript, fuentes, librerías, favicon), lo sirve directamente
  *    con el tipo MIME adecuado y cabeceras de caché.
- * 3. Para todas las demás rutas dinámicas de la aplicación, delega la ejecución
+ *    Seguridad: la ruta se resuelve con realpath() y SOLO se sirven archivos que
+ *    estén dentro de /public (bloquea path traversal tipo /../.env) y nunca
+ *    archivos ocultos (.env, .htaccess, etc.).
+ * 3. Los scripts PHP de compatibilidad ubicados directamente en /public
+ *    (ej. prodwrk.php de enlaces antiguos de planta) se ejecutan tal cual.
+ * 4. Para todas las demás rutas dinámicas de la aplicación, delega la ejecución
  *    a public/index.php (Front Controller principal).
  */
 
 $uri = urldecode(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/');
-$publicFile = __DIR__ . '/public' . $uri;
+
+if (str_contains($uri, "\0")) {
+    http_response_code(400);
+    exit;
+}
 
 // Rutas de documentos/ERP: deben pasar siempre por unibagServeErpDocument en index.php
 $isErpDoc = str_starts_with($uri, '/docs/')
@@ -34,8 +43,17 @@ $isErpDoc = str_starts_with($uri, '/docs/')
     || $uri === '/api/document'
     || $uri === '/doc';
 
-if (!$isErpDoc && $uri !== '/' && file_exists($publicFile) && !is_dir($publicFile)) {
+$publicRoot = realpath(__DIR__ . '/public');
+$publicFile = ($publicRoot !== false && $uri !== '/') ? realpath($publicRoot . $uri) : false;
+$normalize = static fn(string $p): string => strtolower(str_replace('\\', '/', $p));
+
+$isInsidePublic = $publicFile !== false
+    && str_starts_with($normalize($publicFile), $normalize($publicRoot) . '/');
+$isHidden = $isInsidePublic && str_starts_with(basename($publicFile), '.');
+
+if (!$isErpDoc && $isInsidePublic && !$isHidden && is_file($publicFile)) {
     $ext = strtolower(pathinfo($publicFile, PATHINFO_EXTENSION));
+
     if ($ext !== 'php') {
         $mimes = [
             'css'   => 'text/css; charset=UTF-8',
@@ -59,6 +77,15 @@ if (!$isErpDoc && $uri !== '/' && file_exists($publicFile) && !is_dir($publicFil
         header('Content-Length: ' . filesize($publicFile));
         header('Cache-Control: public, max-age=86400');
         readfile($publicFile);
+        exit;
+    }
+
+    // Scripts PHP de compatibilidad directamente en /public (ej. prodwrk.php), excepto el Front Controller
+    if (
+        basename($publicFile) !== 'index.php'
+        && $normalize(dirname($publicFile)) === $normalize($publicRoot)
+    ) {
+        require $publicFile;
         exit;
     }
 }

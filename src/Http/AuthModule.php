@@ -493,6 +493,23 @@ function handleAuthRoutes(string $path, string $method): bool
         return true;
     }
 
+    if ($path === '/switch-area' && $method === 'GET') {
+        if (!unibagIsAuthenticated()) {
+            redirectResponse('/login');
+            return true;
+        }
+        $targetArea = normalizeErpArea((string)($_GET['area'] ?? 'ERP'));
+        $perms = sessionAreaPermissions();
+        if (userCanAccessArea($targetArea, $perms)) {
+            $_SESSION['erp_area'] = $targetArea;
+            $_SESSION['erp_area_label'] = erpAreaDefinitions()[$targetArea]['label'] ?? $targetArea;
+            redirectResponse(erpAreaDefinitions()[$targetArea]['home'] ?? '/');
+            return true;
+        }
+        redirectResponse(firstAllowedAreaHome($perms));
+        return true;
+    }
+
     return false;
 }
 
@@ -529,6 +546,10 @@ function unibagEnforceAuthenticatedAreaAccess(string $path): void
 
     if (!unibagIsAuthenticated()) {
         redirectResponse('/login');
+    }
+
+    if ($path === '/switch-area') {
+        return;
     }
 
     $sessionAreaPermissions = sessionAreaPermissions();
@@ -613,6 +634,66 @@ function unibagCanUserPerformModifications(): bool
     }
 
     return false;
+}
+
+/**
+ * Valida credenciales contra la base de datos verificando si corresponden a Héctor Matus (4077) o Javier Perozo (4129).
+ *
+ * @return array{id: int, user_login: string, user_firstname: string, user_lastname: string}|null
+ */
+function unibagValidateHectorOrJavierCredentials(string $login, string $pass): ?array
+{
+    $login = strtoupper(trim($login));
+    $pass = trim($pass);
+    if ($login === '' || $pass === '') {
+        return null;
+    }
+    if ($login !== 'HECTOR' && $login !== 'JAVIER') {
+        return null;
+    }
+    try {
+        $pdo = Db::erpPdo();
+        $st = $pdo->prepare("SELECT id, user_login, user_firstname, user_lastname FROM user WHERE id IN (4077, 4129) AND UPPER(user_login) = :login AND user_pass = :pass AND user_status = 1 LIMIT 1");
+        $st->execute([
+            ':login' => $login,
+            ':pass' => md5($pass),
+        ]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    } catch (Throwable) {
+        return null;
+    }
+}
+
+/**
+ * Determina si el usuario actual (por sesión) o por credenciales directas de supervisor
+ * cuenta con autorización para borrar registros de producción (exclusivo Javier y Héctor).
+ *
+ * @return array{ok: bool, authorizer?: string, error?: string}
+ */
+function unibagCanDeleteProductionRecord(?string $supervisorUser = null, ?string $supervisorPass = null): array
+{
+    // 1. Si la sesión activa ya pertenece a Héctor o Javier
+    if (unibagCanUserPerformModifications()) {
+        $name = trim((string)($_SESSION['auth_display_name'] ?? $_SESSION['user_firstname'] ?? $_SESSION['user_login'] ?? 'Javier / Héctor'));
+        return ['ok' => true, 'authorizer' => $name];
+    }
+
+    // 2. Si se suministraron credenciales de supervisor en la petición
+    $user = trim((string)$supervisorUser);
+    $pass = trim((string)$supervisorPass);
+    if ($user !== '' && $pass !== '') {
+        $validated = unibagValidateHectorOrJavierCredentials($user, $pass);
+        if ($validated !== null) {
+            $fullName = trim(($validated['user_firstname'] ?? '') . ' ' . ($validated['user_lastname'] ?? ''));
+            return ['ok' => true, 'authorizer' => $fullName ?: (string)$validated['user_login']];
+        }
+    }
+
+    return [
+        'ok' => false,
+        'error' => 'Acceso denegado: únicamente Javier Perozo y Héctor Matus tienen autorización para eliminar registros de producción.',
+    ];
 }
 
 /** Excepcion limitada a la toma de inventario: responsables y usuarios de Bodega.
