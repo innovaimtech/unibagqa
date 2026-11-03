@@ -462,9 +462,19 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
             <?php if ($compatible): ?>
                 ✅ <b><?=count($compatible)?> tipo<?=count($compatible)>1?'s':''?> de bobina sirven para esta OT</b>
                 <b class="big"><?=supplyEscape(implode(', ',array_column($compatible,'sku')))?></b>
-                Coinciden material, color y gramaje y tienen ancho suficiente. Se muestran primero.
-            <?php else: ?>
-                ⚠️ No hay bobinas con stock en 100 o 200 que coincidan con los cuatro datos de esta OT. Las alternativas indican qué dato revisar; puedes elegirlas manualmente.
+                Ningún dato contradice la OT y al menos dos coinciden (gramaje ±5 g/m², ancho igual o mayor). Se muestran primero.
+            <?php else:
+                $near=array_values(array_filter($rolls,static fn($r)=>count(array_filter($r['checks'],static fn($v)=>$v===false))<=1 && (int)$r['match_score']>0));
+                $near=array_slice($near,0,5); ?>
+                <?php if ($requirements['material']==='' && $requirements['width_cm']<=0 && $requirements['color']==='' && $requirements['grammage']<=0): ?>
+                ⚠️ La ficha de esta OT no trae datos de la tela (material, ancho, color ni gramaje), por eso no se puede recomendar. Elige la bobina manualmente en «Todas» o completa la ficha de la OT.
+                <?php else: ?>
+                ⚠️ Ninguna bobina con stock en 100 o 200 coincide completamente con esta OT.
+                <?php if ($near): ?>Las más cercanas:
+                <b class="big"><?=supplyEscape(implode(', ',array_column($near,'sku')))?></b>
+                Se muestran primero; revisa en cada tarjeta qué dato no coincide.
+                <?php else: ?>No hay opciones cercanas; puedes elegir otra manualmente en «Todas».<?php endif; ?>
+                <?php endif; ?>
             <?php endif; ?>
         </div>
         <?php endif; ?>
@@ -540,8 +550,11 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
                     </div>
                     <?php endif; ?>
                     <?php if ($isRec): ?><div><span class="sp-badge good">✔ <?=$itemKind==='inks'?'Color de la OT':'Recomendada para esta OT'?></span></div>
-                    <?php elseif ($agenda && $itemKind==='rolls'): $failed=array_keys(array_filter($item['checks'],static fn($match)=>!$match)); ?>
-                    <div><span class="sp-badge review">Revisar: <?=supplyEscape($failed?implode(', ',$failed):'compatibilidad')?></span></div>
+                    <?php elseif ($agenda && $itemKind==='rolls'):
+                        $failed=array_keys(array_filter($item['checks'],static fn($match)=>$match===false));
+                        $unknown=array_keys(array_filter($item['checks'],static fn($match)=>$match===null)); ?>
+                    <div><?php if ($failed): ?><span class="sp-badge review">No coincide: <?=supplyEscape(implode(', ',$failed))?></span><?php endif; ?>
+                    <?php if ($unknown): ?><span class="sp-badge" style="background:#e2e8f0;color:#475569">Sin dato: <?=supplyEscape(implode(', ',$unknown))?></span><?php endif; ?></div>
                     <?php endif; ?>
                     <div class="sp-foot">
                         <div class="sp-avail"><b><?=supplyNum((float)$item['available_qty'])?></b><?=supplyEscape($item['unit'])?> disponibles</div>
