@@ -127,6 +127,34 @@ function handleWorkOrderLifecycleRoutes(
     int $plantaId,
     string $plantaName
 ): bool {
+    // Peso registrado en trazabilidad de una bobina (roll_code o etiqueta de bodega): para completar el peso al escanear.
+    if ($path === '/production/api/roll-weight' && $method === 'GET') {
+        header('Content-Type: application/json; charset=utf-8');
+        if (function_exists('session_write_close')) {
+            session_write_close();
+        }
+        $code = trim((string)($_GET['code'] ?? ''));
+        if ($code === '') {
+            echo json_encode(['ok' => false, 'error' => 'Ingrese un código.']);
+            return true;
+        }
+        try {
+            $trz = Db::trzPdo();
+            $roll = TraceableRollLookup::find($trz, $code);
+            if (!$roll) {
+                echo json_encode(['ok' => false, 'error' => 'No existe una bobina con ese código de trazabilidad.']);
+                return true;
+            }
+            $kg = TraceableRollLookup::weightKg($trz, $roll, $code);
+            echo json_encode(['ok' => true, 'roll_code' => (string)$roll['roll_code'], 'sku_code' => (string)($roll['sku_code'] ?? ''),
+                'weight_kg' => $kg, 'has_weight' => $kg > 0], JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $e) {
+            error_log('roll-weight: ' . $e->getMessage());
+            echo json_encode(['ok' => false, 'error' => 'No se pudo consultar la trazabilidad.']);
+        }
+        return true;
+    }
+
     if ($path === '/production/api/search-cc' && $method === 'GET') {
         header('Content-Type: application/json; charset=utf-8');
         $q = trim((string)($_GET['q'] ?? ''));

@@ -17,6 +17,62 @@ trait RewindAndPackagingServiceTrait
         return $this->lastSupplyConsumptionWarning;
     }
 
+    /**
+     * Cinta de embalaje según la caja: SIN logo (caja genérica) = INS0038; CON logo (impresa) = INS0073.
+     * Sin logo cuando el pedido tiene "Logotipo empresa" = No (Genérico) o la medida dice SIN LOGO / SIN IMPRESION.
+     */
+    private function resolvePackagingTapeType(int $workerOtId, string $medidasCaja): string
+    {
+        $m = mb_strtoupper($medidasCaja);
+        if (str_contains($m, 'SIN LOGO') || str_contains($m, 'SIN IMPRESION') || str_contains($m, 'SIN IMPRESIÓN')) {
+            return 'INS0038';
+        }
+        try {
+            $st = $this->erpPdo->prepare('SELECT o.req_caja_impresa FROM prod_worker_ot ot JOIN prod_agenda a ON a.id = ot.wok_ag_id
+                JOIN orders o ON o.id = a.ag_reqid WHERE ot.id = ?');
+            $st->execute([$workerOtId]);
+            if (strtoupper(trim((string)$st->fetchColumn())) === 'NO') {
+                return 'INS0038';
+            }
+        } catch (Throwable $e) {
+            error_log('resolvePackagingTapeType: ' . $e->getMessage());
+        }
+        return 'INS0073';
+    }
+
+    /** @var string[]|null Columnas reales de prod_worker_embalajes (cache por instancia). */
+    private ?array $packagingTableColumns = null;
+
+    /**
+     * Deja solo los campos que existen en prod_worker_embalajes del ERP. Algunos datos (p. ej. el tipo de cinta)
+     * se usan para calcular el consumo de insumos pero la tabla del ERP puede no tener esa columna; sin este
+     * filtro el INSERT/UPDATE fallaba con "Unknown column".
+     *
+     * @param array<string,mixed> $data
+     * @return array<string,mixed>
+     */
+    private function onlyExistingPackagingColumns(array $data): array
+    {
+        if ($this->packagingTableColumns === null) {
+            try {
+                $cols = $this->erpPdo->query('SHOW COLUMNS FROM prod_worker_embalajes')->fetchAll(PDO::FETCH_COLUMN) ?: [];
+                $this->packagingTableColumns = array_map('strval', $cols);
+            } catch (Throwable $e) {
+                error_log('prod_worker_embalajes columnas: ' . $e->getMessage());
+                $this->packagingTableColumns = [];
+            }
+        }
+        if ($this->packagingTableColumns === []) {
+            return $data; // no se pudo consultar: comportamiento anterior
+        }
+        $known = array_flip($this->packagingTableColumns);
+        $dropped = array_diff_key($data, $known);
+        if ($dropped !== []) {
+            error_log('Embalaje: columnas inexistentes en prod_worker_embalajes, no se guardan: ' . implode(', ', array_keys($dropped)));
+        }
+        return array_intersect_key($data, $known);
+    }
+
     public function listPackagingClosureTypes(int $requestId = 0): array
     {
         $stmt = $this->erpPdo->prepare("SELECT codigo, descripcion, valor1 FROM parametros
@@ -176,6 +232,7 @@ trait RewindAndPackagingServiceTrait
             'evt_crtdat'=>time(),'req_v2refid'=>$eventId];
         $existing = $this->getPackagingEventDetail($eventId,$workerOtId);
         if (!$existing) $data += ['req_codigo_cierre'=>'','req_observacion'=>''];
+        $data = $this->onlyExistingPackagingColumns($data);
         $params = [];
         foreach ($data as $field=>$value) $params[':'.$field]=$value;
         if ($existing) {
@@ -324,10 +381,12 @@ trait RewindAndPackagingServiceTrait
         $supervisorId = (int)$user->fetchColumn();
 
         $mixedItems = $detail['mixed_items'] ?? [];
+        $totalUnitsForMail = (int)($detail['total_units'] ?? 0);
         unset($detail['total_units'], $detail['mixed_items']);
 
         $data = $detail + ['evt_prod_worker_otid' => $workerOtId, 'evt_reqid' => $requestId,
             'evt_crtdat' => time(), 'req_id_supervisor' => $supervisorId, 'req_v2refid' => $eventId];
+        $data = $this->onlyExistingPackagingColumns($data);
         $existing = $this->getPackagingEventDetail($eventId, $workerOtId);
         $params = [];
         foreach ($data as $field => $value) $params[':' . $field] = $value;
@@ -401,6 +460,22 @@ trait RewindAndPackagingServiceTrait
         } catch (Throwable $e) {
             error_log('Error en consumePackagingSupplies: ' . $e->getMessage());
             $this->lastSupplyConsumptionWarning = 'No se pudo descontar el stock de embalaje: ' . $e->getMessage();
+        }
+
+        // Correo a facturación con las unidades listas para enviar (un fallo de correo no interrumpe el guardado)
+        try {
+            require_once dirname(__DIR__, 2) . '/MailService.php';
+            require_once dirname(__DIR__, 2) . '/PackagingBillingMail.php';
+            $mailRes = (new PackagingBillingMail($this->erpPdo, $this->trzPdo ?? null))->notify(
+                $eventId, $workerOtId, $embalajeId, $requestId, $detail, $mixedItems, $totalUnitsForMail,
+                (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0)
+            );
+            if (($mailRes['ok'] ?? true) !== true) {
+                $warn = 'El embalaje se guardó, pero NO se pudo enviar el correo a facturación: ' . (string)($mailRes['error'] ?? 'error desconocido');
+                $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning . ' ' . $warn);
+            }
+        } catch (Throwable $e) {
+            error_log('Correo de facturación (embalaje): ' . $e->getMessage());
         }
 
         return $embalajeId;
@@ -707,7 +782,7 @@ trait RewindAndPackagingServiceTrait
 
         // 4. Cinta de papel: ancho de la caja + 5 cm por lado (+10 cm)
         $boxWidthCm = self::extractBoxWidthCm($medidasCaja);
-        $tapeType = trim((string)($detail['req_embalaje_tipo_cinta'] ?? 'INS0073'));
+        $tapeType = $this->resolvePackagingTapeType($workerOtId, $medidasCaja);
         if ($tapeType === 'INS0038') {
             $tapeItemId = 153;
             $tapeSku = 'INS0038';
@@ -1068,29 +1143,35 @@ trait RewindAndPackagingServiceTrait
         $shopId = (int)($agenda['req_shop_id'] ?? 20010);
         $stId3000 = 16; // 3000 INSUMOS EN PRODUCCION
 
-        // 1. Buscar directamente en ERP item
-        $stmt = $this->erpPdo->prepare("
-            SELECT i.*,
-                   COALESCE((SELECT SUM(iss_inventory) FROM item_shops_storehouses WHERE item_id = i.id AND st_id IN (16, 27)), 0) as stock_3000,
-                   COALESCE((SELECT SUM(iss_inventory) FROM item_shops_storehouses WHERE item_id = i.id AND st_id IN (1, 10, 11)), 0) as stock_mp
-            FROM item i
-            WHERE i.item_number_prod = :c OR i.item_number = :c OR i.id = :c2
-            LIMIT 1
-        ");
-        $stmt->execute([':c' => $code, ':c2' => is_numeric($code) ? (int)$code : 0]);
-        $item = $stmt->fetch(PDO::FETCH_ASSOC);
+        // 0. Una bobina con trazabilidad (roll_code o etiqueta de bodega) manda sobre el SKU del ERP:
+        //    así se trae el peso registrado y no el peso estándar del ítem.
+        $trzRoll = null;
+        try {
+            if ($this->trzPdo !== null) {
+                $trzRoll = TraceableRollLookup::find($this->trzPdo, $code);
+            }
+        } catch (Throwable) {
+            $trzRoll = null;
+        }
+
+        // 1. Buscar directamente en ERP item (solo si no es una bobina trazable)
+        $item = false;
+        if (!$trzRoll) {
+            $stmt = $this->erpPdo->prepare("
+                SELECT i.*,
+                       COALESCE((SELECT SUM(iss_inventory) FROM item_shops_storehouses WHERE item_id = i.id AND st_id IN (16, 27)), 0) as stock_3000,
+                       COALESCE((SELECT SUM(iss_inventory) FROM item_shops_storehouses WHERE item_id = i.id AND st_id IN (1, 10, 11)), 0) as stock_mp
+                FROM item i
+                WHERE i.item_number_prod = :c OR i.item_number = :c OR i.id = :c2
+                LIMIT 1
+            ");
+            $stmt->execute([':c' => $code, ':c2' => is_numeric($code) ? (int)$code : 0]);
+            $item = $stmt->fetch(PDO::FETCH_ASSOC);
+        }
 
         // 2. Si no se encuentra, buscar en TRZ rolls por roll_code o id
         if (!$item) {
             try {
-                $stmtTrz = $this->trzPdo->prepare("
-                    SELECT r.*, s.code AS sku_code
-                    FROM rolls r
-                    LEFT JOIN skus s ON r.sku_id = s.id
-                    WHERE r.roll_code = :c OR r.id = :c2 LIMIT 1
-                ");
-                $stmtTrz->execute([':c' => $code, ':c2' => is_numeric($code) ? (int)$code : 0]);
-                $trzRoll = $stmtTrz->fetch(PDO::FETCH_ASSOC);
                 if ($trzRoll) {
                     if (!empty($trzRoll['sku_code'])) {
                         $stmtBySku = $this->erpPdo->prepare("
@@ -1117,8 +1198,9 @@ trait RewindAndPackagingServiceTrait
                         $stmtF->execute([':w' => $wCm, ':c' => '%' . ($trzRoll['color'] ?? '') . '%']);
                         $item = $stmtF->fetch(PDO::FETCH_ASSOC);
                     }
-                    if ($item && !empty($trzRoll['weight_kg']) && (float)$trzRoll['weight_kg'] > 0) {
-                        $item['item_reg_kg'] = (float)$trzRoll['weight_kg'];
+                    $regWeight = TraceableRollLookup::weightKg($this->trzPdo, $trzRoll, $code);
+                    if ($item && $regWeight > 0) {
+                        $item['item_reg_kg'] = $regWeight;
                     }
                 }
             } catch (Throwable) {}

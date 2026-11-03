@@ -462,7 +462,7 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
             <?php if ($compatible): ?>
                 ✅ <b><?=count($compatible)?> tipo<?=count($compatible)>1?'s':''?> de bobina sirven para esta OT</b>
                 <b class="big"><?=supplyEscape(implode(', ',array_column($compatible,'sku')))?></b>
-                Ningún dato contradice la OT y al menos dos coinciden (gramaje ±5 g/m², ancho igual o mayor). Se muestran primero.
+                Coinciden en material, color y ancho (igual o mayor) con la ficha de la OT, igual que en la pantalla de la OT. Se muestran primero.
             <?php else:
                 $near=array_values(array_filter($rolls,static fn($r)=>count(array_filter($r['checks'],static fn($v)=>$v===false))<=1 && (int)$r['match_score']>0));
                 $near=array_slice($near,0,5); ?>

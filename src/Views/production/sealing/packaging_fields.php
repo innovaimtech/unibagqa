@@ -13,7 +13,11 @@
     ];
 
     $savedCode = (string)($saved['req_codigo_cierre'] ?? '');
-    $savedTape = trim((string)($saved['req_embalaje_tipo_cinta'] ?? 'INS0073'));
+    // Cinta según la caja: SIN logo (genérica, "Logotipo empresa" = No) = INS0038; CON logo (impresa) = INS0073.
+    $boxMeasuresUpper = mb_strtoupper((string)($saved['req_embalaje_medidas_caja'] ?? $agenda['req_embalaje_medidas_caja'] ?? ''));
+    $boxWithoutLogo = strtoupper(trim((string)($agenda['req_caja_impresa'] ?? ''))) === 'NO'
+        || str_contains($boxMeasuresUpper, 'SIN LOGO') || str_contains($boxMeasuresUpper, 'SIN IMPRESION') || str_contains($boxMeasuresUpper, 'SIN IMPRESIÓN');
+    $savedTape = $boxWithoutLogo ? 'INS0038' : 'INS0073';
     // Regla solicitada: El Cierre Mixto lo selecciona el operador, no debe estar abierto en todo momento por defecto.
     // Solo se activa inicialmente si ya fue guardado previamente con código 50.
     $isMixtoSelected = ($savedCode === '50');
@@ -390,8 +394,8 @@
                 </small>
             </div>
             <div class="pack-close-auth">
-                <label>Tipo de cinta papel (rollo estándar) *
-                    <select name="req_embalaje_tipo_cinta" id="req_embalaje_tipo_cinta" class="inptxt" required onchange="updatePackagingSuppliesPreview(this.form)">
+                <label>Tipo de cinta papel (automático según la caja) *
+                    <select name="req_embalaje_tipo_cinta" id="req_embalaje_tipo_cinta" class="inptxt" required style="pointer-events:none;background:#F1F5F9" tabindex="-1" onchange="updatePackagingSuppliesPreview(this.form)" title="Caja con logo = INS0073 · caja sin logo = INS0038">
                         <option value="INS0073" data-meters="40" ' . ($savedTape === 'INS0073' || $savedTape === '' ? 'selected' : '') . '>Cinta Impresa Papel 48mm × 40 MT (Rollo 40m - INS0073)</option>
                         <option value="INS0038" data-meters="50" ' . ($savedTape === 'INS0038' ? 'selected' : '') . '>Cinta Eco Paper 48mm × 50 MT (Rollo 50m - INS0038)</option>
                     </select>
@@ -703,6 +707,12 @@
         function updatePackagingSuppliesPreview(form) {
             if (!form) form = document.getElementById("pack_total_units")?.form;
             if (!form) return;
+            // El total de unidades se asigna por código (no dispara "input"): se refresca el panel "Total CC Actualizado".
+            if (typeof window.updateClosingPanelFromCurrentInput === "function") window.updateClosingPanelFromCurrentInput();
+            var medUp = (form.elements["req_embalaje_medidas_caja"]?.value || "").toUpperCase();
+            if (/SIN LOGO|SIN IMPRESI/.test(medUp) && form.elements["req_embalaje_tipo_cinta"]) {
+                form.elements["req_embalaje_tipo_cinta"].value = "INS0038";
+            }
             function n(key) { return Math.max(0, Number(form.elements[key]?.value) || 0); }
             var isMixto = (document.getElementById("req_codigo_cierre") && document.getElementById("req_codigo_cierre").value === "50");
             var totalBoxes = 0;

@@ -5680,25 +5680,11 @@ trait ProductionMaterialsServiceTrait
         $isFlexoSeri = $this->isFlexoSeriPulpoMachine($machineId, $agDetails);
 
         // 1. Buscar en rolls de trazabilidad por roll_code o id numérico
+        // (también reconoce el código de la etiqueta de trazabilidad de bodega, no solo el roll_code)
         $trzRoll = null;
         if ($this->trzPdo !== null) {
             try {
-                $stmtTrz = $this->trzPdo->prepare("
-                    SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name, w.code AS warehouse_code
-                    FROM rolls r
-                    LEFT JOIN skus s ON r.sku_id = s.id
-                    LEFT JOIN warehouses w ON r.warehouse_id = w.id
-                    WHERE UPPER(REPLACE(r.roll_code, ' ', '')) = :nc
-                       OR r.roll_code = :c
-                       OR r.id = :cid
-                    ORDER BY r.id DESC LIMIT 1
-                ");
-                $stmtTrz->execute([
-                    ':nc' => $normCode,
-                    ':c' => $code,
-                    ':cid' => is_numeric($code) ? (int)$code : 0,
-                ]);
-                $trzRoll = $stmtTrz->fetch(PDO::FETCH_ASSOC) ?: null;
+                $trzRoll = TraceableRollLookup::find($this->trzPdo, $code);
             } catch (Throwable) {}
         }
 
@@ -5720,7 +5706,7 @@ trait ProductionMaterialsServiceTrait
                             'already_mounted' => true,
                             'roll_id' => (int)$trzRoll['id'],
                             'roll_code' => (string)$trzRoll['roll_code'],
-                            'weight_kg' => (float)$trzRoll['weight_kg'],
+                            'weight_kg' => TraceableRollLookup::weightKg($this->trzPdo, $trzRoll, $code),
                             'message' => "La bobina '{$trzRoll['roll_code']}' ya se encuentra montada en esta máquina.",
                         ];
                     }
@@ -5759,7 +5745,8 @@ trait ProductionMaterialsServiceTrait
                 }
             }
 
-            $wKg = (float)$trzRoll['weight_kg'];
+            // Peso registrado en la trazabilidad (de la bobina o de su etiqueta de bodega)
+            $wKg = TraceableRollLookup::weightKg($this->trzPdo, $trzRoll, $code);
             $assignRes = $this->assignBodega3000RollToMachine(
                 $workerOtId,
                 (string)$trzRoll['id'],
@@ -5813,7 +5800,7 @@ trait ProductionMaterialsServiceTrait
                         }
                     }
 
-                    $wKg = (float)$trzSkuRoll['weight_kg'];
+                    $wKg = TraceableRollLookup::weightKg($this->trzPdo, $trzSkuRoll, $code);
                     $assignRes = $this->assignBodega3000RollToMachine(
                         $workerOtId,
                         (string)$trzSkuRoll['id'],
@@ -6161,7 +6148,10 @@ trait ProductionMaterialsServiceTrait
                     FROM rolls r
                     LEFT JOIN skus s ON r.sku_id = s.id
                     LEFT JOIN warehouses w ON r.warehouse_id = w.id
-                    WHERE UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r.roll_code, ' ', ''), '\r', ''), '\n', ''), '\t', ''), '''', '-'), '`', '-')) = :code
+                    WHERE (UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(r.roll_code, ' ', ''), '\r', ''), '\n', ''), '\t', ''), '''', '-'), '`', '-')) = :code
+                           OR r.id = (SELECT e.entity_id FROM traceability_warehouse_entries e
+                                      WHERE UPPER(REPLACE(e.traceability_code, ' ', '')) = :code_lbl AND e.entity_type = 'ROLL' AND e.entity_id IS NOT NULL
+                                      ORDER BY e.id DESC LIMIT 1))
                       AND r.current_work_order_id IS NULL
                       AND r.status != 'CONSUMED'
                       AND (w.code IN (3000, 16, 27) OR w.name LIKE '%3000%')
@@ -6170,6 +6160,7 @@ trait ProductionMaterialsServiceTrait
                 ");
                 $stmtExistingTraceableRoll->execute([
                     ':code' => $normalizedConfirmedTraceabilityCode,
+                    ':code_lbl' => $normalizedConfirmedTraceabilityCode,
                 ]);
                 $existingTraceableRoll = $stmtExistingTraceableRoll->fetch(PDO::FETCH_ASSOC) ?: null;
 
@@ -6371,7 +6362,7 @@ trait ProductionMaterialsServiceTrait
                     ];
                 }
 
-                $wKg = (float)$roll['weight_kg'];
+                $wKg = TraceableRollLookup::weightKg($this->trzPdo, $roll, $confirmedTraceabilityCode);
                 $rCode = (string)$roll['roll_code'];
                 $sku = (string)($roll['sku_code'] ?? 'S/C');
                 $normalizedConfirmedTraceabilityCode = $this->normalizeTraceabilityCode($confirmedTraceabilityCode);

@@ -860,10 +860,46 @@
             toggleTakeBodega3000TraceabilityMode();
             modal.style.display = 'flex';
             setTimeout(function() {
-                var weightInput = document.getElementById('modal_take_bodega3000_weight');
-                if (weightInput) weightInput.focus();
+                var useTrace = select && String(select.value || '').toLowerCase() === 'with';
+                var target = document.getElementById(useTrace ? 'modal_take_bodega3000_trace_code' : 'modal_take_bodega3000_weight');
+                if (target) target.focus();
             }, 40);
         }
+
+        // Al escanear/escribir el código de trazabilidad se trae el peso registrado en la trazabilidad.
+        function fillTakeBodega3000WeightFromTrace() {
+            var input = document.getElementById('modal_take_bodega3000_trace_code');
+            var weight = document.getElementById('modal_take_bodega3000_weight');
+            var hint = document.getElementById('modal_take_bodega3000_trace_hint');
+            if (!input || !weight) return;
+            var code = String(input.value || '').trim();
+            if (code.length < 3) return;
+            fetch('/production/api/roll-weight?code=' + encodeURIComponent(code), { credentials: 'same-origin', cache: 'no-store' })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (!d || !d.ok) {
+                        if (hint && d && d.error) { hint.innerText = d.error; hint.style.color = '#B91C1C'; }
+                        return;
+                    }
+                    if (d.has_weight) {
+                        weight.value = String(Math.round(d.weight_kg * 1000) / 1000);
+                        if (hint) { hint.innerText = 'Peso registrado en trazabilidad: ' + weight.value + ' kg (bobina ' + d.roll_code + ').'; hint.style.color = '#166534'; }
+                    } else if (hint) {
+                        hint.innerText = 'La bobina ' + d.roll_code + ' no tiene peso registrado en trazabilidad; ingréselo manualmente.';
+                        hint.style.color = '#B45309';
+                    }
+                })
+                .catch(function() {});
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            var ti = document.getElementById('modal_take_bodega3000_trace_code');
+            if (!ti) return;
+            ti.addEventListener('change', fillTakeBodega3000WeightFromTrace);
+            ti.addEventListener('blur', fillTakeBodega3000WeightFromTrace);
+            ti.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') { e.preventDefault(); fillTakeBodega3000WeightFromTrace(); }
+            });
+        });
 
         function closeTakeBodega3000Modal() {
             var modal = document.getElementById('modal_take_bodega3000');

@@ -48,6 +48,34 @@ final class MaterialSupplyRecommendations
         return ['crudo'=>'natural','beige'=>'natural','cristal'=>'transparente','naranjo'=>'naranja','rosado'=>'rosa'][$value] ?? $value;
     }
 
+    /** Material de la OT normalizado igual que en la pantalla de la OT: PLA, PP (incluye TNT) o el texto original. */
+    private static function targetMaterial(string $type): string
+    {
+        $t = mb_strtoupper(trim($type));
+        if ($t === '') return '';
+        if (str_contains($t, 'PLA')) return 'PLA';
+        if (in_array($t, ['PP', 'TNT', 'TNT60'], true) || str_contains($t, 'POLIPROP') || str_contains($t, 'NON WOVEN')) return 'PP';
+        return $t;
+    }
+
+    /** Palabras de color de la OT (sin Pantone), con sinónimos comerciales (crudo = natural = beige, etc.). */
+    private static function colorKeywords(string $color): array
+    {
+        $clean = mb_strtolower(trim($color));
+        $clean = preg_replace('/\(pantone[^)]*\)/i', '', $clean) ?? $clean;
+        $clean = preg_replace('/[^a-záéíóúñ\s]/u', ' ', $clean) ?? $clean;
+        $words = array_values(array_filter(array_map('trim', explode(' ', $clean)), static fn($w) => mb_strlen($w) >= 3));
+        $bases = ['blanco','negro','azul','rojo','verde','amarillo','naranjo','naranja','beige','crudo','natural','gris',
+            'morado','fucsia','celeste','turquesa','transparente','cafe','café','cristal','dorado','plateado','rosa','rosado'];
+        $keys = array_values(array_filter($words, static fn($w) => in_array($w, $bases, true)));
+        $groups = [['crudo','natural','beige'], ['transparente','cristal'], ['naranja','naranjo']];
+        foreach ($groups as $g) {
+            if (array_intersect($g, $keys)) $keys = array_values(array_unique(array_merge($keys, $g)));
+        }
+        if (!$keys && $words) $keys = $words;
+        return $keys;
+    }
+
     /**
      * Extrae los requisitos técnicos de la OT agendada (material, ancho en cm, color y gramaje).
      *
@@ -58,28 +86,38 @@ final class MaterialSupplyRecommendations
     {
         $width = (float)($agenda['req_operador_tela_width'] ?? 0);
         if ($width <= 0) $width = (float)($agenda['fab_med_width'] ?? 0);
-        if ($width > 300) $width /= 10; // valor guardado en mm
-        $type = trim((string)($agenda['fab_type'] ?? ''));
-        $material = $type === '' ? '' : (stripos($type, 'PLA') !== false ? 'PLA' : 'PP');
+        if ($width >= 300) $width /= 10; // valor guardado en mm
         $grams = (float)($agenda['ot_grams'] ?? 0);
         if ($grams <= 0) $grams = (float)($agenda['fab_mat_gramms'] ?? 0);
-        return ['material'=>$material, 'width_cm'=>$width,
+        return ['material'=>self::targetMaterial((string)($agenda['fab_type'] ?? '')), 'width_cm'=>$width,
             'color'=>trim((string)($agenda['fabric_color'] ?? $agenda['ag_color_tela'] ?? '')), 'grammage'=>$grams];
     }
 
     /**
-     * Compara una bobina con la OT. Cada criterio puede ser:
-     *   true  = coincide, false = NO coincide, null = sin dato (en la OT o en la bobina; no descarta).
-     * Es compatible si ningún criterio falla y al menos dos coinciden. Tolerancias del sistema anterior:
-     * gramaje ±5 g/m² y ancho igual o mayor (se acepta hasta 8 cm menos).
+     * Compara una bobina con la OT con las MISMAS reglas que la pantalla de la OT:
+     * material (la bodega 100 es PLA y la 200 es PP), color por palabras clave y ancho (igual o mayor, o hasta 8 cm menos).
+     * El gramaje no decide la compatibilidad; se muestra solo como dato.
+     * Cada criterio: true = coincide, false = NO coincide, null = sin dato en la OT o en la bobina (no descarta).
      */
     public static function roll(array $item, ?array $agenda): array
     {
         $title = (string)$item['description'];
+        $sku = (string)($item['sku'] ?? '');
+        $stId = (int)($item['source_storehouse_id'] ?? 0);
+        $whName = mb_strtoupper((string)($item['warehouse_name'] ?? ''));
         $parts = explode('/', $title);
-        $specs = ['material'=>(stripos($title, 'PLA') !== false || stripos((string)($item['sku'] ?? ''), 'PLA') !== false) ? 'PLA' : 'PP',
-            'color'=>trim($parts[1] ?? ''), 'width_cm'=>(float)($item['width_cm'] ?? 0), 'grammage'=>0.0];
-        $specs['color'] = trim((string)preg_replace('/\(pantone[^)]*\)/i', '', $specs['color']));
+        $titleMat = mb_strtoupper(trim($parts[0] ?? ''));
+
+        $rollMat = 'OTRO';
+        if ($titleMat === 'PLA' || $stId === 5 || str_contains($whName, 'PLA')) {
+            $rollMat = 'PLA';
+        } elseif (in_array($titleMat, ['PP', 'TNT'], true) || $stId === 11 || str_contains($whName, 'PP')) {
+            $rollMat = 'PP';
+        } elseif (str_starts_with(strtoupper($sku), 'TEL') || $titleMat !== '') {
+            $rollMat = stripos($title, 'PLA') !== false ? 'PLA' : 'PP';
+        }
+        $color = trim((string)preg_replace('/\(pantone[^)]*\)/i', '', trim($parts[1] ?? '')));
+        $specs = ['material'=>$rollMat, 'color'=>$color, 'width_cm'=>(float)($item['width_cm'] ?? 0), 'grammage'=>0.0];
         if (preg_match('/\/\s*(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*x/i', $title, $m)) {
             if ($specs['width_cm'] <= 0) $specs['width_cm'] = (float)str_replace(',','.',$m[1]);
             $specs['grammage'] = (float)str_replace(',','.',$m[2]);
@@ -97,29 +135,33 @@ final class MaterialSupplyRecommendations
         $target = self::requirements($agenda);
 
         $checks = [];
-        $checks['Material'] = $target['material'] === '' ? null : $specs['material'] === $target['material'];
+        if ($target['material'] === '') {
+            $checks['Material'] = null;
+        } elseif (in_array($target['material'], ['PLA', 'PP'], true)) {
+            $checks['Material'] = $rollMat === $target['material'];
+        } else {
+            $checks['Material'] = str_contains(mb_strtolower($title), mb_strtolower($target['material']));
+        }
         if ($target['width_cm'] <= 0 || $specs['width_cm'] <= 0) {
             $checks['Ancho'] = null;
         } else {
             $checks['Ancho'] = $specs['width_cm'] >= $target['width_cm'] - 8.0;
         }
-        $tc = self::color($target['color']);
-        $rc = self::color($specs['color']);
-        if ($tc === '' || $rc === '') {
+        $keys = self::colorKeywords($target['color']);
+        if (!$keys) {
             $checks['Color'] = null;
         } else {
-            $checks['Color'] = $rc === $tc || str_contains($rc, $tc) || str_contains($tc, $rc);
-        }
-        if ($target['grammage'] <= 0 || $specs['grammage'] <= 0) {
-            $checks['Gramaje'] = null;
-        } else {
-            $checks['Gramaje'] = abs($specs['grammage'] - $target['grammage']) <= 5.0;
+            $hay = mb_strtolower($color . ' ' . $title);
+            $checks['Color'] = false;
+            foreach ($keys as $kw) {
+                if (str_contains($hay, $kw)) { $checks['Color'] = true; break; }
+            }
         }
         $item['checks'] = $checks;
         $ok = count(array_filter($checks, static fn($v) => $v === true));
         $bad = count(array_filter($checks, static fn($v) => $v === false));
         $item['match_score'] = $ok - 2 * $bad;
-        $item['recommended'] = $bad === 0 && $ok >= 2;
+        $item['recommended'] = $bad === 0 && $ok >= 1;
         return $item;
     }
 
