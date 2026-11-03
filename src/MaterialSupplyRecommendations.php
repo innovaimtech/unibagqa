@@ -165,6 +165,36 @@ final class MaterialSupplyRecommendations
         return $item;
     }
 
+    /**
+     * Compara una bobina candidata con el artículo solicitado (cuando no hay OT planificada):
+     * mismo material, color compartido y ancho igual o hasta 8 cm menor. true/false/null como en roll().
+     *
+     * @return array<string,bool|null>
+     */
+    public static function compareWithItem(array $candidate, array $requested): array
+    {
+        $c = self::roll($candidate, null)['specs'];
+        $q = self::roll($requested, null)['specs'];
+        $checks = [];
+        $checks['Material'] = ($c['material'] === 'OTRO' || $q['material'] === 'OTRO') ? null : $c['material'] === $q['material'];
+        if ($q['width_cm'] <= 0 || $c['width_cm'] <= 0) {
+            $checks['Ancho'] = null;
+        } else {
+            $checks['Ancho'] = $c['width_cm'] >= $q['width_cm'] - 8.0;
+        }
+        $keys = self::colorKeywords((string)$q['color']);
+        if (!$keys) {
+            $checks['Color'] = null;
+        } else {
+            $hay = mb_strtolower($c['color'] . ' ' . (string)$candidate['description']);
+            $checks['Color'] = false;
+            foreach ($keys as $kw) {
+                if (str_contains($hay, $kw)) { $checks['Color'] = true; break; }
+            }
+        }
+        return $checks;
+    }
+
     public static function inkMatches(array $item, ?array $agenda): bool
     {
         if ($agenda === null) return false;

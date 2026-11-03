@@ -24,7 +24,7 @@ declare(strict_types=1);
  *    - /stock/material-supply/scan: Registra el escaneo de una bobina (una por vez, con validaciones).
  *    - /stock/material-supply/scan-void: Anula un escaneo aún no despachado (motivo obligatorio).
  *    - /stock/material-supply/cancel-request: Cancela la solicitud antes de despachar (motivo obligatorio).
- *    - /stock/material-supply/receive: El encargado confirma la recepción en Bodega 3000.
+ *    - (La recepción la confirma solo el operador en /production/materials/receive.)
  *    - /stock/material-supply/reports: Reportes de traspasos entre bodegas.
  */
 
@@ -52,7 +52,7 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
     $isWarehouse = $path === '/stock/material-supply' || $path === '/stock/material-supply/dispatch'
         || $path === '/stock/material-supply/resume' || $path === '/stock/material-supply/cancel'
         || in_array($path, ['/stock/material-supply/accept','/stock/material-supply/reject','/stock/material-supply/scan',
-            '/stock/material-supply/scan-void','/stock/material-supply/cancel-request','/stock/material-supply/receive',
+            '/stock/material-supply/scan-void','/stock/material-supply/cancel-request',
             '/stock/material-supply/reports'], true);
     if (!$isOperator && !$isWarehouse) return false;
     $actor = supplySessionActor($name);
@@ -82,21 +82,20 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
                     $service->voidScan((string)($_POST['scan_key']??''),(string)($_POST['reason']??''),$actor);
                 } elseif ($path === '/stock/material-supply/cancel-request') {
                     $service->cancelRequest($requestKey,(string)($_POST['reason']??''),$actor);
-                } elseif ($path === '/stock/material-supply/receive') {
-                    if (empty($_POST['receipt_confirmed'])) throw new RuntimeException('Confirma la recepción de la cantidad y los códigos.');
-                    $service->receiveByWarehouse((string)($_POST['dispatch_key']??''),$actor);
                 } elseif ($path === '/stock/material-supply/resume') {
                     $service->resume((string)($_POST['dispatch_key']??''),$actor);
                 } elseif ($path === '/stock/material-supply/cancel') {
                     $service->cancelPending((string)($_POST['dispatch_key']??''),(string)($_POST['reason']??''),$actor);
                 } else {
+                    // Bobinas: la cantidad sale de las bobinas escaneadas. Otros materiales: cantidad indicada.
                     $service->dispatch((string)($_POST['dispatch_key']??''),(string)($_POST['request_key']??''),
-                        supplyPostedQuantity(),(string)($_POST['codes']??''),$actor);
+                        isset($_POST['quantity']) ? supplyPostedQuantity() : 0.0,(string)($_POST['codes']??''),$actor,
+                        (string)($_POST['change_reason']??''));
                 }
             } else {
                 if ($path === '/production/materials/receive') {
                     if (empty($_POST['receipt_confirmed'])) throw new RuntimeException('Confirma la cantidad y codigos recibidos.');
-                    $service->receive((string)($_POST['dispatch_key']??''),0,$actor);
+                    $service->receive((string)($_POST['dispatch_key']??''),0,$actor,(string)($_POST['receive_comment']??''));
                 } else {
                     if ((string)($_POST['action_mode']??'') !== 'central_supply') {
                         throw new RuntimeException('Usa Solicitar para pedir bobinas o tintas desde esta pantalla.');
@@ -147,6 +146,32 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
         else renderProdwrkShell('Solicitar Materiales',$body,7,$name,(string)($_SESSION['planta_name']??'PLANTA'));
     }
     return true;
+}
+
+/** Texto legible de las diferencias de un despacho (SKU, UNITS, METERS). */
+function supplyChangeLabel(?string $flags): string
+{
+    $names = ['SKU' => 'otro código de bobina', 'UNITS' => 'cantidad distinta', 'METERS' => 'metros distintos'];
+    $out = [];
+    foreach (array_filter(explode(',', (string)$flags)) as $f) $out[] = $names[$f] ?? $f;
+    return implode(', ', $out);
+}
+
+/** Bobinas de un despacho, una por línea: código · SKU · metros · peso, marcando los reemplazos. */
+function supplyRollLines(array $payload, string $requestedSku): string
+{
+    $html = '';
+    foreach ($payload['rolls'] ?? [] as $roll) {
+        $sku = (string)($roll['sku'] ?? $payload['sku'] ?? '');
+        $meters = (float)($roll['meters'] ?? 0);
+        $html .= '<div style="font-size:12px;margin-top:3px"><b>' . supplyEscape($roll['code'] ?? '') . '</b>'
+            . ($sku !== '' ? ' · ' . supplyEscape($sku) : '')
+            . ($meters > 0 ? ' · ' . supplyEscape(supplyNum($meters)) . ' m' : '')
+            . ((float)($roll['weight_kg'] ?? 0) > 0 ? ' · ' . supplyEscape(supplyNum((float)$roll['weight_kg'])) . ' kg' : '')
+            . ($sku !== '' && $sku !== $requestedSku ? ' <span style="background:#fef3c7;color:#92400e;border-radius:8px;padding:1px 7px;font-weight:700">Reemplazo</span>' : '')
+            . '</div>';
+    }
+    return $html;
 }
 
 /** Cantidad legible: 120 / 35,5 / 1.250,25 (sin ceros sobrantes). */
@@ -685,7 +710,9 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
         <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Entrega / Traspaso ERP</th><th>Cantidad / Codigos</th><th>Entregado por</th><th>Recibido por</th><th>Estado / Opciones</th></tr></thead><tbody>
         <?php foreach ($service->deliveries($r['request_key']) as $d): $payload=json_decode($d['payload'],true)?:[]; ?>
         <tr><td><?=supplyEscape(substr($d['dispatch_key'],0,8))?><br><?=supplyEscape($d['erp_transfer_id']??((int)$r['source_storehouse_id']===16?'Entrega interna':'-'))?></td>
-        <td><?=supplyEscape($d['quantity'])?> <?=supplyEscape($r['unit'])?><br><?=supplyEscape(implode(', ',array_column($payload['rolls']??[],'code')))?></td>
+        <td><?=supplyEscape($d['quantity'])?> <?=supplyEscape($r['unit'])?><?=supplyRollLines($payload,(string)$r['sku'])?>
+            <?php if (!empty($d['change_flags'])): ?><div class="sp-reason" style="margin-top:6px">Cambio: <?=supplyEscape(supplyChangeLabel($d['change_flags']))?><br>Motivo de bodega: <?=supplyEscape($d['change_reason'])?></div><?php endif; ?>
+            <?php if (!empty($d['receive_comment'])): ?><div style="margin-top:6px;font-size:12px"><b>Comentario del operador:</b> <?=supplyEscape($d['receive_comment'])?></div><?php endif; ?></td>
         <td><?=supplyEscape(supplyActorLabel($d['delivered_by']))?><br><?=supplyDate($d['delivered_at'])?></td>
         <td><?=supplyEscape(supplyActorLabel($d['received_by']))?><br><?=supplyDate($d['received_at'])?></td>
         <td><?=supplyEscape(['PENDING'=>'Pendiente de resolver','DISPATCHED'=>'Por recibir','RECEIVED'=>'Recibido','CANCELLED'=>'Cancelado'][$d['state']]??$d['state'])?>
@@ -695,7 +722,14 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="dispatch_key" value="<?=supplyEscape($d['dispatch_key'])?>">
             <input type="hidden" name="agid" value="<?=$agId?>">
-            <?php if (!$warehouse): ?><label><input type="checkbox" name="receipt_confirmed" value="1" required> Confirmo que recibi esta cantidad y los codigos indicados.</label><?php endif; ?>
+            <?php if (!$warehouse): $hasChange = !empty($d['change_flags']); ?>
+                <?php if ($hasChange): ?>
+                <div class="sp-reason">Lo que llegó es distinto a lo que pediste (<?=supplyEscape(supplyChangeLabel($d['change_flags']))?>). Revisa las bobinas y deja tu comentario.</div>
+                <label>Comentario obligatorio: acepto el cambio y está dentro de lo que necesito para producir</label>
+                <textarea name="receive_comment" required minlength="10" maxlength="500" rows="3" style="width:100%" placeholder="Ej.: acepto las bobinas de reemplazo; el color y ancho sirven para esta OT"></textarea>
+                <?php endif; ?>
+                <label><input type="checkbox" name="receipt_confirmed" value="1" required> <?=$hasChange?'Acepto el cambio: lo recibido sirve para producir.':'Confirmo que recibí esta cantidad y los códigos indicados.'?></label>
+            <?php endif; ?>
             <button class="btngreen"><?=$warehouse?'Reintentar':'Recibir'?></button>
         </form>
         <?php if ($warehouse): ?>
@@ -708,14 +742,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
         </form>
         <?php endif; ?>
         <?php endif; ?>
-        <?php if ($warehouse && $d['state']==='DISPATCHED'): ?>
-        <form method="post" action="/stock/material-supply/receive">
-            <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
-            <input type="hidden" name="dispatch_key" value="<?=supplyEscape($d['dispatch_key'])?>">
-            <label><input type="checkbox" name="receipt_confirmed" value="1" required> Confirmo la recepción en Bodega 3000 de esta cantidad y estos códigos.</label>
-            <button class="btngreen">Confirmar recepción</button>
-        </form>
-        <?php endif; ?></td></tr>
+</td></tr>
         <?php endforeach; ?>
         </tbody></table></div>
         <div class="supply-actions"><button type="button" class="btngrey" onclick="this.closest('dialog').close()">Volver</button></div>
@@ -734,23 +761,29 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
     </dialog>
     <?php endif; ?>
     <?php if ($warehouse && (int)$r['source_storehouse_id']!==16 && $r['status']==='ACCEPTED' && $remaining>0):
-        $isRoll=str_starts_with(strtoupper($r['sku']),'TEL'); $reqQty=(float)$r['requested_qty']; $scans=$isRoll?$service->scans($r['request_key']):[]; ?>
+        $isRoll=str_starts_with(strtoupper($r['sku']),'TEL'); $reqQty=(float)$r['requested_qty']; $scans=$isRoll?$service->scans($r['request_key']):[];
+        $scanTotal=0.0; $hasSubstitute=false;
+        foreach ($scans as $sc) { if ($sc['state']==='SCANNED') { $scanTotal+=(float)$sc['quantity']; if (!empty($sc['substitute'])) $hasSubstitute=true; } }
+        $needReason=$hasSubstitute || ($isRoll && $scanTotal>0 && abs($scanTotal-$reqQty)>0.000001); ?>
     <dialog id="supply_dispatch_<?=$i?>" class="supply-dialog">
         <h2>Preparar y despachar</h2>
         <b><?=supplyEscape($r['sku'])?></b> <?=supplyEscape($r['description'])?>
-        <p>Se solicitaron <b><?=supplyEscape($r['requested_qty'])?> <?=supplyEscape($r['unit'])?></b> desde la Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?>. El despacho debe ser completo. Al despachar se descuenta el stock de origen, se carga en la Bodega 3000 y se genera el traspaso ERP.</p>
+        <p>Se solicitaron <b><?=supplyEscape($r['requested_qty'])?> <?=supplyEscape($r['unit'])?></b> desde la Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?>. Puedes enviar otra bobina compatible (otro código o metros distintos) o más unidades; en ese caso debes escribir el motivo. Al despachar se descuenta el stock de origen, se carga en la Bodega 3000 y se genera el traspaso ERP.</p>
         <?php if ($isRoll): ?>
         <form method="post" action="/stock/material-supply/scan" autocomplete="off">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
-            <label>Escanea el código de trazabilidad de la bobina (<?=count($scans)?> de <?=(int)$reqQty?>)</label>
+            <label>Escanea el código de trazabilidad de la bobina (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se solicitaron <?=supplyEscape(supplyNum($reqQty))?>)</label>
             <input name="code" required maxlength="60" autofocus placeholder="Escanea aquí; el lector envía Enter">
             <div class="supply-actions"><button class="btnblue">Registrar escaneo</button></div>
         </form>
         <?php if ($scans): ?>
-        <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Código</th><th>Escaneado por</th><th>Fecha</th><th>Estado</th><th></th></tr></thead><tbody>
+        <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Código</th><th>Producto</th><th>Metros</th><th>Escaneado por</th><th>Fecha</th><th>Estado</th><th></th></tr></thead><tbody>
         <?php foreach ($scans as $s): ?>
-        <tr><td><b><?=supplyEscape($s['code'])?></b></td><td><?=supplyEscape(supplyActorLabel($s['scanned_by']))?></td><td><?=supplyDate($s['scanned_at'])?></td>
+        <tr><td><b><?=supplyEscape($s['code'])?></b></td>
+            <td><?=supplyEscape($s['sku']??'')?><?php if (!empty($s['substitute'])): ?> <span style="background:#fef3c7;color:#92400e;border-radius:8px;padding:1px 7px;font-weight:700;font-size:12px">Reemplazo</span><?php endif; ?></td>
+            <td><?=!empty($s['meters'])?supplyEscape(supplyNum((float)$s['meters'])).' m':'-'?></td>
+            <td><?=supplyEscape(supplyActorLabel($s['scanned_by']))?></td><td><?=supplyDate($s['scanned_at'])?></td>
             <td><?=supplyEscape(['SCANNED'=>'Escaneada','DISPATCHED'=>'Despachada','RECEIVED'=>'Recibida'][$s['state']]??$s['state'])?></td>
             <td><?php if ($s['state']==='SCANNED'): ?>
             <form method="post" action="/stock/material-supply/scan-void" style="display:flex;gap:6px">
@@ -768,8 +801,13 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
             <input type="hidden" name="dispatch_key" value="<?=bin2hex(random_bytes(16))?>">
-            <input type="hidden" name="quantity" value="<?=supplyEscape($r['requested_qty'])?>">
-            <div class="supply-actions"><button class="btngreen" <?=($isRoll && count($scans)!==(int)$reqQty)?'disabled title="Faltan bobinas por escanear"':''?>>Despachar a Bodega 3000</button></div>
+            <?php if (!$isRoll): ?>
+            <label>Cantidad a entregar (mínimo lo solicitado: <?=supplyEscape(supplyNum($reqQty))?>)</label>
+            <input type="number" name="quantity" min="<?=supplyEscape($reqQty)?>" step="any" value="<?=supplyEscape($r['requested_qty'])?>" required oninput="var n=parseFloat(this.value),m=<?=json_encode($reqQty)?>,t=this.form.querySelector('textarea[name=change_reason]');if(t){t.required=(n!==m);}">
+            <?php endif; ?>
+            <label style="margin-top:8px">Motivo del cambio <?=$needReason?'(obligatorio: envías algo distinto a lo solicitado)':'(solo si envías otro código, otros metros o más unidades)'?></label>
+            <textarea name="change_reason" rows="2" maxlength="500" style="width:100%" <?=$needReason?'required minlength="10"':''?> placeholder="Ej.: la bobina pedida no tiene stock físico; se envía una de otros metros"></textarea>
+            <div class="supply-actions"><button class="btngreen" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="Faltan bobinas por escanear"':''?>>Despachar a Bodega 3000</button></div>
         </form>
         <form method="post" action="/stock/material-supply/cancel-request" style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
@@ -842,6 +880,14 @@ function renderSupplyReports(MaterialSupplyService $service, string $from, strin
         <td><?=supplyEscape($row['requested_qty'])?></td><td><?=supplyEscape($row['dispatched_qty'])?></td><td><?=supplyEscape($row['received_qty'])?></td>
         <td style="<?=(abs($diff)>0.000001||abs($short)>0.000001)?'color:#991b1b;font-weight:700':''?>"><?=abs($diff)>0.000001?'Sin recibir: '.supplyEscape($diff):(abs($short)>0.000001?'Falta despachar: '.supplyEscape($short):'OK')?></td></tr>
     <?php endforeach; if (!$rep['differences']): ?><tr><td colspan="8">Sin solicitudes en el periodo.</td></tr><?php endif; ?>
+    </tbody></table></div>
+    <h4 style="margin-top:20px">Despachos con cambio (otro código, otra cantidad o metros distintos)</h4>
+    <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Solicitud</th><th>Pedido</th><th>Cantidad enviada</th><th>Cambio</th><th>Motivo de bodega</th><th>Comentario del operador</th></tr></thead><tbody>
+    <?php foreach ($rep['changes'] as $row): ?>
+    <tr><td><?=supplyEscape(substr($row['request_key'],0,8))?></td><td><?=supplyEscape($row['requested_sku'])?></td><td><?=supplyEscape($row['quantity'])?></td>
+        <td><?=supplyEscape(supplyChangeLabel($row['change_flags']))?></td><td><?=supplyEscape($row['change_reason'])?></td>
+        <td><?=$row['receive_comment']!==null&&$row['receive_comment']!==''?supplyEscape($row['receive_comment']):($row['state']==='RECEIVED'?'-':'Pendiente de recepción')?></td></tr>
+    <?php endforeach; if (!$rep['changes']): ?><tr><td colspan="6">Sin cambios en el periodo.</td></tr><?php endif; ?>
     </tbody></table></div>
     </div>
     <?php
