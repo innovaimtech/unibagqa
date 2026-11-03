@@ -580,9 +580,9 @@
         $itemTitle = trim((string)($ord['item_title'] ?? $savedItem['item_title'] ?? ''));
         $imageHash = trim((string)($ord['fab_design_imagehash'] ?? $savedItem['fab_design_imagehash'] ?? ''));
 
-        $cajas = isset($savedItem['total_cajas']) ? (int)$savedItem['total_cajas'] : (int)($ord['req_embalaje_cajas_completas_amt'] ?? 0);
-        $bpc = isset($savedItem['bolsas_por_caja']) ? (int)$savedItem['bolsas_por_caja'] : (int)($ord['req_embalaje_bolsas_por_caja_amt'] ?? 0);
-        $bcf = isset($savedItem['bolsas_caja_final']) ? (int)$savedItem['bolsas_caja_final'] : (int)($ord['req_embalaje_caja_final'] ?? 0);
+        $cajas = isset($savedItem['total_cajas']) ? (int)$savedItem['total_cajas'] : 0; // el operador ingresa las cantidades del cierre (no se precargan)
+        $bpc = isset($savedItem['bolsas_por_caja']) ? (int)$savedItem['bolsas_por_caja'] : 0;
+        $bcf = isset($savedItem['bolsas_caja_final']) ? (int)$savedItem['bolsas_caja_final'] : 0;
         $bsobr = isset($savedItem['bolsas_sobrante']) ? (int)$savedItem['bolsas_sobrante'] : 0;
         $totBolsas = isset($savedItem['total_bolsas']) ? (int)$savedItem['total_bolsas'] : (($cajas * $bpc) + $bcf + $bsobr);
 
@@ -647,7 +647,12 @@
             'req_embalaje_cajas_completas_amt' => (int)($saved['req_embalaje_cajas_completas_amt'] ?? $agenda['req_embalaje_cajas_completas_amt'] ?? 0),
             'req_embalaje_bolsas_por_caja_amt' => (int)($saved['req_embalaje_bolsas_por_caja_amt'] ?? $agenda['req_embalaje_bolsas_por_caja_amt'] ?? 0),
             'req_embalaje_caja_final' => (int)($saved['req_embalaje_caja_final'] ?? 0),
-        ], [], true);
+        ], !empty($saved) ? [
+            'total_cajas' => (int)($saved['req_embalaje_cajas_completas_amt'] ?? 0),
+            'bolsas_por_caja' => (int)($saved['req_embalaje_bolsas_por_caja_amt'] ?? 0),
+            'bolsas_caja_final' => (int)($saved['req_embalaje_caja_final'] ?? 0),
+            'bolsas_sobrante' => (int)($saved['req_embalaje_bolsas_sobrantes_amt'] ?? 0),
+        ] : [], true);
         $rowIdx = 1;
     }
 
@@ -914,9 +919,9 @@
                         + "<input type=\'hidden\' name=\'mixed_item_id_" + nextIdx + "\' value=\'" + (o.item_id || 0) + "\'>"
                         + "</td><td style=\'text-align:center\'>" + imgHtml + "</td>"
                         + "<td><b>" + (o.item_number_prod || "") + "</b>" + (o.item_title ? ("<br><small style=\'color:#64748b\'>" + o.item_title + "</small>") : "") + "</td>"
-                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'total_cajas_" + nextIdx + "\' id=\'total_cajas_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + (o.req_embalaje_cajas_completas_amt || 0) + "\' oninput=\'calcEmbalajeMixto()\'></td>"
-                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_por_caja_" + nextIdx + "\' id=\'bolsas_por_caja_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + (o.req_embalaje_bolsas_por_caja_amt || 0) + "\' oninput=\'calcEmbalajeMixto()\'></td>"
-                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_caja_final_" + nextIdx + "\' id=\'bolsas_caja_final_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + (o.req_embalaje_caja_final || 0) + "\' oninput=\'calcEmbalajeMixto()\'></td>"
+                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'total_cajas_" + nextIdx + "\' id=\'total_cajas_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
+                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_por_caja_" + nextIdx + "\' id=\'bolsas_por_caja_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
+                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_caja_final_" + nextIdx + "\' id=\'bolsas_caja_final_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
                         + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_sobrante_" + nextIdx + "\' id=\'bolsas_sobrante_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'0\' oninput=\'calcEmbalajeMixto()\'></td>"
                         + "<td style=\'text-align:center\'><input type=\'number\' name=\'total_bolsas_" + nextIdx + "\' id=\'total_bolsas_" + nextIdx + "\' class=\'inptxt\' style=\'width:95px;text-align:center;background:#F8FAFC;font-weight:800;color:#0F766E\' value=\'0\' readonly></td>"
                         + "<td><select name=\'req_id_bodega_" + nextIdx + "\' class=\'inptxt\' style=\'width:100%;height:32px;font-size:12px\'>" + whOptions + "</select></td>"
