@@ -3033,7 +3033,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         $body .= '    <div>';
         $body .= '      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
         $body .= '        <span style="font-size:22px">✅</span>';
-        $body .= '        <span style="font-size:17px;font-weight:800;color:#166534">¡Traspaso a Bodega 3000 registrado exitosamente!</span>';
+        $body .= '        <span style="font-size:17px;font-weight:800;color:#166534">¡Traspaso a 3000 Insumos en Producción registrado exitosamente!</span>';
         $body .= '      </div>';
         $body .= '      <div style="font-size:13.5px;color:#14532d;line-height:1.6">';
         $body .= '        Bobina con código de trazabilidad: <span style="display:inline-block;background:#0f172a;color:#fff;font-family:monospace;font-size:14px;font-weight:700;padding:2px 8px;border-radius:4px;letter-spacing:0.5px">' . h($dispatchedRollCode) . '</span>';
@@ -3561,7 +3561,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '        </div>';
     $body .= '        <div style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap">';
     $body .= '          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:#334155;cursor:pointer">';
-    $body .= '            <input type="radio" name="destination_mode" value="production" checked onchange="toggleDestinationMode(\'production\')"> A Producción (Bodega 3000)
+    $body .= '            <input type="radio" name="destination_mode" value="production" checked onchange="toggleDestinationMode(\'production\')"> A Producción (3000 Insumos en Producción)
     ';
     $body .= '          </label>';
     $body .= '          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:#334155;cursor:pointer">';
@@ -3668,10 +3668,10 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
 
     // Botón de Confirmación Destacado
     $body .= '        <button type="submit" class="btn" style="width:100%;background:#15803d;color:#fff;font-size:15px;font-weight:800;padding:12px 20px;border-radius:8px;display:flex;justify-content:center;align-items:center;gap:8px;box-shadow:0 4px 10px rgba(21,128,61,0.25)">';
-    $body .= '          <span id="transfer_submit_label">🚀 Confirmar Traspaso y Despachar a Bodega 3000</span>';
+    $body .= '          <span id="transfer_submit_label">🚀 Confirmar Traspaso y Despachar a 3000 Insumos en Producción</span>';
     $body .= '        </button>';
     $body .= '        <div id="transfer_submit_help" style="text-align:center;font-size:11.5px;color:#64748b;margin-top:8px">';
-    $body .= '          Se actualizará automáticamente la bodega del rollo a Bodega 3000 y se registrará el evento de trazabilidad auditado.';
+    $body .= '          Se actualizará automáticamente la bodega del rollo a 3000 Insumos en Producción y se registrará el evento de trazabilidad auditado.';
     $body .= '        </div>';
     $body .= '      </div>';
 
@@ -3765,7 +3765,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '  <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">';
     $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
     $body .= '      <div>';
-    $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📜 Historial de Traspasos a Bodega 3000 (Planta)</h2>';
+    $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📜 Historial de Traspasos a 3000 Insumos en Producción (Planta)</h2>';
     $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Registro auditado de bobinas traspasadas: quién solicitó, quién sacó, máquina receptora y etiquetas Zebra 100×70.</p>';
     $body .= '      </div>';
     $body .= '      <span style="background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px">' . count($history) . ' registros</span>';
@@ -3774,7 +3774,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     if (empty($history)) {
         $body .= '    <div style="text-align:center;padding:40px 20px;color:#94a3b8">';
         $body .= '      <div style="font-size:32px;margin-bottom:8px">📋</div>';
-        $body .= '      <div style="font-size:15px;font-weight:700;color:#475569">Aún no se registran traspasos a Bodega 3000.</div>';
+        $body .= '      <div style="font-size:15px;font-weight:700;color:#475569">Aún no se registran traspasos a 3000 Insumos en Producción.</div>';
         $body .= '    </div>';
     } else {
         $body .= '    <div style="overflow-x:auto">';
@@ -4166,10 +4166,10 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         if (selWarehouse) selWarehouse.required = !isProduction;
         if (inpWarehouseOperator) inpWarehouseOperator.required = !isProduction;
         document.getElementById("transfer_submit_label").textContent = isProduction
-          ? "🚀 Confirmar Traspaso y Despachar a Bodega 3000"
+          ? "🚀 Confirmar Traspaso y Despachar a 3000 Insumos en Producción"
           : "🚚 Confirmar Traspaso Entre Bodegas";
         document.getElementById("transfer_submit_help").textContent = isProduction
-          ? "Se actualizará automáticamente la bodega del rollo a Bodega 3000 y se registrará el evento de trazabilidad auditado."
+          ? "Se actualizará automáticamente la bodega del rollo a 3000 Insumos en Producción y se registrará el evento de trazabilidad auditado."
           : "Se actualizará la bodega actual del rollo y el movimiento quedará registrado para trazabilidad e informe de stock.";
       }
 

@@ -25,7 +25,11 @@
     // Preparar lista de bodegas
     $warehouses = [];
     try {
-        $warehouses = Db::erpPdo()->query('SELECT id, st_name FROM company_shops_storehouses ORDER BY st_name')->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        // Destino del embalaje: solo las bodegas 400, 500, 700 y 1000 del ERP.
+        $warehouses = array_values(array_filter(
+            Db::erpPdo()->query('SELECT id, st_name FROM company_shops_storehouses WHERE st_status = 1 ORDER BY st_name')->fetchAll(PDO::FETCH_ASSOC) ?: [],
+            static fn(array $w): bool => WarehouseVisibility::isPackagingDestination((string)$w['st_name'])
+        ));
     } catch (Throwable) {}
 
     echo '<style>

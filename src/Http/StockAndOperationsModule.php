@@ -182,7 +182,7 @@ if (preg_match('#^/stock/material-requests/(\d+)/scan$#', $path, $m) === 1 && $m
     $reqData = $service->getMaterialRequest($requestId);
     $otLabel = trim((string)($reqData['ot_code'] ?? ''));
     $rollCode = trim((string)($roll['roll_code'] ?? ('#' . $roll['id'])));
-    $okMsg = '✅ Bobina ' . $rollCode . ($otLabel !== '' ? (' entregada a OT ' . $otLabel) : '') . ' y trasladada exitosamente a Bodega 3000 (MP Producción).';
+    $okMsg = '✅ Bobina ' . $rollCode . ($otLabel !== '' ? (' entregada a OT ' . $otLabel) : '') . ' y trasladada exitosamente a 3000 Insumos en Producción.';
     $query = (($result['ok'] ?? false) === true)
         ? '?ok=' . rawurlencode($okMsg)
         : '?error=' . rawurlencode((string)reset($result['errors']));

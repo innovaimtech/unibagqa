@@ -63,6 +63,7 @@ $unibagCoreFiles = [
     __DIR__ . '/HandleConsumptionService.php',
     __DIR__ . '/TraceabilityService.php',
     __DIR__ . '/FabricationDossierService.php',
+    __DIR__ . '/WarehouseVisibility.php',
     __DIR__ . '/MailService.php',
     __DIR__ . '/TraceableRollLookup.php',
     __DIR__ . '/PackagingBillingMail.php',

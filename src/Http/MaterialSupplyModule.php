@@ -449,9 +449,9 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
     }
     $tabs = ['rolls'=>['📜','Bobinas',count($rolls)],'inks'=>['🎨','Tintas',count($inks)],'products'=>['📦','Productos Bodega 400',count($products)]];
     $sections = ['rolls'=>'Bobinas e insumos','inks'=>'Tintas','products'=>'Productos de Bodega 400'];
-    $routes = ['rolls'=>'Bodegas 100 / 200 → Bodega 3000','inks'=>'Bodegas 900 / 910 / 920 → Bodega 3000','products'=>'Bodega 400 → Bodega 3000'];
+    $routes = ['rolls'=>'Bodegas 100 / 200 → 3000 Insumos en Producción','inks'=>'Bodegas 900 / 910 / 920 → 3000 Insumos en Producción','products'=>'Bodega 400 → 3000 Insumos en Producción'];
     $helps = ['rolls'=>'Pedir bobinas no mueve stock: Bodega prepara el despacho y tú confirmas la recepción.',
-        'inks'=>'Indica la cantidad de tinta. Bodega registra el traspaso a 3000; recibir no descuenta consumo.',
+        'inks'=>'Indica la cantidad de tinta. Bodega registra el traspaso a 3000 Insumos en Producción; recibir no descuenta consumo.',
         'products'=>'Bolsas de algodón y otros productos de la bodega 400. Bodega registra el traspaso y tú confirmas la recepción.'];
     ?>
     <div class="sp">
@@ -663,7 +663,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
                     🏭 <?=supplyEscape($ctx['machine_name']??('Máquina #'.($ctx['win_equipoid']??0)))?>
                     <?php if (!empty($ctx['planned_ot_number'])): ?> · OT <?=supplyEscape($ctx['planned_ot_number'])?><?php elseif ((int)$r['worker_ot_id']>0): ?> · OT #<?=(int)$r['worker_ot_id']?><?php endif; ?>
                     · <?=supplyDate($r['created_at'])?><br>
-                    Solicita: <?=supplyEscape(supplyActorLabel($r['requested_by']))?> · Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?> → <?=(int)$r['source_storehouse_id']===16?'Máquina':'3000'?> · N.º <?=supplyEscape(substr($r['request_key'],0,8))?>
+                    Solicita: <?=supplyEscape(supplyActorLabel($r['requested_by']))?> · Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?> → <?=(int)$r['source_storehouse_id']===16?'Máquina':'3000 Insumos en Producción'?> · N.º <?=supplyEscape(substr($r['request_key'],0,8))?>
                 </div>
             </div>
             <div><?=supplyStatusBadge($r)?></div>
@@ -768,7 +768,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
     <dialog id="supply_dispatch_<?=$i?>" class="supply-dialog">
         <h2>Preparar y despachar</h2>
         <b><?=supplyEscape($r['sku'])?></b> <?=supplyEscape($r['description'])?>
-        <p>Se solicitaron <b><?=supplyEscape($r['requested_qty'])?> <?=supplyEscape($r['unit'])?></b> desde la Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?>. Puedes enviar otra bobina compatible (otro código o metros distintos) o más unidades; en ese caso debes escribir el motivo. Al despachar se descuenta el stock de origen, se carga en la Bodega 3000 y se genera el traspaso ERP.</p>
+        <p>Se solicitaron <b><?=supplyEscape($r['requested_qty'])?> <?=supplyEscape($r['unit'])?></b> desde la Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?>. Puedes enviar otra bobina compatible (otro código o metros distintos) o más unidades; en ese caso debes escribir el motivo. Al despachar se descuenta el stock de origen, se carga en la bodega 3000 Insumos en Producción y se genera el traspaso ERP.</p>
         <?php if ($isRoll): ?>
         <form method="post" action="/stock/material-supply/scan" autocomplete="off">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
@@ -807,7 +807,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
             <?php endif; ?>
             <label style="margin-top:8px">Motivo del cambio <?=$needReason?'(obligatorio: envías algo distinto a lo solicitado)':'(solo si envías otro código, otros metros o más unidades)'?></label>
             <textarea name="change_reason" rows="2" maxlength="500" style="width:100%" <?=$needReason?'required minlength="10"':''?> placeholder="Ej.: la bobina pedida no tiene stock físico; se envía una de otros metros"></textarea>
-            <div class="supply-actions"><button class="btngreen" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="Faltan bobinas por escanear"':''?>>Despachar a Bodega 3000</button></div>
+            <div class="supply-actions"><button class="btngreen" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="Faltan bobinas por escanear"':''?>>Despachar a 3000 Insumos en Producción</button></div>
         </form>
         <form method="post" action="/stock/material-supply/cancel-request" style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
@@ -869,7 +869,7 @@ function renderSupplyReports(MaterialSupplyService $service, string $from, strin
     <h4 style="margin-top:20px">Movimientos por producto y bodega</h4>
     <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Producto</th><th>Bodega origen</th><th>Despachos</th><th>Cantidad</th></tr></thead><tbody>
     <?php foreach ($rep['movements'] as $row): ?>
-    <tr><td><b><?=supplyEscape($row['sku'])?></b><br><?=supplyEscape($row['description'])?></td><td><?=supplyWarehouseLabel((int)$row['source_storehouse_id'])?> → 3000</td><td><?=(int)$row['dispatches']?></td><td><?=supplyEscape($row['quantity'])?> <?=supplyEscape($row['unit'])?></td></tr>
+    <tr><td><b><?=supplyEscape($row['sku'])?></b><br><?=supplyEscape($row['description'])?></td><td><?=supplyWarehouseLabel((int)$row['source_storehouse_id'])?> → 3000 Insumos en Producción</td><td><?=(int)$row['dispatches']?></td><td><?=supplyEscape($row['quantity'])?> <?=supplyEscape($row['unit'])?></td></tr>
     <?php endforeach; if (!$rep['movements']): ?><tr><td colspan="4">Sin movimientos en el periodo.</td></tr><?php endif; ?>
     </tbody></table></div>
     <h4 style="margin-top:20px">Diferencias: solicitado, despachado y recibido</h4>

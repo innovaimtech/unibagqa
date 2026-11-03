@@ -741,7 +741,14 @@ trait WarehouseInventoryServiceTrait
              ORDER BY w.code ASC, w.name ASC'
         );
         $stmt->execute();
-        return $stmt->fetchAll();
+        return $this->onlyErpWarehouses($stmt->fetchAll());
+    }
+
+    /** Quita de la vista las bodegas de TRZ que no existen en el ERP (no borra datos). */
+    private function onlyErpWarehouses(array $rows): array
+    {
+        require_once dirname(__DIR__, 2) . '/WarehouseVisibility.php';
+        return WarehouseVisibility::filterTrz($rows, $this->erpPdo ?? null);
     }
 
     private function getReceptionWarehouseById(int $warehouseId): ?array
@@ -839,9 +846,9 @@ trait WarehouseInventoryServiceTrait
         if ($refreshFromErp) {
             $this->syncWarehousesFromErp();
         }
-        $stmt = $this->pdo->prepare('SELECT id, code, name FROM warehouses ORDER BY code ASC');
+        $stmt = $this->pdo->prepare('SELECT id, code, name, erp_storehouse_id FROM warehouses ORDER BY code ASC');
         $stmt->execute();
-        return $stmt->fetchAll();
+        return $this->onlyErpWarehouses($stmt->fetchAll());
     }
 
     /**
@@ -1032,7 +1039,7 @@ trait WarehouseInventoryServiceTrait
              ORDER BY w.code ASC'
         );
         $stmt->execute();
-        $warehouses = $stmt->fetchAll();
+        $warehouses = $this->onlyErpWarehouses($stmt->fetchAll());
 
         $result = [];
         foreach ($warehouses as $w) {

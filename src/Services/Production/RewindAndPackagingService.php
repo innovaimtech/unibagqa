@@ -404,9 +404,12 @@ trait RewindAndPackagingServiceTrait
         if ($requestId <= 0) {
             throw new RuntimeException('No se encontro el pedido asociado al evento.');
         }
-        $warehouse = $this->erpPdo->prepare('SELECT id FROM company_shops_storehouses WHERE id = :id');
+        $warehouse = $this->erpPdo->prepare('SELECT st_name FROM company_shops_storehouses WHERE id = :id AND st_status = 1');
         $warehouse->execute([':id' => $detail['req_id_bodega']]);
-        if (!$warehouse->fetchColumn()) throw new RuntimeException('Bodega de destino no valida.');
+        $destName = $warehouse->fetchColumn();
+        if ($destName === false || !WarehouseVisibility::isPackagingDestination((string)$destName)) {
+            throw new RuntimeException('Bodega de destino no valida: solo se permiten las bodegas 400, 500, 700 y 1000.');
+        }
         $user = $this->erpPdo->prepare('SELECT id FROM user WHERE user_login = :login AND user_status = 1 LIMIT 1');
         $user->execute([':login' => trim($supervisor)]);
         $supervisorId = (int)$user->fetchColumn();

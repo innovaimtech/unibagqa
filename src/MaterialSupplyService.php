@@ -500,8 +500,8 @@ final class MaterialSupplyService
             $pending = $this->one($this->trz,"SELECT dispatch_key FROM production_supply_dispatches
                 WHERE request_key=? AND state='PENDING'",[$requestKey]);
             if ($pending) throw new RuntimeException('Primero resuelve el despacho pendiente.');
-            $destination = $this->one($this->trz,'SELECT id FROM warehouses WHERE code=3000 AND erp_storehouse_id=16 ORDER BY id LIMIT 1');
-            if (!$destination) throw new RuntimeException('No existe Bodega 3000 vinculada al ERP 16.');
+            $destination = $this->one($this->trz,'SELECT id FROM warehouses WHERE erp_storehouse_id=16 ORDER BY id LIMIT 1');
+            if (!$destination) throw new RuntimeException('No existe la bodega 3000 Insumos en Producción (ERP 16) en trazabilidad.');
 
             // Grupos a despachar, uno por SKU (cada uno es un traspaso ERP de un solo artículo).
             $groups = [];
@@ -727,7 +727,7 @@ final class MaterialSupplyService
     private function warehouseLabel(int $erpStorehouseId): string
     {
         $known = [5 => 'Bodega 100', 11 => 'Bodega 200', 7 => 'Bodega 900', 24 => 'Bodega 910',
-            28 => 'Bodega 920', 16 => 'Bodega 3000'];
+            28 => 'Bodega 920', 16 => '3000 Insumos en Producción'];
         if (isset($known[$erpStorehouseId])) return $known[$erpStorehouseId];
         $row = $this->one($this->erp, 'SELECT st_name FROM company_shops_storehouses WHERE id=?', [$erpStorehouseId]);
         if ($row && preg_match('/^\s*(\d{3,4})\b/', (string)$row['st_name'], $m) === 1) return 'Bodega ' . $m[1];
