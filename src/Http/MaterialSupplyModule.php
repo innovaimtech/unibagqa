@@ -58,7 +58,8 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
     $actor = supplySessionActor($name);
     $service = new MaterialSupplyService(Db::erpPdo(),Db::trzPdo());
     $agId = max(0,(int)($_POST['agid'] ?? $_GET['agid'] ?? 0));
-    $kind = (($_POST['material_kind'] ?? $_GET['material_kind'] ?? '') === 'inks') ? 'inks' : 'rolls';
+    $kindRaw = (string)($_POST['material_kind'] ?? $_GET['material_kind'] ?? '');
+    $kind = in_array($kindRaw, ['inks', 'products'], true) ? $kindRaw : 'rolls';
     $back = $isWarehouse ? '/stock/material-supply' : '/production/materials/request';
     if (!$isWarehouse) $back .= '?agid='.$agId.'&material_kind='.$kind;
     try {
@@ -148,6 +149,13 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
     return true;
 }
 
+/** Cantidad legible: 120 / 35,5 / 1.250,25 (sin ceros sobrantes). */
+function supplyNum(float $value): string
+{
+    $text = number_format($value, 3, ',', '.');
+    return rtrim(rtrim($text, '0'), ',');
+}
+
 function supplyEscape($value): string
 {
     return htmlspecialchars((string)$value,ENT_QUOTES,'UTF-8');
@@ -168,35 +176,219 @@ function supplyAssets(): void
 {
     ?>
     <style>
-    .supply-panel{background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:16px;margin-bottom:14px}
+    /* ---- base (compatibilidad con diálogos y reportes existentes) ---- */
+    .supply-panel{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
     .supply-table{width:100%;border-collapse:collapse;font-size:13px}
-    .supply-table th,.supply-table td{padding:9px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}
+    .supply-table th,.supply-table td{padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}
     .supply-table th{background:#115452;color:#fff}
-    .supply-dialog{width:min(950px,94vw);max-height:90vh;border:1px solid #cbd5e1;border-radius:10px;padding:24px;box-sizing:border-box}
+    .supply-dialog{width:min(950px,94vw);max-height:90vh;border:0;border-radius:16px;padding:24px;box-sizing:border-box;box-shadow:0 25px 60px rgba(15,23,42,.35)}
     .supply-dialog::backdrop{background:rgba(15,23,42,.55)}
     .supply-dialog label{display:block;margin:12px 0 6px;font-weight:700}
-    .supply-dialog input:not([type="checkbox"]),.supply-dialog textarea,.supply-dialog select{box-sizing:border-box;width:100%;padding:10px;border:1px solid #cbd5e1}
+    .supply-dialog input:not([type="checkbox"]),.supply-dialog textarea,.supply-dialog select{box-sizing:border-box;width:100%;padding:11px;border:1px solid #cbd5e1;border-radius:10px;font-size:15px}
     .supply-table [hidden]{display:none!important}
-    .supply-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px}
+    .supply-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px;flex-wrap:wrap}
+    /* ---- nuevo diseño ---- */
+    .sp{max-width:1280px;margin:0 auto;color:#0f172a}
+    .sp *{box-sizing:border-box}
+    .sp-hero{background:linear-gradient(135deg,#0f3f3d,#115452 55%,#0f766e);color:#fff;border-radius:18px;padding:20px 22px;margin-bottom:16px;display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    .sp-hero h2{margin:0;font-size:24px;font-weight:800;letter-spacing:-.02em;color:#fff}
+    .sp-chip{display:inline-flex;align-items:center;gap:6px;background:rgba(255,255,255,.16);border-radius:999px;padding:6px 12px;font-size:13px;font-weight:700;margin-top:8px}
+    .sp-hero a.sp-link{color:#fff;background:rgba(255,255,255,.16);border-radius:10px;padding:10px 14px;font-weight:700;text-decoration:none;font-size:14px}
+    .sp-card-box{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
+    .sp-label{display:block;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#475569;margin-bottom:6px}
+    .sp-select{width:100%;padding:13px 12px;border:1px solid #cbd5e1;border-radius:12px;font-size:15px;background:#fff;color:#0f172a}
+    .sp-req-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+    .sp-req-chips span{background:#f1f5f9;border-radius:10px;padding:7px 11px;font-size:13px;color:#334155}
+    .sp-req-chips b{color:#0f172a}
+    .sp-note{border-radius:12px;padding:12px 14px;margin-top:12px;font-size:14px;line-height:1.45}
+    .sp-note.ok{background:#f0fdf4;border:1px solid #86efac;color:#14532d}
+    .sp-note.warn{background:#fffbeb;border:1px solid #fcd34d;color:#78350f}
+    .sp-note b.big{display:block;font-size:20px;margin:4px 0}
+    .sp-tabs{display:flex;gap:8px;background:#e2e8f0;border-radius:16px;padding:6px;margin-bottom:16px;flex-wrap:wrap}
+    .sp-tab{flex:1 1 160px;border:0;background:transparent;border-radius:12px;padding:13px 12px;font-size:15px;font-weight:800;color:#475569;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;min-height:48px}
+    .sp-tab i{font-style:normal;background:#cbd5e1;color:#334155;border-radius:999px;padding:2px 9px;font-size:12px}
+    .sp-tab.active{background:#fff;color:#115452;box-shadow:0 2px 8px rgba(15,23,42,.12)}
+    .sp-tab.active i{background:#115452;color:#fff}
+    .sp-tools{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+    .sp-search{flex:1 1 260px;padding:13px 14px;border:1px solid #cbd5e1;border-radius:12px;font-size:15px}
+    .sp-seg{display:flex;gap:6px}
+    .sp-seg button{border:1px solid #cbd5e1;background:#fff;border-radius:10px;padding:11px 14px;font-weight:700;font-size:14px;cursor:pointer;min-height:44px}
+    .sp-seg button.active{background:#115452;color:#fff;border-color:#115452}
+    .sp-route{font-size:13px;color:#475569;margin:0 0 12px}
+    .sp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+    .sp-card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:10px;box-shadow:0 1px 3px rgba(15,23,42,.05);transition:box-shadow .15s,transform .15s}
+    .sp-card:hover{box-shadow:0 8px 24px rgba(15,23,42,.12);transform:translateY(-2px)}
+    .sp-card[hidden]{display:none!important}
+    .sp-card.rec{border-color:#22c55e;box-shadow:0 0 0 2px rgba(34,197,94,.18)}
+    .sp-top{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+    .sp-sku{font-size:22px;font-weight:900;letter-spacing:-.01em;line-height:1.1;word-break:break-word}
+    .sp-wh{background:#e0f2fe;color:#075985;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:800;white-space:nowrap}
+    .sp-desc{font-size:14px;color:#334155;line-height:1.35;flex:1}
+    .sp-specs{display:flex;flex-wrap:wrap;gap:6px}
+    .sp-specs span{background:#f1f5f9;border-radius:8px;padding:4px 8px;font-size:12px;color:#334155}
+    .sp-badge{display:inline-block;border-radius:999px;padding:4px 10px;font-size:12px;font-weight:800}
+    .sp-badge.good{background:#dcfce7;color:#166534}
+    .sp-badge.review{background:#fef3c7;color:#92400e}
+    .sp-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px solid #f1f5f9;padding-top:12px}
+    .sp-avail{font-size:13px;color:#475569;line-height:1.2}
+    .sp-avail b{display:block;font-size:20px;color:#0f172a}
+    .sp-btn{border:0;background:#115452;color:#fff;border-radius:12px;padding:12px 18px;font-size:15px;font-weight:800;cursor:pointer;min-height:46px}
+    .sp-btn:hover{background:#0f766e}
+    .sp-btn.green{background:#16a34a}.sp-btn.green:hover{background:#15803d}
+    .sp-btn.ghost{background:#f1f5f9;color:#334155}.sp-btn.ghost:hover{background:#e2e8f0}
+    .sp-btn.red{background:#fee2e2;color:#991b1b}.sp-btn.red:hover{background:#fecaca}
+    .sp-empty{text-align:center;color:#64748b;padding:32px 12px;background:#f8fafc;border:2px dashed #cbd5e1;border-radius:16px;font-size:15px}
+    .sp-alert{border-radius:12px;padding:13px 16px;margin-bottom:14px;font-weight:700}
+    .sp-alert.err{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
+    .sp-alert.ok{background:#dcfce7;color:#166534;border:1px solid #86efac}
+    .sp-qty{display:flex;gap:8px;align-items:stretch}
+    .sp-qty button{width:56px;border:1px solid #cbd5e1;background:#f8fafc;border-radius:12px;font-size:26px;font-weight:800;cursor:pointer}
+    .sp-qty input{text-align:center;font-size:24px!important;font-weight:800}
+    .sp-dlg-head{border-bottom:1px solid #e2e8f0;margin-bottom:6px;padding-bottom:10px}
+    .sp-dlg-head .sp-sku{font-size:26px}
+    /* solicitudes */
+    .sp-h3{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:6px 0 12px}
+    .sp-h3 h3{margin:0;font-size:20px;font-weight:800}
+    .sp-req{background:#fff;border:1px solid #e2e8f0;border-left:6px solid #94a3b8;border-radius:16px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(15,23,42,.05)}
+    .sp-req.st-PENDING{border-left-color:#f59e0b}.sp-req.st-ACCEPTED{border-left-color:#3b82f6}
+    .sp-req.st-DISPATCHED{border-left-color:#0d9488}.sp-req.st-RECEIVED{border-left-color:#22c55e}
+    .sp-req.st-REJECTED,.sp-req.st-CANCELLED{border-left-color:#ef4444}
+    .sp-req-head{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start}
+    .sp-req-sku{font-size:18px;font-weight:900}
+    .sp-req-meta{font-size:13px;color:#64748b;margin-top:3px;line-height:1.4}
+    .sp-steps{display:flex;align-items:center;margin:14px 0 6px}
+    .sp-step{flex:1;text-align:center;font-size:11.5px;font-weight:700;color:#94a3b8;position:relative}
+    .sp-step:before{content:"";display:block;width:18px;height:18px;border-radius:50%;background:#e2e8f0;margin:0 auto 4px;position:relative;z-index:1}
+    .sp-step:after{content:"";position:absolute;top:8px;left:calc(-50% + 9px);width:calc(100% - 18px);height:3px;background:#e2e8f0}
+    .sp-step:first-child:after{display:none}
+    .sp-step.done{color:#115452}.sp-step.done:before{background:#16a34a}.sp-step.done:after{background:#16a34a}
+    .sp-step.now:before{background:#fff;border:4px solid #3b82f6}
+    .sp-req-nums{display:flex;gap:18px;flex-wrap:wrap;margin:10px 0;font-size:13px;color:#475569}
+    .sp-req-nums b{display:block;font-size:20px;color:#0f172a}
+    .sp-req-act{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+    .sp-req-act form{margin:0}
+    .sp-reason{background:#fef2f2;color:#991b1b;border-radius:10px;padding:9px 12px;font-size:13px;margin-top:8px}
+    .sp-banner{background:#ecfeff;border:1px solid #67e8f9;color:#155e75;border-radius:14px;padding:14px 16px;margin-bottom:16px;font-weight:700}
+    @media(max-width:640px){.sp-hero h2{font-size:20px}.sp-grid{grid-template-columns:1fr}.sp-btn{width:100%}.sp-foot{flex-direction:column;align-items:stretch}.sp-tab{flex:1 1 100%}.sp-req-act .sp-btn,.sp-req-act form{width:100%}.sp-step{font-size:10px}}
+    .sp-sm{width:auto;flex:0 1 190px;padding:12px 10px}
+    .sp-pager{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0}
+    .sp-pager-sum{font-size:14px;color:#475569;font-weight:700}
+    .sp-pager-btns{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+    .sp-pager-btns button{border:1px solid #cbd5e1;background:#fff;border-radius:10px;min-width:44px;min-height:44px;padding:0 12px;font-size:14px;font-weight:800;cursor:pointer;color:#334155}
+    .sp-pager-btns button.active{background:#115452;color:#fff;border-color:#115452}
+    .sp-pager-btns button:disabled{opacity:.4;cursor:default}
+    .sp-dots{color:#94a3b8;font-weight:800}
+    @media(max-width:640px){.sp-sm{flex:1 1 100%}.sp-pager{justify-content:center}.sp-pager-sum{width:100%;text-align:center}}
     </style>
     <script>
-    let supplyCompatibleOnly=false;
-    function supplyOpen(id){document.getElementById(id).showModal();}
-    function supplyFilter(value,id){document.querySelectorAll('#'+id+' tbody tr').forEach(function(row){
-        row.hidden=row.innerText.toLowerCase().indexOf(value.toLowerCase())===-1
-            || (id==='supply_catalog_rolls' && supplyCompatibleOnly && row.dataset.compatible==='0');
-    });}
-    function supplyShowRolls(compatibleOnly){supplyCompatibleOnly=compatibleOnly;
-        const input=document.getElementById('supply_roll_search');
-        supplyFilter(input?input.value:'','supply_catalog_rolls');}
-    function supplyTab(kind){document.getElementById('supply_rolls').hidden=kind!=='rolls';
-        document.getElementById('supply_inks').hidden=kind!=='inks';
+    var supplyCompatibleOnly=false;
+    var SP_KEYS={rolls:'roll',inks:'ink',products:'product'};
+    var SP_STATE={rolls:{page:1},inks:{page:1},products:{page:1}};
+    function spNorm(t){t=(t||'').toLowerCase();try{t=t.normalize('NFD').replace(/[̀-ͯ]/g,'');}catch(e){}return t;}
+    function supplyOpen(id){var d=document.getElementById(id);if(d)d.showModal();}
+    function supplyCtl(section,name){return document.getElementById('sp_'+name+'_'+section);}
+    function supplyApply(section,keepPage){
+        var wrap=document.getElementById('supply_catalog_'+section);if(!wrap)return;
+        var st=SP_STATE[section];if(!keepPage)st.page=1;
+        var input=document.getElementById('supply_'+SP_KEYS[section]+'_search');
+        var tokens=spNorm(input?input.value:'').split(/\s+/).filter(Boolean);
+        var famSel=supplyCtl(section,'fam'),fam=famSel?famSel.value:'';
+        var sortSel=supplyCtl(section,'sort'),sort=sortSel?sortSel.value:'sku';
+        var sizeSel=supplyCtl(section,'size'),size=parseInt(sizeSel?sizeSel.value:'24',10)||24;
+        var cards=[].slice.call(wrap.querySelectorAll('.sp-card'));
+        var match=cards.filter(function(c){
+            if(section==='rolls'&&supplyCompatibleOnly&&c.dataset.compatible==='0')return false;
+            if(fam&&c.dataset.fam!==fam)return false;
+            var q=c.dataset.q||'';
+            for(var i=0;i<tokens.length;i++){if(q.indexOf(tokens[i])<0)return false;}
+            return true;
+        });
+        match.sort(function(a,b){
+            if(sort==='stock')return (parseFloat(b.dataset.stock)||0)-(parseFloat(a.dataset.stock)||0);
+            if(sort==='desc')return (a.dataset.desc||'').localeCompare(b.dataset.desc||'','es');
+            return (a.dataset.sku||'').localeCompare(b.dataset.sku||'','es',{numeric:true});
+        });
+        var pages=Math.max(1,Math.ceil(match.length/size));
+        if(st.page>pages)st.page=pages;
+        var from=(st.page-1)*size,to=from+size;
+        cards.forEach(function(c){c.hidden=true;});
+        match.forEach(function(c,i){c.style.order=i;c.hidden=!(i>=from&&i<to);});
+        var cnt=document.getElementById('supply_count_'+section);if(cnt)cnt.textContent=match.length;
+        var none=document.getElementById('supply_none_'+section);if(none)none.hidden=match.length>0;
+        var sum=match.length?('Mostrando '+(from+1)+'–'+Math.min(to,match.length)+' de '+match.length):'Sin resultados';
+        wrap.querySelectorAll('.sp-pager').forEach(function(p){supplyPager(p,section,st.page,pages,sum);});
+    }
+    function supplyPager(el,section,page,pages,sum){
+        var h='<span class="sp-pager-sum">'+sum+'</span><span class="sp-pager-btns">';
+        function b(label,p,dis,act){return '<button type="button" class="'+(act?'active':'')+'" '+(dis?'disabled':'')+' onclick="supplyGo(\''+section+'\','+p+')">'+label+'</button>';}
+        if(pages>1){
+            h+=b('‹ Anterior',page-1,page<=1,false);
+            var last=0;
+            for(var p=1;p<=pages;p++){
+                if(p===1||p===pages||Math.abs(p-page)<=2){
+                    if(last&&p-last>1)h+='<span class="sp-dots">…</span>';
+                    h+=b(p,p,false,p===page);last=p;
+                }
+            }
+            h+=b('Siguiente ›',page+1,page>=pages,false);
+        }
+        el.innerHTML=h+'</span>';
+    }
+    function supplyGo(section,p){
+        SP_STATE[section].page=Math.max(1,p);supplyApply(section,true);
+        var w=document.getElementById('supply_'+section);if(w&&w.scrollIntoView)w.scrollIntoView({behavior:'smooth',block:'start'});
+    }
+    function supplyClear(section){
+        var i=document.getElementById('supply_'+SP_KEYS[section]+'_search');if(i)i.value='';
+        ['fam'].forEach(function(n){var c=supplyCtl(section,n);if(c)c.value='';});
+        var s=supplyCtl(section,'sort');if(s)s.value='sku';
+        supplyApply(section);
+    }
+    function supplyFilter(value,id){supplyApply(id.replace('supply_catalog_',''));}
+    function supplyShowRolls(compatibleOnly){
+        supplyCompatibleOnly=compatibleOnly;
+        document.querySelectorAll('.sp-seg button').forEach(function(b){b.classList.toggle('active',(b.dataset.mode==='compat')===compatibleOnly);});
+        supplyApply('rolls');
+    }
+    function supplyTab(kind){
+        ['rolls','inks','products'].forEach(function(k){
+            var s=document.getElementById('supply_'+k);if(s)s.hidden=kind!==k;
+            var t=document.getElementById('sp_tab_'+k);if(t)t.classList.toggle('active',kind===k);
+        });
         document.querySelectorAll('.supply-request-kind').forEach(function(input){input.value=kind;});
-        const url=new URL(location.href);url.searchParams.set('material_kind',kind);history.replaceState(null,'',url);}
+        try{var url=new URL(location.href);url.searchParams.set('material_kind',kind);history.replaceState(null,'',url);}catch(e){}
+    }
+    function supplyStep(btn,delta){
+        var input=btn.parentNode.querySelector('input');if(!input)return;
+        var step=parseFloat(input.dataset.btnstep||'1')||1,min=parseFloat(input.min)||0,max=parseFloat(input.max);
+        var v=(parseFloat(input.value)||0)+delta*step;
+        if(v<min)v=min;if(!isNaN(max)&&v>max)v=max;
+        input.value=Math.round(v*1000)/1000;
+    }
+    function supplyKey(){var a=new Uint8Array(16);(window.crypto||window.msCrypto).getRandomValues(a);return [].map.call(a,function(x){return ('0'+x.toString(16)).slice(-2);}).join('');}
+    function supplyAsk(btn){
+        var d=document.getElementById('supply_request_dlg');if(!d)return;
+        var c=btn.closest('.sp-card'),ds=c.dataset,f=d.querySelector('form');
+        d.querySelector('.sp-sku').textContent=ds.skuraw;
+        d.querySelector('.sp-dlg-desc').textContent=ds.descraw;
+        d.querySelector('.sp-dlg-avail').textContent=ds.availtxt+' '+ds.unit+' · Bodega '+ds.whlabel;
+        d.querySelector('.sp-dlg-unit').textContent=ds.unit;
+        f.elements['item_id'].value=ds.item;
+        f.elements['source_storehouse_id'].value=ds.source;
+        f.elements['request_key'].value=supplyKey();
+        var q=f.elements['quantity'];
+        q.value='';q.max=ds.stock;q.min=ds.whole==='1'?'1':'0.001';q.step=ds.whole==='1'?'1':'0.001';
+        f.elements['notes'].value='';
+        d.showModal();
+        setTimeout(function(){q.focus();},50);
+    }
+    document.addEventListener('DOMContentLoaded',function(){
+        ['rolls','inks','products'].forEach(function(s){supplyApply(s);});
+    });
     </script>
     <?php
-    if (!empty($_GET['error'])) echo '<div class="supply-panel" style="color:#991b1b">' . supplyEscape($_GET['error']) . '</div>';
-    if (!empty($_GET['saved'])) echo '<div class="supply-panel" style="color:#166534">Operacion registrada.</div>';
+    if (!empty($_GET['error'])) echo '<div class="sp-alert err">⚠️ ' . supplyEscape($_GET['error']) . '</div>';
+    if (!empty($_GET['saved'])) echo '<div class="sp-alert ok">✅ Operación registrada.</div>';
 }
 
 function renderSupplyOperatorScreen(MaterialSupplyService $service, array $context, string $name, array $orders = [], string $kind = 'rolls'): void
@@ -206,8 +398,12 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
     $catalog = $service->catalog((int)$context['req_shop_id']);
     $rolls = [];
     $inks = [];
+    $products = [];
     foreach ($catalog as $item) {
-        if (str_starts_with(strtoupper($item['sku']),'TIN')) {
+        if (($item['kind'] ?? '') === 'products') {
+            $item['recommended'] = false;
+            $products[] = $item;
+        } elseif (str_starts_with(strtoupper($item['sku']),'TIN')) {
             $item['recommended'] = MaterialSupplyRecommendations::inkMatches($item,$agenda);
             $inks[] = $item;
         } else {
@@ -219,142 +415,253 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
     usort($inks,static fn($a,$b)=>($b['recommended']<=>$a['recommended']) ?: strcmp($a['sku'],$b['sku']));
     $compatible = array_values(array_filter($rolls,static fn($item)=>$item['recommended']));
     $compatibleOnly = $agenda !== null && count($compatible) > 0;
-    $catalog = array_merge($rolls,$inks);
+    $catalog = array_merge($rolls,$inks,$products);
     ob_start();
     supplyAssets();
+    $pendingReceipts = 0;
+    foreach ($service->requests(null,(int)$context['win_equipoid']) as $mine) {
+        if (($mine['status'] ?? '') === 'DISPATCHED') $pendingReceipts++;
+    }
+    $tabs = ['rolls'=>['📜','Bobinas',count($rolls)],'inks'=>['🎨','Tintas',count($inks)],'products'=>['📦','Productos Bodega 400',count($products)]];
+    $sections = ['rolls'=>'Bobinas e insumos','inks'=>'Tintas','products'=>'Productos de Bodega 400'];
+    $routes = ['rolls'=>'Bodegas 100 / 200 → Bodega 3000','inks'=>'Bodegas 900 / 910 / 920 → Bodega 3000','products'=>'Bodega 400 → Bodega 3000'];
+    $helps = ['rolls'=>'Pedir bobinas no mueve stock: Bodega prepara el despacho y tú confirmas la recepción.',
+        'inks'=>'Indica la cantidad de tinta. Bodega registra el traspaso a 3000; recibir no descuenta consumo.',
+        'products'=>'Bolsas de algodón y otros productos de la bodega 400. Bodega registra el traspaso y tú confirmas la recepción.'];
     ?>
-    <h2>Solicitar Materiales</h2>
-    <div class="supply-panel">
-        <b>Maquina: <?=supplyEscape($context['machine_name'])?></b>
-        <a class="btnblue" href="/production/machines">Maquinas</a>
-        <div style="margin-top:12px">
-        <label for="supply_ot"><b>OT planificada para hoy (<?=date('d/m/Y')?>)</b></label>
-        <select id="supply_ot" class="inptxt" onchange="location.href='/production/materials/request?agid='+this.value+'&material_kind='+new URL(location.href).searchParams.get('material_kind')">
-            <option value="0">Sin OT / Solicitud para la maquina</option>
+    <div class="sp">
+    <div class="sp-hero">
+        <div>
+            <h2>Solicitar materiales</h2>
+            <span class="sp-chip">🏭 <?=supplyEscape($context['machine_name'])?></span>
+        </div>
+        <a class="sp-link" href="/production/machines">Cambiar máquina</a>
+    </div>
+
+    <?php if ($pendingReceipts > 0): ?>
+    <div class="sp-banner">📬 Tienes <?=$pendingReceipts?> entrega<?=$pendingReceipts>1?'s':''?> por recibir. Búscalas abajo, en «Mis solicitudes».</div>
+    <?php endif; ?>
+
+    <div class="sp-card-box">
+        <label class="sp-label" for="supply_ot">OT planificada para hoy (<?=date('d/m/Y')?>)</label>
+        <select id="supply_ot" class="sp-select" onchange="location.href='/production/materials/request?agid='+this.value+'&material_kind='+(new URL(location.href).searchParams.get('material_kind')||'rolls')">
+            <option value="0">Sin OT — solicitud para la máquina</option>
             <?php $seen=[]; foreach ($orders as $order): $id=(int)$order['ag_id'];if(isset($seen[$id]))continue;$seen[$id]=true; ?>
-            <option value="<?=$id?>" <?=$id===$agId?'selected':''?>>OT <?=supplyEscape($order['prd_number']??$id)?> - <?=supplyEscape($order['cust_name']??'')?> - <?=supplyEscape($order['item_title']??'')?></option>
+            <option value="<?=$id?>" <?=$id===$agId?'selected':''?>>OT <?=supplyEscape($order['prd_number']??$id)?> — <?=supplyEscape($order['cust_name']??'')?> — <?=supplyEscape($order['item_title']??'')?></option>
             <?php endforeach; ?>
             <?php if ($agId>0 && !isset($seen[$agId])): ?><option selected value="<?=$agId?>">OT <?=supplyEscape($context['planned_ot_number']??$agId)?></option><?php endif; ?>
         </select>
-        </div>
         <?php if ($agenda): $requirements=MaterialSupplyRecommendations::requirements($agenda); ?>
-        <p><b>Material:</b> <?=supplyEscape($requirements['material']?:'Sin dato')?> |
-            <b>Ancho de tela:</b> <?=$requirements['width_cm']>0?supplyEscape($requirements['width_cm']).' cm':'Sin dato'?> |
-            <b>Color:</b> <?=supplyEscape($requirements['color']?:'Sin dato')?> |
-            <b>Gramaje:</b> <?=$requirements['grammage']>0?supplyEscape($requirements['grammage']).' g/m2':'Sin dato'?></p>
-        <div style="padding:12px;border:2px solid <?=$compatible?'#16a34a':'#d97706'?>;background:<?=$compatible?'#f0fdf4':'#fffbeb'?>">
-        <b>Bobinas que sirven para esta OT: <?=count($compatible)?> tipos disponibles</b>
-        <?php if ($compatible): ?>
-            <p style="font-size:20px;font-weight:bold;margin:8px 0"><?=supplyEscape(implode(', ',array_column($compatible,'sku')))?></p>
-            <div>Coinciden material, color y gramaje y tienen ancho suficiente. Se muestran primero las compatibles.</div>
-        <?php else: ?>
-            <p>No hay bobinas con stock disponible en 100 o 200 que coincidan con los cuatro datos de esta OT.
-            Las alternativas indican que dato debes revisar; puedes elegirlas manualmente.</p>
-        <?php endif; ?>
+        <div class="sp-req-chips">
+            <span>Material: <b><?=supplyEscape($requirements['material']?:'Sin dato')?></b></span>
+            <span>Ancho: <b><?=$requirements['width_cm']>0?supplyEscape($requirements['width_cm']).' cm':'Sin dato'?></b></span>
+            <span>Color: <b><?=supplyEscape($requirements['color']?:'Sin dato')?></b></span>
+            <span>Gramaje: <b><?=$requirements['grammage']>0?supplyEscape($requirements['grammage']).' g/m²':'Sin dato'?></b></span>
+        </div>
+        <div class="sp-note <?=$compatible?'ok':'warn'?>">
+            <?php if ($compatible): ?>
+                ✅ <b><?=count($compatible)?> tipo<?=count($compatible)>1?'s':''?> de bobina sirven para esta OT</b>
+                <b class="big"><?=supplyEscape(implode(', ',array_column($compatible,'sku')))?></b>
+                Coinciden material, color y gramaje y tienen ancho suficiente. Se muestran primero.
+            <?php else: ?>
+                ⚠️ No hay bobinas con stock en 100 o 200 que coincidan con los cuatro datos de esta OT. Las alternativas indican qué dato revisar; puedes elegirlas manualmente.
+            <?php endif; ?>
         </div>
         <?php endif; ?>
     </div>
-    <div class="supply-panel"><button type="button" class="btnblue" onclick="supplyTab('rolls')">Bobinas</button>
-        <button type="button" class="btnblue" onclick="supplyTab('inks')">Tintas</button></div>
-    <?php foreach (['rolls'=>'Bobinas e Insumos','inks'=>'Solicitud de Tintas'] as $section=>$title): ?>
+
+    <div class="sp-tabs" role="tablist">
+        <?php foreach ($tabs as $key=>[$icon,$label,$total]): ?>
+        <button type="button" role="tab" id="sp_tab_<?=$key?>" class="sp-tab<?=$kind===$key?' active':''?>" onclick="supplyTab('<?=$key?>')"><?=$icon?> <?=$label?> <i><?=$total?></i></button>
+        <?php endforeach; ?>
+    </div>
+
+    <?php foreach ($sections as $section=>$title): ?>
     <div id="supply_<?=$section?>" <?=$kind!==$section?'hidden':''?>>
-    <div class="supply-panel">
-        <h3><?=$section==='rolls' && $agenda?'Bobinas para esta OT':$title?></h3>
-        <b><?=$section==='inks'?'Bodegas 900 / 910 / 920 → Bodega 3000':'Bodegas 100 / 200 → Bodega 3000'?></b>
-        <?php if ($section==='inks'): ?><p>Solicita la cantidad de tinta necesaria. Bodega registra el traspaso a 3000; recibir no descuenta consumo.</p>
-        <?php else: ?><p>La solicitud no mueve stock. Bodega registra el despacho y el operador confirma la recepcion.</p><?php endif; ?>
-        <?php if ($section==='rolls' && $agenda): ?><div class="supply-actions" style="justify-content:flex-start;margin:10px 0">
-            <button type="button" class="btngreen" onclick="supplyShowRolls(true)">Compatibles (<?=count($compatible)?>)</button>
-            <button type="button" class="btnblue" onclick="supplyShowRolls(false)">Todas / Elegir otra</button>
-        </div><?php endif; ?>
-        <input id="supply_<?=$section==='rolls'?'roll':'ink'?>_search" class="inptxt" placeholder="Buscar codigo o descripcion" oninput="supplyFilter(this.value,'supply_catalog_<?=$section?>')">
-        <div style="overflow:auto;max-height:48vh;margin-top:12px">
-        <table class="supply-table" id="supply_catalog_<?=$section?>">
-            <thead><tr><th>Codigo</th><th>Descripcion / Datos</th><th>Bodega</th><th>Disponible</th><th>Recomendacion</th><th>Opciones</th></tr></thead>
-            <tbody>
-            <?php $count=0; foreach ($catalog as $i=>$item): $isInk=str_starts_with(strtoupper($item['sku']),'TIN');if($isInk!==($section==='inks'))continue;$count++;$dialog='supply_request_'.$i; ?>
-                <tr data-compatible="<?=$item['recommended']?'1':'0'?>" <?=$section==='rolls'&&$compatibleOnly&&!$item['recommended']?'hidden':''?>><td><b style="font-size:18px"><?=supplyEscape($item['sku'])?></b></td><td><?=supplyEscape($item['description'])?></td>
-                <td><?=supplyWarehouseLabel((int)$item['source_storehouse_id'])?></td>
-                <td><?=number_format((float)$item['available_qty'],3,',','.')?> <?=supplyEscape($item['unit'])?></td>
-                <td><?php if ($item['recommended']): ?><b style="color:#166534"><?=$isInk?'Color de la OT':'Recomendada'?></b><?php elseif ($agenda && !$isInk): ?>Revisar compatibilidad<?php else: ?>-<?php endif; ?>
-                    <?php if (!$isInk): $specs=$item['specs']; ?><br><?=supplyEscape($specs['material']?:'Sin material')?> |
-                    <?=$specs['width_cm']>0?supplyEscape($specs['width_cm']).' cm':'Sin ancho'?> |
-                    <?=supplyEscape($specs['color']?:'Sin color')?> |
-                    <?=$specs['grammage']>0?supplyEscape($specs['grammage']).' g/m2':'Sin gramaje'?>
-                    <?php if ($agenda): ?><br><?php $failed=array_keys(array_filter($item['checks'],static fn($match)=>!$match)); ?><?=supplyEscape($failed?'Revisar: '.implode(', ',$failed):'Coinciden los cuatro criterios')?><?php endif; endif; ?>
-                </td>
-                <td><button type="button" class="btnblue" onclick="supplyOpen('<?=$dialog?>')">Solicitar</button></td></tr>
-            <?php endforeach; ?>
-            <?php if (!$count): ?><tr><td colspan="6">No hay materiales con stock disponible en esta seccion.</td></tr><?php endif; ?>
-            </tbody>
-        </table>
+        <p class="sp-route"><b><?=$routes[$section]?></b> · <?=$helps[$section]?></p>
+        <?php
+        $families=[];
+        foreach ($catalog as $fi) {
+            $fk=$fi['kind']??(str_starts_with(strtoupper($fi['sku']),'TIN')?'inks':'rolls');
+            if ($fk!==$section) continue;
+            $fam=preg_match('/^[A-Za-z]+/',trim((string)$fi['sku']),$fm)===1?strtoupper($fm[0]):'OTROS';
+            $families[$fam]=($families[$fam]??0)+1;
+        }
+        ksort($families);
+        ?>
+        <div class="sp-tools">
+            <input id="supply_<?=['rolls'=>'roll','inks'=>'ink','products'=>'product'][$section]?>_search" class="sp-search" type="search" placeholder="🔎 Buscar por código o descripción (varias palabras)" oninput="supplyApply('<?=$section?>')">
+            <?php if (count($families)>1): ?>
+            <select id="sp_fam_<?=$section?>" class="sp-select sp-sm" onchange="supplyApply('<?=$section?>')" aria-label="Filtrar por familia de código">
+                <option value="">Todas las familias (<?=count($families)?>)</option>
+                <?php foreach ($families as $famName=>$famCount): ?><option value="<?=supplyEscape($famName)?>"><?=supplyEscape($famName)?> (<?=$famCount?>)</option><?php endforeach; ?>
+            </select>
+            <?php endif; ?>
+            <select id="sp_sort_<?=$section?>" class="sp-select sp-sm" onchange="supplyApply('<?=$section?>')" aria-label="Ordenar">
+                <option value="sku">Orden: código</option>
+                <option value="desc">Orden: descripción</option>
+                <option value="stock">Orden: mayor stock</option>
+            </select>
+            <select id="sp_size_<?=$section?>" class="sp-select sp-sm" onchange="supplyApply('<?=$section?>')" aria-label="Productos por página">
+                <option value="12">12 por página</option><option value="24" selected>24 por página</option><option value="48">48 por página</option><option value="96">96 por página</option>
+            </select>
+            <button type="button" class="sp-btn ghost" onclick="supplyClear('<?=$section?>')">Limpiar</button>
+            <?php if ($section==='rolls' && $agenda): ?>
+            <div class="sp-seg">
+                <button type="button" data-mode="compat" class="<?=$compatibleOnly?'active':''?>" onclick="supplyShowRolls(true)">Compatibles (<?=count($compatible)?>)</button>
+                <button type="button" data-mode="all" class="<?=$compatibleOnly?'':'active'?>" onclick="supplyShowRolls(false)">Todas</button>
+            </div>
+            <?php endif; ?>
         </div>
-    </div>
+        <div id="supply_catalog_<?=$section?>">
+            <div class="sp-pager"></div>
+            <div class="sp-grid">
+            <?php $count=0; foreach ($catalog as $i=>$item):
+                $itemKind=$item['kind']??(str_starts_with(strtoupper($item['sku']),'TIN')?'inks':'rolls');
+                if($itemKind!==$section)continue;$count++;
+                $isRec=!empty($item['recommended']);
+                $famItem=preg_match('/^[A-Za-z]+/',trim((string)$item['sku']),$fm2)===1?strtoupper($fm2[0]):'OTROS';
+                $isWhole=str_starts_with(strtoupper($item['sku']),'TEL'); ?>
+                <div class="sp-card<?=$isRec?' rec':''?>" hidden
+                    data-compatible="<?=$isRec?'1':'0'?>" data-fam="<?=supplyEscape($famItem)?>"
+                    data-sku="<?=supplyEscape(strtolower($item['sku']))?>" data-desc="<?=supplyEscape(mb_strtolower((string)$item['description'],'UTF-8'))?>"
+                    data-q="<?=supplyEscape(mb_strtolower($item['sku'].' '.$item['description'],'UTF-8'))?>"
+                    data-stock="<?=(float)$item['available_qty']?>" data-item="<?=(int)$item['item_id']?>" data-source="<?=(int)$item['source_storehouse_id']?>"
+                    data-skuraw="<?=supplyEscape($item['sku'])?>" data-descraw="<?=supplyEscape($item['description'])?>" data-unit="<?=supplyEscape($item['unit'])?>"
+                    data-availtxt="<?=supplyEscape(supplyNum((float)$item['available_qty']))?>" data-whlabel="<?=supplyEscape(supplyWarehouseLabel((int)$item['source_storehouse_id']))?>" data-whole="<?=$isWhole?'1':'0'?>">
+                    <div class="sp-top"><span class="sp-sku"><?=supplyEscape($item['sku'])?></span><span class="sp-wh">Bod. <?=supplyWarehouseLabel((int)$item['source_storehouse_id'])?></span></div>
+                    <div class="sp-desc"><?=supplyEscape($item['description'])?></div>
+                    <?php if ($itemKind==='rolls'): $specs=$item['specs']; ?>
+                    <div class="sp-specs">
+                        <span><?=supplyEscape($specs['material']?:'Sin material')?></span>
+                        <span><?=$specs['width_cm']>0?supplyEscape($specs['width_cm']).' cm':'Sin ancho'?></span>
+                        <span><?=supplyEscape($specs['color']?:'Sin color')?></span>
+                        <span><?=$specs['grammage']>0?supplyEscape($specs['grammage']).' g/m²':'Sin gramaje'?></span>
+                    </div>
+                    <?php endif; ?>
+                    <?php if ($isRec): ?><div><span class="sp-badge good">✔ <?=$itemKind==='inks'?'Color de la OT':'Recomendada para esta OT'?></span></div>
+                    <?php elseif ($agenda && $itemKind==='rolls'): $failed=array_keys(array_filter($item['checks'],static fn($match)=>!$match)); ?>
+                    <div><span class="sp-badge review">Revisar: <?=supplyEscape($failed?implode(', ',$failed):'compatibilidad')?></span></div>
+                    <?php endif; ?>
+                    <div class="sp-foot">
+                        <div class="sp-avail"><b><?=supplyNum((float)$item['available_qty'])?></b><?=supplyEscape($item['unit'])?> disponibles</div>
+                        <button type="button" class="sp-btn" onclick="supplyAsk(this)">Solicitar</button>
+                    </div>
+                </div>
+            <?php endforeach; ?>
+            </div>
+            <div id="supply_none_<?=$section?>" class="sp-empty" <?=$count?'hidden':''?>>No hay materiales que coincidan con los filtros<?=$count?'':' (esta sección no tiene stock disponible)'?>.</div>
+            <div class="sp-pager"></div>
+        </div>
     </div>
     <?php endforeach; ?>
     <script>supplyCompatibleOnly=<?=$compatibleOnly?'true':'false'?>;</script>
-    <?php foreach ($catalog as $i=>$item): ?>
-    <dialog id="supply_request_<?=$i?>" class="supply-dialog">
-        <h2>Solicitar Materiales</h2><b><?=supplyEscape($item['sku'])?></b><p><?=supplyEscape($item['description'])?></p>
+
+    <dialog id="supply_request_dlg" class="supply-dialog" style="width:min(560px,94vw)">
+        <div class="sp-dlg-head"><span class="sp-sku"></span><div class="sp-desc sp-dlg-desc" style="margin-top:4px"></div>
+        <div class="sp-avail sp-dlg-avail" style="margin-top:8px"></div></div>
         <form method="post" action="/production/materials/request/assign">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="action_mode" value="central_supply">
             <input type="hidden" name="agid" value="<?=$agId?>">
             <input type="hidden" class="supply-request-kind" name="material_kind" value="<?=$kind?>">
-            <input type="hidden" name="request_key" value="<?=bin2hex(random_bytes(16))?>">
-            <input type="hidden" name="item_id" value="<?=(int)$item['item_id']?>">
-            <input type="hidden" name="source_storehouse_id" value="<?=(int)$item['source_storehouse_id']?>">
-            <label>Cantidad (<?=supplyEscape($item['unit'])?>)</label>
-            <input type="number" name="quantity" step="<?=str_starts_with(strtoupper($item['sku']),'TEL')?'1':'0.001'?>" min="<?=str_starts_with(strtoupper($item['sku']),'TEL')?'1':'0.001'?>" max="<?=(float)$item['available_qty']?>" required>
-            <label>Observaciones</label><textarea name="notes" rows="3"></textarea>
-            <div class="supply-actions"><button type="button" class="btngrey" onclick="this.closest('dialog').close()">Volver</button><button class="btnblue">Solicitar</button></div>
+            <input type="hidden" name="request_key" value="">
+            <input type="hidden" name="item_id" value="">
+            <input type="hidden" name="source_storehouse_id" value="">
+            <label>¿Cuántas <span class="sp-dlg-unit">unidades</span> necesitas?</label>
+            <div class="sp-qty">
+                <button type="button" onclick="supplyStep(this,-1)" aria-label="Menos">−</button>
+                <input type="number" name="quantity" data-btnstep="1" step="0.001" min="0.001" placeholder="0" required inputmode="decimal">
+                <button type="button" onclick="supplyStep(this,1)" aria-label="Más">+</button>
+            </div>
+            <label>Observaciones (opcional)</label><textarea name="notes" rows="3" placeholder="Ej.: urgente para el turno de la tarde"></textarea>
+            <div class="supply-actions"><button type="button" class="sp-btn ghost" onclick="this.closest('dialog').close()">Volver</button><button class="sp-btn green">Enviar solicitud</button></div>
         </form>
     </dialog>
-    <?php endforeach; ?>
     <?php renderSupplyRequestHistory($service,$service->requests(null,(int)$context['win_equipoid']),$agId,false); ?>
+    </div>
     <?php
     renderProdwrkShell('Solicitar Materiales',ob_get_clean(),7,$name,(string)($_SESSION['planta_name']??'PLANTA'));
 }
 
 function supplyWarehouseLabel(int $id): string
 {
-    return [5=>'100',11=>'200',7=>'900',24=>'910',28=>'920',16=>'3000'][$id] ?? (string)$id;
+    static $names = null;
+    $known = [5=>'100',11=>'200',7=>'900',24=>'910',28=>'920',16=>'3000'];
+    if (isset($known[$id])) return $known[$id];
+    if ($names === null) {
+        $names = [];
+        try {
+            foreach (Db::erpPdo()->query('SELECT id, st_name FROM company_shops_storehouses')->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                if (preg_match('/^\s*(\d{3,4})\b/', (string)$row['st_name'], $m) === 1) $names[(int)$row['id']] = $m[1];
+            }
+        } catch (Throwable $e) {
+            error_log('supplyWarehouseLabel: ' . $e->getMessage());
+        }
+    }
+    return $names[$id] ?? (string)$id;
 }
 
 function renderSupplyRequestHistory(MaterialSupplyService $service, array $requests, int $agId, bool $warehouse): void
 {
     if ($warehouse) supplyAssets();
     ?>
-    <div class="supply-panel">
-    <h3><?=$warehouse?'Solicitudes de Materiales':'Solicitudes de la Maquina'?></h3>
-    <?php if ($warehouse): ?><a href="/stock/transfers" class="btnblue">Traspasos</a> <a href="/stock/material-supply/reports" class="btnblue">Reportes</a><?php endif; ?>
-    <div style="overflow:auto;margin-top:12px">
-    <table class="supply-table"><thead><tr><th>Solicitud / Maquina</th><th>Material</th><th>Origen → Destino</th><th>Cantidades</th><th>Solicitado por</th><th>Opciones</th></tr></thead>
-    <tbody>
-    <?php foreach ($requests as $i=>$r): $remaining=max(0,(float)$r['requested_qty']-(float)$r['allocated_qty']);$details='supply_details_'.$i;$ctx=json_decode($r['context'],true)?:[]; ?>
-    <tr><td><b><?=supplyEscape(substr($r['request_key'],0,8))?></b><br><?=supplyEscape($ctx['machine_name']??('Maquina #'.($ctx['win_equipoid']??0)))?><?php if (!empty($ctx['planned_ot_number'])): ?><br>OT <?=supplyEscape($ctx['planned_ot_number'])?><?php elseif ((int)$r['worker_ot_id']>0): ?><br>OT asignacion #<?=(int)$r['worker_ot_id']?><?php endif; ?><br><?=supplyDate($r['created_at'])?><br><?=supplyStatusBadge($r)?></td>
-        <td><b><?=supplyEscape($r['sku'])?></b><br><?=supplyEscape($r['description'])?><br><?=supplyEscape($r['notes'])?></td>
-        <td><?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?> → <?=(int)$r['source_storehouse_id']===16?'Maquina':'3000'?></td>
-        <td>Solicitado: <?=supplyEscape($r['requested_qty'])?><br>Entregado: <?=supplyEscape($r['delivered_qty'])?><br>Recibido: <?=supplyEscape($r['received_qty'])?><br><?=supplyEscape($r['unit'])?></td>
-        <td><?=supplyEscape(supplyActorLabel($r['requested_by']))?></td>
-        <td><button type="button" class="btnblue" onclick="supplyOpen('<?=$details?>')">Detalle</button>
-        <?php if ($warehouse && (int)$r['source_storehouse_id']!==16): ?>
-            <?php if ($r['status']==='PENDING'): ?>
-            <form method="post" action="/stock/material-supply/accept" style="display:inline">
-                <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
-                <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
-                <button class="btngreen">Aceptar</button>
-            </form>
-            <button type="button" class="btngrey" style="color:#991b1b" onclick="supplyOpen('supply_reject_<?=$i?>')">Rechazar</button>
-            <?php elseif ($r['status']==='ACCEPTED' && $remaining>0): ?>
-            <button type="button" class="btngreen" onclick="supplyOpen('supply_dispatch_<?=$i?>')">Preparar y despachar</button>
-            <?php endif; ?>
+    <div class="<?=$warehouse?'sp':''?>">
+    <div class="sp-h3"><h3><?=$warehouse?'📋 Solicitudes de materiales':'📋 Mis solicitudes'?> <small style="color:#64748b;font-weight:600">(<?=count($requests)?>)</small></h3>
+    <?php if ($warehouse): ?><div><a href="/stock/transfers" class="sp-btn ghost" style="text-decoration:none;display:inline-block">Traspasos</a> <a href="/stock/material-supply/reports" class="sp-btn ghost" style="text-decoration:none;display:inline-block">Reportes</a></div><?php endif; ?></div>
+    <?php
+    $stepFlow = ['PENDING'=>1,'ACCEPTED'=>2,'DISPATCHED'=>3,'RECEIVED'=>4];
+    $stepNames = [1=>'Solicitada',2=>'En preparación',3=>'Despachada',4=>'Recibida'];
+    foreach ($requests as $i=>$r):
+        $remaining=max(0,(float)$r['requested_qty']-(float)$r['allocated_qty']);$details='supply_details_'.$i;
+        $ctx=json_decode($r['context'],true)?:[];
+        $st=(string)$r['status'];$cur=$stepFlow[$st]??0;
+        $req=(float)$r['requested_qty'];$pct=$req>0?max(0,min(100,(int)round((float)$r['received_qty']/$req*100))):0; ?>
+    <div class="sp-req st-<?=supplyEscape($st)?>">
+        <div class="sp-req-head">
+            <div>
+                <div class="sp-req-sku"><?=supplyEscape($r['sku'])?> · <?=supplyEscape($r['description'])?></div>
+                <div class="sp-req-meta">
+                    🏭 <?=supplyEscape($ctx['machine_name']??('Máquina #'.($ctx['win_equipoid']??0)))?>
+                    <?php if (!empty($ctx['planned_ot_number'])): ?> · OT <?=supplyEscape($ctx['planned_ot_number'])?><?php elseif ((int)$r['worker_ot_id']>0): ?> · OT #<?=(int)$r['worker_ot_id']?><?php endif; ?>
+                    · <?=supplyDate($r['created_at'])?><br>
+                    Solicita: <?=supplyEscape(supplyActorLabel($r['requested_by']))?> · Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?> → <?=(int)$r['source_storehouse_id']===16?'Máquina':'3000'?> · N.º <?=supplyEscape(substr($r['request_key'],0,8))?>
+                </div>
+            </div>
+            <div><?=supplyStatusBadge($r)?></div>
+        </div>
+        <?php if ($cur>0): ?>
+        <div class="sp-steps"><?php foreach ($stepNames as $n=>$label): ?><div class="sp-step<?=$n<$cur||($cur===4&&$n===4)?' done':($n===$cur?' now':'')?>"><?=$label?></div><?php endforeach; ?></div>
         <?php endif; ?>
-        <?php if ((int)$r['source_storehouse_id']===16 && $remaining>0): ?><p>Registro anterior: crea una solicitud desde 900, 910 o 920.</p><?php endif; ?></td>
-    </tr>
+        <div class="sp-req-nums">
+            <div>Solicitado<b><?=supplyEscape($r['requested_qty'])?></b><?=supplyEscape($r['unit'])?></div>
+            <div>Entregado<b><?=supplyEscape($r['delivered_qty'])?></b><?=supplyEscape($r['unit'])?></div>
+            <div>Recibido<b><?=supplyEscape($r['received_qty'])?></b><?=supplyEscape($r['unit'])?></div>
+            <?php if (!empty($r['notes'])): ?><div style="flex:1 1 220px">Observaciones<b style="font-size:14px;font-weight:600"><?=supplyEscape($r['notes'])?></b></div><?php endif; ?>
+        </div>
+        <?php if ($st==='REJECTED' && !empty($r['reject_reason'])): ?><div class="sp-reason">Rechazada: <?=supplyEscape($r['reject_reason'])?></div><?php endif; ?>
+        <?php if ($st==='CANCELLED' && !empty($r['cancel_reason'])): ?><div class="sp-reason">Cancelada: <?=supplyEscape($r['cancel_reason'])?></div><?php endif; ?>
+        <div class="sp-req-act">
+            <?php if (!$warehouse && $st==='DISPATCHED'): ?><button type="button" class="sp-btn green" onclick="supplyOpen('<?=$details?>')">📥 Recibir material</button><?php endif; ?>
+            <button type="button" class="sp-btn ghost" onclick="supplyOpen('<?=$details?>')">Ver detalle</button>
+            <?php if ($warehouse && (int)$r['source_storehouse_id']!==16): ?>
+                <?php if ($st==='PENDING'): ?>
+                <form method="post" action="/stock/material-supply/accept">
+                    <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
+                    <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
+                    <button class="sp-btn green">✔ Aceptar</button>
+                </form>
+                <button type="button" class="sp-btn red" onclick="supplyOpen('supply_reject_<?=$i?>')">Rechazar</button>
+                <?php elseif ($st==='ACCEPTED' && $remaining>0): ?>
+                <button type="button" class="sp-btn green" onclick="supplyOpen('supply_dispatch_<?=$i?>')">📦 Preparar y despachar</button>
+                <?php endif; ?>
+            <?php endif; ?>
+        </div>
+        <?php if ((int)$r['source_storehouse_id']===16 && $remaining>0): ?><p class="sp-req-meta">Registro anterior: crea una solicitud desde 900, 910 o 920.</p><?php endif; ?>
+    </div>
     <?php endforeach; ?>
-    <?php if (!$requests): ?><tr><td colspan="6">No hay solicitudes registradas.</td></tr><?php endif; ?>
-    </tbody></table></div></div>
+    <?php if (!$requests): ?><div class="sp-empty">Aún no hay solicitudes registradas.</div><?php endif; ?>
+    </div>
     <?php foreach ($requests as $i=>$r): $remaining=max(0,(float)$r['requested_qty']-(float)$r['allocated_qty']); ?>
     <dialog id="supply_details_<?=$i?>" class="supply-dialog">
         <h2>Detalle de Solicitud</h2>

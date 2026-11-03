@@ -205,6 +205,25 @@ final class MaterialSupplyService
         return array_merge($machine, $shop, ['worker_ot_id'=>0, 'agenda_id'=>0, 'order_id'=>0, 'req_number'=>'']);
     }
 
+    /**
+     * Ids ERP de las bodegas "400" (productos terminados de reventa) de la sucursal.
+     * Se identifican por el código al inicio del nombre (ej. "400 (PROD TERMINADOS REVENTA)"), no por un id fijo.
+     *
+     * @return int[]
+     */
+    public function productStorehouseIds(int $shopId): array
+    {
+        $stmt = $this->erp->prepare('SELECT id, st_name FROM company_shops_storehouses WHERE st_shop_id=?');
+        $stmt->execute([$shopId]);
+        $ids = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            if (preg_match('/^\s*400\b/', (string)$row['st_name']) === 1) {
+                $ids[] = (int)$row['id'];
+            }
+        }
+        return $ids;
+    }
+
     public function catalog(int $shopId): array
     {
         $stmt = $this->erp->prepare("SELECT i.id AS item_id, i.item_number_prod AS sku,
@@ -222,11 +241,51 @@ final class MaterialSupplyService
               AND iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0)>0
             ORDER BY i.item_number_prod, css.id LIMIT 1000");
         $stmt->execute([$shopId]);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($items as &$row) {
+            $row['kind'] = str_starts_with(strtoupper((string)$row['sku']), 'TIN') ? 'inks' : 'rolls';
+        }
+        unset($row);
+
+        // Productos de la bodega 400 (bolsas de algodón y otros): consulta aparte para no desplazar bobinas ni tintas.
+        $productIds = $this->productStorehouseIds($shopId);
+        if ($productIds !== []) {
+            $in = implode(',', array_map('intval', $productIds));
+            $stmt = $this->erp->prepare("SELECT i.id AS item_id, i.item_number_prod AS sku,
+                    i.item_title AS description, i.item_reg_width AS width_cm, i.item_desc,
+                    css.id AS source_storehouse_id, css.st_name AS warehouse_name,
+                    COALESCE(u.unit_name,'Unid.') AS unit,
+                    iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0) AS available_qty
+                FROM item_shops_storehouses iss JOIN item i ON i.id=iss.item_id
+                JOIN company_shops_storehouses css ON css.id=iss.st_id AND css.st_shop_id=iss.shop_id
+                LEFT JOIN item_units u ON u.id=i.item_unit
+                WHERE iss.shop_id=? AND iss.st_id IN ($in)
+                  AND (i.item_status>0 OR i.item_status IS NULL)
+                  AND iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0)>0
+                ORDER BY i.item_title, i.item_number_prod LIMIT 20000");
+            $stmt->execute([$shopId]);
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $row['kind'] = 'products';
+                $items[] = $row;
+            }
+        }
+        return $items;
     }
 
     private function item(int $itemId, int $source, int $shopId): array
     {
+        $productIds = $this->productStorehouseIds($shopId);
+        if (in_array($source, $productIds, true)) {
+            $product = $this->one($this->erp, "SELECT i.id AS item_id,i.item_number_prod AS sku,i.item_title AS description,
+                    COALESCE(u.unit_name,'Unid.') AS unit,
+                    iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0) AS available_qty
+                FROM item i JOIN item_shops_storehouses iss ON iss.item_id=i.id
+                LEFT JOIN item_units u ON u.id=i.item_unit
+                WHERE i.id=? AND iss.st_id=? AND iss.shop_id=? AND (i.item_status>0 OR i.item_status IS NULL)
+                  AND iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0)>0", [$itemId, $source, $shopId]);
+            if ($product) return $product;
+            throw new RuntimeException('El producto no tiene stock disponible en la bodega 400.');
+        }
         if (!in_array($source, [5, 11, 7, 24, 28], true)) throw new RuntimeException('Bodega de solicitud no permitida.');
         $item = $this->one($this->erp,"SELECT i.id AS item_id,i.item_number_prod AS sku,i.item_title AS description,
                 COALESCE(u.unit_name,'Unid.') AS unit,
@@ -576,10 +635,12 @@ final class MaterialSupplyService
     /** Etiqueta legible de una bodega ERP para el kardex. */
     private function warehouseLabel(int $erpStorehouseId): string
     {
-        return match ($erpStorehouseId) {
-            5 => 'Bodega 100', 11 => 'Bodega 200', 7 => 'Bodega 900', 24 => 'Bodega 910',
-            28 => 'Bodega 920', 16 => 'Bodega 3000', default => 'ERP ' . $erpStorehouseId,
-        };
+        $known = [5 => 'Bodega 100', 11 => 'Bodega 200', 7 => 'Bodega 900', 24 => 'Bodega 910',
+            28 => 'Bodega 920', 16 => 'Bodega 3000'];
+        if (isset($known[$erpStorehouseId])) return $known[$erpStorehouseId];
+        $row = $this->one($this->erp, 'SELECT st_name FROM company_shops_storehouses WHERE id=?', [$erpStorehouseId]);
+        if ($row && preg_match('/^\s*(\d{3,4})\b/', (string)$row['st_name'], $m) === 1) return 'Bodega ' . $m[1];
+        return 'ERP ' . $erpStorehouseId;
     }
 
     /**

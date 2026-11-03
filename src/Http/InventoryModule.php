@@ -2225,17 +2225,10 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             setupSameSkuToolbar(sameSkuInList ? (list[0] || null) : null);
 
             // Si es un solo registro pero tiene quantity > 1 (ej: 10 bobinas), dar la opción de imprimir 1 etiqueta por cada unidad
-            if (!exactBatch && list.length === 1 && parseFloat(list[0].quantity) > 1.0001) {
-                currentEntryForSplit = list[0];
-                var nUnits = Math.round(parseFloat(list[0].quantity));
-                document.getElementById("lbl_split_count").textContent = nUnits;
-                toolbar.style.display = "block";
-                // Por defecto mostrar ya divididas en N etiquetas individuales para comodidad del bodeguero
-                splitCurrentEntryLabels();
-            } else {
-                toolbar.style.display = "none";
-                renderLabelList(list);
-            }
+            // Un bulto con contenido agrupado lleva UNA sola etiqueta (la del bulto) con la cantidad que contiene;
+            // nunca se generan etiquetas por cada unidad contenida.
+            toolbar.style.display = "none";
+            renderLabelList(list);
 
             if (exactBatch) {
                 var batchesModal = document.getElementById("traceabilityBatchesModal");
