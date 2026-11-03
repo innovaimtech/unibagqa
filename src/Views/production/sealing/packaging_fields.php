@@ -305,6 +305,88 @@
             outline: none;
             box-shadow: 0 0 0 2px rgba(13,148,136,0.15);
         }
+
+        /* Cierre mixto en tablet: cada CC pasa a tarjeta para que los campos no se sobrepongan */
+        #panel_cierre_mixto { container-type: inline-size; }
+        @container (max-width: 1000px) {
+        #panel_cierre_mixto .pack-mixto-table { min-width: 0; width: 100%; display: block; }
+        #panel_cierre_mixto .pack-mixto-table thead { display: none; }
+        #panel_cierre_mixto .pack-mixto-table tbody { display: block; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] {
+            display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 12px;
+            padding: 14px; margin: 0 0 12px; border: 1px solid #CBD5E1; border-radius: 10px; background: #FFFFFF;
+        }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td { display: block; border: 0; padding: 0; min-width: 0; text-align: left !important; white-space: normal !important; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1) { grid-column: 1 / 4; font-size: 15px; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-column: 4; grid-row: 1 / 3; justify-self: end; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) { grid-column: 1 / 4; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-column: 1 / 4; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-column: 4; align-self: end; justify-self: end; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(n+4):nth-child(-n+9)::before {
+            display: block; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] input,
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] select {
+            width: 100% !important; min-width: 0; height: 44px !important; font-size: 16px !important; box-sizing: border-box;
+        }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] .btnred { min-height: 44px; min-width: 44px; }
+        #panel_cierre_mixto .pack-mixto-table tfoot, #panel_cierre_mixto .pack-mixto-table tfoot tr { display: block; }
+        #panel_cierre_mixto .pack-mixto-table tfoot tr { padding: 12px 14px; border: 2px solid #CBD5E1; border-radius: 10px; }
+        #panel_cierre_mixto .pack-mixto-table tfoot td { display: block; border: 0; padding: 3px 0; text-align: left !important; }
+        #panel_cierre_mixto .pack-mixto-table tfoot td:last-child { display: none; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(4)::before { content: "Cajas"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(5)::before { content: "Unid. x caja"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(6)::before { content: "Caja final"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(7)::before { content: "Sobrantes"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(8)::before { content: "Total bolsas"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9)::before { content: "Bodega origen"; }
+        }
+        @supports not (container-type: inline-size) {
+            @media (max-width: 1450px) {
+        #panel_cierre_mixto .pack-mixto-table { min-width: 0; width: 100%; display: block; }
+        #panel_cierre_mixto .pack-mixto-table thead { display: none; }
+        #panel_cierre_mixto .pack-mixto-table tbody { display: block; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] {
+            display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 12px;
+            padding: 14px; margin: 0 0 12px; border: 1px solid #CBD5E1; border-radius: 10px; background: #FFFFFF;
+        }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td { display: block; border: 0; padding: 0; min-width: 0; text-align: left !important; white-space: normal !important; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1) { grid-column: 1 / 4; font-size: 15px; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-column: 4; grid-row: 1 / 3; justify-self: end; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) { grid-column: 1 / 4; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-column: 1 / 4; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-column: 4; align-self: end; justify-self: end; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(n+4):nth-child(-n+9)::before {
+            display: block; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] input,
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] select {
+            width: 100% !important; min-width: 0; height: 44px !important; font-size: 16px !important; box-sizing: border-box;
+        }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] .btnred { min-height: 44px; min-width: 44px; }
+        #panel_cierre_mixto .pack-mixto-table tfoot, #panel_cierre_mixto .pack-mixto-table tfoot tr { display: block; }
+        #panel_cierre_mixto .pack-mixto-table tfoot tr { padding: 12px 14px; border: 2px solid #CBD5E1; border-radius: 10px; }
+        #panel_cierre_mixto .pack-mixto-table tfoot td { display: block; border: 0; padding: 3px 0; text-align: left !important; }
+        #panel_cierre_mixto .pack-mixto-table tfoot td:last-child { display: none; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(4)::before { content: "Cajas"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(5)::before { content: "Unid. x caja"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(6)::before { content: "Caja final"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(7)::before { content: "Sobrantes"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(8)::before { content: "Total bolsas"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9)::before { content: "Bodega origen"; }
+            }
+        }
+        @media (max-width: 1280px) {
+            .pack-close-grid { grid-template-columns: minmax(0, 1fr); }
+        }
+        @media (max-width: 640px) {
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1),
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3),
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-column: 1 / 3; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-column: 2; grid-row: auto; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-column: 2; }
+        }
     </style>';
 
     // 1. Selector de Modalidad (Simple y claro para los operadores)
@@ -454,7 +536,7 @@
                 <span>Ingrese las cajas y unidades de cada CC que conforma este pallet. Los totales se consolidan y sincronizan automáticamente con el cierre.</span>
             </div>
             <div style="display:flex;align-items:center;gap:8px">
-                <input type="text" id="inp_search_mixed_cc" class="inptxt" placeholder="Buscar CC (ej: 26-00578-1)" style="width:220px;height:34px;font-size:12.5px;border:1.5px solid #99F6E4;border-radius:6px;padding:4px 10px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();searchAndAddMixedCC();}">
+                <input type="text" id="inp_search_mixed_cc" class="inptxt" placeholder="Buscar CC (ej: 26-00578-1)" style="width:220px;max-width:100%;height:34px;font-size:12.5px;border:1.5px solid #99F6E4;border-radius:6px;padding:4px 10px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();searchAndAddMixedCC();}">
                 <button type="button" class="btnblue" style="padding:7px 14px;font-size:12.5px;border-radius:6px;font-weight:bold;height:34px;display:inline-flex;align-items:center;gap:6px" onclick="searchAndAddMixedCC()"><i class="fa fa-plus"></i> Agregar CC</button>
             </div>
         </div>
