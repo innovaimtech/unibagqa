@@ -35,7 +35,7 @@
     for ($x = 0; $x < 5; $x++) {
         if (!empty($agenda["req_prod_adjfile_{$x}"])) {
             $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
-            $adjIsImage = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp|bmp)$/i', $adjFile);
+            $adjIsImage = unibagAttachmentIsImage($adjFile);
             $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
             $adjComments = (string)($agenda["req_prod_adjcomments_{$x}"] ?? '');
 

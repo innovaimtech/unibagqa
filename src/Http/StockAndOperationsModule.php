@@ -614,9 +614,40 @@ if (preg_match('#^/stock/material-requests/(\d+)$#', $path, $m) === 1 && $method
     exit;
 }
 
+// Sincroniza bodegas y plan de producción con el ERP en segundo plano (lo llama la pantalla de traspasos
+// después de cargar, para que la página no espere al ERP). Devuelve las OT disponibles ya actualizadas.
+if ($path === '/stock/transfers/sync' && $method === 'GET') {
+    session_write_close(); // no bloquear otras pestañas de la misma sesión mientras dura la sincronización
+    header('Content-Type: application/json; charset=utf-8');
+    try {
+        $service->refreshProductionPlanFromErp();
+        $service->syncWarehousesFromErp();
+        $orders = array_map(static fn(array $wo): array => [
+            'id' => (int)$wo['id'],
+            'code' => (string)$wo['ot_code'],
+            'sku' => (string)$wo['sku_final'],
+            'status' => (string)$wo['status'],
+            'label' => (string)$wo['ot_code'] . ' - ' . (string)$wo['sku_final'] . ((string)$wo['status'] === 'ACTIVE' ? ' [ACTIVA]' : ''),
+        ], $service->listWorkOrdersForTransfer(false));
+        echo json_encode(['ok' => true, 'work_orders' => $orders], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        error_log('Sync traspasos: ' . $e->getMessage());
+        echo json_encode(['ok' => false]);
+    }
+    exit;
+}
+
 if ($path === '/stock/transfers' && $method === 'GET') {
-    $warehouses = $service->listWarehouses();
-    $transferWorkOrders = $service->listWorkOrdersForTransfer();
+    // Lectura rápida desde el caché local; la sincronización con el ERP corre después en segundo plano.
+    $warehouses = $service->listWarehouses(false);
+    if ($warehouses === []) {
+        $warehouses = $service->listWarehouses(true); // primera vez: aún no hay bodegas locales
+    }
+    $transferWorkOrders = $service->listWorkOrdersForTransfer(false);
+    if ($transferWorkOrders === []) {
+        $transferWorkOrders = $service->listWorkOrdersForTransfer(true); // primera vez: aún no hay OT locales
+    }
+    $planStale = $service->isProductionPlanSyncStale();
     $scanCode = trim((string)($_GET['code'] ?? ''));
     $roll = $scanCode !== '' ? $service->getRollByScanCode($scanCode) : null;
 
@@ -762,6 +793,14 @@ if ($path === '/stock/transfers' && $method === 'GET') {
         </div>';
     }
 
+    if ($planStale) {
+        $body .= '<script>(function(){fetch("/stock/transfers/sync",{credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){'
+            . 'if(!d||!d.ok)return;var sel=document.querySelector("select[name=work_order_id]");if(!sel)return;var cur=sel.value;'
+            . 'sel.innerHTML="";var o=document.createElement("option");o.value="";o.textContent="Seleccionar";sel.appendChild(o);'
+            . 'd.work_orders.forEach(function(w){var op=document.createElement("option");op.value=String(w.id);op.textContent=w.label;sel.appendChild(op);});'
+            . 'sel.value=cur;}).catch(function(){});})();</script>';
+    }
+
     render('Traspaso', $body);
     exit;
 }
@@ -772,7 +811,6 @@ if ($path === '/stock/transfers' && $method === 'POST') {
     $scanCode = trim((string)($_POST['code'] ?? ''));
     $transferMode = (string)($_POST['transfer_mode'] ?? 'warehouse');
     $toWarehouseId = $transferMode === 'warehouse' ? (int)($_POST['to_warehouse_id'] ?? 0) : 0;
-    $transferWorkOrders = $service->listWorkOrdersForTransfer();
     $workOrderId = $transferMode === 'work_order' ? (int)($_POST['work_order_id'] ?? 0) : null;
     $result = $service->transferRoll($rollId, $toWarehouseId, $currentOperatorName, $workOrderId);
     if ($result['ok'] === true) {
@@ -780,8 +818,8 @@ if ($path === '/stock/transfers' && $method === 'POST') {
         exit;
     }
 
-    $warehouses = $service->listWarehouses();
-    $transferWorkOrders = $service->listWorkOrdersForTransfer();
+    $warehouses = $service->listWarehouses(false);
+    $transferWorkOrders = $service->listWorkOrdersForTransfer(false);
     $roll = $service->getRoll($rollId);
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div style="font-size:18px;font-weight:700">Traspaso por pistoleo</div>

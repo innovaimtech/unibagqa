@@ -2873,11 +2873,20 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
 {
     $availableRolls = $service->listAvailableRollsForTransfer(150);
     $allTransferRolls = $service->listAllRollsForWarehouseTransfer(null, 2500);
+    // Lectura rápida desde el caché local: la sincronización con el ERP (lenta) corre después en segundo plano.
+    $cachedWarehouses = $service->listWarehouses(false);
+    if ($cachedWarehouses === []) {
+        $cachedWarehouses = $service->listWarehouses(true); // primera vez: todavía no hay bodegas locales
+    }
     $warehouses = array_values(array_filter(
-        $service->listWarehouses(),
+        $cachedWarehouses,
         static fn(array $warehouse): bool => (int)($warehouse['id'] ?? 0) > 0
     ));
-    $workOrders = $service->listWorkOrdersForTransfer();
+    $workOrders = $service->listWorkOrdersForTransfer(false);
+    if ($workOrders === []) {
+        $workOrders = $service->listWorkOrdersForTransfer(true); // primera vez: todavía no hay OT locales
+    }
+    $planStale = $service->isProductionPlanSyncStale();
     $machines = $service->listProductionMachines();
     $pendingRequests = $service->listPendingMaterialRequestsFromProduction(30);
     $history = $service->listProductionTransferHistory(50);
@@ -4376,6 +4385,16 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     </script>';
 
     $body .= '</div>'; // Fin transfers-shell
+
+    if ($planStale) {
+        // Actualiza en segundo plano las OT desde el ERP sin hacer esperar a quien abre la pantalla.
+        $body .= '<script>(function(){fetch("/stock/transfers/sync",{credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){'
+            . 'if(!d||!d.ok)return;var sel=document.getElementById("sel_work_order");if(!sel)return;var cur=sel.value;'
+            . 'var known={};Array.prototype.forEach.call(sel.options,function(o){known[o.value]=1;});'
+            . 'd.work_orders.forEach(function(w){if(known[String(w.id)])return;var op=document.createElement("option");op.value=String(w.id);op.setAttribute("data-ot",w.code);'
+            . 'op.textContent="OT #"+w.code+" - "+w.sku+" ("+(w.status==="ACTIVE"?"ACTIVA":"PROGRAMADA")+")";sel.appendChild(op);});sel.value=cur;'
+            . '}).catch(function(){});})();</script>';
+    }
 
     render('Traspasos de Bodega', $body);
 }

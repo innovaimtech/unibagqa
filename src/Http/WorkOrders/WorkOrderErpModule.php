@@ -142,7 +142,7 @@ function unibagBuildLegacyClientRows(
         if ($adj !== '') {
             $comment = trim((string)($ot["req_prod_adjcomments_{$x}"] ?? ''));
             $adjUrl = '/docs/prod/' . rawurlencode($adj);
-            $isImg = preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $adj) === 1;
+            $isImg = unibagAttachmentIsImage($adj);
             $btnText = $isImg ? '📷 Ver Adjunto #' . ($x + 1) : '📄 Descargar #' . ($x + 1);
 
             $adjHtml = '<div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">';

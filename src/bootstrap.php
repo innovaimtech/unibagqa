@@ -62,6 +62,7 @@ $unibagCoreFiles = [
     __DIR__ . '/MonthlyPresentationService.php',
     __DIR__ . '/HandleConsumptionService.php',
     __DIR__ . '/TraceabilityService.php',
+    __DIR__ . '/FabricationDossierService.php',
 ];
 
 foreach ($unibagCoreFiles as $coreFile) {

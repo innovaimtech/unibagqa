@@ -124,7 +124,7 @@
                 <?php for ($x = 0; $x < 5; $x++): ?>
                     <?php if (!empty($agenda["req_prod_adjfile_{$x}"])): 
                         $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
-                        $isImg = (bool)preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $adjFile);
+                        $isImg = unibagAttachmentIsImage($adjFile);
                     ?>
                         <tr>
                             <td class="tdleft" colspan="2">Imagen #<?=($x + 1)?></td>

@@ -834,9 +834,11 @@ trait WarehouseInventoryServiceTrait
 
 
 
-    public function listWarehouses(): array
+    public function listWarehouses(bool $refreshFromErp = true): array
     {
-        $this->syncWarehousesFromErp();
+        if ($refreshFromErp) {
+            $this->syncWarehousesFromErp();
+        }
         $stmt = $this->pdo->prepare('SELECT id, code, name FROM warehouses ORDER BY code ASC');
         $stmt->execute();
         return $stmt->fetchAll();

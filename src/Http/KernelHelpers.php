@@ -244,6 +244,16 @@ function unibagLookupDesignMetadata(string $hash): ?array
 }
 
 /**
+ * ¿El adjunto es una imagen? Extensión de imagen conocida, o sin extensión (el ERP guarda varios adjuntos
+ * solo con el hash): en ese caso se abre en el visor con rotación y el servidor confirma por contenido.
+ */
+function unibagAttachmentIsImage(string $fileName): bool
+{
+    $ext = strtolower(pathinfo(trim($fileName), PATHINFO_EXTENSION));
+    return $ext === '' || in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'jfif'], true);
+}
+
+/**
  * Renderiza el visor interactivo de diseño e imágenes con rotación 360°, zoom, espejo, arrastre y atajos.
  */
 function unibagRenderImageViewerHtml(string $hash, string $folder): string
@@ -291,13 +301,24 @@ function unibagServeErpDocument(string $path): bool
         || (str_contains($_SERVER['HTTP_ACCEPT'] ?? '', 'text/html'))
     );
 
-    if ($shouldShowViewer) {
+    // Navegación directa al archivo (sin extensión de imagen conocida): se decide por el contenido más abajo.
+    $viewerRequested = empty($_GET['raw']) && (
+        (!empty($_GET['view']))
+        || (($_SERVER['HTTP_SEC_FETCH_DEST'] ?? '') === 'document')
+        || (($_SERVER['HTTP_SEC_FETCH_DEST'] ?? '') === 'iframe')
+        || (str_contains($_SERVER['HTTP_ACCEPT'] ?? '', 'text/html'))
+    );
+    $showViewer = static function () use ($hash, $folder): void {
         while (ob_get_level() > 0) {
             ob_end_clean();
         }
         header('Content-Type: text/html; charset=utf-8');
         echo unibagRenderImageViewerHtml($hash, $folder ?? 'docs.order');
         exit;
+    };
+
+    if ($shouldShowViewer) {
+        $showViewer();
     }
 
     $cacheBase = __DIR__ . '/docs_cache';
@@ -331,6 +352,16 @@ function unibagServeErpDocument(string $path): bool
     if ($localExisting !== null) {
         if (!file_exists($cachedFile)) {
             @copy($localExisting, $cachedFile);
+        }
+        // Adjuntos sin extensión: si el contenido es una imagen, usar su tipo real y el visor con rotación.
+        if (!$isImage && $contentType === 'application/octet-stream') {
+            $sniffed = @getimagesize($localExisting);
+            if (is_array($sniffed) && !empty($sniffed['mime'])) {
+                $contentType = (string)$sniffed['mime'];
+                if ($viewerRequested) {
+                    $showViewer();
+                }
+            }
         }
         if ($folder === 'docs.order' && !file_exists($orderStatic)) {
             $orderDir = __DIR__ . '/docs/order';
@@ -390,6 +421,15 @@ function unibagServeErpDocument(string $path): bool
             $prodDir = __DIR__ . '/docs/prod';
             if (!is_dir($prodDir)) @mkdir($prodDir, 0777, true);
             @file_put_contents($prodDir . '/' . $hash, $downloadedData);
+        }
+        if (!$isImage && ($contentType === 'application/octet-stream' || $contentType === '')) {
+            $sniffed = @getimagesizefromstring($downloadedData);
+            if (is_array($sniffed) && !empty($sniffed['mime'])) {
+                $contentType = (string)$sniffed['mime'];
+                if ($viewerRequested) {
+                    $showViewer();
+                }
+            }
         }
         header('Content-Type: ' . $contentType);
         header('Content-Length: ' . strlen($downloadedData));

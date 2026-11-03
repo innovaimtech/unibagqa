@@ -366,9 +366,17 @@ trait WorkOrderErpServiceTrait
         return $wo === false ? null : $wo;
     }
 
-    public function listWorkOrdersForTransfer(): array
+    /**
+     * OT disponibles para traspaso.
+     *
+     * $refreshFromErp = false lee solo el caché local (rápido). Con true (valor por defecto, comportamiento histórico)
+     * puede ejecutar la sincronización con el ERP, que es lenta cuando el caché de 5 minutos venció.
+     */
+    public function listWorkOrdersForTransfer(bool $refreshFromErp = true): array
     {
-        $this->syncWorkOrdersFromErpProductionPlan();
+        if ($refreshFromErp) {
+            $this->syncWorkOrdersFromErpProductionPlan();
+        }
         $stmt = $this->pdo->prepare(
             "SELECT id, ot_code, sku_final, target_qty, status, created_at
              FROM work_orders
@@ -377,6 +385,19 @@ trait WorkOrderErpServiceTrait
         );
         $stmt->execute();
         return $stmt->fetchAll();
+    }
+
+    /** ¿Venció el caché local del plan ERP? Consulta barata: no toca el ERP. */
+    public function isProductionPlanSyncStale(): bool
+    {
+        $last = (int)($this->getAppSetting('erp_production_plan_synced_at', '0') ?? '0');
+        return $last <= 0 || $last < (time() - 300);
+    }
+
+    /** Refresca el plan de producción desde el ERP (respeta el caché de 5 minutos). */
+    public function refreshProductionPlanFromErp(): void
+    {
+        $this->syncWorkOrdersFromErpProductionPlan();
     }
 
     public function setActiveWorkOrder(int $id, string $operatorName = ''): void

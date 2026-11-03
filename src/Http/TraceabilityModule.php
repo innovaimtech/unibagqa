@@ -42,6 +42,32 @@ function handleTraceabilityRoutes(
         return true;
     }
 
+    // Sub-route: API Ficha técnica de fabricación por máquina (JSON para el modal de detalle)
+    if ($cleanPath === '/trazabilidad/api/fabricacion') {
+        header('Content-Type: application/json; charset=utf-8');
+        $evtId = (int)($_GET['id'] ?? 0);
+        if ($evtId <= 0) {
+            echo json_encode(['success' => false, 'error' => 'ID de evento no especificado']);
+            return true;
+        }
+        try {
+            $trzForDossier = null;
+            try {
+                $trzForDossier = Db::trzPdo();
+            } catch (Throwable) {
+                $trzForDossier = null; // TRZ es opcional: sin él solo faltan clichés asignados, tintas y alistamiento
+            }
+            $dossier = (new FabricationDossierService($pdo, $trzForDossier))->forEvent($evtId);
+            echo json_encode($dossier === null
+                ? ['success' => false, 'error' => 'No se encontró la máquina de este evento']
+                : ['success' => true, 'dossier' => $dossier], JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+        } catch (Throwable $e) {
+            error_log('Ficha de fabricación: ' . $e->getMessage());
+            echo json_encode(['success' => false, 'error' => 'No se pudo cargar la ficha técnica de la máquina']);
+        }
+        return true;
+    }
+
     // Sub-route: API Evento de Producción (JSON for floating modal)
     if ($cleanPath === '/trazabilidad/api/evento') {
         header('Content-Type: application/json; charset=utf-8');
@@ -1529,6 +1555,10 @@ function renderTrzProdModalHtml(): void
                     </div>
                 </div>
 
+                <!-- Ficha técnica completa de la máquina (se carga desde /trazabilidad/api/fabricacion) -->
+                <h5 class="trz-modal-section-title" style="margin-top:18px;">Ficha técnica de la máquina en esta OT</h5>
+                <div id="trzDossier" class="trz-dossier"><div class="trz-dossier-note">Cargando ficha técnica…</div></div>
+
                 <!-- Observations / Comments Box -->
                 <div id="trzProdCommentsBox" class="trz-modal-annotation-box" style="margin-top: 14px;">
                     <span class="annot-label">📝 Observaciones & Comentarios del Operador:</span>
@@ -1612,6 +1642,8 @@ function renderTrzProdModalHtml(): void
             var plannedAmt = parseFloat(ev.planned_amount || 0);
             document.getElementById('trzProdPlanned').textContent = plannedAmt > 0 ? (plannedAmt.toLocaleString('es-CL') + ' un.') : 'No especificado';
 
+            loadTrzDossier(ev.id);
+
             var commentsBox = document.getElementById('trzProdCommentsBox');
             var commentsEl = document.getElementById('trzProdCommentsText');
             if (ev.evt_comments && ev.evt_comments.trim() !== '') {
@@ -1621,6 +1653,126 @@ function renderTrzProdModalHtml(): void
                 commentsEl.textContent = 'Sin observaciones adicionales registradas por el operador.';
                 commentsBox.style.display = 'block';
             }
+        }
+
+        var trzDossierCache = {};
+        function loadTrzDossier(eventId) {
+            var box = document.getElementById('trzDossier');
+            if (!box) return;
+            if (!eventId) { box.innerHTML = ''; return; }
+            if (trzDossierCache[eventId]) { renderTrzDossier(trzDossierCache[eventId]); return; }
+            box.innerHTML = '<div class="trz-dossier-note">Cargando ficha técnica…</div>';
+            fetch('/trazabilidad/api/fabricacion?id=' + encodeURIComponent(eventId), {credentials: 'same-origin'})
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    if (!d || !d.success) {
+                        box.innerHTML = '<div class="trz-dossier-note">' + escapeTrzHtml((d && d.error) || 'No se pudo cargar la ficha técnica.') + '</div>';
+                        return;
+                    }
+                    trzDossierCache[eventId] = d.dossier;
+                    renderTrzDossier(d.dossier);
+                })
+                .catch(function () { box.innerHTML = '<div class="trz-dossier-note">No se pudo cargar la ficha técnica.</div>'; });
+        }
+
+        function trzNum(v, dec) {
+            var n = parseFloat(v || 0);
+            return n.toLocaleString('es-CL', {minimumFractionDigits: dec || 0, maximumFractionDigits: dec || 0});
+        }
+
+        function renderTrzDossier(d) {
+            var box = document.getElementById('trzDossier');
+            if (!box) return;
+            var h = '';
+            function kv(label, value) {
+                var v = (value === null || value === undefined || value === '') ? '-' : value;
+                return '<div class="dos-kv"><span>' + escapeTrzHtml(label) + '</span><strong>' + escapeTrzHtml(String(v)) + '</strong></div>';
+            }
+            function section(title, inner) { return '<div class="dos-sec"><div class="dos-title">' + title + '</div>' + inner + '</div>'; }
+
+            var p = d.plan || {};
+            // 1. Medidas programadas
+            var m = '<div class="dos-grid">'
+                + kv('Máquina', p.machine) + kv('Proceso', p.process) + kv('OT', p.ot) + kv('Cliente', p.customer)
+                + kv('Producto', p.product) + kv('Diseño', p.design)
+                + kv('Cantidad programada', trzNum(p.planned_units) + ' un.') + kv('Merma programada', trzNum(p.waste_percent_planned, 1) + ' %')
+                + kv('Ancho', trzNum(p.width, 1) + ' cm') + kv('Alto', trzNum(p.height, 1) + ' cm') + kv('Fuelle', trzNum(p.gusset, 1) + ' cm')
+                + kv('Área de impresión', trzNum(p.print_width, 1) + ' x ' + trzNum(p.print_height, 1) + ' cm')
+                + (p.handle_length > 0 ? kv('Largo manilla', trzNum(p.handle_length, 0) + ' cm') : '')
+                + (p.grams > 0 ? kv('Gramaje', trzNum(p.grams, 0) + ' g') : '')
+                + (p.fabric_color ? kv('Color de tela', p.fabric_color) : '')
+                + '</div>';
+            h += section('📐 Medidas programadas', m);
+
+            // 2. Corte y rodillo (solo flexografía)
+            if (d.cut) {
+                var c = d.cut;
+                h += section('✂️ Corte y formato de rodillo', '<div class="dos-grid">'
+                    + kv('Rodillo (Z)', c.roller_z > 0 ? 'Z = ' + c.roller_z : 'Sin dato en equipo_params')
+                    + kv('Corte por bolsa', trzNum(c.cut_m, 4) + ' m')
+                    + kv('Medida usada para el rodillo', trzNum(c.measure_used, 0) + ' cm')
+                    + kv('Polímero', c.polymer_type)
+                    + kv('Metros lineales programados', trzNum(c.linear_meters_planned) + ' m')
+                    + kv('Metros adicionales por merma', trzNum(c.linear_meters_extra) + ' m')
+                    + kv('Metros lineales a imprimir', trzNum(c.linear_meters_to_print) + ' m') + '</div>');
+            }
+
+            // 3. Clichés
+            var cl = d.cliche || {};
+            var assigned = (cl.assigned || []).map(function (a) { return a.code + (a.description ? ' - ' + a.description : ''); }).join(' | ');
+            h += section('🧩 Clichés', '<div class="dos-grid">'
+                + kv('Código de cliché', cl.code) + kv('Ubicación', cl.location)
+                + kv('Solicitado', cl.requested_at) + kv('Recibido', cl.received_at)
+                + kv('Clichés asignados a la OT', assigned || (d.warnings && d.warnings.indexOf('clichés asignados') >= 0 ? 'No disponible' : 'Sin registro')) + '</div>');
+
+            // 4. Colores, anilox y tintas por unidad
+            if (d.units && d.units.length) {
+                var t = '<div class="dos-table-wrap"><table class="dos-table"><thead><tr><th>Unidad</th><th>Color programado</th><th>Color cargado</th><th>Anilox usado</th><th>Tinta</th><th style="text-align:right">Consumo</th></tr></thead><tbody>';
+                d.units.forEach(function (u) {
+                    t += '<tr><td><strong>N° ' + u.unit + '</strong></td><td>' + escapeTrzHtml(u.color_planned || '-') + '</td><td>' + escapeTrzHtml(u.color_used || '-') + '</td>'
+                        + '<td>' + escapeTrzHtml(u.anilox || '-') + '</td>'
+                        + '<td>' + escapeTrzHtml(u.ink || '-') + (u.mixed ? ' <em>(mezcla' + (u.notes ? ': ' + escapeTrzHtml(u.notes) : '') + ')</em>' : '') + '</td>'
+                        + '<td style="text-align:right">' + (u.consumed_kg === null ? '-' : trzNum(u.consumed_kg, 2) + ' kg') + '</td></tr>';
+                });
+                t += '</tbody></table></div>';
+                h += section('🎨 Colores, anilox y tintas por unidad', t);
+            }
+
+            // 5. Producción real
+            var pr = d.production || {};
+            var ops = (pr.operators || []).map(function (o) { return escapeTrzHtml(o.operator) + ': <strong>' + trzNum(o.units) + ' un.</strong> (' + o.turns + ' turno' + (o.turns == 1 ? '' : 's') + ')'; }).join('<br>');
+            h += section('🏭 Producción realizada en esta máquina', '<div class="dos-grid">'
+                + kv('Unidades producidas', trzNum(pr.units) + ' un.') + kv('Metros lineales', trzNum(pr.meters) + ' m')
+                + kv('Kilos procesados', trzNum(pr.kg, 1) + ' kg') + kv('Turnos / eventos', pr.turns)
+                + kv('Primer registro', pr.first_at) + kv('Último registro', pr.last_at) + '</div>'
+                + (ops ? '<div class="dos-list"><span>Por operador</span><div>' + ops + '</div></div>' : ''));
+
+            // 6. Mermas
+            if (d.wastes && d.wastes.length) {
+                var w = '<div class="dos-table-wrap"><table class="dos-table"><thead><tr><th>Tipo de merma</th><th style="text-align:right">Unidades</th><th style="text-align:right">Kilos</th></tr></thead><tbody>';
+                d.wastes.forEach(function (x) { w += '<tr><td>' + escapeTrzHtml(x.title) + '</td><td style="text-align:right">' + trzNum(x.units) + '</td><td style="text-align:right">' + trzNum(x.kg, 2) + '</td></tr>'; });
+                h += section('⚠️ Mermas registradas', w + '</tbody></table></div>');
+            }
+
+            // 7. Alistamiento
+            if (d.setup && d.setup.length) {
+                var s = '<div class="dos-table-wrap"><table class="dos-table"><thead><tr><th>Inicio</th><th>Término</th><th>Duración</th><th>Operador</th><th>Ayudante</th><th>Comentarios</th></tr></thead><tbody>';
+                d.setup.forEach(function (x) {
+                    s += '<tr><td>' + escapeTrzHtml(x.start) + '</td><td>' + escapeTrzHtml(x.end) + '</td><td>' + (x.minutes === null ? '-' : x.minutes + ' min') + '</td><td>' + escapeTrzHtml(x.operator || '-') + '</td><td>' + escapeTrzHtml(x.helper || '-') + '</td><td>' + escapeTrzHtml(x.comments || '-') + '</td></tr>';
+                });
+                h += section('🔧 Alistamiento / apertura de máquina', s + '</tbody></table></div>');
+            }
+
+            // 8. Aprobación
+            var ap = d.approvals || [];
+            h += section('✅ Aprobación de la producción', ap.length
+                ? '<div class="dos-grid">' + ap.map(function (a) { return kv(a.role, a.name + (a.at ? ' · ' + a.at : '')); }).join('') + '</div>'
+                : '<div class="dos-empty">No hay aprobación registrada (líder o supervisor) para esta máquina.</div>');
+
+            if (d.warnings && d.warnings.length) {
+                h += '<div class="trz-dossier-note">Algunos datos no se pudieron consultar: ' + escapeTrzHtml(d.warnings.join(', ')) + '.</div>';
+            }
+            box.innerHTML = h;
         }
 
         function closeTrzProdModal(e) {
@@ -3033,6 +3185,21 @@ function renderTraceabilityStyles(): void
             color: #64748b;
             margin-top: 3px;
         }
+        .trz-dossier{display:flex;flex-direction:column;gap:12px}
+        .trz-dossier-note,.dos-empty{font-size:12.5px;color:#64748b;padding:10px 12px;background:#f8fafc;border:1px dashed #cbd5e1;border-radius:8px}
+        .dos-sec{border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#fff;color:#0f172a}
+        .dos-title{padding:8px 12px;background:#f1f5f9;font-weight:800;font-size:13px;color:#0f172a;border-bottom:1px solid #e2e8f0}
+        .dos-sec>.dos-grid,.dos-sec>.dos-empty{margin:10px 12px}
+        .dos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px 14px}
+        .dos-kv{display:flex;flex-direction:column;gap:1px;min-width:0}
+        .dos-kv span{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:700}
+        .dos-kv strong{font-size:13.5px;color:#0f172a;overflow-wrap:anywhere}
+        .dos-list{margin:0 12px 10px;font-size:13px}
+        .dos-list>span{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;font-weight:700;margin-bottom:2px}
+        .dos-table-wrap{overflow-x:auto}
+        .dos-table{width:100%;border-collapse:collapse;font-size:12.5px}
+        .dos-table th{background:#f8fafc;text-align:left;padding:7px 10px;font-size:11px;text-transform:uppercase;color:#475569;border-bottom:1px solid #e2e8f0;white-space:nowrap}
+        .dos-table td{color:#0f172a;padding:7px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top}
         .trz-modal-annotation-box {
             background: rgba(30, 41, 59, 0.7);
             border-left: 3px solid #00a9a6;
