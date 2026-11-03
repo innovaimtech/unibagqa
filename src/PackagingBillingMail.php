@@ -78,6 +78,9 @@ final class PackagingBillingMail
             })();
             $seller = $names($this->erpPdo, (int)$o['req_userid_seller']);
             $packer = $names($this->erpPdo, $packerUserId);
+            if ($packer['name'] === '') {
+                $packer['name'] = trim((string)($_SESSION['operator_name'] ?? ''));
+            }
             $supStmt = $this->erpPdo->prepare("SELECT CONCAT(u.user_firstname,' ',u.user_lastname) FROM prod_worker_embalajes e JOIN user u ON u.id = e.req_id_supervisor WHERE e.id = ?");
             $supStmt->execute([$embalajeId]);
             $receiver = trim((string)$supStmt->fetchColumn());
@@ -108,7 +111,8 @@ final class PackagingBillingMail
                 $subjectBase = trim((string)$sa->fetchColumn());
             }
             if ($subjectBase === '') {
-                $subjectBase = 'Embalaje listo para facturar';
+                $subjectBase = ['0' => 'INGRESO BODEGA', '1' => 'CIERRE FINAL BODEGA', '2' => 'CIERRE PROVISORIO BODEGA'][$code]
+                    ?? 'Embalaje listo para facturar';
             }
             $ccs = [(string)$o['req_number']];
             $mixedNums = [];

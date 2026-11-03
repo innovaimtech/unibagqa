@@ -444,6 +444,7 @@ function handleProductionEventsRoutes(
                 $prodService->savePackagingEventDetail((int)$productionResult['event_id'], $workerOtId, $packagingDetail,
                     (string)($_REQUEST['pack_supervisor_user'] ?? ''), (string)($_REQUEST['pack_supervisor_pass'] ?? ''));
                 $packagingPdo->commit();
+                $prodService->sendPendingPackagingBillingMail();
             }
         } catch (Throwable $e) {
             if ($packagingPdo !== null && $packagingPdo->inTransaction()) $packagingPdo->rollBack();

@@ -17,6 +17,37 @@ trait RewindAndPackagingServiceTrait
         return $this->lastSupplyConsumptionWarning;
     }
 
+    /** @var array<int,mixed>|null Datos del correo de facturación pendiente de enviar tras el commit. */
+    private ?array $pendingBillingMail = null;
+
+    /**
+     * Envía el correo a facturación del último embalaje guardado. Llamar tras confirmar la transacción.
+     * Un fallo de correo nunca interrumpe el guardado: queda como aviso para el operador.
+     */
+    public function sendPendingPackagingBillingMail(): void
+    {
+        $args = $this->pendingBillingMail;
+        $this->pendingBillingMail = null;
+        if ($args === null) {
+            return;
+        }
+        try {
+            require_once dirname(__DIR__, 2) . '/MailService.php';
+            require_once dirname(__DIR__, 2) . '/PackagingBillingMail.php';
+            [$eventId, $workerOtId, $embalajeId, $requestId, $detail, $mixedItems, $totalUnits] = $args;
+            $mailRes = (new PackagingBillingMail($this->erpPdo, $this->trzPdo ?? null))->notify(
+                $eventId, $workerOtId, $embalajeId, $requestId, $detail, $mixedItems, $totalUnits,
+                (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0)
+            );
+            if (($mailRes['ok'] ?? true) !== true) {
+                $warn = 'El embalaje se guardó, pero NO se pudo enviar el correo a facturación: ' . (string)($mailRes['error'] ?? 'error desconocido');
+                $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning . ' ' . $warn);
+            }
+        } catch (Throwable $e) {
+            error_log('Correo de facturación (embalaje): ' . $e->getMessage());
+        }
+    }
+
     /**
      * Cinta de embalaje según la caja: SIN logo (caja genérica) = INS0038; CON logo (impresa) = INS0073.
      * Sin logo cuando el pedido tiene "Logotipo empresa" = No (Genérico) o la medida dice SIN LOGO / SIN IMPRESION.
@@ -462,21 +493,8 @@ trait RewindAndPackagingServiceTrait
             $this->lastSupplyConsumptionWarning = 'No se pudo descontar el stock de embalaje: ' . $e->getMessage();
         }
 
-        // Correo a facturación con las unidades listas para enviar (un fallo de correo no interrumpe el guardado)
-        try {
-            require_once dirname(__DIR__, 2) . '/MailService.php';
-            require_once dirname(__DIR__, 2) . '/PackagingBillingMail.php';
-            $mailRes = (new PackagingBillingMail($this->erpPdo, $this->trzPdo ?? null))->notify(
-                $eventId, $workerOtId, $embalajeId, $requestId, $detail, $mixedItems, $totalUnitsForMail,
-                (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0)
-            );
-            if (($mailRes['ok'] ?? true) !== true) {
-                $warn = 'El embalaje se guardó, pero NO se pudo enviar el correo a facturación: ' . (string)($mailRes['error'] ?? 'error desconocido');
-                $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning . ' ' . $warn);
-            }
-        } catch (Throwable $e) {
-            error_log('Correo de facturación (embalaje): ' . $e->getMessage());
-        }
+        // El correo a facturación se envía DESPUÉS de confirmar la transacción (ver sendPendingPackagingBillingMail).
+        $this->pendingBillingMail = [$eventId, $workerOtId, $embalajeId, $requestId, $detail, $mixedItems, $totalUnitsForMail];
 
         return $embalajeId;
     }
