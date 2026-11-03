@@ -1022,6 +1022,14 @@ echo renderView('production/partials/operator_flash_banners', ['agenda' => $agen
                                 <button type="submit" class="btngreen" style="font-size:14px;padding:10px 22px;margin-left:10px;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16)" onclick="document.getElementById('prod_submode').value='update'">
                                     <i class="fa fa-fw fa-save"></i> Guardar
                                 </button>
+                                <?php if ($overrideEmbalaje === 1): ?>
+                                <input type="hidden" name="close_without_production" id="close_without_production" value="">
+                                <input type="hidden" name="close_without_production_reason" id="close_without_production_reason" value="">
+                                <button type="submit" formnovalidate class="btngrey" style="font-size:14px;padding:10px 22px;margin-left:10px;border-radius:8px;border:1.5px solid #94A3B8"
+                                    onclick="var r = prompt('Cerrar el embalaje SIN producción.\nNo se registrarán cajas ni se enviará correo de facturación.\n\nIndica el motivo:'); if (r === null || r.trim().length < 5) { if (r !== null) alert('Escribe un motivo de al menos 5 caracteres.'); return false; } document.getElementById('prod_submode').value='end'; document.getElementById('close_without_production').value='1'; document.getElementById('close_without_production_reason').value=r.trim();">
+                                    <i class="fa fa-fw fa-ban"></i> Cerrar sin producción
+                                </button>
+                                <?php endif; ?>
                             <?php elseif ($refId > 0): ?>
                                 <button type="submit" class="btngreen" style="font-size:14px;padding:10px 24px;font-weight:bold;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.16)" onclick="document.getElementById('prod_submode').value='update'">
                                     <i class="fa fa-fw fa-save"></i> Guardar Cambios

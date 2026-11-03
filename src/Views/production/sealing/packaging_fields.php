@@ -308,7 +308,7 @@
 
         /* Cierre mixto en tablet: cada CC pasa a tarjeta para que los campos no se sobrepongan */
         #panel_cierre_mixto { container-type: inline-size; }
-        @container (max-width: 1000px) {
+        @container (min-width: 0px) {
         #panel_cierre_mixto .pack-mixto-table { min-width: 0; width: 100%; display: block; }
         #panel_cierre_mixto .pack-mixto-table thead { display: none; }
         #panel_cierre_mixto .pack-mixto-table tbody { display: block; }
@@ -342,7 +342,7 @@
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9)::before { content: "Bodega origen"; }
         }
         @supports not (container-type: inline-size) {
-            @media (max-width: 1450px) {
+            @media (min-width: 0px) {
         #panel_cierre_mixto .pack-mixto-table { min-width: 0; width: 100%; display: block; }
         #panel_cierre_mixto .pack-mixto-table thead { display: none; }
         #panel_cierre_mixto .pack-mixto-table tbody { display: block; }
@@ -618,10 +618,10 @@
             . '</td>'
             . '<td style="text-align:center">' . $imgHtml . '</td>'
             . '<td><b>' . $escape($itemNum) . '</b>' . ($itemTitle !== '' ? ('<br><small style="color:#64748b">' . $escape($itemTitle) . '</small>') : '') . '</td>'
-            . '<td style="text-align:center"><input type="number" min="0" step="1" name="total_cajas_' . $idx . '" id="total_cajas_' . $idx . '" class="inptxt" style="width:75px;text-align:center" value="' . $cajas . '" oninput="calcEmbalajeMixto()"></td>'
-            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_por_caja_' . $idx . '" id="bolsas_por_caja_' . $idx . '" class="inptxt" style="width:75px;text-align:center" value="' . $bpc . '" oninput="calcEmbalajeMixto()"></td>'
-            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_caja_final_' . $idx . '" id="bolsas_caja_final_' . $idx . '" class="inptxt" style="width:75px;text-align:center" value="' . $bcf . '" oninput="calcEmbalajeMixto()"></td>'
-            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_sobrante_' . $idx . '" id="bolsas_sobrante_' . $idx . '" class="inptxt" style="width:75px;text-align:center" value="' . $bsobr . '" oninput="calcEmbalajeMixto()"></td>'
+            . '<td style="text-align:center"><input type="number" min="0" step="1" name="total_cajas_' . $idx . '" id="total_cajas_' . $idx . '" class="inptxt" style="width:75px;text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $cajas . '" oninput="calcEmbalajeMixto()"></td>'
+            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_por_caja_' . $idx . '" id="bolsas_por_caja_' . $idx . '" class="inptxt" style="width:75px;text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bpc . '" oninput="calcEmbalajeMixto()"></td>'
+            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_caja_final_' . $idx . '" id="bolsas_caja_final_' . $idx . '" class="inptxt" style="width:75px;text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bcf . '" oninput="calcEmbalajeMixto()"></td>'
+            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_sobrante_' . $idx . '" id="bolsas_sobrante_' . $idx . '" class="inptxt" style="width:75px;text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bsobr . '" oninput="calcEmbalajeMixto()"></td>'
             . '<td style="text-align:center"><input type="number" name="total_bolsas_' . $idx . '" id="total_bolsas_' . $idx . '" class="inptxt" style="width:95px;text-align:center;background:#F8FAFC;font-weight:800;color:#0F766E" value="' . $totBolsas . '" readonly></td>'
             . '<td><select name="req_id_bodega_' . $idx . '" class="inptxt" style="width:100%;height:32px;font-size:12px">' . $whOptions . '</select></td>'
             . '<td style="text-align:center">' . $removeBtn . '</td>'
@@ -748,6 +748,15 @@
             var rows = document.querySelectorAll("#table_mixto_body tr");
             var sumBoxes = 0;
             var sumUnits = 0;
+            // La CC actual (fila 0) se carga con lo registrado arriba en "Cantidades de Embalaje".
+            var topForm = document.getElementById("pack_total_units") ? document.getElementById("pack_total_units").form : null;
+            if (topForm) {
+                [["req_embalaje_cajas_completas_amt", "total_cajas_0"], ["req_embalaje_bolsas_por_caja_amt", "bolsas_por_caja_0"],
+                 ["req_embalaje_caja_final", "bolsas_caja_final_0"], ["req_embalaje_bolsas_sobrantes_amt", "bolsas_sobrante_0"]].forEach(function(pair) {
+                    var src = topForm.elements[pair[0]], dst = document.getElementById(pair[1]);
+                    if (src && dst) dst.value = Math.max(0, parseInt(src.value) || 0);
+                });
+            }
             rows.forEach(function(row) {
                 var idx = row.getAttribute("data-idx");
                 if (idx === null) return;
@@ -761,15 +770,6 @@
                 sumBoxes += cajas + (bcf > 0 ? 1 : 0);
                 sumUnits += rowTotal;
 
-                if (idx === "0") {
-                    var f = document.getElementById("pack_total_units")?.form;
-                    if (f) {
-                        if (f.elements["req_embalaje_cajas_completas_amt"]) f.elements["req_embalaje_cajas_completas_amt"].value = cajas;
-                        if (f.elements["req_embalaje_bolsas_por_caja_amt"]) f.elements["req_embalaje_bolsas_por_caja_amt"].value = bpc;
-                        if (f.elements["req_embalaje_caja_final"]) f.elements["req_embalaje_caja_final"].value = bcf;
-                        if (f.elements["req_embalaje_bolsas_sobrantes_amt"]) f.elements["req_embalaje_bolsas_sobrantes_amt"].value = bsobr;
-                    }
-                }
             });
 
             var lblBoxes = document.getElementById("lbl_mixed_total_boxes");

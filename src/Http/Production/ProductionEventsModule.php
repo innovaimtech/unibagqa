@@ -402,7 +402,19 @@ function handleProductionEventsRoutes(
         $packagingDetail = null;
         $packagingPdo = null;
         try {
-            if ($overrideEmbalaje === 1) {
+            if ($overrideEmbalaje === 1 && $isEnd && !empty($_REQUEST['close_without_production'])) {
+                // Cierre de embalaje sin producción: no se registra detalle de cajas, no hay descuento de insumos ni correo.
+                $noProdReason = trim((string)($_REQUEST['close_without_production_reason'] ?? ''));
+                if (mb_strlen($noProdReason) < 5) {
+                    throw new RuntimeException('Indica el motivo del cierre sin producción.');
+                }
+                $amount = 0.0;
+                $amount2 = $bobinaKg = $amountFrente = $amountDorso = 0;
+                $mmaq = $mlin = 0;
+                $mtype = '';
+                $mermas = $repairs = [];
+                $comments = 'Cierre de embalaje sin producción. Motivo: ' . $noProdReason;
+            } elseif ($overrideEmbalaje === 1) {
                 $packagingDetail = ProductionService::normalizePackagingDetail($_REQUEST);
                 $amount = (float)$packagingDetail['total_units'];
                 $amount2 = $bobinaKg = $amountFrente = $amountDorso = 0;
