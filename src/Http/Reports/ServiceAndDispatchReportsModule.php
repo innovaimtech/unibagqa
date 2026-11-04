@@ -375,7 +375,6 @@ function unibagRenderServiceLevelReportPage(ReceptionService $service): void
                     <span style="font-size:24px;">🚚</span>
                     <div>
                         <h3 style="margin:0;font-size:16px;font-weight:800;color:#0f172a;">Modificar Fecha / Justificar Entrega</h3>
-                        <div style="font-size:12px;color:#64748b;margin-top:2px;">Nivel de Servicio (OTIF) · Gestión y Acuerdo con Cliente</div>
                     </div>
                 </div>
                 <button type="button" class="sl-modal-close" onclick="closeSlModal()">&times;</button>
@@ -1089,7 +1088,6 @@ function unibagRenderDailySummaryPage(ReceptionService $service): void
         $body .= '<div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:16px 20px; margin-bottom:18px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:16px;">';
         $body .= '<div>';
         $body .= '<div style="font-size:16px; font-weight:800; color:#0f172a; text-transform:uppercase; letter-spacing:-.01em;">DETALLE DE DESPACHOS REALIZADOS Y VALORIZACIÓN EN DINERO (CLP)</div>';
-        $body .= '<div style="font-size:13px; color:#64748b; margin-top:2px;">Consolidado de salidas comerciales, guías de despacho, facturas y montos valorizados en la jornada.</div>';
         $body .= '</div>';
         $body .= '<div style="display:flex; gap:14px; flex-wrap:wrap;">';
         $body .= '<div style="background:#fff; border:1px solid #cbd5e1; border-radius:10px; padding:8px 14px; text-align:right;">';
@@ -1200,7 +1198,6 @@ function unibagRenderDailySummaryPage(ReceptionService $service): void
         $body .= '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">';
         $body .= '<div>';
         $body .= '<div style="font-size:16px; font-weight:800; color:#0f172a; text-transform:uppercase;">REGISTRO CRONOLÓGICO DE DETENCIONES, AJUSTES E INCIDENTES</div>';
-        $body .= '<div style="font-size:13px; color:#64748b; margin-top:2px;">Detalle de todas las interrupciones operativas, fallas, montajes y pausas de máquina reportadas.</div>';
         $body .= '</div>';
         $body .= '</div>';
 
@@ -1316,7 +1313,6 @@ function unibagRenderDailySummaryPage(ReceptionService $service): void
         $body .= '<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">';
         $body .= '<div>';
         $body .= '<div style="font-size:16px; font-weight:800; color:#0f172a; text-transform:uppercase;">DOTACIÓN DE OPERARIOS Y CUMPLIMIENTO DE COLACIONES</div>';
-        $body .= '<div style="font-size:13px; color:#64748b; margin-top:2px;">Control de asistencia en planta, turnos iniciados y horarios de almuerzo registrados.</div>';
         $body .= '</div>';
         $body .= '<div>';
         $body .= '<a class="btn secondary" href="/reports/colaciones?date=' . urlencode($date) . '" style="background:#00A9A6; color:#fff; border:none; font-weight:800; font-size:12.5px; padding:7px 14px; border-radius:8px; text-decoration:none; text-transform:uppercase;">GESTIONAR COLACIONES EN MÓDULO →</a>';
@@ -1605,7 +1601,7 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $body .= '<div class="erp-filter-header">';
     $body .= '<div>';
     $body .= '<div class="erp-filter-title">📊 INFORME MENSUAL DE OPERACIONES (PPTX)</div>';
-    $body .= '<div class="erp-filter-sub">Generación automatizada de la presentación ejecutiva basada en la plantilla maestra de 41 láminas con datos calculados del ERP.</div>';
+    $body .= '<div class="erp-filter-sub"></div>';
     $body .= '</div>';
     $body .= '<div class="erp-filter-actions">';
     $body .= '<a class="btn-pptx-download" href="' . h($downloadUrl) . '">📥 Descargar Presentación PPTX (' . h($monthLabel) . ')</a>';
@@ -1660,7 +1656,6 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $body .= '<div class="kpi-card-premium amber">';
     $body .= '<div class="kpi-header-row"><span class="kpi-tag">Plantilla Oficial</span><span style="font-size:12px;font-weight:700;color:#b45309">100% Integrada</span></div>';
     $body .= '<div class="kpi-num">41 <span style="font-size:14px;color:#64748b">Láminas</span></div>';
-    $body .= '<div class="kpi-desc">11 láminas dinámicas ERP + 30 conservadas del histórico</div>';
     $body .= '</div>';
 
     $body .= '</div>';
@@ -1668,7 +1663,6 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     // Tarjeta Detalle de Láminas
     $body .= '<div class="erp-filter-card">';
     $body .= '<div style="font-size:16px;font-weight:800;color:#0f172a;margin-bottom:8px">📑 ESTRUCTURA DEL INFORME MENSUAL GENERADO (' . h(strtoupper($monthLabel)) . ')</div>';
-    $body .= '<div style="font-size:13px;color:#64748b;margin-bottom:14px">A continuación se detalla cómo el sistema inyecta la información del ERP en la presentación PowerPoint, manteniendo la trazabilidad histórica anterior:</div>';
 
     $body .= '<div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:12px">';
     $body .= '<table class="slide-preview-table">';
@@ -1873,7 +1867,7 @@ function unibagRenderDispatchesReportPage(ReceptionService $service): void
     $body .= '<div class="erp-filter-header">';
     $body .= '<div>';
     $body .= '<div class="erp-filter-title">🚚 INFORME DE DESPACHOS POR PERÍODO O RANGO DE FECHAS</div>';
-    $body .= '<div class="erp-filter-sub">' . h($activeFilterLabel) . ' · SEGUIMIENTO DE SALIDAS Y FACTURACIÓN COMERCIAL</div>';
+    $body .= '<div class="erp-filter-sub">' . h($activeFilterLabel) . '</div>';
     $body .= '</div>';
     $body .= '<div class="erp-filter-actions">';
     $body .= '<a href="' . h($excelUrl) . '" class="btn-filter-excel">📥 EXPORTAR A EXCEL</a>';

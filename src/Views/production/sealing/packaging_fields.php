@@ -393,14 +393,13 @@
     echo '<div class="pack-mode-container">
         <div class="pack-mode-header">
             <span class="pack-mode-title"><i class="fa fa-layer-group"></i> Modalidad de Embalaje / Pallet:</span>
-            <span class="pack-mode-hint">Haga clic para alternar fácilmente entre Cierre Estándar o Cierre Mixto</span>
+            
         </div>
         <div class="pack-mode-options">
             <button type="button" class="pack-mode-card ' . (!$isMixtoSelected ? 'active' : '') . '" id="btn_mode_standard" onclick="setPackagingMode(\'standard\')">
                 <div class="pack-mode-icon"><i class="fa fa-box"></i></div>
                 <div class="pack-mode-info">
                     <span class="pack-mode-name">1. Pallet Estándar (Monoproducto)</span>
-                    <span class="pack-mode-desc">Embalaje y pallet exclusivo para este pedido / CC</span>
                 </div>
                 <div class="pack-mode-check"><i class="fa fa-check-circle"></i></div>
             </button>
@@ -408,7 +407,6 @@
                 <div class="pack-mode-icon"><i class="fa fa-boxes"></i></div>
                 <div class="pack-mode-info">
                     <span class="pack-mode-name">2. Pallet Mixto (Múltiples CCs / Diseños)</span>
-                    <span class="pack-mode-desc">Consolidar y desglosar varias órdenes combinadas en el pallet</span>
                 </div>
                 <div class="pack-mode-check"><i class="fa fa-check-circle"></i></div>
             </button>

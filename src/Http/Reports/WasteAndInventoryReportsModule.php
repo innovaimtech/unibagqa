@@ -389,7 +389,7 @@ function unibagRenderOperatorWasteReportPage(ReceptionService $service): void
     $body .= '<div class="erp-filter-header">';
     $body .= '<div>';
     $body .= '<div class="erp-filter-title">👷 INFORME DE MERMA POR OPERADOR</div>';
-    $body .= '<div class="erp-filter-sub">' . h($activeFilterLabel) . ' · Desempeño, ranking y trazabilidad analítica de mermas por trabajador</div>';
+    $body .= '<div class="erp-filter-sub">' . h($activeFilterLabel) . '</div>';
     $body .= '</div>';
     $body .= '<div class="erp-filter-actions">';
     $body .= '<a class="btn-filter-excel" href="' . h($excelUrl) . '">📥 Exportar Excel</a>';
@@ -603,7 +603,6 @@ function unibagRenderOperatorWasteReportPage(ReceptionService $service): void
 
     $body .= '<div class="modal-body">';
     $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px;flex-wrap:wrap">';
-    $body .= '<div class="erp-prod-muted">Detalle por evento registrado en las órdenes de trabajo</div>';
     $body .= '<input type="text" id="modal-op-search" placeholder="Filtrar por OT, CC, máquina..." style="max-width:280px;height:34px;padding:4px 10px;font-size:12px" oninput="unibagFilterModalOts(this.value)">';
     $body .= '</div>';
 

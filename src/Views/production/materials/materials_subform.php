@@ -82,9 +82,6 @@
                         </span>
                         Tintas disponibles en 3000 Insumos de Producción
                     </div>
-                    <div style="font-size:12.5px;color:#64748B;line-height:1.55;max-width:760px">
-                        Seleccione una tinta `TIN`, filtre por código o color y cargue solo los kilos que realmente entran a la máquina.
-                    </div>
                 </div>
                 <div style="font-size:11.5px;color:#64748B;font-weight:800">
                     <?=count($availableInkRows)?> item(s) con stock

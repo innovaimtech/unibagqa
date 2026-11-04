@@ -469,7 +469,7 @@ function maintenanceBonusConfigForm(array $report): string
         .'<div class="mcfg-kpi"><div class="k">Colación mensual <em>automático</em></div><div class="v">'.h(MaintenanceBonusService::duration($report['calendar']['lunch_seconds'])).'</div><div class="s">'.(int)$report['calendar']['days'].' días × 30 minutos</div></div>'
         .'<div class="mcfg-kpi"><div class="k">Jornada diaria <em>automático</em></div><div class="v">'.h(MaintenanceBonusService::duration($programmed['daily'])).'</div><div class="s">42 horas semanales ÷ 5 días</div></div>'
         .'<div class="mcfg-kpi"><div class="k">Horas por máquina <em>automático</em></div><div class="v">'.h(MaintenanceBonusService::duration($programmed['total'])).'</div><div class="s">jornada × días hábiles</div></div></div>'
-        .'<section class="mcfg-card"><div class="mcfg-card-head"><h3>Máquinas y metas</h3><p>Marca las máquinas que participan y define su preventivo programado y su meta. Los valores sugeridos deben confirmarse. «Tiempo disponible» se recalcula al editar.</p></div>'
+        .'<section class="mcfg-card"><div class="mcfg-card-head"><h3>Máquinas y metas</h3></div>'
         .'<div class="mcfg-scroll"><table class="mcfg-table"><thead><tr><th class="c">Participa</th><th>Máquina</th><th class="r">Preventivo programado</th><th class="r">Meta</th><th class="r">Horas totales / mes</th><th class="r">Tiempo disponible</th></tr></thead><tbody>';
     foreach ($report['machines'] as $machine) {
         $id=(int)$machine['id'];
@@ -489,7 +489,7 @@ function maintenanceBonusConfigForm(array $report): string
                 $programmed['total']-$programmed['lunch']-(float)$row['preventive_hours']*3600)).'</span></td></tr>';
     }
     $form.='</tbody></table></div></section>'
-        .'<section class="mcfg-card"><div class="mcfg-card-head"><h3>Clasificación fija de motivos</h3><p>Cómo se clasifica cada motivo de detención. Estas reglas son fijas y no se editan por mes.</p></div>'
+        .'<section class="mcfg-card"><div class="mcfg-card-head"><h3>Clasificación fija de motivos</h3></div>'
         .'<div class="mcfg-scroll"><table class="mcfg-table mcfg-reasons"><thead><tr><th>Motivo</th><th>Clasificación</th></tr></thead><tbody>';
     $groupedReasons=[];
     foreach ($report['reasons'] as $key=>$reason) {

@@ -2085,7 +2085,7 @@ function renderWorkOrderMaterialUsageScreen(
                     . '<div class="legacy-inline-modal" id="' . $rowReleaseModalId . '" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;padding:20px;overflow:auto">'
                     . '<div style="max-width:520px;margin:40px auto;background:#fff;border-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,.22);padding:18px">'
                     . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Salida de bobina</div><button type="button" class="btn secondary"' . $rowCloseReleaseOnclick . '>Cerrar</button></div>'
-                    . '<div class="muted" style="margin-bottom:12px">Registra los kilos que salieron de la máquina y la merma generada.</div>'
+                    . ''
                     . '<form method="post" action="/work-orders/' . (int)$ot['id'] . '/materials/release" data-release-form>'
                     . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
                     . '<input type="hidden" name="request_id" value="' . $rowRequestId . '">'
@@ -2370,7 +2370,7 @@ function renderWorkOrderMaterialUsageScreen(
             $entryHtml .= '<div class="legacy-inline-modal" id="material-modal-release-' . $requestId . '" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:1000;padding:20px;overflow:auto">'
                 . '<div style="max-width:520px;margin:40px auto;background:#fff;border-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,.22);padding:18px">'
                 . '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><div style="font-size:18px;font-weight:800">Salida de bobina</div><button type="button" class="btn secondary" data-material-modal-close="release-' . $requestId . '"' . $closeReleaseOnclick . '>Cerrar</button></div>'
-                . '<div class="muted" style="margin-bottom:12px">Registra los kilos que salieron de la máquina y la merma generada.</div>'
+                . ''
                 . '<form method="post" action="/work-orders/' . (int)$ot['id'] . '/materials/release" data-release-form>'
                 . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
                 . '<input type="hidden" name="request_id" value="' . $requestId . '">'
@@ -3535,7 +3535,7 @@ function renderErpWorkOrderReadOnlyScreen(
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
           <div style="font-size:20px;font-weight:800">Seguimiento OT ' . h((string)$ot['ot_code']) . '</div>
-          <div class="muted">Vista ejecutiva de trazabilidad y movimientos de la orden. Sin acciones operativas desde ERP.</div>
+          
         </div>
         <div class="row">
           <a class="btn secondary" href="/work-orders">Volver</a>
@@ -5153,7 +5153,7 @@ if (preg_match('#^/work-orders/(\d+)/traceability$#', $path, $m) === 1 && $metho
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
           <div style="font-size:18px;font-weight:700">Trazabilidad OT ' . h((string)$ot['ot_code']) . '</div>
-          <div class="muted">Seguimiento completo de bobinas, tintas y eventos de la orden de trabajo.</div>
+          
         </div>
         <div class="row">
           <a class="btn secondary" href="' . h(withQuery('/work-orders/' . (int)$ot['id'] . '/start', $traceabilityNavParams)) . '">Volver a OT</a>

@@ -508,9 +508,6 @@
                             </span>
                             Solicitud de Tintas para la OT
                         </div>
-                        <div style="font-size:12.5px;color:#64748B;line-height:1.55;max-width:760px">
-                            Seleccione las tintas disponibles en la bodega correspondiente y registre la cantidad necesaria para la orden de trabajo.
-                        </div>
                     </div>
                     <div style="display:flex;gap:8px;flex-wrap:wrap">
                         <span style="background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE;padding:6px 10px;border-radius:999px;font-size:11.5px;font-weight:800">
@@ -535,9 +532,6 @@
                         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
                             <span style="background:#DBEAFE;color:#1D4ED8;padding:4px 10px;border-radius:999px;font-weight:900;font-size:13px"><?=htmlspecialchars((string)$inkWarehouseCode)?></span>
                             <span style="font-size:13px;font-weight:700"><?=htmlspecialchars($inkWarehouseName)?></span>
-                        </div>
-                        <div style="margin-top:6px;font-size:12px;line-height:1.5;color:#1D4ED8">
-                            La solicitud queda asociada a esta bodega para que el equipo de bodega la prepare correctamente.
                         </div>
                     </div>
                     <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:14px 16px;color:#334155">
@@ -570,9 +564,6 @@
                                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
                                     <input type="text" id="filter_inks" placeholder="Buscar por codigo, descripcion o stock..." class="inptxt" style="width:100%;max-width:360px;font-size:12px;padding:8px 12px;border-radius:8px;background:#FFF" onkeyup="filterTable('tbl_inks', this.value)">
                                     <span style="font-size:11.5px;color:#64748B">Seleccione una fila para solicitarla.</span>
-                                </div>
-                                <div style="font-size:11.5px;color:#64748B;font-weight:700">
-                                    Vista tipo lista para busqueda rapida
                                 </div>
                             </div>
                             <div style="overflow:auto;max-height:360px;border:1px solid #CBD5E1;border-radius:10px;background:#FFF;box-shadow:inset 0 1px 0 rgba(255,255,255,0.5)">

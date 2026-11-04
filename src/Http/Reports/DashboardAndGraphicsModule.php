@@ -177,7 +177,7 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
     $body .= '<div class="erp-filter-card">';
     $body .= '<div>';
     $body .= '<div class="erp-filter-title">📊 PANEL DE CONTROL Y PRODUCCIÓN ERP</div>';
-    $body .= '<div class="erp-filter-sub">' . h($activeFilterLabel) . ' · Indicadores clave de rendimiento operativo</div>';
+    $body .= '<div class="erp-filter-sub">' . h($activeFilterLabel) . '</div>';
     $body .= '</div>';
 
     $body .= '<form id="erp-dashboard-filter-form" method="get" action="' . h($formAction) . '" class="erp-filter-form">';
@@ -225,7 +225,6 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
     $body .= '<div class="kpi-header-row"><span class="kpi-tag">Corte y Sellado</span><span style="font-size:18px;">✂️</span></div>';
     $body .= '<div style="display:flex; flex-direction:column; align-items:center; text-align:center; margin:6px 0;">';
     $body .= '<div class="kpi-num">' . h($fmtInt($producedUnits)) . '</div>';
-    $body .= '<div class="kpi-desc">Unidades producidas (Corte y Sellado)</div>';
     $body .= '</div>';
     $body .= '<div class="kpi-footer-hint" style="justify-content:center; color:#0d9488;">Total acumulado del período</div>';
     $body .= '</div>';
@@ -235,7 +234,6 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
     $body .= '<div class="kpi-header-row"><span class="kpi-tag">Plan Abierto</span><span style="font-size:18px;">⏳</span></div>';
     $body .= '<div style="display:flex; flex-direction:column; align-items:center; text-align:center; margin:6px 0;">';
     $body .= '<div class="kpi-num">' . h($fmtInt($pendingUnits)) . '</div>';
-    $body .= '<div class="kpi-desc">Unidades pendientes de fabricación</div>';
     $body .= '</div>';
     $body .= '<div class="kpi-footer-hint" style="justify-content:center; color:#1d4ed8;">Órdenes en curso de producción</div>';
     $body .= '</div>';
@@ -345,7 +343,6 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
         $body .= '<div style="width:42px; height:42px; border-radius:50%; background:#fee2e2; color:#dc2626; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; flex-shrink:0;">⚠️</div>';
         $body .= '<div>';
         $body .= '<div style="font-size:16px; font-weight:800; color:#991b1b;">Alerta de Calidad: ' . $criticalCount . ' Órdenes de Trabajo con Merma Superior al 5%</div>';
-        $body .= '<div style="font-size:12.5px; color:#64748b; margin-top:2px;">Producciones registradas en el período activo con porcentaje de merma crítico que requieren supervisión técnica.</div>';
         $body .= '</div>';
         $body .= '</div>';
         $body .= '<div style="display:flex; align-items:center; gap:10px;">';
@@ -453,7 +450,6 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
         // 1. Informe de Merma por Tipo de Producción
         $byProductionType = is_array($details['by_production_type'] ?? null) ? $details['by_production_type'] : [];
         $body .= '<div class="dashboard-subtitle" style="margin-top:16px; display:flex; align-items:center; gap:8px;"><span>🏭</span> Informe de Merma por Tipo de Producción</div>';
-        $body .= '<div class="erp-prod-muted" style="margin:-4px 0 12px">Desglose oficial clasificado por línea operativa: Impresión, Corte y Sellado, Embalaje y Pulpo Serigráfico.</div>';
 
         if ($byProductionType === []) {
             $body .= '<div class="erp-prod-empty">Sin datos de procesos para el período.</div>';
@@ -596,7 +592,6 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
 
         if ($byType !== []) {
             $body .= '<div class="dashboard-subtitle" style="margin-top:14px">Merma por tipo</div>';
-            $body .= '<div class="erp-prod-muted" style="margin:-4px 0 8px">Basado en merma real registrada por tipo de defecto.</div>';
             $body .= '<div class="erp-prod-table-wrap"><table class="erp-prod-table table-compact"><thead><tr>';
             $body .= '<th>Tipo</th><th style="text-align:right">Merma (unid)</th><th style="text-align:right">Merma (kg)</th><th style="text-align:right">Participación</th>';
             $body .= '</tr></thead><tbody>';
@@ -1097,7 +1092,6 @@ function unibagOutputProductionDashboardMetricExcel(ReceptionService $service): 
     echo '.text-cell{mso-number-format:"\@"}';
     echo '</style></head><body>';
     echo '<div class="title">' . h((string)$definition['title']) . '</div>';
-    echo '<div class="sub">Reporte descargado desde la ventana emergente del Panel ERP</div>';
     echo '<div class="meta"><strong>Filtro aplicado:</strong> ' . h((string)$definition['filter_label']) . '<br><strong>Generado:</strong> ' . h((string)$definition['generated_at']) . '</div>';
     echo '<table class="summary"><tr><th>Indicador</th><th>Valor</th></tr>';
     foreach ((array)$definition['summary'] as $summaryRow) {
@@ -2083,7 +2077,7 @@ function unibagRenderProductionDashboardPage(ReceptionService $service, bool $em
                 . $renderMiniStat('Avance del plan', number_format($completionPercent, 2, '.', '') . '%', 'Cumplimiento del período')
                 . $renderMiniStat('Unidades despachadas', number_format($dispatchedUnits, 0, '.', ''), 'Salida comercial registrada')
                 . '</div>')
-                . '<div class="erp-prod-modal-note">Esta lectura cruza el volumen terminado frente a la carga abierta del mismo corte para mostrar cuánto del plan ya se convirtió en producto final.</div>'
+                . ''
                 . $producedWorkOrdersHtml,
         ],
         [
@@ -2100,7 +2094,7 @@ function unibagRenderProductionDashboardPage(ReceptionService $service, bool $em
                 . $renderMiniStat('Relación vs producidas', number_format($pendingVsProduced, 2, '.', '') . '%', 'Pendiente frente a terminado')
                 . $renderMiniStat('Mayor presión de bodega', $topWarehouseOccupancyText, $topWarehouseLabel)
                 . '</div>')
-                . '<div class="erp-prod-modal-note">El backlog muestra la carga que aún no se convierte en producto terminado y ayuda a priorizar programación, materiales y capacidad.</div>'
+                . ''
                 . $pendingWorkOrdersHtml,
         ],
         [
@@ -2117,7 +2111,7 @@ function unibagRenderProductionDashboardPage(ReceptionService $service, bool $em
                 . $renderMiniStat('Cobertura de despacho', number_format($dispatchCoverage, 2, '.', '') . '%', 'Despachado sobre producido')
                 . $renderMiniStat('Pendiente por atender', number_format($pendingUnits, 0, '.', ''), 'Carga aún abierta')
                 . '</div>')
-                . '<div class="erp-prod-modal-note">Este indicador permite ver cuánto de lo producido ya salió comercialmente y cuánto volumen sigue retenido o en espera de despacho.</div>'
+                . ''
                 . $dispatchedWorkOrdersHtml,
         ],
         [
@@ -2135,7 +2129,7 @@ function unibagRenderProductionDashboardPage(ReceptionService $service, bool $em
                 . $renderMiniStat('Equiv. estimada', number_format($semiEstimatedUnitsTotal, 0, '.', ''), 'Bolsas aproximadas')
                 . '</div>')
                 . $renderModalSection('Bobinas recientes', $semiRowsPreview)
-                . '<div class="erp-prod-modal-note">Se muestran las bobinas semielaboradas más recientes para revisar rápidamente disponibilidad, peso y equivalencia aproximada antes de programar corte o sellado.</div>'
+                . ''
                 . $semiWorkOrdersHtml,
         ],
         [
@@ -2152,7 +2146,7 @@ function unibagRenderProductionDashboardPage(ReceptionService $service, bool $em
                 . $renderMiniStat('Kg procesados', number_format($processedKg, 3, '.', '') . ' kg', 'Base del cálculo')
                 . $renderMiniStat('Rendimiento neto', number_format($yieldPercent, 2, '.', '') . '%', '100% - merma')
                 . '</div>')
-                . '<div class="erp-prod-modal-note">La merma se calcula sobre el peso procesado informado en producción. Esta ventana ayuda a validar el porcentaje y el peso real perdido en el corte consultado.</div>'
+                . ''
                 . $wasteWorkOrdersHtml,
         ],
         [
@@ -2169,14 +2163,14 @@ function unibagRenderProductionDashboardPage(ReceptionService $service, bool $em
                 . $renderMiniStat('Kg merma asociados', number_format($wasteKg, 3, '.', '') . ' kg', 'Impacto del desperdicio')
                 . $renderMiniStat('% merma vinculada', number_format($wastePercent, 2, '.', '') . '%', 'Sobre el total procesado')
                 . '</div>')
-                . '<div class="erp-prod-modal-note">Los kilogramos procesados son la base para medir consumo, eficiencia y merma. Aquí puedes contrastar el peso ingresado al proceso frente al aprovechamiento neto.</div>'
+                . ''
                 . $processedWorkOrdersHtml,
         ],
     ];
 
     $body = '<div class="erp-prod-shell">';
     if (!$embeddedInErp) {
-        $body .= '<div class="erp-prod-hero"><div class="erp-prod-hero-top"><div><div class="erp-prod-title">DASHBOARD DE PRODUCCIÓN</div><div class="erp-prod-subtitle">Vista ejecutiva de fabricación, semielaborados, despacho, ocupación de bodegas y merma para seguimiento diario del negocio.</div><div class="erp-prod-badges"><div class="erp-prod-badge">Filtro aplicado: ' . h($activeFilterLabel) . '</div><div class="erp-prod-badge">Modo: ' . h($defaultFilterType === 'range' ? 'Rango de fechas' : 'Período 26 al 25') . '</div><div class="erp-prod-badge">Ocupación máxima: ' . h(number_format($bestOccupancy, 2, '.', '')) . '%</div></div></div><div class="erp-prod-hero-actions"><a class="btn secondary" href="/">Volver al panel ERP</a></div></div></div>';
+        $body .= '<div class="erp-prod-hero"><div class="erp-prod-hero-top"><div><div class="erp-prod-title">DASHBOARD DE PRODUCCIÓN</div><div class="erp-prod-badges"><div class="erp-prod-badge">Filtro aplicado: ' . h($activeFilterLabel) . '</div><div class="erp-prod-badge">Modo: ' . h($defaultFilterType === 'range' ? 'Rango de fechas' : 'Período 26 al 25') . '</div><div class="erp-prod-badge">Ocupación máxima: ' . h(number_format($bestOccupancy, 2, '.', '')) . '%</div></div></div><div class="erp-prod-hero-actions"><a class="btn secondary" href="/">Volver al panel ERP</a></div></div></div>';
     }
 
     $body .= '<div class="erp-prod-panel"><div class="erp-prod-panel-head"><div><div class="erp-prod-panel-title">Filtros del dashboard</div></div><button type="button" class="erp-collapse-toggle" data-collapse-toggle aria-label="Colapsar sección"><span class="chev">▾</span></button></div><div class="erp-prod-panel-body">';
@@ -2243,7 +2237,7 @@ function unibagRenderProductionDashboardPage(ReceptionService $service, bool $em
         ? 'Vista actual filtrada por la bodega seleccionada. Puedes volver a mostrar todas las bodegas desde el selector.'
         : 'Comparación entre el stock almacenado y la capacidad configurada de cada bodega. Usa el selector para ver el detalle de una sola bodega.';
     $occupancyExcelUrl = withQuery('/reports/occupancy/excel', $dashboardFilterParams);
-    $body .= '<div class="erp-prod-panel"><div class="erp-prod-panel-head"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;flex:1"><div><div class="erp-prod-panel-title">Nivel de ocupación de bodegas</div><div class="erp-prod-panel-sub">' . h($warehouseFilterSubtitle) . '</div></div><div class="row" style="flex-wrap:wrap;gap:10px;align-items:flex-end"><form method="get" action="' . ($embeddedInErp ? '/' : '/reports/production-dashboard') . '" class="erp-prod-panel-filter" style="margin:0"><div class="erp-prod-field" style="min-width:260px"><label for="warehouse_filter_occupancy">Ver bodega</label><select id="warehouse_filter_occupancy" name="warehouse_filter" onchange="this.form.submit()">' . $warehouseOptionsHtml . '</select></div>' . $warehouseFilterHiddenInputs . '</form><a class="btn secondary" href="' . h($occupancyExcelUrl) . '">Exportar Excel</a></div></div><button type="button" class="erp-collapse-toggle" data-collapse-toggle aria-label="Colapsar sección"><span class="chev">▾</span></button></div><div class="erp-prod-panel-body">';
+    $body .= '<div class="erp-prod-panel"><div class="erp-prod-panel-head"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;flex:1"><div><div class="erp-prod-panel-title">Nivel de ocupación de bodegas</div></div><div class="row" style="flex-wrap:wrap;gap:10px;align-items:flex-end"><form method="get" action="' . ($embeddedInErp ? '/' : '/reports/production-dashboard') . '" class="erp-prod-panel-filter" style="margin:0"><div class="erp-prod-field" style="min-width:260px"><label for="warehouse_filter_occupancy">Ver bodega</label><select id="warehouse_filter_occupancy" name="warehouse_filter" onchange="this.form.submit()">' . $warehouseOptionsHtml . '</select></div>' . $warehouseFilterHiddenInputs . '</form><a class="btn secondary" href="' . h($occupancyExcelUrl) . '">Exportar Excel</a></div></div><button type="button" class="erp-collapse-toggle" data-collapse-toggle aria-label="Colapsar sección"><span class="chev">▾</span></button></div><div class="erp-prod-panel-body">';
     if ($filteredWarehouses === []) {
         $body .= '<div class="erp-prod-empty">Sin bodegas registradas para mostrar ocupación en esta selección.</div>';
     } else {
@@ -2307,13 +2301,12 @@ function unibagRenderProductionDashboardPage(ReceptionService $service, bool $em
         $body .= '<div class="erp-prod-modal" id="' . h($modalId) . '" hidden>';
         $body .= '<div class="erp-prod-modal-backdrop" data-modal-close="1"></div>';
         $body .= '<div class="erp-prod-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="' . h($titleId) . '">';
-        $body .= '<div class="erp-prod-modal-head"><div><div class="erp-prod-modal-title" id="' . h($titleId) . '">Detalle bodega · ' . h($modalTitle) . '</div><div class="erp-prod-modal-sub">Inventario ubicado actualmente en esta bodega.</div></div><div class="erp-prod-modal-actions"><a class="btn secondary" href="' . h($exportUrl) . '">Exportar Excel</a><button type="button" class="erp-prod-modal-close" aria-label="Cerrar" data-modal-close="1">&times;</button></div></div>';
+        $body .= '<div class="erp-prod-modal-head"><div><div class="erp-prod-modal-title" id="' . h($titleId) . '">Detalle bodega · ' . h($modalTitle) . '</div></div><div class="erp-prod-modal-actions"><a class="btn secondary" href="' . h($exportUrl) . '">Exportar Excel</a><button type="button" class="erp-prod-modal-close" aria-label="Cerrar" data-modal-close="1">&times;</button></div></div>';
         $body .= $summaryHtml;
         $body .= $compositionHtml;
         $body .= $rollHtml;
         $body .= $palletHtml;
         $body .= $boxHtml;
-        $body .= '<div class="erp-prod-modal-note">Haz clic en cualquier código de bobina, pallet o caja para abrir su trazabilidad completa desde el módulo de inventario.</div>';
         $body .= '</div></div>';
     }
 
@@ -2523,7 +2516,7 @@ function unibagRenderGraphicsPage(ReceptionService $service): void
     $body .= '<div class="erp-filter-card">';
     $body .= '<div>';
     $body .= '<div class="erp-filter-title">GRÁFICOS Y MÉTRICAS ERP</div>';
-    $body .= '<div class="erp-filter-sub">' . h($activeFilterLabel) . ' · Datos consolidados en tiempo real desde la base de datos</div>';
+    $body .= '<div class="erp-filter-sub">' . h($activeFilterLabel) . '</div>';
     $body .= '</div>';
     $body .= '<form id="erp-graph-filter-form" method="get" action="' . h($formAction) . '" class="erp-filter-form">';
     $body .= '<div class="erp-filter-field">';
@@ -2557,21 +2550,18 @@ function unibagRenderGraphicsPage(ReceptionService $service): void
     $body .= '<div class="erp-kpi-card blue">';
     $body .= '<div class="erp-kpi-badge">✂️ Corte y Sellado</div>';
     $body .= '<div class="erp-kpi-val">' . $fmtInt($unitsCorteSellado) . '</div>';
-    $body .= '<div class="erp-kpi-sub">Bolsas cortadas y selladas</div>';
     $body .= '</div>';
 
     // KPI 2: Embalaje
     $body .= '<div class="erp-kpi-card indigo">';
     $body .= '<div class="erp-kpi-badge">📦 Embalaje</div>';
     $body .= '<div class="erp-kpi-val">' . $fmtInt($unitsEmbalaje) . '</div>';
-    $body .= '<div class="erp-kpi-sub">Bolsas empacadas y finalizadas</div>';
     $body .= '</div>';
 
     // KPI 3: Flexografía
     $body .= '<div class="erp-kpi-card cyan">';
     $body .= '<div class="erp-kpi-badge">🖨️ Flexografía</div>';
     $body .= '<div class="erp-kpi-val">' . $fmtInt($unitsFlexo) . '</div>';
-    $body .= '<div class="erp-kpi-sub">Impresión continua en flexo</div>';
     $body .= '</div>';
 
     // KPI 4: Serigrafía
@@ -2605,7 +2595,6 @@ function unibagRenderGraphicsPage(ReceptionService $service): void
     $body .= '<div class="erp-chart-head">';
     $body .= '<div>';
     $body .= '<div class="erp-chart-title" id="trendChartTitle">Evolución de Producción en el Período</div>';
-    $body .= '<div class="erp-chart-subtitle" id="trendChartSubtitle">Unidades producidas día a día (Confección vs Impresión)</div>';
     $body .= '</div>';
     $body .= '<div class="chart-toggle-pills">';
     $body .= '<button type="button" class="chart-pill active" id="btnTrendPeriod" onclick="toggleTrendView(\'period\')">Día a Día</button>';
@@ -2622,7 +2611,6 @@ function unibagRenderGraphicsPage(ReceptionService $service): void
     $body .= '<div class="erp-chart-head">';
     $body .= '<div>';
     $body .= '<div class="erp-chart-title">Distribución por Proceso</div>';
-    $body .= '<div class="erp-chart-subtitle">Participación proporcional de cada línea de producción</div>';
     $body .= '</div>';
     $body .= '</div>';
     $body .= '<div class="erp-chart-wrap tall">';
@@ -2640,7 +2628,6 @@ function unibagRenderGraphicsPage(ReceptionService $service): void
     $body .= '<div class="erp-chart-head">';
     $body .= '<div>';
     $body .= '<div class="erp-chart-title">Producción por Máquina</div>';
-    $body .= '<div class="erp-chart-subtitle">Volumen total de unidades producidas por equipo</div>';
     $body .= '</div>';
     $body .= '</div>';
     $body .= '<div class="erp-chart-wrap tall">';
@@ -2653,7 +2640,6 @@ function unibagRenderGraphicsPage(ReceptionService $service): void
     $body .= '<div class="erp-chart-head">';
     $body .= '<div>';
     $body .= '<div class="erp-chart-title">Control de Calidad: Merma por Máquina</div>';
-    $body .= '<div class="erp-chart-subtitle">Kilos de merma generados por cada máquina en el período</div>';
     $body .= '</div>';
     $body .= '</div>';
     $body .= '<div class="erp-chart-wrap tall">';
@@ -2819,7 +2805,7 @@ function unibagRenderGraphicsPage(ReceptionService $service): void
                 var btnP = document.getElementById("btnTrendPeriod");
                 var btnM = document.getElementById("btnTrendMonthly");
                 var title = document.getElementById("trendChartTitle");
-                var sub = document.getElementById("trendChartSubtitle");
+                var sub = document.getElementById("trendChartSubtitle") || {};
 
                 if (mode === "monthly") {
                     btnM.classList.add("active");

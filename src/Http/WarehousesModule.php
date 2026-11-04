@@ -175,7 +175,6 @@ function unibagRenderWarehousesPage(ReceptionService $service): void
             <span class="erp-collapse-toggle" aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-right:2px solid #475569;border-bottom:2px solid #475569;transform:rotate(45deg);margin-right:4px"></span>
             <div>
               <div style="font-size:15px;font-weight:800">Maestro de bodegas y ocupación</div>
-              <div class="muted" style="font-size:12px">Monitorea el stock real completo del inventario ERP y gestiona las capacidades máximas de cada bodega.</div>
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">

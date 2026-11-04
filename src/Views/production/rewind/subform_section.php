@@ -1462,9 +1462,6 @@
                                     <i class="fa fa-fw fa-warehouse" style="color:#F39C12"></i> <?=$tableTitle?>
                                     <span style="font-size:12px;color:#BDC3C7;margin-left:8px">(<?=count($displayMaterials)?> bobinas con stock)</span>
                                 </div>
-                                <div style="font-size:12px;color:#BDC3C7">
-                                    <?=$tableSubtitle?>
-                                </div>
                             </div>
                         </td>
                     </tr>

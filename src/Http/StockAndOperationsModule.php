@@ -1640,7 +1640,7 @@ if (preg_match('#^/maquila/(\d+)$#', $path, $m) === 1 && $method === 'GET') {
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
           <div style="font-size:18px;font-weight:700">Orden de maquila #' . (int)$maquilaOrder['id'] . '</div>
-          <div class="muted">Seguimiento de salida, retornos y diferencia por taller externo.</div>
+          
         </div>
         <div class="row"><a class="btn secondary" href="/maquila">Volver</a><a class="btn secondary" href="/pallets/' . (int)$maquilaOrder['pallet_id'] . '">Ver pallet</a></div>
       </div>';

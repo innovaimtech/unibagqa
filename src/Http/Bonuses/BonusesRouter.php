@@ -504,7 +504,6 @@ if ($path === '/bonificaciones' && $method === 'GET') {
 
         $body .= '<div class="erp-filter-card">';
         $body .= '<div style="font-weight:900;font-size:16px;color:#1e293b;margin-bottom:6px">Planilla Corte y Sellado</div>';
-        $body .= '<div class="muted" style="margin-bottom:14px;font-size:13px">Filtra por período mensual operativo (26 al 25) o define un rango de fechas con inicio y final. Puedes descargar la planilla Excel y filtrar por operador.</div>';
         $body .= '<form method="get" action="/bonificaciones" class="erp-filter-form" id="bonus-filter-form-cys">';
         $body .= '<input type="hidden" name="view" value="bonocys">';
         $body .= '<div class="erp-filter-field"><label for="filter_type_cys">Modo de consulta</label><select name="filter_type" id="filter_type_cys" class="erp-filter-select">';
@@ -636,7 +635,6 @@ if ($path === '/bonificaciones' && $method === 'GET') {
 
         $body .= '<div class="erp-filter-card">';
         $body .= '<div style="font-weight:900;font-size:16px;color:#1e293b;margin-bottom:6px">Planilla Serigrafía</div>';
-        $body .= '<div class="muted" style="margin-bottom:14px;font-size:13px">Filtra por período mensual operativo (26 al 25) o define un rango de fechas con inicio y final. Puedes descargar la planilla Excel y filtrar por operador.</div>';
         $body .= '<form method="get" action="/bonificaciones" class="erp-filter-form" id="bonus-filter-form-seri">';
         $body .= '<input type="hidden" name="view" value="bonoseri">';
         $body .= '<div class="erp-filter-field"><label for="filter_type_seri">Modo de consulta</label><select name="filter_type" id="filter_type_seri" class="erp-filter-select">';
@@ -769,7 +767,6 @@ if ($path === '/bonificaciones' && $method === 'GET') {
 
         $body .= '<div class="erp-filter-card">';
         $body .= '<div style="font-weight:900;font-size:16px;color:#1e293b;margin-bottom:6px">Planilla Flexo</div>';
-        $body .= '<div class="muted" style="margin-bottom:14px;font-size:13px">Filtra por período mensual operativo (26 al 25) o define un rango de fechas con inicio y final. Puedes descargar en Excel y filtrar por operador o Centro de Costo.</div>';
         $body .= '<form method="get" action="/bonificaciones" class="erp-filter-form" id="bonus-filter-form-flexo">';
         $body .= '<input type="hidden" name="view" value="bonoflexo">';
         $body .= '<div class="erp-filter-field"><label for="filter_type_flexo">Modo de consulta</label><select name="filter_type" id="filter_type_flexo" class="erp-filter-select">';

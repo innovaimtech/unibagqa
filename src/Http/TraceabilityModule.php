@@ -773,7 +773,6 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
                             <div class="trz-step-body">
                                 <div class="trz-step-name"><?= h($st['name']) ?></div>
                                 <div class="trz-step-date"><?= h($st['date']) ?></div>
-                                <div class="trz-step-desc"><?= h($st['desc']) ?></div>
                             </div>
                         </div>
                     <?php endforeach; ?>
@@ -1089,7 +1088,6 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
 
                     <div class="trz-head-with-hint">
                         <h4 class="trz-subheading" style="margin:0;">Historial de Eventos de Producción</h4>
-                        <span class="trz-table-hint">💡 Clic en cualquier fila para ver operador y tiempos</span>
                     </div>
 
                     <?php if (empty($events)): ?>
@@ -1177,7 +1175,6 @@ function renderTraceabilityDetailView(array $detail, TraceabilityService $traceS
 
                     <div class="trz-head-with-hint" style="margin-top:18px;">
                         <h4 class="trz-subheading" style="margin:0;">Guías de Despacho Emitidas</h4>
-                        <span class="trz-table-hint">💡 Clic en el N° de Guía para ver todos los productos despachados</span>
                     </div>
 
                     <?php if (empty($deliveries)): ?>
@@ -1274,7 +1271,7 @@ function renderTrzRotatorModalHtml(): void
                     <span class="trz-modal-icon">🎨</span>
                     <div>
                         <h4 id="trzModalTitle" class="trz-modal-title">Diseño de Impresión</h4>
-                        <span id="trzModalSub" class="trz-modal-sub">Inspección de Arte y Medidas</span>
+                        <span id="trzModalSub" class="trz-modal-sub"></span>
                     </div>
                 </div>
                 <div class="trz-modal-tools">
@@ -1387,7 +1384,7 @@ function renderTrzDeliveryModalHtml(): void
                     <span class="trz-modal-icon">🚚</span>
                     <div>
                         <h4 id="trzDlvModalTitle" class="trz-modal-title">Guía de Despacho N° GV000000</h4>
-                        <span id="trzDlvModalSub" class="trz-modal-sub">Detalle de mercadería despachada y datos de entrega</span>
+                        <span id="trzDlvModalSub" class="trz-modal-sub"></span>
                     </div>
                 </div>
                 <div class="trz-modal-tools">
@@ -1554,7 +1551,7 @@ function renderTrzProdModalHtml(): void
                     <span class="trz-modal-icon">⚙️</span>
                     <div>
                         <h4 id="trzProdModalTitle" class="trz-modal-title">Detalle de Fabricación en Máquina</h4>
-                        <span id="trzProdModalSub" class="trz-modal-sub">Información técnica de tirada, operador responsable y tiempos</span>
+                        <span id="trzProdModalSub" class="trz-modal-sub"></span>
                     </div>
                 </div>
                 <div class="trz-modal-tools">

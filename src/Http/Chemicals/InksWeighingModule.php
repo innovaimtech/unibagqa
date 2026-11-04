@@ -17,7 +17,7 @@ if ($path === '/chemicals/weighings' && $method === 'GET') {
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
           <div style="font-size:18px;font-weight:700">Pesaje de tintas</div>
-          <div class="muted">Registro de peso inicial y retorno para calcular consumo neto por OT.</div>
+          
         </div>
         <a class="btn" href="/chemicals/weighings/new">Nuevo pesaje</a>
       </div>';

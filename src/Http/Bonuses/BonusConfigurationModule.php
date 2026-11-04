@@ -282,7 +282,7 @@ function renderBonusProcessConfiguration(BonusConfigurationService $config, stri
         </script>';
     }
     $html .= $head('bonus-history','Historial de modificaciones · '.h($monthLabel))
-        .'<p class="muted">Quién realizó el cambio y cómo estaba la configuración antes y después. El respaldo original se conserva en el sistema.</p>';
+        .'';
     $history = $config->listHistory($month,$code);
     foreach ($history as $entry) {
         $description = bonusHistoryChanges($entry);

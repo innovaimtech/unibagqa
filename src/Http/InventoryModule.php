@@ -572,9 +572,6 @@ function unibagRenderStockPage(ReceptionService $service): void
               <span id="rolls-visible-badge" style="font-size:11.5px;font-weight:800;background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:12px">' . $totalWarehouseRolls . ' bobinas</span>
               <span id="rolls-weight-badge" style="font-size:11.5px;font-weight:800;background:#f0fdf4;color:#16a34a;padding:2px 8px;border-radius:12px">' . number_format($totalWarehouseRollsWeight, 2, ',', '.') . ' Kg</span>
             </div>
-            <div style="font-size:12px;color:#64748b;margin-top:3px">
-              Detalle de cada bobina física con su código de trazabilidad 360°, peso real capturado en balanza, especificaciones y procedencia.
-            </div>
           </div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <input id="stock-rolls-live-filter" type="text" placeholder="🔍 Filtrar bobina, trazabilidad, SKU, contenedor..." style="height:36px;padding:0 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;width:260px" oninput="filterStockRollsTable(this.value)">
@@ -1428,11 +1425,9 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<div class="mode-selector">';
     $body .= '<button type="button" class="mode-btn active" id="btn_mode_unitary" onclick="setPackagingMode(\'UNITARY\')">';
     $body .= '<div class="mode-btn-title">🏷️ 1 Etiqueta por cada Unidad / Producto</div>';
-    $body .= '<div class="mode-btn-desc">Para Bobinas, Pallets o piezas donde cada una lleva su propia etiqueta única.</div>';
     $body .= '</button>';
     $body .= '<button type="button" class="mode-btn" id="btn_mode_pack" onclick="setPackagingMode(\'PACK\')">';
     $body .= '<div class="mode-btn-title">📦 Bultos con Contenido Agrupado</div>';
-    $body .= '<div class="mode-btn-desc">Cajas o pallets que contienen múltiples unidades adentro (ej. 5 cajas de 500 bolsas).</div>';
     $body .= '</button>';
     $body .= '</div>';
     $body .= '</div>';
@@ -2878,7 +2873,6 @@ function unibagRenderStockTraceabilityTreePage(ReceptionService $service, ?Produ
         $body .= '<div class="trz-card" style="text-align:center;padding:48px 20px">';
         $body .= '<div style="font-size:48px;margin-bottom:12px">🌳</div>';
         $body .= '<div style="font-size:18px;font-weight:800;color:#0f172a;margin-bottom:6px">Consulta de Trazabilidad 360°</div>';
-        $body .= '<div style="font-size:13.5px;color:#64748b;max-width:540px;margin:0 auto 16px">Ingrese cualquier código de trazabilidad de bodega, bobina, caja, pallet, orden de trabajo u orden de compra para auditar el origen, medidas, operador y movimientos.</div>';
         $body .= '</div>';
     }
 
@@ -3479,7 +3473,6 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         $body .= '</option>';
     }
     $body .= '          </select>';
-    $body .= '          <div style="font-size:11.5px;color:#64748b;margin-top:4px">Muestra bobinas activas registradas en Bodegas 100, 200 y stock TRZ.</div>';
     $body .= '        </div>';
 
     // Modo 2: Pistolear Código
@@ -3693,7 +3686,6 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
     $body .= '      <div>';
     $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📥 Agenda y Registros Anteriores</h2>';
-    $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Haga clic en <strong>⚡ Despachar Material</strong> para auto-completar el formulario de traspaso con los datos de la máquina y la OT.</p>';
     $body .= '      </div>';
     $body .= '      <span style="background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px">' . count($pendingRequests) . ' solicitudes</span>';
     $body .= '    </div>';
@@ -3766,7 +3758,6 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
     $body .= '      <div>';
     $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📜 Historial de Traspasos a 3000 Insumos en Producción (Planta)</h2>';
-    $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Registro auditado de bobinas traspasadas: quién solicitó, quién sacó, máquina receptora y etiquetas Zebra 100×70.</p>';
     $body .= '      </div>';
     $body .= '      <span style="background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px">' . count($history) . ' registros</span>';
     $body .= '    </div>';
@@ -4847,7 +4838,6 @@ function unibagRenderRollsDecommissionPage(ReceptionService $service, ?Productio
     $body .= '      <span style="font-size:28px">📋</span>';
     $body .= '      <div>';
     $body .= '        <h2 style="margin:0;font-size:18px;font-weight:800;color:#0f172a">Pistolear o Pegar Lista de Códigos de Bobinas</h2>';
-    $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Pegue una columna de Excel, mensajes de texto o escanee con la pistola de códigos. Se marcarán automáticamente en la lista de baja.</p>';
     $body .= '      </div>';
     $body .= '    </div>';
 
@@ -4872,7 +4862,6 @@ function unibagRenderRollsDecommissionPage(ReceptionService $service, ?Productio
     $body .= '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">';
     $body .= '      <div>';
     $body .= '        <h2 style="margin:0;font-size:17px;font-weight:800;color:#0f172a">📜 Historial de Bobinas Dadas de Baja (Auditado)</h2>';
-    $body .= '        <p style="margin:4px 0 0;font-size:13px;color:#64748b">Registro auditado de bobinas retiradas de stock por Javier Perozo, motivo de consumo y peso.</p>';
     $body .= '      </div>';
     $body .= '      <span style="background:#f1f5f9;color:#475569;font-size:12px;font-weight:700;padding:4px 10px;border-radius:6px">' . count($history) . ' registros</span>';
     $body .= '    </div>';

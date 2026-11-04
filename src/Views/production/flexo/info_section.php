@@ -885,9 +885,6 @@
                     <div style="font-size:12px;color:#334155">
                         Bodega de tintas: <b><?=htmlspecialchars((string)($inkWarehouse['name'] ?? 'Sin definir'))?></b>
                     </div>
-                    <div style="font-size:12px;color:#64748B">
-                        Registre carga, sobrante y mezcla por anilox.
-                    </div>
                 </div>
                 <form id="anilox_form" method="post" action="/production/work-orders/operate" onsubmit="return false;">
                     <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
@@ -1018,9 +1015,6 @@
                                     </div>
                                     <div style="padding:16px 18px">
                                         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
-                                            <div style="font-size:12px;color:#475569">
-                                                Componentes tomados desde la misma bodega de tintas de esta OT.
-                                            </div>
                                             <div style="display:flex;gap:8px;flex-wrap:wrap">
                                                 <span id="mix_count_badge_<?=$unidadAnilox?>" class="anilox-kg-badge" style="background:#F8FAFC;border-color:#E2E8F0;color:#475569">0 componente(s)</span>
                                                 <span id="mix_total_badge_<?=$unidadAnilox?>" class="anilox-kg-badge" style="background:#EEF2FF;border-color:#C7D2FE;color:#3730A3">Mezcla: 0.00 kg</span>

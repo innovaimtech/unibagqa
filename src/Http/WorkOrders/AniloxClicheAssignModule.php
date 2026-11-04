@@ -497,7 +497,7 @@ if ($path === '/cliches' && $method === 'GET') {
     $body = '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:12px">
         <div>
           <div style="font-size:18px;font-weight:700">Clisés</div>
-          <div class="muted">Inventario digital, retiro a OT y devolución con trazabilidad histórica.</div>
+          
         </div>
         <a class="btn secondary" href="/stock">Volver a inventario</a>
       </div>';

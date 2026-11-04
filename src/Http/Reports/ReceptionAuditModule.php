@@ -414,9 +414,6 @@ function handleReceptionAuditList(ReceptionService $service): void
             <span style="font-size:13px;color:#64748b;font-weight:600">Control Metrológico & Cierre de Embarques</span>
           </div>
           <h1 style="margin:6px 0 4px 0;font-size:24px;font-weight:900;color:#0f172a">Informe Ejecutivo de Auditoría de Recepción</h1>
-          <div style="font-size:13px;color:#64748b;max-width:880px;line-height:1.5">
-            Evaluación independiente por unidad de contenedor. Compara el pesaje real capturado en báscula electrónica TRZ contra el manifiesto documental (BL/Invoice), diferenciando ingresos históricos administrativos en ERP.
-          </div>
         </div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
           <a href="' . h($excelUrl) . '" class="btn" style="background:#059669;color:#ffffff;border:none;display:inline-flex;align-items:center;gap:8px;font-weight:700;padding:9px 16px;border-radius:10px">
@@ -1171,7 +1168,6 @@ function handleReceptionAuditContainerDetail(ReceptionService $service, int $con
       <div style="padding:16px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap">
         <div>
           <div style="font-size:16px;font-weight:900;color:#0f172a">Detalle por Ítem / SKU de la Orden</div>
-          <div style="font-size:12px;color:#64748b;margin-top:2px">Cruce de cantidades documentadas vs recepción registrada por línea de cargamento</div>
         </div>
         <div style="font-size:12px;color:#64748b">' . count($lines) . ' líneas registradas</div>
       </div>
@@ -1242,7 +1238,6 @@ function handleReceptionAuditContainerDetail(ReceptionService $service, int $con
           <div style="padding:16px 20px;background:#0f172a;color:#ffffff;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
             <div>
               <div style="font-size:16px;font-weight:900">Registro Unitario de Bobinas en Báscula TRZ (' . count($rolls) . ' bobinas)</div>
-              <div style="font-size:12px;color:#94a3b8;margin-top:2px">Detalle individual de cada pesaje capturado por balanza electrónica para este contenedor</div>
             </div>
             <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
               <span class="rec-stat-pill" style="background:#1e293b;color:#38bdf8">Total Balanza: ' . number_format($scaleTotalKg, 1, ',', '.') . ' kg</span>

@@ -321,7 +321,6 @@ function unibagHandleOperatorLunchBreaks(ReceptionService $service): void
         <div class="lunch-header">
             <div class="lunch-title-group">
                 <h1><span>🍱</span> Control de Horario de Colación</h1>
-                <p>Gestión y supervisión de colaciones para maquinistas de producción con turno en máquina (excluye embalaje, ayudantes y puestos sin máquina).</p>
             </div>
 
             <div class="date-nav">

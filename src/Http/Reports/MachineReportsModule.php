@@ -1524,9 +1524,6 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
                             <span>Control de Bobinas Cargadas en Máquinas</span>
                             <span id="modal-loaded-rolls-badge" style="background:rgba(255,255,255,0.25);padding:2px 10px;border-radius:999px;font-size:12px;font-weight:800">...</span>
                         </div>
-                        <div style="font-size:12.5px;color:#ccfbf1;margin-top:2px">
-                            Visualiza las bobinas tomadas o montadas en máquinas de producción y devuélvelas a Bodega 3000 si no fueron utilizadas.
-                        </div>
                     </div>
                 </div>
                 <button type="button" id="btn-close-loaded-rolls-x" style="background:rgba(255,255,255,0.15);border:none;color:#fff;width:32px;height:32px;border-radius:999px;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;transition:background .15s" title="Cerrar">&times;</button>

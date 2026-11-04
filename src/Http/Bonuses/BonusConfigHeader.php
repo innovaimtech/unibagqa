@@ -32,7 +32,7 @@ function bonusConfigHeader(string $activeCode, bool $canEdit, ?string $month = n
         .bch-tab.active{color:#0f766e;border-bottom-color:#00A9A6;background:#fff}
         @media(max-width:640px){.bch-top{padding:14px 16px 12px}.bch-tab{padding:12px 12px;font-size:13px}}
     </style>';
-    $html .= '<div class="bch"><div class="bch-top"><div><h2>Configuración de bonificaciones</h2><p>Elige el bono y ajusta sus montos, tramos y reglas.</p></div>'
+    $html .= '<div class="bch"><div class="bch-top"><div><h2>Configuración de bonificaciones</h2></div>'
         . '<span class="bch-pill' . ($canEdit ? '' : ' off') . '">' . ($canEdit ? '✔ Edición habilitada' : '🔒 Solo lectura') . '</span></div>'
         . '<nav class="bch-tabs" aria-label="Bonos">';
     foreach ($tabs as $code => [$icon, $label]) {

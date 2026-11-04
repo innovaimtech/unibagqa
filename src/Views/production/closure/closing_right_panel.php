@@ -196,7 +196,6 @@
                         <div style="font-size:13px;font-weight:700;color:#1E293B;display:flex;align-items:center;gap:6px">
                             <i class="fa fa-clipboard-list" style="color:#0284C7"></i> Total CC:
                         </div>
-                        <div style="font-size:11px;color:#64748B">Total que se debe producir en esta CC</div>
                     </div>
                     <div style="text-align:right">
                         <span style="font-size:17px;font-weight:800;color:#0F172A"><?=number_format($totalCc, 0, ',', '.')?></span>
@@ -210,7 +209,6 @@
                         <div style="font-size:13px;font-weight:700;color:#1E40AF;display:flex;align-items:center;gap:6px">
                             <i class="fa fa-arrow-circle-right" style="color:#2563EB"></i> Producido:
                         </div>
-                        <div style="font-size:11px;color:#3B82F6">Lo que se produjo en esta producción</div>
                     </div>
                     <div style="text-align:right">
                         <span id="sync_cierre_producido" style="font-size:17px;font-weight:800;color:#1D4ED8"><?=number_format($producidoInitial, 0, ',', '.')?></span>
@@ -224,7 +222,6 @@
                         <div style="font-size:13px;font-weight:700;color:#334155;display:flex;align-items:center;gap:6px">
                             <i class="fa fa-layer-group" style="color:#64748B"></i> Acumulado CC:
                         </div>
-                        <div style="font-size:11px;color:#64748B">Acumulado hasta el momento sin esta producción</div>
                     </div>
                     <div style="text-align:right">
                         <span style="font-size:17px;font-weight:800;color:#334155"><?=number_format($acumuladoCc, 0, ',', '.')?></span>
@@ -238,7 +235,6 @@
                         <div style="font-size:13px;font-weight:700;color:#065F46;display:flex;align-items:center;gap:6px">
                             <i class="fa fa-chart-line" style="color:#059669"></i> Total CC Actualizado:
                         </div>
-                        <div style="font-size:11px;color:#059669">Total producido con el acumulado (Acumulado + Producido)</div>
                     </div>
                     <div style="text-align:right">
                         <span id="sync_cierre_total_act" style="font-size:17px;font-weight:800;color:#047857"><?=number_format($totalCcActualizado, 0, ',', '.')?></span>
@@ -252,7 +248,6 @@
                         <div style="font-size:13px;font-weight:700;color:#92400E;display:flex;align-items:center;gap:6px">
                             <i class="fa fa-hourglass-half" style="color:#D97706"></i> Por Producir:
                         </div>
-                        <div style="font-size:11px;color:#B45309">Monto que falta por producir (Total CC - Total CC Actualizado)</div>
                     </div>
                     <div style="text-align:right">
                         <span id="sync_cierre_por_producir" style="font-size:17px;font-weight:800;color:#B45309"><?=number_format($porProducir, 0, ',', '.')?></span>

@@ -226,7 +226,7 @@ function renderHelperBonusConfiguration(string $month, array $erpNames, array $s
     }
     $money = static fn($value): string => '$ '.number_format((float)$value,0,',','.');
     $html = helperBonusStyles().'<div class="hbx-card">'
-        .'<div class="hbx-head"><div><h2>Bonos máximos por ayudante</h2><p>Montos máximos, bono fijo e indicaciones de cada ayudante.</p></div>'
+        .'<div class="hbx-head"><div><h2>Bonos máximos por ayudante</h2></div>'
         .'<div class="hbx-actions"><form method="get" action="/bonificaciones" class="hbx-month">'
         .'<input type="hidden" name="view" value="configuracion"><input type="hidden" name="bonus" value="bonoayudante">'
         .'<label for="hbx-cfg-month">Mes</label><input id="hbx-cfg-month" type="month" name="month" required value="'.h($month).'"><button class="btn secondary">Cargar mes</button></form>'
@@ -300,7 +300,7 @@ function renderHelperBonusEvaluation(string $month, array $rows, array $recipien
 
     // Cabecera: título, selector de mes y acciones.
     $html = helperBonusStyles().'<div class="hbx-card">'
-        .'<div class="hbx-head"><div><h2>Bono ayudante</h2><p>Evaluación mensual · '.h($monthLabel).'</p></div>'
+        .'<div class="hbx-head"><div><h2>Bono ayudante</h2></div>'
         .'<div class="hbx-actions"><form method="get" action="/bonificaciones" class="hbx-month">'
         .'<input type="hidden" name="view" value="bonoayudante"><label for="hbx-month">Mes</label>'
         .'<input id="hbx-month" type="month" name="month" required value="'.h($month).'"><button class="btn secondary">Ver mes</button></form>'

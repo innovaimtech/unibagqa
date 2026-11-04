@@ -1545,7 +1545,6 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
             echo '<div style="padding:16px 20px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
             echo '<div>';
             echo '<div style="font-weight:900;font-size:15px;color:#0f172a">🏷️ Bobinas con Trazabilidad Asignada (' . count($existingRolls) . ' bobinas en bodega)</div>';
-            echo '<div style="font-size:12px;color:#64748b">Estas bobinas están listas para ser escaneadas y consumidas en producción/flexografía con su código corto.</div>';
             echo '</div>';
             echo '<div style="font-size:12px;color:#0f766e;font-weight:700">Prefijo utilizado: <span class="badge-code">' . h($defaultShortPrefix) . 'XXX</span></div>';
             echo '</div>';

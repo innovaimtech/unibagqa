@@ -45,9 +45,6 @@
                     <span style="font-weight:800;font-size:14px;color:#0F172A">
                         Consumo de Tintas de Serigrafía &mdash; Bodega 3000 (Insumos en Producción)
                     </span>
-                    <span style="font-size:12px;color:#64748B;margin-left:8px">
-                        Consumo = Peso al Inicio del tarro menos Cuánto sobró (el resto en bastidor se pierde al lavar)
-                    </span>
                 </div>
             </div>
             <div style="display:flex;align-items:center;gap:8px">
@@ -92,9 +89,6 @@
                                 </option>
                             <?php endforeach; ?>
                         </select>
-                        <div style="font-size:10.5px;color:#64748B;margin-top:3px">
-                            Catálogo de Bodega 3000 Insumos en Producción (prioriza con stock).
-                        </div>
                     </div>
 
                     <!-- Color de la OT -->
