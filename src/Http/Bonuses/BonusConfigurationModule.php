@@ -209,8 +209,8 @@ function renderBonusProcessConfiguration(BonusConfigurationService $config, stri
         $current = (float)($policy['factors'][$operator]??1)*100;
         $html .= '<tr data-operator="'.h(mb_strtolower($operator)).'"><td>'.h($operator)
             .'<input type="hidden" name="operators[]" value="'.h($operator).'"></td><td><select name="percentages[]"'.$disabled.' style="width:100%">';
-        foreach ([100,90,80] as $percent) {
-            $html .= '<option value="'.$percent.'"'.(abs($current-$percent)<.001?' selected':'').'>'.$percent.'%</option>';
+        foreach (($code==='bonocys' ? [120,100,90,80] : [100,90,80]) as $percent) {
+            $html .= '<option value="'.$percent.'"'.(abs($current-$percent)<.001?' selected':'').'>'.$percent.'%'.($percent===120?' (+20% de unidades)':'').'</option>';
         }
         $html .= '</select></td></tr>';
     }

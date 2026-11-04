@@ -2555,6 +2555,14 @@ function unibagBuildTraceabilityTreeHtml(array $treeData, bool $isModal = false)
     $html .= '<div class="trz-card" style="padding:14px;background:#fff;border:1px solid #E2E8F0"><div style="font-size:11px;font-weight:800;color:#64748B;text-transform:uppercase">Salida generada</div><div style="font-size:16px;font-weight:900;color:#6D28D9;margin-top:4px">' . $childRollCount . ' bob. · ' . $boxCount . ' cajas</div><div style="font-size:12px;color:#64748B;margin-top:3px">' . $palletCount . ' pallets · ' . $fmtQty($boxUnits, 0) . ' un embaladas</div></div>';
     $html .= '</div>';
 
+    $dispatchInfo = $treeData['dispatch'] ?? null;
+    if (is_array($dispatchInfo)) {
+        $html .= '<div class="trz-card" style="padding:14px;background:#f0fdf4;border:1px solid #86efac;margin-bottom:14px"><div style="font-size:11.5px;font-weight:800;color:#166534">Despachado</div>'
+            . '<div style="font-size:14px;font-weight:800;color:#0f172a;margin-top:4px">Guía ' . h((string)$dispatchInfo['guide']) . ($dispatchInfo['customer'] !== '' ? ' · ' . h((string)$dispatchInfo['customer']) : '') . '</div>'
+            . '<div style="font-size:12px;color:#475569;margin-top:3px">' . ($dispatchInfo['type'] === 'MAQUILA' ? 'Envío a procesar' : 'Venta directa') . ' · Picking ' . h((string)$dispatchInfo['picking'])
+            . ' · ' . h((string)$dispatchInfo['confirmed_by']) . ' · ' . h(substr((string)$dispatchInfo['confirmed_at'], 0, 16)) . '</div></div>';
+    }
+
     $html .= '<div style="display:flex;flex-direction:column;gap:14px">';
 
     $html .= '<div class="trz-card" style="padding:16px;background:#fff">';

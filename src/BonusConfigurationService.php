@@ -110,10 +110,34 @@ final class BonusConfigurationService
         return $this->policyCache[$key];
     }
 
-    public function factor(string $code, string $operator, string $date, string $fallbackMonth): float
+    /** Porcentajes aceptados por operador según el bono (120% solo en Corte y Sellado). */
+    public static function allowedPercentages(string $code): array
+    {
+        return $code === 'bonocys' ? [80.0, 90.0, 100.0, 120.0] : [80.0, 90.0, 100.0];
+    }
+
+    private function rawFactor(string $code, string $operator, string $date, string $fallbackMonth): float
     {
         $policy = $this->getPolicy($code, self::monthForDate($date, $fallbackMonth));
         return $policy['mode'] === 'percentage' ? (float)($policy['factors'][trim($operator)] ?? 1.0) : 1.0;
+    }
+
+    /** Factor que multiplica el pago de producción: nunca pasa de 1 (el 120% se paga aparte, como unidades extra). */
+    public function factor(string $code, string $operator, string $date, string $fallbackMonth): float
+    {
+        return min(1.0, $this->rawFactor($code, $operator, $date, $fallbackMonth));
+    }
+
+    /** Fracción de unidades extra por multiplicador de producción (0,20 para 120%; 0 en los demás casos). */
+    public function productionBonusRate(string $code, string $operator, string $date, string $fallbackMonth): float
+    {
+        return max(0.0, round($this->rawFactor($code, $operator, $date, $fallbackMonth) - 1.0, 6));
+    }
+
+    /** Pago adicional: unidades × fracción extra × tarifa base de producción (sin importar el tipo de producto). */
+    public static function extraProductionPay(float $units, float $multiplierRate, float $baseRate): float
+    {
+        return $units > 0 && $multiplierRate > 0 && $baseRate > 0 ? $units * $multiplierRate * $baseRate : 0.0;
     }
 
     private function audit(string $month, string $key, mixed $before, mixed $after, string $actor): void
@@ -132,8 +156,10 @@ final class BonusConfigurationService
         foreach ($percentages as $name=>$value) {
             $name = trim((string)$name);
             if ($name === '' || mb_strlen($name)>120 || !is_numeric($value)
-                || !in_array((float)$value,[80.0,90.0,100.0],true)) {
-                throw new RuntimeException('Selecciona 80%, 90% o 100% para cada operador.');
+                || !in_array((float)$value,self::allowedPercentages($code),true)) {
+                throw new RuntimeException($code === 'bonocys'
+                    ? 'Selecciona 80%, 90%, 100% o 120% para cada operador.'
+                    : 'Selecciona 80%, 90% o 100% para cada operador.');
             }
             if ((float)$value!==100.0) $factors[$name] = (float)$value/100;
         }

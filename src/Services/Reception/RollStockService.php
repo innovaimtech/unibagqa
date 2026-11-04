@@ -2358,7 +2358,7 @@ trait RollStockServiceTrait
             $stmt = $this->pdo->prepare("
                 SELECT item_code, COALESCE(item_id, 0) AS item_id, SUM(quantity) AS tagged_qty
                 FROM traceability_warehouse_entries
-                WHERE {$whClause} AND status != 'CANCELLED'
+                WHERE {$whClause} AND status NOT IN ('CANCELLED', 'DISPATCHED')
                 GROUP BY item_code, item_id
             ");
             $stmt->execute($params);

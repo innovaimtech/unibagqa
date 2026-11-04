@@ -95,6 +95,8 @@ $unibagHttpModules = [
     __DIR__ . '/Http/WarehousesModule.php',
     __DIR__ . '/Http/InventoryModule.php',
     __DIR__ . '/Http/MaterialSupplyModule.php',
+    __DIR__ . '/Http/DispatchModule.php',
+    __DIR__ . '/Http/ExpectedStockModule.php',
     __DIR__ . '/Http/StockAndOperationsModule.php',
 
     // Recepción, Producción, OTs, Trazabilidad, Mermas y Tintas

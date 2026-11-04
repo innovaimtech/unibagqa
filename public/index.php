@@ -120,6 +120,12 @@ if (handleApiRoutes($path, $method, $service, $scale, $printer, $currentOperator
 if (handleMaterialSupplyRoutes($path, $method, $prodService, $currentOperatorName)) {
     exit;
 }
+if (handleDispatchRoutes($path, $method, $currentOperatorName)) {
+    exit;
+}
+if (handleExpectedStockRoutes($path, $method, $currentOperatorName)) {
+    exit;
+}
 if (handleInventoryRoutes($path, $method, $service, $currentOperatorName, $prodService)) {
     exit;
 }

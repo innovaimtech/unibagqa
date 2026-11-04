@@ -306,86 +306,82 @@
             box-shadow: 0 0 0 2px rgba(13,148,136,0.15);
         }
 
-        /* Cierre mixto en tablet: cada CC pasa a tarjeta para que los campos no se sobrepongan */
+        /* Cierre mixto: una tarjeta compacta por CC; la grilla reparte el ancho sin celdas vacías */
         #panel_cierre_mixto { container-type: inline-size; }
-        @container (min-width: 0px) {
         #panel_cierre_mixto .pack-mixto-table { min-width: 0; width: 100%; display: block; }
         #panel_cierre_mixto .pack-mixto-table thead { display: none; }
         #panel_cierre_mixto .pack-mixto-table tbody { display: block; }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] {
-            display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 12px;
-            padding: 14px; margin: 0 0 12px; border: 1px solid #CBD5E1; border-radius: 10px; background: #FFFFFF;
+            display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px 10px; align-items: end;
+            padding: 10px 12px; margin: 0 0 8px; border: 1px solid #CBD5E1; border-radius: 10px; background: #FFFFFF;
         }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td { display: block; border: 0; padding: 0; min-width: 0; text-align: left !important; white-space: normal !important; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1) { grid-column: 1 / 4; font-size: 15px; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-column: 4; grid-row: 1 / 3; justify-self: end; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) { grid-column: 1 / 4; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-column: 1 / 4; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-column: 4; align-self: end; justify-self: end; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1) { align-self: center; font-size: 14px; line-height: 1.2; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { align-self: center; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) img { height: 40px !important; max-width: 46px !important; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) > div { height: 40px !important; max-width: 46px !important; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { align-self: center; justify-self: end; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) { display: flex; gap: 6px; align-items: baseline; align-self: center; overflow: hidden; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) br { display: none; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) b { white-space: nowrap; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(n+4):nth-child(-n+9)::before {
-            display: block; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            display: block; font-size: 10.5px; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] input,
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] select {
-            width: 100% !important; min-width: 0; height: 44px !important; font-size: 16px !important; box-sizing: border-box;
-        }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] .btnred { min-height: 44px; min-width: 44px; }
-        #panel_cierre_mixto .pack-mixto-table tfoot, #panel_cierre_mixto .pack-mixto-table tfoot tr { display: block; }
-        #panel_cierre_mixto .pack-mixto-table tfoot tr { padding: 12px 14px; border: 2px solid #CBD5E1; border-radius: 10px; }
-        #panel_cierre_mixto .pack-mixto-table tfoot td { display: block; border: 0; padding: 3px 0; text-align: left !important; }
-        #panel_cierre_mixto .pack-mixto-table tfoot td:last-child { display: none; }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(4)::before { content: "Cajas"; }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(5)::before { content: "Unid. x caja"; }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(6)::before { content: "Caja final"; }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(7)::before { content: "Sobrantes"; }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(8)::before { content: "Total bolsas"; }
         #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9)::before { content: "Bodega origen"; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] input, #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] select { width: 100% !important; min-width: 0; height: 40px !important; font-size: 15px !important; box-sizing: border-box; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] input[id^="total_bolsas_"] { font-weight: 800; font-size: 16px !important; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] .btnred { min-height: 40px; min-width: 40px; }
+        /* Medio (tablet vertical): 5 líneas sin huecos */
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-area: 1 / 1 / 2 / 2; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1) { grid-area: 1 / 2 / 2 / 6; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-area: 1 / 6 / 2 / 7; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) { grid-area: 2 / 1 / 3 / 7; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-area: 3 / 1 / 4 / 7; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(4) { grid-area: 4 / 1 / 5 / 3; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(5) { grid-area: 4 / 3 / 5 / 5; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(6) { grid-area: 4 / 5 / 5 / 7; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(7) { grid-area: 5 / 1 / 6 / 4; }
+        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(8) { grid-area: 5 / 4 / 6 / 7; }
+        /* Ancho (>= 720 px): 2 líneas por CC */
+        @container (min-width: 720px) {
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] { grid-template-columns: 46px repeat(4, minmax(0, 1fr)) minmax(0, 1.3fr) minmax(0, 2.4fr) 44px; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-area: 1 / 1 / 2 / 2; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1) { grid-area: 1 / 2 / 2 / 4; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) { grid-area: 1 / 4 / 2 / 8; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-area: 1 / 8 / 2 / 9; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(4) { grid-area: 2 / 1 / 3 / 3; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(5) { grid-area: 2 / 3 / 3 / 4; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(6) { grid-area: 2 / 4 / 3 / 5; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(7) { grid-area: 2 / 5 / 3 / 6; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(8) { grid-area: 2 / 6 / 3 / 7; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-area: 2 / 7 / 3 / 9; }
         }
-        @supports not (container-type: inline-size) {
-            @media (min-width: 0px) {
-        #panel_cierre_mixto .pack-mixto-table { min-width: 0; width: 100%; display: block; }
-        #panel_cierre_mixto .pack-mixto-table thead { display: none; }
-        #panel_cierre_mixto .pack-mixto-table tbody { display: block; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] {
-            display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 12px;
-            padding: 14px; margin: 0 0 12px; border: 1px solid #CBD5E1; border-radius: 10px; background: #FFFFFF;
+        /* Angosto (< 480 px): campos de a dos */
+        @container (max-width: 479px) {
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-area: 1 / 1 / 2 / 2; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1) { grid-area: 1 / 2 / 2 / 4; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-area: 1 / 4 / 2 / 5; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) { grid-area: 2 / 1 / 3 / 5; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-area: 3 / 1 / 4 / 5; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(4) { grid-area: 4 / 1 / 5 / 3; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(5) { grid-area: 4 / 3 / 5 / 5; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(6) { grid-area: 5 / 1 / 6 / 3; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(7) { grid-area: 5 / 3 / 6 / 5; }
+            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(8) { grid-area: 6 / 1 / 7 / 5; }
         }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td { display: block; border: 0; padding: 0; min-width: 0; text-align: left !important; white-space: normal !important; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1) { grid-column: 1 / 4; font-size: 15px; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-column: 4; grid-row: 1 / 3; justify-self: end; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3) { grid-column: 1 / 4; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-column: 1 / 4; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-column: 4; align-self: end; justify-self: end; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(n+4):nth-child(-n+9)::before {
-            display: block; font-size: 11px; font-weight: 700; color: #475569; text-transform: uppercase; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-        }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] input,
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] select {
-            width: 100% !important; min-width: 0; height: 44px !important; font-size: 16px !important; box-sizing: border-box;
-        }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] .btnred { min-height: 44px; min-width: 44px; }
-        #panel_cierre_mixto .pack-mixto-table tfoot, #panel_cierre_mixto .pack-mixto-table tfoot tr { display: block; }
-        #panel_cierre_mixto .pack-mixto-table tfoot tr { padding: 12px 14px; border: 2px solid #CBD5E1; border-radius: 10px; }
-        #panel_cierre_mixto .pack-mixto-table tfoot td { display: block; border: 0; padding: 3px 0; text-align: left !important; }
+        #panel_cierre_mixto .pack-mixto-table tfoot { display: block; }
+        #panel_cierre_mixto .pack-mixto-table tfoot tr { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: flex-end; gap: 4px 18px; padding: 8px 12px; border: 2px solid #CBD5E1; border-radius: 10px; background: #F8FAFC; }
+        #panel_cierre_mixto .pack-mixto-table tfoot td { display: block; border: 0 !important; padding: 0 !important; text-align: left !important; }
         #panel_cierre_mixto .pack-mixto-table tfoot td:last-child { display: none; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(4)::before { content: "Cajas"; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(5)::before { content: "Unid. x caja"; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(6)::before { content: "Caja final"; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(7)::before { content: "Sobrantes"; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(8)::before { content: "Total bolsas"; }
-        #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9)::before { content: "Bodega origen"; }
-            }
-        }
         @media (max-width: 1280px) {
             .pack-close-grid { grid-template-columns: minmax(0, 1fr); }
-        }
-        @media (max-width: 640px) {
-            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(1),
-            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(3),
-            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(9) { grid-column: 1 / 3; }
-            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(2) { grid-column: 2; grid-row: auto; }
-            #panel_cierre_mixto .pack-mixto-table tr[id^="mixed_row_"] > td:nth-child(10) { grid-column: 2; }
         }
     </style>';
 
@@ -535,19 +531,13 @@
     // 3. PANEL CIERRE MIXTO: Desglose por CC / Diseño (Aparece solo si el operador elige Cierre Mixto)
     // -------------------------------------------------------------------------
     echo '<section id="panel_cierre_mixto" class="pack-close-block" style="margin-top:24px;margin-bottom:24px;' . ($isMixtoSelected ? 'display:block;' : 'display:none;') . 'border:2px solid #0D9488;box-shadow:0 4px 14px rgba(13,148,136,0.12)">
-        <div class="pack-close-title" style="background:linear-gradient(135deg, #0F766E, #115E59);padding:12px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-            <span style="font-size:14px"><i class="fa fa-boxes"></i> Desglose de Pallet Mixto (Múltiples Órdenes / Diseños)</span>
-            <span style="font-size:11.5px;background:rgba(255,255,255,0.22);padding:3px 10px;border-radius:12px;font-weight:600">Código 50 · Cierre Mixto</span>
-        </div>
-        <div style="padding:12px 18px;background:#F0FDFA;border-bottom:1px solid #CCFBF1;font-size:13px;color:#115E59;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
-            <div style="display:flex;align-items:center;gap:8px;max-width:620px">
-                <i class="fa fa-info-circle" style="font-size:17px;color:#0D9488;flex-shrink:0"></i>
-                <span>Ingrese las cajas y unidades de cada CC que conforma este pallet. Los totales se consolidan y sincronizan automáticamente con el cierre.</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px">
-                <input type="text" id="inp_search_mixed_cc" class="inptxt" placeholder="Buscar CC (ej: 26-00578-1)" style="width:220px;max-width:100%;height:34px;font-size:12.5px;border:1.5px solid #99F6E4;border-radius:6px;padding:4px 10px" onkeydown="if(event.key===\'Enter\'){event.preventDefault();searchAndAddMixedCC();}">
+        <div class="pack-close-title" style="background:linear-gradient(135deg, #0F766E, #115E59);padding:10px 14px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <span style="font-size:14px"><i class="fa fa-boxes"></i> Desglose de Pallet Mixto</span>
+            <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <input type="text" id="inp_search_mixed_cc" class="inptxt" placeholder="Buscar CC (ej: 26-00578-1)" style="width:210px;max-width:100%;height:34px;font-size:12.5px;border:1.5px solid #99F6E4;border-radius:6px;padding:4px 10px;color:#0F172A;background:#fff" onkeydown="if(event.key===\'Enter\'){event.preventDefault();searchAndAddMixedCC();}">
                 <button type="button" class="btnblue" style="padding:7px 14px;font-size:12.5px;border-radius:6px;font-weight:bold;height:34px;display:inline-flex;align-items:center;gap:6px" onclick="searchAndAddMixedCC()"><i class="fa fa-plus"></i> Agregar CC</button>
-            </div>
+                <span style="font-size:11.5px;background:rgba(255,255,255,0.22);padding:3px 10px;border-radius:12px;font-weight:600">Código 50 · Cierre Mixto</span>
+            </span>
         </div>
         <div style="overflow-x:auto;padding:2px">
             <table class="pack-mixto-table" id="table_mixto">
@@ -627,13 +617,13 @@
             . '<input type="hidden" name="mixed_item_id_' . $idx . '" value="' . $itemId . '">'
             . '</td>'
             . '<td style="text-align:center">' . $imgHtml . '</td>'
-            . '<td><b>' . $escape($itemNum) . '</b>' . ($itemTitle !== '' ? ('<br><small style="color:#64748b">' . $escape($itemTitle) . '</small>') : '') . '</td>'
-            . '<td style="text-align:center"><input type="number" min="0" step="1" name="total_cajas_' . $idx . '" id="total_cajas_' . $idx . '" class="inptxt" style="width:75px;text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $cajas . '" oninput="calcEmbalajeMixto()"></td>'
-            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_por_caja_' . $idx . '" id="bolsas_por_caja_' . $idx . '" class="inptxt" style="width:75px;text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bpc . '" oninput="calcEmbalajeMixto()"></td>'
-            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_caja_final_' . $idx . '" id="bolsas_caja_final_' . $idx . '" class="inptxt" style="width:75px;text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bcf . '" oninput="calcEmbalajeMixto()"></td>'
-            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_sobrante_' . $idx . '" id="bolsas_sobrante_' . $idx . '" class="inptxt" style="width:75px;text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bsobr . '" oninput="calcEmbalajeMixto()"></td>'
-            . '<td style="text-align:center"><input type="number" name="total_bolsas_' . $idx . '" id="total_bolsas_' . $idx . '" class="inptxt" style="width:95px;text-align:center;background:#F8FAFC;font-weight:800;color:#0F766E" value="' . $totBolsas . '" readonly></td>'
-            . '<td><select name="req_id_bodega_' . $idx . '" class="inptxt" style="width:100%;height:32px;font-size:12px">' . $whOptions . '</select></td>'
+            . '<td title="' . $escape(trim($itemNum . ' ' . $itemTitle)) . '"><b>' . $escape($itemNum) . '</b>' . ($itemTitle !== '' ? ('<br><small style="color:#64748b">' . $escape($itemTitle) . '</small>') : '') . '</td>'
+            . '<td style="text-align:center"><input type="number" min="0" step="1" name="total_cajas_' . $idx . '" id="total_cajas_' . $idx . '" class="inptxt" style="text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $cajas . '" oninput="calcEmbalajeMixto()"></td>'
+            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_por_caja_' . $idx . '" id="bolsas_por_caja_' . $idx . '" class="inptxt" style="text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bpc . '" oninput="calcEmbalajeMixto()"></td>'
+            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_caja_final_' . $idx . '" id="bolsas_caja_final_' . $idx . '" class="inptxt" style="text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bcf . '" oninput="calcEmbalajeMixto()"></td>'
+            . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_sobrante_' . $idx . '" id="bolsas_sobrante_' . $idx . '" class="inptxt" style="text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bsobr . '" oninput="calcEmbalajeMixto()"></td>'
+            . '<td style="text-align:center"><input type="number" name="total_bolsas_' . $idx . '" id="total_bolsas_' . $idx . '" class="inptxt" style="text-align:center;background:#F8FAFC;font-weight:800;color:#0F766E" value="' . $totBolsas . '" readonly></td>'
+            . '<td><select name="req_id_bodega_' . $idx . '" class="inptxt" >' . $whOptions . '</select></td>'
             . '<td style="text-align:center">' . $removeBtn . '</td>'
             . '</tr>';
     };
@@ -669,9 +659,9 @@
     echo '      </tbody>
                 <tfoot>
                     <tr style="background:#F8FAFC;font-weight:bold;border-top:2px solid #CBD5E1">
-                        <td colspan="3" style="text-align:right;padding-right:14px;color:#1E293B;font-size:12.5px">TOTALES COMBINADOS PALLET MIXTO:</td>
+                        <td colspan="3" style="text-align:right;padding-right:14px;color:#1E293B;font-size:12.5px">Totales del pallet mixto:</td>
                         <td style="text-align:center"><span id="lbl_mixed_total_boxes" style="color:#0F766E;font-size:15px;font-weight:800">0</span> <small style="color:#64748B">cajas</small></td>
-                        <td colspan="3" style="text-align:right;color:#64748B;font-weight:normal;font-size:12px">Suma bolsas de todos los CCs:</td>
+                        <td colspan="3" style="text-align:right;color:#64748B;font-weight:normal;font-size:12px">Bolsas de todos los CCs:</td>
                         <td style="text-align:center"><span id="lbl_mixed_total_units" style="color:#0F766E;font-size:16px;font-weight:800">0</span></td>
                         <td colspan="2"></td>
                     </tr>
@@ -929,14 +919,15 @@
                         + "<input type=\'hidden\' name=\'mixed_item_id_" + nextIdx + "\' value=\'" + (o.item_id || 0) + "\'>"
                         + "</td><td style=\'text-align:center\'>" + imgHtml + "</td>"
                         + "<td><b>" + (o.item_number_prod || "") + "</b>" + (o.item_title ? ("<br><small style=\'color:#64748b\'>" + o.item_title + "</small>") : "") + "</td>"
-                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'total_cajas_" + nextIdx + "\' id=\'total_cajas_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
-                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_por_caja_" + nextIdx + "\' id=\'bolsas_por_caja_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
-                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_caja_final_" + nextIdx + "\' id=\'bolsas_caja_final_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
-                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_sobrante_" + nextIdx + "\' id=\'bolsas_sobrante_" + nextIdx + "\' class=\'inptxt\' style=\'width:75px;text-align:center\' value=\'0\' oninput=\'calcEmbalajeMixto()\'></td>"
-                        + "<td style=\'text-align:center\'><input type=\'number\' name=\'total_bolsas_" + nextIdx + "\' id=\'total_bolsas_" + nextIdx + "\' class=\'inptxt\' style=\'width:95px;text-align:center;background:#F8FAFC;font-weight:800;color:#0F766E\' value=\'0\' readonly></td>"
-                        + "<td><select name=\'req_id_bodega_" + nextIdx + "\' class=\'inptxt\' style=\'width:100%;height:32px;font-size:12px\'>" + whOptions + "</select></td>"
+                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'total_cajas_" + nextIdx + "\' id=\'total_cajas_" + nextIdx + "\' class=\'inptxt\' style=\'text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
+                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_por_caja_" + nextIdx + "\' id=\'bolsas_por_caja_" + nextIdx + "\' class=\'inptxt\' style=\'text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
+                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_caja_final_" + nextIdx + "\' id=\'bolsas_caja_final_" + nextIdx + "\' class=\'inptxt\' style=\'text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
+                        + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_sobrante_" + nextIdx + "\' id=\'bolsas_sobrante_" + nextIdx + "\' class=\'inptxt\' style=\'text-align:center\' value=\'0\' oninput=\'calcEmbalajeMixto()\'></td>"
+                        + "<td style=\'text-align:center\'><input type=\'number\' name=\'total_bolsas_" + nextIdx + "\' id=\'total_bolsas_" + nextIdx + "\' class=\'inptxt\' style=\'text-align:center;background:#F8FAFC;font-weight:800;color:#0F766E\' value=\'0\' readonly></td>"
+                        + "<td><select name=\'req_id_bodega_" + nextIdx + "\' class=\'inptxt\'>" + whOptions + "</select></td>"
                         + "<td style=\'text-align:center\'><button type=\'button\' class=\'btnred\' style=\'padding:5px 9px;font-size:11px;border-radius:4px\' onclick=\'removeMixedRow(" + nextIdx + ")\' title=\'Quitar este CC\'><i class=\'fa fa-trash\'></i></button></td>";
 
+                    tr.children[2].title = ((o.item_number_prod || "") + " " + (o.item_title || "")).trim();
                     tbody.appendChild(tr);
                     document.getElementById("inp_search_mixed_cc").value = "";
                     calcEmbalajeMixto();

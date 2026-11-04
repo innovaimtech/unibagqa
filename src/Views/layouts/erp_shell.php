@@ -581,6 +581,7 @@
         echo '<a class="subitem' . ($currentPath === '/reports/machine-events' ? ' active' : '') . '" href="/reports/machine-events"><span>Eventos de Máquina</span></a>';
         echo '<a class="subitem' . ($isLunch ? ' active' : '') . '" href="/reports/colaciones"><span>🍱 Control Colaciones</span></a>';
         echo '<a class="subitem' . ($currentPath === '/reports/nivel-servicio' ? ' active' : '') . '" href="/reports/nivel-servicio"><span>Nivel de Servicio</span></a>';
+        echo '<a class="subitem' . (str_starts_with($currentPath, '/reports/stock-esperado') ? ' active' : '') . '" href="/reports/stock-esperado"><span>Stock Esperado</span></a>';
         echo '<a class="subitem' . (str_starts_with($currentPath, '/reports/reception-audit') ? ' active' : '') . '" href="/reports/reception-audit"><span>Auditoría Recepción</span></a>';
         echo '<a class="subitem' . (str_starts_with($currentPath, '/reports/monthly-presentation') ? ' active' : '') . '" href="/reports/monthly-presentation"><span>Informe Mensual PPT</span></a>';
     } elseif ($activeModule === 'bonificaciones') {
@@ -597,11 +598,13 @@
         $isTrzEntry = str_starts_with($currentPath, '/stock/traceability-entry') || str_starts_with($currentPath, '/stock/ingreso-trazable');
         $isTrzTree = str_starts_with($currentPath, '/stock/traceability') && !$isTrzEntry;
         $isTransfers = str_starts_with($currentPath, '/stock/transfers') || str_starts_with($currentPath, '/stock/traspasos');
-        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry && !$isTrzTree && !$isTransfers && !$isMatRequests;
+        $isDispatch = str_starts_with($currentPath, '/stock/dispatch');
+        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry && !$isTrzTree && !$isTransfers && !$isMatRequests && !$isDispatch;
         $isWh = str_starts_with($currentPath, '/warehouses');
         echo '<a class="subitem' . ($isStock ? ' active' : '') . '" href="/stock"><span>Consulta de stock</span></a>';
         echo '<a class="subitem' . ($isMatRequests ? ' active' : '') . '" href="/stock/material-requests"><span>📋 Solicitudes MP (Bodega 3000)</span></a>';
         echo '<a class="subitem' . ($isTransfers ? ' active' : '') . '" href="/stock/transfers"><span>🔄 Traspasos a Producción</span></a>';
+        echo '<a class="subitem' . ($isDispatch ? ' active' : '') . '" href="/stock/dispatch"><span>🚚 Despacho</span></a>';
         echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso con Trazabilidad</span></a>';
         echo '<a class="subitem' . ($isTrzTree ? ' active' : '') . '" href="/stock/traceability"><span>🌳 Árbol Trazabilidad</span></a>';
         echo '<a class="subitem' . ($isWh ? ' active' : '') . '" href="/warehouses"><span>Configuración de bodega</span></a>';

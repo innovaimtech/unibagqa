@@ -1423,6 +1423,10 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
     $opXxl = [];
     $opBolsas = [];
     $opBasurines = [];
+    $opExtraUnits = [];
+    $opExtraPay = [];
+    // Multiplicador de producción (120%): el 20% extra se paga sobre las unidades con la tarifa base de producción ($1 por defecto).
+    $extraBaseRate = (float)($effectiveRates['bolsas']['BASE'] ?? (float)($defaultRates['bolsas']['BASE'] ?? 1.0));
 
     foreach ($rows as $r) {
         if (!is_array($r)) {
@@ -1451,6 +1455,11 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         $amount = $units * $rate * $cysBonusConfig->factor('bonocys', $opName, (string)($r['event_date'] ?? ''), $monthKey);
 
         $opBase[$opLabel] = (float)($opBase[$opLabel] ?? 0.0) + $amount;
+        $extraRate = $cysBonusConfig->productionBonusRate('bonocys', $opName, (string)($r['event_date'] ?? ''), $monthKey);
+        if ($extraRate > 0) {
+            $opExtraUnits[$opLabel] = (float)($opExtraUnits[$opLabel] ?? 0.0) + ($units * $extraRate);
+            $opExtraPay[$opLabel] = (float)($opExtraPay[$opLabel] ?? 0.0) + BonusConfigurationService::extraProductionPay($units, $extraRate, $extraBaseRate);
+        }
         if ($category === 'sacos') {
             $opSacos[$opLabel] = (float)($opSacos[$opLabel] ?? 0.0) + $amount;
         } elseif ($category === 'bolsas_xxl') {
@@ -1494,7 +1503,7 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
         foreach ($opCols as $c) {
             $cnt = (float)($opChangeCounts[$c] ?? 0.0);
             $opChangePay[$c] = $cnt > 0 ? ($cnt * $cfgAmount) : 0.0;
-            $opTotalPay[$c] = (float)($opBase[$c] ?? 0.0) + (float)($opChangePay[$c] ?? 0.0);
+            $opTotalPay[$c] = (float)($opBase[$c] ?? 0.0) + (float)($opExtraPay[$c] ?? 0.0) + (float)($opChangePay[$c] ?? 0.0);
         }
 
         $opPackUnits = [];
@@ -1541,7 +1550,8 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
             ['label' => 'BOLSAS XXL (x1,5)', 'type' => 'money', 'map' => $opXxl],
             ['label' => 'BOLSAS (x1)', 'type' => 'money', 'map' => $opBolsas],
             ['label' => 'BASURINES/TROQUELES (x0,5)', 'type' => 'money', 'map' => $opBasurines],
-            ['label' => 'ADICIONAL', 'type' => 'money', 'map' => []],
+            ['label' => 'UNIDADES EXTRA (MULTIPLICADOR)', 'type' => 'count', 'map' => $opExtraUnits],
+            ['label' => 'ADICIONAL +20% PRODUCCIÓN', 'type' => 'money', 'map' => $opExtraPay],
             ['label' => 'CAMBIOS DE CONFIGURACIÓN', 'type' => 'count', 'map' => $opChangeCounts],
             ['label' => 'VALOR CAMBIOS ($)', 'type' => 'fixed_money', 'value' => $cfgAmount],
             ['label' => 'A PAGAR POR CAMBIOS', 'type' => 'money', 'map' => $opChangePay],
@@ -1566,14 +1576,14 @@ if ($path === '/bonificaciones/cys/export-xls' && $method === 'GET') {
             foreach ($opCols as $c) {
                 $v = (float)($map[$c] ?? 0.0);
                 if ($type === 'count') {
-                    echo '<td class="right">' . h($v > 0 ? (string)(int)$v : '0') . '</td>';
+                    echo '<td class="right">' . h($v > 0 ? number_format((float)(int)$v, 0, ',', '.') : '0') . '</td>';
                 } else {
                     echo '<td class="right">' . h($money($v)) . '</td>';
                 }
             }
             $total = $rowTotal($map, $opCols);
             if ($type === 'count') {
-                echo '<td class="right" style="font-weight:900">' . h((string)(int)$total) . '</td></tr>';
+                echo '<td class="right" style="font-weight:900">' . h(number_format((float)(int)$total, 0, ',', '.')) . '</td></tr>';
             } else {
                 echo '<td class="right" style="font-weight:900">' . h($money($total)) . '</td></tr>';
             }

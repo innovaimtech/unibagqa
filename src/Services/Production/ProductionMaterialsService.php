@@ -3062,6 +3062,28 @@ trait ProductionMaterialsServiceTrait
         return $stmt->fetchAll() ?: [];
     }
 
+    /** Despacho confirmado (picking, guía, cliente) de un pallet o caja, o null si no ha salido. */
+    private function dispatchOf(string $type, int $id): ?array
+    {
+        if ($this->trzPdo === null) {
+            return null;
+        }
+        require_once dirname(__DIR__, 2) . '/DispatchService.php';
+        $row = (new DispatchService($this->erpPdo, $this->trzPdo))->dispatchOf($type, $id);
+        if ($row === null) {
+            return null;
+        }
+        $g = !empty($row['guide_snapshot']) ? json_decode((string)$row['guide_snapshot'], true) : [];
+        return [
+            'picking' => (string)$row['code'],
+            'type' => (string)$row['dispatch_type'],
+            'guide' => (string)$row['guide_number'],
+            'customer' => (string)($g['customer'] ?? ''),
+            'confirmed_by' => (string)$row['confirmed_by'],
+            'confirmed_at' => (string)$row['confirmed_at'],
+        ];
+    }
+
     private function ensureMovementCodeColumns(): bool
     {
         static $ok = null;
@@ -3441,6 +3463,7 @@ trait ProductionMaterialsServiceTrait
             try {
                 $result['movements'] = $this->trzMovementsFor('box_code', (string)$box['box_code'], 'BOX', (int)$box['id']);
             } catch (Throwable) {}
+            $result['dispatch'] = $this->dispatchOf('BOX', (int)$box['id']);
 
             return $result;
         }
@@ -3548,6 +3571,7 @@ trait ProductionMaterialsServiceTrait
             try {
                 $result['movements'] = $this->trzMovementsFor('pallet_code', (string)$pallet['pallet_code'], 'PALLET', (int)$pallet['id']);
             } catch (Throwable) {}
+            $result['dispatch'] = $this->dispatchOf('PALLET', (int)$pallet['id']);
 
             return $result;
         }
