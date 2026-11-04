@@ -1800,6 +1800,50 @@ trait WorkOrderAgendaServiceTrait
         }
     }
 
+    /**
+     * Motivos de mantención: tabla `equipo_manttype` del ERP (la misma del sistema anterior),
+     * solo los activos y ordenados por nombre.
+     *
+     * @return array<int,array{id:int,mant_title:string,mant_code:string}>
+     */
+    public function listMaintenanceTypes(): array
+    {
+        try {
+            return $this->erpPdo->query(
+                "SELECT id, mant_title, mant_code FROM equipo_manttype WHERE mant_status > 0 ORDER BY mant_title ASC"
+            )->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable $e) {
+            error_log('listMaintenanceTypes: ' . $e->getMessage());
+            return [];
+        }
+    }
+
+    /**
+     * Ubicaciones/partes de la máquina donde se hace la mantención (`equipos_ubimants`),
+     * filtradas por el tipo de máquina como en el sistema anterior.
+     *
+     * @return array<int,array{id:int,ubim_title:string}>
+     */
+    public function listMaintenanceLocations(int $equipoTypeId): array
+    {
+        if ($equipoTypeId <= 0) {
+            return [];
+        }
+        try {
+            $stmt = $this->erpPdo->prepare(
+                "SELECT t1.id, t1.ubim_title FROM equipos_ubimants t1
+                 INNER JOIN equipos_ubimants_types t2 ON t1.id = t2.ubimid
+                 WHERE t1.ubim_status > 0 AND t2.typeid = :type
+                 GROUP BY t1.id, t1.ubim_title ORDER BY t1.ubim_title ASC"
+            );
+            $stmt->execute([':type' => $equipoTypeId]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        } catch (Throwable $e) {
+            error_log('listMaintenanceLocations: ' . $e->getMessage());
+            return [];
+        }
+    }
+
     public function listMedidas(): array
     {
         try {

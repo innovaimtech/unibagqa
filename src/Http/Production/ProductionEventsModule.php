@@ -599,14 +599,21 @@ function handleProductionEventsRoutes(
         $agId = (int)($_REQUEST['agid'] ?? 0);
         $workerOtId = (int)($_REQUEST['worker_ot_id'] ?? 0);
         $repairId = (int)($_REQUEST['evt_equipo_mantid'] ?? 0);
+        $ubimId = (int)($_REQUEST['evt_ubim_id'] ?? 0);
         $comments = trim((string)($_REQUEST['evt_comments'] ?? ''));
         $submode = trim((string)($_REQUEST['submode'] ?? ''));
         $eventId = (int)($_REQUEST['refid'] ?? 0);
 
+        if ($repairId <= 0) {
+            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=mantencion&error=' . rawurlencode('Selecciona el motivo de la mantención.'));
+            return true;
+        }
         if ($eventId > 0 && $submode === 'end') {
-            $prodService->endEvent($eventId, $workerOtId, 0, $comments);
+            $prodService->recordEventMantencion($workerOtId, $repairId, $ubimId, $comments, $eventId, true);
+        } elseif ($eventId > 0) {
+            $prodService->recordEventMantencion($workerOtId, $repairId, $ubimId, $comments, $eventId, false);
         } else {
-            $prodService->recordEventMantencion($workerOtId, $repairId, 0, $comments);
+            $prodService->recordEventMantencion($workerOtId, $repairId, $ubimId, $comments);
         }
         redirectResponse('/production/work-orders/operate?agid=' . $agId . '&saved_mant=1');
         return true;
@@ -950,6 +957,9 @@ function handleProductionOperateRoutes(
             $ctx['ink_warehouse'] = [];
             $ctx['ink_items'] = [];
         }
+        // Motivos y ubicaciones de mantención (equipo_manttype / equipos_ubimants del ERP).
+        $ctx['maintenance_types'] = $prodService->listMaintenanceTypes();
+        $ctx['maintenance_locations'] = $prodService->listMaintenanceLocations((int)($ctx['machine_init']['equipo_type_id'] ?? 0));
         $ctx['machine_ink_loads'] = ($workerOtId > 0 || $agId > 0) ? $prodService->listMachineInkLoadsForWorkOrder($workerOtId, false, $agId) : [];
 
         renderProductionOperatorConsole(

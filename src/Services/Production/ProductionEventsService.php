@@ -22,12 +22,13 @@ trait ProductionEventsServiceTrait
         }
 
         $sql = "SELECT t1.*, t2.med_name AS from_med_name, t3.med_name AS to_med_name,
-                       t4.pause_name, t5.repair_title AS repair_name
+                       t4.pause_name, t5.mant_title AS repair_name, t5.mant_code AS repair_code, t6.ubim_title AS ubim_name
                 FROM prod_worker_ot_events t1
                 LEFT OUTER JOIN prod_medidas t2 ON t1.evt_medida_fromid = t2.id
                 LEFT OUTER JOIN prod_medidas t3 ON t1.evt_medida_toid = t3.id
                 LEFT OUTER JOIN prod_pause_types t4 ON t1.evt_pause_id = t4.id
-                LEFT OUTER JOIN prod_repairtypes t5 ON t1.evt_equipo_mantid = t5.id
+                LEFT OUTER JOIN equipo_manttype t5 ON t1.evt_equipo_mantid = t5.id
+                LEFT OUTER JOIN equipos_ubimants t6 ON t1.evt_ubim_id = t6.id
                 WHERE (
                     t1.evt_prod_worker_otid = :ot_id
                     OR (t1.overrideembalaje_act = 1 AND t1.overrideembalaje_selladora_evtrefid = :ot_id2)

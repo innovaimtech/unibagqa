@@ -1356,16 +1356,36 @@ echo renderView('production/partials/operator_flash_banners', ['agenda' => $agen
                 <table border="0" width="100%" cellpadding="8" cellspacing="0">
                 <colgroup><col width="220"><col></colgroup>
                 <tr>
-                    <td class="tdleft">Tipo Mantención</td>
+                    <td class="tdleft">Motivo de mantención *</td>
                     <td class="tdnrm">
-                        <select name="evt_equipo_mantid" class="inptxt" style="width:250px" required>
-                            <option value="">Seleccione tipo...</option>
-                            <?php foreach ($repairs as $r): ?>
-                                <option value="<?=$r['id']?>"><?=htmlspecialchars((string)$r['mant_title'])?></option>
+                        <?php
+                        $maintTypes = $ctx['maintenance_types'] ?? [];
+                        $maintLocations = $ctx['maintenance_locations'] ?? [];
+                        $maintRef = null;
+                        foreach ($events as $__ev) { if ((int)$__ev['id'] === $refId) { $maintRef = $__ev; break; } }
+                        ?>
+                        <select name="evt_equipo_mantid" class="inptxt" style="width:100%;max-width:420px" required>
+                            <option value="">Seleccione el motivo...</option>
+                            <?php foreach ($maintTypes as $mt): ?>
+                                <option value="<?=(int)$mt['id']?>" <?=((int)($maintRef['evt_equipo_mantid'] ?? 0) === (int)$mt['id']) ? 'selected' : ''?>><?=htmlspecialchars((string)$mt['mant_title'])?><?=trim((string)($mt['mant_code'] ?? '')) !== '' ? ' (Código ' . htmlspecialchars((string)$mt['mant_code']) . ')' : ''?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <?php if (!$maintTypes): ?><div style="color:#B91C1C;font-size:12px;margin-top:4px">No hay motivos de mantención activos en el ERP (tabla equipo_manttype).</div><?php endif; ?>
+                    </td>
+                </tr>
+                <?php if ($maintLocations): ?>
+                <tr>
+                    <td class="tdleft">Ubicación / parte de la máquina *</td>
+                    <td class="tdnrm">
+                        <select name="evt_ubim_id" class="inptxt" style="width:100%;max-width:420px" required>
+                            <option value="">Seleccione la ubicación...</option>
+                            <?php foreach ($maintLocations as $ml): ?>
+                                <option value="<?=(int)$ml['id']?>" <?=((int)($maintRef['evt_ubim_id'] ?? 0) === (int)$ml['id']) ? 'selected' : ''?>><?=htmlspecialchars((string)$ml['ubim_title'])?></option>
                             <?php endforeach; ?>
                         </select>
                     </td>
                 </tr>
+                <?php endif; ?>
                 <tr>
                     <td class="tdleft">Comentarios / Causa</td>
                     <td class="tdnrm"><textarea name="evt_comments" class="inptxt" style="width:100%;height:60px" placeholder="Descripción de la mantención o falla..."></textarea></td>
@@ -1373,9 +1393,11 @@ echo renderView('production/partials/operator_flash_banners', ['agenda' => $agen
                 <tr>
                     <td class="tdleft">&nbsp;</td>
                     <td class="tdnrm">
+                        <?php if ($refId <= 0): ?>
                         <button type="submit" class="btnred" style="font-size:14px;padding:8px 20px" onclick="document.getElementById('mant_submode').value='start'">
                             <i class="fa fa-fw fa-play"></i> Iniciar Mantención
                         </button>
+                        <?php endif; ?>
                         <?php if ($refId > 0): ?>
                             <button type="submit" class="btngreen" style="font-size:14px;padding:8px 20px;margin-left:10px" onclick="document.getElementById('mant_submode').value='end'">
                                 <i class="fa fa-fw fa-check"></i> Terminar Mantención
@@ -1630,7 +1652,7 @@ echo renderView('production/partials/operator_flash_banners', ['agenda' => $agen
                         'prod', 'prodsericolor' => ((int)($ev['overrideembalaje_act'] ?? 0) === 1 ? 'Prod. Embalaje' : ($isSelladora ? 'Corte y Sellado' : 'Producción')),
                         'apertura' => 'Alistamiento',
                         'merma' => 'Merma de Bobina',
-                        'mantencion' => !empty($ev['repair_name']) ? 'Mantención: ' . htmlspecialchars((string)$ev['repair_name']) : 'Mantención',
+                        'mantencion' => !empty($ev['repair_name']) ? 'Mantención: ' . htmlspecialchars((string)$ev['repair_name']) . (!empty($ev['ubim_name']) ? ' · ' . htmlspecialchars((string)$ev['ubim_name']) : '') : 'Mantención',
                         'pause' => !empty($ev['pause_name']) ? 'Pausa: ' . htmlspecialchars((string)$ev['pause_name']) : 'Pausa',
                         default => ucfirst((string)$ev['evt_type'])
                     };
