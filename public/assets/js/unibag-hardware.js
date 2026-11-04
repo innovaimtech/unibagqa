@@ -45,7 +45,10 @@
     printerZebra: "unibag_hw_printer_zebra",
     printerBarpos: "unibag_hw_printer_barpos",
     serialPrinterVidPid: "unibag_hw_serial_printer_vidpid",
-    serialPrinterBaud: "unibag_hw_serial_printer_baud"
+    serialPrinterBaud: "unibag_hw_serial_printer_baud",
+    // Posición del puerto entre los que comparten el mismo VID/PID (dos adaptadores CH340 iguales)
+    scaleIdx: "unibag_hw_scale_idx",
+    serialPrinterIdx: "unibag_hw_serial_printer_idx"
   };
 
   function lsGet(key, fallback) {
@@ -97,6 +100,38 @@
       }
     } catch (_) {}
     return "";
+  }
+
+  // Recuerda la posición del puerto entre los autorizados con el mismo VID/PID.
+  async function rememberPortIndex(port, key) {
+    try {
+      var sig = portSignature(port);
+      if (!sig || !navigator.serial) return;
+      var ports = await navigator.serial.getPorts();
+      var same = [];
+      for (var i = 0; i < ports.length; i++) {
+        if (portSignature(ports[i]) === sig) same.push(ports[i]);
+      }
+      var pos = same.indexOf(port);
+      if (pos >= 0) lsSet(key, String(pos));
+    } catch (_) {}
+  }
+
+  // Elige el puerto con la firma dada; si hay varios iguales usa la posición recordada y evita los excluidos.
+  function pickPortBySig(ports, sig, idxKey, exclude) {
+    var same = [];
+    for (var i = 0; i < ports.length; i++) {
+      if (portSignature(ports[i]) === sig) same.push(ports[i]);
+    }
+    var skip = exclude || [];
+    var idx = parseInt(lsGet(idxKey, "-1"), 10);
+    if (same.length > 1 && idx >= 0 && same[idx] && skip.indexOf(same[idx]) < 0) {
+      return same[idx];
+    }
+    for (var j = 0; j < same.length; j++) {
+      if (skip.indexOf(same[j]) < 0) return same[j];
+    }
+    return null;
   }
 
   // ===========================================================================
@@ -321,6 +356,7 @@
       var sig = portSignature(port);
       if (sig) {
         lsSet(LS_KEYS.scaleVidPid, sig);
+        rememberPortIndex(port, LS_KEYS.scaleIdx);
       }
 
       startScaleReadLoop(port);
@@ -390,12 +426,8 @@
         return false;
       }
 
-      for (var i = 0; i < ports.length; i++) {
-        var sig = portSignature(ports[i]);
-        if (preferredSig && sig === preferredSig) {
-          candidate = ports[i];
-          break;
-        }
+      if (preferredSig) {
+        candidate = pickPortBySig(ports, preferredSig, LS_KEYS.scaleIdx, [printerState.serialPrinterPort]);
       }
       // Sin una balanza recordada y con varios puertos autorizados NO se adivina:
       // se podría abrir el puerto de la impresora como si fuera la balanza.
@@ -1080,7 +1112,10 @@
       await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none" });
       printerState.serialPrinterPort = port;
       var sig = portSignature(port);
-      if (sig) lsSet(LS_KEYS.serialPrinterVidPid, sig);
+      if (sig) {
+        lsSet(LS_KEYS.serialPrinterVidPid, sig);
+        rememberPortIndex(port, LS_KEYS.serialPrinterIdx);
+      }
       lsSet(LS_KEYS.printTransport, "webserial");
       syncPageBridgeBadge(true);
       updateHardwareUi();
@@ -1111,9 +1146,7 @@
         }
         var chosen = null;
         if (sig) {
-          for (var j = 0; j < candidates.length; j++) {
-            if (portSignature(candidates[j]) === sig) { chosen = candidates[j]; break; }
-          }
+          chosen = pickPortBySig(ports, sig, LS_KEYS.serialPrinterIdx, [scaleState.port]);
         }
         // Los COM Bluetooth no exponen VID/PID: si queda un solo puerto autorizado, es el de la impresora.
         if (!chosen && candidates.length === 1) chosen = candidates[0];
@@ -1210,7 +1243,11 @@
     }
 
     if (preferred === "webserial" && !printerState.serialPrinterPort) {
-      await autoReconnectSerialPrinter();
+      // Tras cambiar de página el puerto puede seguir liberándose: se reintenta unos segundos antes de rendirse.
+      for (var tryN = 0; tryN < 6 && !printerState.serialPrinterPort; tryN++) {
+        if (tryN > 0) await sleep(500);
+        await autoReconnectSerialPrinter();
+      }
     }
 
     // 1. Si el usuario configuró explícitamente WebUSB o WebSerial primero
@@ -1859,12 +1896,55 @@
     }
   }
 
+  // Reconexión persistente: el navegador cierra los puertos al salir de una página y la siguiente puede
+  // intentar abrirlos mientras el puerto aún está liberándose. Se reintenta con espera creciente hasta que
+  // todo lo recordado (balanza, impresora serial, impresora USB) quede conectado.
+  var reconnectRunning = false;
+  async function reconnectRememberedDevices() {
+    if (reconnectRunning) return;
+    reconnectRunning = true;
+    var delays = [0, 350, 700, 1200, 1800, 2600, 4000, 6000];
+    try {
+      for (var a = 0; a < delays.length; a++) {
+        if (delays[a] > 0) await sleep(delays[a]);
+        var wantScale = !!lsGet(LS_KEYS.scaleVidPid, "") || (!!scaleState.supported && !lsGet(LS_KEYS.serialPrinterVidPid, ""));
+        var wantSerialPrinter = !!lsGet(LS_KEYS.serialPrinterVidPid, "") || lsGet(LS_KEYS.printTransport, "auto") === "webserial";
+        var wantUsb = lsGet(LS_KEYS.printTransport, "auto") === "webusb";
+        if (wantScale && scaleState.supported && !scaleState.connected && !scaleState.connecting) {
+          await autoReconnectScale();
+        }
+        if (wantSerialPrinter && scaleState.supported && !(printerState.serialPrinterPort && printerState.serialPrinterPort.writable)) {
+          await autoReconnectSerialPrinter();
+        }
+        if (wantUsb && !printerState.usbDevice) {
+          await autoReconnectWebUsbPrinter();
+        }
+        var scaleOk = !wantScale || scaleState.connected || !scaleState.supported;
+        var serOk = !wantSerialPrinter || !!(printerState.serialPrinterPort && printerState.serialPrinterPort.writable) || !scaleState.supported;
+        var usbOk = !wantUsb || !!printerState.usbDevice;
+        if (scaleOk && serOk && usbOk) break;
+      }
+    } catch (_) {
+    } finally {
+      reconnectRunning = false;
+    }
+  }
+
+  // Si se perdió la conexión (cable, cambio de pestaña) se recupera al volver a la ventana.
+  window.addEventListener("focus", function () { reconnectRememberedDevices(); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") reconnectRememberedDevices();
+  });
+  // Al volver con el botón Atrás (caché de páginas) los puertos estaban cerrados: se reabren.
+  window.addEventListener("pageshow", function (ev) {
+    if (ev && ev.persisted) reconnectRememberedDevices();
+  });
+
   // Inicialización al cargar el DOM
   function initHardwareEngine() {
     ensureHardwarePill();
     setupGlobalPrintLinkInterceptor();
-    autoReconnectScale();
-    autoReconnectWebUsbPrinter();
+    reconnectRememberedDevices();
 
     if (pageHasHardwareControls()) {
       probeLocalPrintBridge(false);

@@ -1782,6 +1782,13 @@ trait RollStockServiceTrait
     {
         static $done = false;
         if ($done) return;
+        // Rendimiento: estas verificaciones (ALTER ... MODIFY, information_schema) se corrían en cada página.
+        $schemaVersion = 'twe-v1';
+        $gated = $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql' && class_exists('SchemaGate');
+        if ($gated && SchemaGate::done('traceability-entries', $schemaVersion)) {
+            $done = true;
+            return;
+        }
 
         try {
             $this->pdo->exec("
@@ -1850,6 +1857,9 @@ trait RollStockServiceTrait
             @$this->pdo->exec("ALTER TABLE pallets MODIFY destination_mode VARCHAR(20) NOT NULL DEFAULT 'BODEGA'");
             @$this->pdo->exec("ALTER TABLE boxes MODIFY source_roll_id BIGINT UNSIGNED NULL DEFAULT NULL");
             @$this->pdo->exec("ALTER TABLE boxes MODIFY destination_mode VARCHAR(20) NOT NULL DEFAULT 'BODEGA'");
+            if ($gated) {
+                SchemaGate::mark('traceability-entries', $schemaVersion);
+            }
             $done = true;
         } catch (Throwable) {}
     }

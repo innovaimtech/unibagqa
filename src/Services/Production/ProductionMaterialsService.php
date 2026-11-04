@@ -3042,6 +3042,53 @@ trait ProductionMaterialsServiceTrait
      * Construye el árbol completo de trazabilidad "Inicio a Fin" a partir de cualquier código:
      * Código de Bobina (ROLL-*), Código de Caja (BOX-*), Código de Pallet (PAL-*), Número de OT o Número de OC.
      */
+    /**
+     * Movimientos de una entidad por (tipo, id) o por un código dentro del JSON del payload.
+     * Rendimiento: JSON_EXTRACT(...) = :code obliga a leer y parsear TODAS las filas de movements en cada
+     * consulta. Se crean (una vez) columnas virtuales indexadas con esos códigos y se consulta por índice;
+     * si el motor no las admite, se usa la consulta original.
+     */
+    private function trzMovementsFor(string $jsonKey, string $code, string $entityType, int $entityId): array
+    {
+        $cols = ['traceability_code' => 'mv_trz_code', 'box_code' => 'mv_box_code', 'pallet_code' => 'mv_pallet_code'];
+        $col = $cols[$jsonKey] ?? null;
+        if ($col !== null && $this->ensureMovementCodeColumns()) {
+            $stmt = $this->trzPdo->prepare("SELECT * FROM movements WHERE (entity_type = :etype AND entity_id = :eid) OR {$col} = :code ORDER BY id DESC");
+            $stmt->execute([':etype' => $entityType, ':eid' => $entityId, ':code' => $code]);
+            return $stmt->fetchAll() ?: [];
+        }
+        $stmt = $this->trzPdo->prepare("SELECT * FROM movements WHERE (entity_type = :etype AND entity_id = :eid) OR JSON_EXTRACT(payload, '$.{$jsonKey}') = :code ORDER BY id DESC");
+        $stmt->execute([':etype' => $entityType, ':eid' => $entityId, ':code' => $code]);
+        return $stmt->fetchAll() ?: [];
+    }
+
+    private function ensureMovementCodeColumns(): bool
+    {
+        static $ok = null;
+        if ($ok !== null) {
+            return $ok;
+        }
+        $version = 'movcols-v1';
+        if (SchemaGate::done('movements-codes', $version)) {
+            return $ok = true;
+        }
+        try {
+            $have = [];
+            foreach ($this->trzPdo->query('SHOW COLUMNS FROM movements')->fetchAll() as $c) {
+                $have[(string)$c['Field']] = true;
+            }
+            foreach (['mv_trz_code' => 'traceability_code', 'mv_box_code' => 'box_code', 'mv_pallet_code' => 'pallet_code'] as $col => $key) {
+                if (!isset($have[$col])) {
+                    $this->trzPdo->exec("ALTER TABLE movements ADD COLUMN {$col} VARCHAR(80) GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT(payload, '$.{$key}'))) VIRTUAL, ADD INDEX idx_{$col} ({$col})");
+                }
+            }
+            SchemaGate::mark('movements-codes', $version);
+            return $ok = true;
+        } catch (Throwable) {
+            return $ok = false;
+        }
+    }
+
     public function getTraceabilityTree(string $queryCode): ?array
     {
         $queryCode = trim($queryCode);
@@ -3078,11 +3125,7 @@ trait ProductionMaterialsServiceTrait
         if ($whEntry) {
             $result['warehouse_entry'] = $whEntry;
             try {
-                $stmtMov = $this->trzPdo->prepare(
-                    "SELECT * FROM movements WHERE JSON_EXTRACT(payload, '$.traceability_code') = :code OR (entity_type = :etype AND entity_id = :eid) ORDER BY id DESC"
-                );
-                $stmtMov->execute([':code' => $whEntry['traceability_code'], ':etype' => $whEntry['entity_type'], ':eid' => (int)($whEntry['entity_id'] ?? 0)]);
-                $result['movements'] = $stmtMov->fetchAll();
+                $result['movements'] = $this->trzMovementsFor('traceability_code', (string)$whEntry['traceability_code'], (string)$whEntry['entity_type'], (int)($whEntry['entity_id'] ?? 0));
             } catch (Throwable) {}
 
             if ($whEntry['entity_type'] === 'ROLL' && !empty($whEntry['entity_id'])) {
@@ -3115,9 +3158,7 @@ trait ProductionMaterialsServiceTrait
             }
             if (empty($result['movements'])) {
                 try {
-                    $stmtMov = $this->trzPdo->prepare("SELECT * FROM movements WHERE (entity_type = 'ROLL' AND entity_id = :eid) OR JSON_EXTRACT(payload, '$.traceability_code') = :code ORDER BY id DESC");
-                    $stmtMov->execute([':eid' => (int)$roll['id'], ':code' => (string)$roll['roll_code']]);
-                    $result['movements'] = $stmtMov->fetchAll();
+                    $result['movements'] = $this->trzMovementsFor('traceability_code', (string)$roll['roll_code'], 'ROLL', (int)$roll['id']);
                 } catch (Throwable) {}
             }
 
@@ -3398,9 +3439,7 @@ trait ProductionMaterialsServiceTrait
             }
 
             try {
-                $stmtMov = $this->trzPdo->prepare("SELECT * FROM movements WHERE (entity_type = 'BOX' AND entity_id = :bid) OR JSON_EXTRACT(payload, '$.box_code') = :bcode ORDER BY id DESC");
-                $stmtMov->execute([':bid' => (int)$box['id'], ':bcode' => (string)$box['box_code']]);
-                $result['movements'] = $stmtMov->fetchAll() ?: [];
+                $result['movements'] = $this->trzMovementsFor('box_code', (string)$box['box_code'], 'BOX', (int)$box['id']);
             } catch (Throwable) {}
 
             return $result;
@@ -3507,9 +3546,7 @@ trait ProductionMaterialsServiceTrait
             }
 
             try {
-                $stmtMov = $this->trzPdo->prepare("SELECT * FROM movements WHERE (entity_type = 'PALLET' AND entity_id = :pid) OR JSON_EXTRACT(payload, '$.pallet_code') = :pcode ORDER BY id DESC");
-                $stmtMov->execute([':pid' => (int)$pallet['id'], ':pcode' => (string)$pallet['pallet_code']]);
-                $result['movements'] = $stmtMov->fetchAll() ?: [];
+                $result['movements'] = $this->trzMovementsFor('pallet_code', (string)$pallet['pallet_code'], 'PALLET', (int)$pallet['id']);
             } catch (Throwable) {}
 
             return $result;
