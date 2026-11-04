@@ -489,10 +489,21 @@
                 <label>Bodega de destino *
                     <select name="req_id_bodega" id="req_id_bodega" class="inptxt" required>
                         <option value="">Seleccionar bodega...</option>';
+    // Stock del producto de esta OT en cada bodega de destino
+    $destItemId = (int)($agenda['item_id'] ?? ($mixedOrders[0]['item_id'] ?? 0));
+    $destStock = [];
+    if ($destItemId > 0) {
+        try {
+            $sq = Db::erpPdo()->prepare('SELECT st_id, SUM(iss_inventory) FROM item_shops_storehouses WHERE item_id = ? GROUP BY st_id');
+            $sq->execute([$destItemId]);
+            foreach ($sq->fetchAll(PDO::FETCH_NUM) as $r) { $destStock[(int)$r[0]] = (int)round((float)$r[1]); }
+        } catch (Throwable) {}
+    }
     foreach ($warehouses as $warehouse) {
         $wId = (int)$warehouse['id'];
         $wSelected = ((int)($saved['req_id_bodega'] ?? 0) === $wId) ? 'selected' : '';
-        echo '<option value="' . $wId . '" ' . $wSelected . '>' . $escape($warehouse['st_name']) . '</option>';
+        $wStock = $destItemId > 0 ? ' (Stock del producto: ' . ($destStock[$wId] ?? 0) . ')' : '';
+        echo '<option value="' . $wId . '" ' . $wSelected . '>' . $escape($warehouse['st_name']) . $wStock . '</option>';
     }
     echo '          </select>
                 </label>
@@ -601,7 +612,8 @@
                 $whId = (int)$b['id'];
                 $whName = $escape((string)$b['st_name']);
                 $stk = (int)round((float)($b['stock'] ?? 0));
-                $whOptions .= '<option value="' . $whId . '">' . $whName . ' (Stock: ' . $stk . ')</option>';
+                $stkOrd = (int)round((float)($b['stock_order'] ?? 0));
+                $whOptions .= '<option value="' . $whId . '">' . $whName . ' (Stock: ' . $stk . ' · este CC: ' . $stkOrd . ')</option>';
             }
         }
 
@@ -903,7 +915,7 @@
                     var whOptions = "<option value=\'\'>-- Misma bodega --</option>";
                     if (o.bodegas && o.bodegas.length) {
                         o.bodegas.forEach(function(b) {
-                            whOptions += "<option value=\'" + b.id + "\'>" + (b.st_name || ("Bodega " + b.id)) + " (Stock: " + Math.round(b.stock) + ")</option>";
+                            whOptions += "<option value=\'" + b.id + "\'>" + (b.st_name || ("Bodega " + b.id)) + " (Stock: " + Math.round(b.stock) + " · este CC: " + Math.round(b.stock_order || 0) + ")</option>";
                         });
                     }
                     var imgHtml = o.fab_design_imagehash

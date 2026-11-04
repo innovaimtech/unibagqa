@@ -148,7 +148,10 @@ trait RewindAndPackagingServiceTrait
         $q->execute($params);
         $orders = $q->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
-        $warehousesSql = "SELECT st.id, st.st_name, ifnull(iss.iss_inventory, 0) AS stock,
+        $warehousesSql = "SELECT st.id, st.st_name,
+                                 COALESCE((SELECT SUM(x.iss_inventory) FROM item_shops_storehouses x
+                                           WHERE x.item_id = i1.id AND x.st_id = st.id), 0) AS stock,
+                                 ifnull(iss.iss_inventory, 0) AS stock_order,
                                  i1.id AS id_item, o.id AS id_orders
                           FROM orders o
                           INNER JOIN orders_items oi ON oi.req_id = o.id
@@ -198,26 +201,119 @@ trait RewindAndPackagingServiceTrait
         ];
     }
 
-    private function transferMixedStock(int $itemId, int $fromWh, int $toWh, int $amount, string $reqNumber): void
+    /**
+     * Traspaso de un CC del pallet mixto entre bodegas: actualiza el stock por pedido
+     * (item_shops_storehouses) Y registra el kardex (storehousechanges + storehousechanges_items + tran_data
+     * sthdown/sthup), igual que el traspaso entre bodegas del módulo de solicitudes.
+     *
+     * Es idempotente: cada documento lleva la marca [TRZ-EMB:embalaje:CC:origen>destino:cantidad]. Al volver a
+     * guardar el embalaje solo se registra la DIFERENCIA (o la reversa si cambió el origen o el destino);
+     * antes cada guardado movía el stock otra vez. Lanza RuntimeException si algo falla (no se traga el error).
+     */
+    private function transferMixedStock(int $embalajeId, int $itemId, int $fromWh, int $toWh, int $amount, string $reqNumber): void
     {
-        try {
-            $stOrd = $this->erpPdo->prepare('SELECT id FROM orders WHERE req_number = ? LIMIT 1');
-            $stOrd->execute([$reqNumber]);
-            $orderId = (int)$stOrd->fetchColumn();
-
-            $stCheck = $this->erpPdo->prepare('SELECT COUNT(*) FROM item_shops_storehouses WHERE item_id = ? AND shop_id = 30010 AND st_id = ? AND iss_order_id = ?');
-            $stCheck->execute([$itemId, $toWh, $orderId]);
-            if ((int)$stCheck->fetchColumn() === 0) {
-                $insIss = $this->erpPdo->prepare('INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_order_amount, iss_inventory_min, iss_inventory, iss_inventory_reserved, iss_order_id) VALUES (?, 30010, ?, 0, 0, 0, 0, ?)');
-                $insIss->execute([$itemId, $toWh, $orderId]);
+        $order = $this->erpPdo->prepare('SELECT id, req_company_id, req_shop_id FROM orders WHERE req_number = ? LIMIT 1');
+        $order->execute([$reqNumber]);
+        $o = $order->fetch(PDO::FETCH_ASSOC);
+        if (!$o || (int)$o['req_company_id'] <= 0 || (int)$o['req_shop_id'] <= 0) {
+            throw new RuntimeException('No se encontró el pedido ' . $reqNumber . ' para registrar el traspaso de bodega.');
+        }
+        $prefix = '[TRZ-EMB:' . $embalajeId . ':' . $reqNumber . ':';
+        // Neto ya registrado por (origen>destino) para este embalaje y CC
+        $docs = $this->erpPdo->prepare('SELECT strc_desc FROM storehousechanges WHERE strc_desc LIKE ?');
+        $docs->execute(['%' . $prefix . '%']);
+        $net = [];
+        foreach ($docs->fetchAll(PDO::FETCH_COLUMN) as $desc) {
+            if (preg_match('/\[TRZ-EMB:' . preg_quote((string)$embalajeId, '/') . ':' . preg_quote($reqNumber, '/') . ':(\d+)>(\d+):(\d+)\]/', (string)$desc, $m) === 1) {
+                $net[$m[1] . '>' . $m[2]] = ($net[$m[1] . '>' . $m[2]] ?? 0) + (int)$m[3];
             }
+        }
+        // Compensar movimientos opuestos para quedar con el neto por par
+        foreach (array_keys($net) as $pair) {
+            [$a, $b] = explode('>', $pair);
+            $opp = $b . '>' . $a;
+            if (isset($net[$pair], $net[$opp]) && $net[$pair] > 0 && $net[$opp] > 0) {
+                $d = min($net[$pair], $net[$opp]);
+                $net[$pair] -= $d;
+                $net[$opp] -= $d;
+            }
+        }
+        $want = $fromWh . '>' . $toWh;
+        // Pares anteriores distintos al deseado: se revierten
+        foreach ($net as $pair => $qty) {
+            if ($pair === $want || $qty <= 0) continue;
+            [$a, $b] = array_map('intval', explode('>', $pair));
+            $this->postStorehouseTransfer($o, $itemId, $b, $a, $qty, $reqNumber, $prefix . $b . '>' . $a . ':' . $qty . '] reversa por cambio de bodega');
+        }
+        $delta = $amount - (int)($net[$want] ?? 0);
+        if ($delta > 0) {
+            $this->postStorehouseTransfer($o, $itemId, $fromWh, $toWh, $delta, $reqNumber, $prefix . $fromWh . '>' . $toWh . ':' . $delta . ']');
+        } elseif ($delta < 0) {
+            $this->postStorehouseTransfer($o, $itemId, $toWh, $fromWh, -$delta, $reqNumber, $prefix . $toWh . '>' . $fromWh . ':' . (-$delta) . '] reversa por menor cantidad');
+        }
+    }
 
-            $updFrom = $this->erpPdo->prepare('UPDATE item_shops_storehouses SET iss_inventory = iss_inventory - ? WHERE item_id = ? AND shop_id = 30010 AND st_id = ? AND iss_order_id = ?');
-            $updFrom->execute([$amount, $itemId, $fromWh, $orderId]);
+    /** Un movimiento: stock por pedido + documento de traspaso + kardex (sthdown / sthup). */
+    private function postStorehouseTransfer(array $order, int $itemId, int $fromWh, int $toWh, int $qty, string $reqNumber, string $marker): void
+    {
+        if ($qty <= 0 || $fromWh <= 0 || $toWh <= 0 || $fromWh === $toWh) {
+            return;
+        }
+        $orderId = (int)$order['id'];
+        $shopId = (int)$order['req_shop_id'];
+        $companyId = (int)$order['req_company_id'];
+        $item = $this->erpPdo->prepare('SELECT item_title FROM item WHERE id = ?');
+        $item->execute([$itemId]);
+        $title = $item->fetchColumn();
+        if ($title === false) {
+            throw new RuntimeException('Artículo ' . $itemId . ' no encontrado en el ERP.');
+        }
+        $company = $this->erpPdo->prepare('SELECT company_numformat_storehouse, company_numcounter_storehouse FROM company_data WHERE id = ?');
+        $company->execute([$companyId]);
+        $c = $company->fetch(PDO::FETCH_ASSOC);
+        if (!$c) {
+            throw new RuntimeException('Contador de traspasos no disponible para la empresa ' . $companyId . '.');
+        }
 
-            $updTo = $this->erpPdo->prepare('UPDATE item_shops_storehouses SET iss_inventory = iss_inventory + ? WHERE item_id = ? AND shop_id = 30010 AND st_id = ? AND iss_order_id = ?');
-            $updTo->execute([$amount, $itemId, $toWh, $orderId]);
-        } catch (Throwable) {
+        // Stock por pedido (filas con iss_order_id, como el sistema anterior)
+        $before = [];
+        foreach ([$fromWh, $toWh] as $st) {
+            $q = $this->erpPdo->prepare('SELECT iss_inventory FROM item_shops_storehouses WHERE item_id = ? AND shop_id = ? AND st_id = ? AND iss_order_id = ?');
+            $q->execute([$itemId, $shopId, $st, $orderId]);
+            $cur = $q->fetchColumn();
+            if ($cur === false) {
+                $this->erpPdo->prepare('INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_order_amount, iss_inventory_min, iss_inventory, iss_inventory_reserved, iss_order_id)
+                    VALUES (?, ?, ?, 0, 0, 0, 0, ?)')->execute([$itemId, $shopId, $st, $orderId]);
+                $cur = 0;
+            }
+            $before[$st] = (float)$cur;
+        }
+        $this->erpPdo->prepare('UPDATE item_shops_storehouses SET iss_inventory = iss_inventory - ? WHERE item_id = ? AND shop_id = ? AND st_id = ? AND iss_order_id = ?')
+            ->execute([$qty, $itemId, $shopId, $fromWh, $orderId]);
+        $this->erpPdo->prepare('UPDATE item_shops_storehouses SET iss_inventory = iss_inventory + ? WHERE item_id = ? AND shop_id = ? AND st_id = ? AND iss_order_id = ?')
+            ->execute([$qty, $itemId, $shopId, $toWh, $orderId]);
+
+        // Documento de traspaso + líneas + kardex
+        $counter = (int)$c['company_numcounter_storehouse'] + 1;
+        $number = ($c['company_numformat_storehouse'] ?: 'TR') . sprintf('%08d', $counter);
+        $this->erpPdo->prepare('UPDATE company_data SET company_numcounter_storehouse = ? WHERE id = ?')->execute([$counter, $companyId]);
+        $now = time();
+        $userId = (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0);
+        $desc = 'Cierre mixto de embalaje. CC ' . $reqNumber . ' ' . $qty . ' un. ' . $marker;
+        $this->erpPdo->prepare('INSERT INTO storehousechanges
+            (strc_company_id,strc_shop_id,strc_company_dest_id,strc_shop_dest_id,strc_status,strc_date,strc_desc,strc_number,strc_crtusr,strc_crtdat,
+             strc_order_id,strc_order_id_dest,strc_order_num,strc_order_num_dest,strc_shopsent,strc_shopreceived,strc_custid,strc_rel_reqnum)
+            VALUES (?,?,?,?,2,?,?,?,?,?,?,?,?,?,0,0,0,?)')->execute([
+                $companyId, $shopId, $companyId, $shopId, $now, $desc, $number, $userId, $now, $orderId, $orderId, $reqNumber, $reqNumber, $reqNumber]);
+        $docId = (int)$this->erpPdo->lastInsertId();
+        $this->erpPdo->prepare("INSERT INTO storehousechanges_items(strc_id,item_id,item_pos,item_amount,item_type,item_st_id,item_st_dest_id)
+            VALUES (?,?,0,?,'item',?,?)")->execute([$docId, $itemId, $qty, $fromWh, $toWh]);
+        foreach ([$fromWh => ['sthdown', 0], $toWh => ['sthup', 1]] as $st => [$type, $pos]) {
+            $this->erpPdo->prepare("INSERT INTO tran_data(tran_id,tran_pos,tran_type,tran_number,tran_currstock,tran_amount,
+                tran_company_id,tran_shop_id,tran_st_id,item_id,item_title,item_type,tran_day,tran_month,tran_year,tran_crtusr,tran_crtdat,tran_order_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,'item',?,?,?,?,?,?)")->execute([
+                    $docId, $pos, $type, $number, $before[$st], $qty, $companyId, $shopId, $st, $itemId, (string)$title,
+                    (int)date('j', $now), (int)date('n', $now), (int)date('Y', $now), $userId, $now, $orderId]);
         }
     }
 
@@ -476,8 +572,15 @@ trait RewindAndPackagingServiceTrait
                     $destWh = (int)$detail['req_id_bodega'];
                     $itemId = (int)($m['id_item'] ?? 0);
                     $totTraspaso = (int)($m['total_bolsas'] ?? 0);
-                    if ($origWh > 0 && $destWh > 0 && $origWh !== $destWh && $itemId > 0 && $totTraspaso > 0) {
-                        $this->transferMixedStock($itemId, $origWh, $destWh, $totTraspaso, trim((string)($m['req_number'] ?? '')));
+                    if ($origWh > 0 && $destWh > 0 && $itemId > 0) {
+                        try {
+                            // Si el origen o la cantidad quedaron en 0/igual al destino, se revierte lo registrado antes.
+                            $this->transferMixedStock($embalajeId, $itemId, $origWh, $destWh, $origWh !== $destWh ? $totTraspaso : 0, trim((string)($m['req_number'] ?? '')));
+                        } catch (Throwable $e) {
+                            error_log('Traspaso de bodega (cierre mixto): ' . $e->getMessage());
+                            $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning
+                                . ' NO se pudo registrar el traspaso de bodega del CC ' . trim((string)($m['req_number'] ?? '')) . ': ' . $e->getMessage());
+                        }
                     }
                 }
             }
