@@ -423,8 +423,29 @@ trait WorkOrderErpServiceTrait
         }
     }
 
+    /** @var array<int,array<string,?string>> Lectura única de app_settings por conexión y solicitud. */
+    private static array $appSettingsCache = [];
+
     private function getAppSetting(string $key, ?string $default = null): ?string
     {
+        $cacheId = spl_object_id($this->pdo);
+        if (!isset(self::$appSettingsCache[$cacheId])) {
+            try {
+                self::$appSettingsCache[$cacheId] = [];
+                foreach ($this->pdo->query('SELECT setting_key, setting_value FROM app_settings')->fetchAll(PDO::FETCH_NUM) as $r) {
+                    self::$appSettingsCache[$cacheId][(string)$r[0]] = $r[1] === null ? null : (string)$r[1];
+                }
+            } catch (Throwable) {
+                unset(self::$appSettingsCache[$cacheId]);
+            }
+        }
+        if (isset(self::$appSettingsCache[$cacheId])) {
+            if (!array_key_exists($key, self::$appSettingsCache[$cacheId])) {
+                return $default;
+            }
+            $cached = self::$appSettingsCache[$cacheId][$key];
+            return $cached === null ? $default : $cached;
+        }
         try {
             $stmt = $this->pdo->prepare('SELECT setting_value FROM app_settings WHERE setting_key = :key LIMIT 1');
             $stmt->execute([':key' => $key]);
@@ -451,6 +472,7 @@ trait WorkOrderErpServiceTrait
                 ':key' => $key,
                 ':value' => $value,
             ]);
+            self::$appSettingsCache[spl_object_id($this->pdo)][$key] = $value;
         } catch (Throwable) {
             return;
         }

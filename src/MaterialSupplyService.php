@@ -61,9 +61,18 @@ final class MaterialSupplyService
         ));
     }
 
+    /** Cambiar este texto cada vez que se agregue una tabla o columna al esquema de solicitudes. */
+    private const SCHEMA_VERSION = 'supply-2026-11-03-b';
+
     public function ensureSchema(): void
     {
         if ($this->ready) return;
+        // Rendimiento: tras una verificación exitosa no se repite en cada página (solo en MySQL real).
+        $useGate = !$this->sqlite($this->trz) && class_exists('SchemaGate');
+        if ($useGate && SchemaGate::done('supply', self::SCHEMA_VERSION)) {
+            $this->ready = true;
+            return;
+        }
         $engine = $this->sqlite($this->trz) ? '' : ' ENGINE=InnoDB';
         $this->trz->exec('CREATE TABLE IF NOT EXISTS production_supply_requests (
             request_key VARCHAR(32) PRIMARY KEY, erp_target VARCHAR(64) NOT NULL,
@@ -152,6 +161,9 @@ final class MaterialSupplyService
             }
         }
         $this->ready = true;
+        if ($useGate) {
+            SchemaGate::mark('supply', self::SCHEMA_VERSION);
+        }
     }
 
     public static function quantity(float $qty, bool $whole = false): float

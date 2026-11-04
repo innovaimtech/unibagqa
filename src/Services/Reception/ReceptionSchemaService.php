@@ -1100,6 +1100,21 @@ trait ReceptionSchemaServiceTrait
 
     private function tableExists(string $table): bool
     {
+        // Rendimiento: information_schema es lento y esto se consulta en cada página. Una consulta directa a
+        // la tabla (LIMIT 0) responde en microsegundos; solo se recuerdan las tablas que existen.
+        static $known = [];
+        $cacheKey = spl_object_id($this->pdo) . ':' . $table;
+        if (isset($known[$cacheKey])) {
+            return true;
+        }
+        if (preg_match('/^[A-Za-z0-9_]+$/', $table) === 1) {
+            try {
+                $this->pdo->query('SELECT 1 FROM `' . $table . '` LIMIT 0');
+                return $known[$cacheKey] = true;
+            } catch (Throwable) {
+                return false;
+            }
+        }
         $stmt = $this->pdo->prepare(
             'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name'
         );

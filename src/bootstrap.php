@@ -52,6 +52,8 @@ spl_autoload_register(static function (string $class): void {
 // -----------------------------------------------------------------------------
 $unibagCoreFiles = [
     __DIR__ . '/Env.php',
+    __DIR__ . '/RequestProfiler.php',
+    __DIR__ . '/SchemaGate.php',
     __DIR__ . '/Db.php',
     __DIR__ . '/SimpleXlsx.php',
     __DIR__ . '/ScaleService.php',

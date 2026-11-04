@@ -45,6 +45,23 @@ final class Db
      * - Removes BOM and invisible characters.
      * - Applies trim.
      */
+    /** Crea el PDO medido (RequestProfiler) y, si la conexión es persistente, descarta transacciones colgadas. */
+    private static function newPdo(string $dsn, string $user, string $pass, array $options): PDO
+    {
+        $pdo = new ProfiledPDO($dsn, $user, $pass, $options);
+        try {
+            $pdo->setAttribute(PDO::ATTR_STATEMENT_CLASS, [ProfiledPDOStatement::class]);
+        } catch (Throwable) {
+        }
+        if (!empty($options[PDO::ATTR_PERSISTENT]) && $pdo->inTransaction()) {
+            try {
+                $pdo->rollBack();
+            } catch (Throwable) {
+            }
+        }
+        return $pdo;
+    }
+
     private static function clean(?string $value, string $default = ''): string
     {
         $value = $value ?? $default;
@@ -222,6 +239,13 @@ final class Db
             PDO::ATTR_EMULATE_PREPARES => true,
             PDO::ATTR_TIMEOUT => 15,
         ];
+        // Conexión persistente (opcional, por base): evita abrir y autenticar una conexión nueva en cada página.
+        // Se activa con ERP_DB_PERSISTENT=1 / TRZ_DB_PERSISTENT=1 en el .env. Sin la clave, no cambia nada.
+        $persistentVar = strtoupper($key) . '_DB_PERSISTENT';
+        $persistent = in_array(strtolower(trim((string)(Env::get($persistentVar, '0') ?? '0'))), ['1', 'true', 'yes', 'on'], true);
+        if ($persistent) {
+            $options[PDO::ATTR_PERSISTENT] = true;
+        }
 
         // DSN final: cuando el charset es reconocido por el driver, se agrega al DSN.
         // ---
@@ -233,14 +257,14 @@ final class Db
 
         for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
             try {
-                $pdo = new PDO($dsn, $config['user'] ?? 'root', $config['pass'] ?? '', $options);
+                $pdo = self::newPdo($dsn, $config['user'] ?? 'root', $config['pass'] ?? '', $options);
                 self::$connections[$key] = $pdo;
                 return self::$connections[$key];
             } catch (PDOException $e) {
                 $lastException = $e;
                 if ($charset !== '' && str_contains($e->getMessage(), 'Unknown character set')) {
                     try {
-                        $pdo = new PDO($baseDsn, $config['user'] ?? 'root', $config['pass'] ?? '', $options);
+                        $pdo = self::newPdo($baseDsn, $config['user'] ?? 'root', $config['pass'] ?? '', $options);
                         try {
                             $pdo->exec('SET NAMES ' . $pdo->quote($charset));
                         } catch (PDOException) {

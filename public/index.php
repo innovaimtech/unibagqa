@@ -33,6 +33,7 @@ if (PHP_SAPI === 'cli-server') {
 require_once __DIR__ . '/../src/bootstrap.php';
 
 Env::load(__DIR__ . '/../.env');
+RequestProfiler::start();
 $appTimezone = trim((string)(Env::get('APP_TIMEZONE', 'America/Santiago') ?? 'America/Santiago'));
 if ($appTimezone === '') {
     $appTimezone = 'America/Santiago';

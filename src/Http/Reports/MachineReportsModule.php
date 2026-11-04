@@ -361,6 +361,8 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
     $search = isset($_GET['q']) ? trim((string)$_GET['q']) : null;
     $canEdit = unibagCanUserPerformModifications();
 
+    $perPage = isset($_GET['per_page']) && in_array((int)$_GET['per_page'], [10, 25, 50, 100], true) ? (int)$_GET['per_page'] : 25;
+    $pageNum = isset($_GET['page']) && is_numeric($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
     $report = $service->getMachineProductionReport(
         $start->format('Y-m-d H:i:s'),
         $end->format('Y-m-d H:i:s'),
@@ -368,8 +370,13 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
         $equipoTypeId,
         $equipoId,
         $search,
-        $activeProcess
+        $activeProcess,
+        $pageNum,
+        $perPage
     );
+    $pagination = $report['pagination'] ?? null;
+    $totalRows = (int)($pagination['total'] ?? count($report['rows']));
+    $pageNum = (int)($pagination['page'] ?? 1);
 
     $plantas = $report['plantas'];
     $equipoTypes = $report['equipo_types'];
@@ -389,7 +396,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
     }
 
     // Helper para generar URLs con parámetros
-    $buildUrl = static function (array $overrides) use ($defaultFilterType, $periodYm, $rangeStartInput, $rangeEndInput, $plantaId, $equipoTypeId, $equipoId, $search, $activeProcess): string {
+    $buildUrl = static function (array $overrides) use ($defaultFilterType, $periodYm, $rangeStartInput, $rangeEndInput, $plantaId, $equipoTypeId, $equipoId, $search, $activeProcess, $perPage): string {
         $params = [
             'filter_type' => $defaultFilterType,
             'period' => $periodYm,
@@ -400,6 +407,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
             'equipo_type_id' => $equipoTypeId,
             'equipo_id' => $equipoId,
             'q' => $search,
+            'per_page' => $perPage !== 25 ? $perPage : null,
         ];
         foreach ($overrides as $k => $v) {
             if ($v === null || $v === '') {
@@ -423,7 +431,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
         $body .= '<div style="padding:12px 18px;border-radius:10px;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;font-size:14px;font-weight:700;display:flex;align-items:center;gap:10px;box-shadow:0 1px 3px rgba(0,0,0,.05)">⚠️ ' . h($error) . '</div>';
     }
 
-    $subtitle = h($activeFilterLabel) . ' · ' . count($rows) . ' órdenes en total';
+    $subtitle = h($activeFilterLabel) . ' · ' . $totalRows . ' órdenes en total';
     if ($search !== null && $search !== '') {
         $subtitle .= ' · <span style="color:#0F766E;font-weight:700">Buscando: "' . h($search) . '"</span>';
         if (!empty($report['is_historical_search'])) {
@@ -454,7 +462,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
     $body .= '<div class="erp-filter-actions">';
     $body .= '<button type="button" id="btn-open-loaded-rolls-modal" class="ub-btn-primary" title="Ver bobinas cargadas en máquinas y devolver a Bodega 3000">📦 Bobinas en Máquinas <span id="badge-loaded-rolls-count" style="background:rgba(255,255,255,0.25);padding:1px 8px;border-radius:999px;font-size:11px">...</span></button>';
     if (!empty($rows)) {
-        $body .= '<a class="btn-filter-excel" href="/reports/machine-production/excel?' . h($exportParams) . '">📥 Exportar Excel (' . count($rows) . ' OTs)</a>';
+        $body .= '<a class="btn-filter-excel" href="/reports/machine-production/excel?' . h($exportParams) . '">📥 Exportar Excel (' . $totalRows . ' OTs)</a>';
     }
     $body .= '<a class="btn-filter-secondary" href="/">← Volver al Dashboard</a>';
     $body .= '</div>';
@@ -581,7 +589,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
     $body .= '<div class="card">';
     $activeProcessTitle = $processes[$activeProcess]['title'] ?? 'General';
     $body .= '<div class="dashboard-head" style="margin-bottom:12px">';
-    $body .= '<div class="dashboard-subtitle" style="margin:0">Detalle de Producción · ' . h($activeProcessTitle) . ' (' . count($rows) . ' órdenes registradas)</div>';
+    $body .= '<div class="dashboard-subtitle" style="margin:0">Detalle de Producción · ' . h($activeProcessTitle) . ' (' . $totalRows . ' órdenes registradas)</div>';
     $body .= '</div>';
 
     if (empty($rows)) {
@@ -738,6 +746,43 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
  
         $body .= '</tbody></table>';
         $body .= '</div>'; // End erp-prod-table-wrap
+
+        // Paginación del detalle (el resumen y el Excel siguen usando todas las órdenes)
+        if ($pagination !== null && $pagination['total'] > 0) {
+            $pages = (int)$pagination['pages'];
+            $from = ($pageNum - 1) * $perPage + 1;
+            $to = min($pagination['total'], $pageNum * $perPage);
+            $linkStyle = 'padding:6px 12px;border:1px solid #cbd5e1;border-radius:6px;text-decoration:none;color:#0f172a;font-weight:600;font-size:13px;background:#fff';
+            $curStyle = 'padding:6px 12px;border:1px solid #0f766e;border-radius:6px;color:#fff;font-weight:700;font-size:13px;background:#0f766e';
+            $body .= '<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin:14px 0 4px">';
+            $body .= '<div style="font-size:13px;color:#475569">Mostrando <b>' . $from . '–' . $to . '</b> de <b>' . $pagination['total'] . '</b> órdenes</div>';
+            $body .= '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">';
+            if ($pageNum > 1) {
+                $body .= '<a style="' . $linkStyle . '" href="' . h($buildUrl(['page' => $pageNum - 1])) . '">‹ Anterior</a>';
+            }
+            $window = array_unique(array_filter([1, $pageNum - 2, $pageNum - 1, $pageNum, $pageNum + 1, $pageNum + 2, $pages], static fn($n) => $n >= 1 && $n <= $pages));
+            sort($window);
+            $prev = 0;
+            foreach ($window as $n) {
+                if ($prev > 0 && $n - $prev > 1) {
+                    $body .= '<span style="color:#94a3b8">…</span>';
+                }
+                $body .= $n === $pageNum
+                    ? '<span style="' . $curStyle . '">' . $n . '</span>'
+                    : '<a style="' . $linkStyle . '" href="' . h($buildUrl(['page' => $n])) . '">' . $n . '</a>';
+                $prev = $n;
+            }
+            if ($pageNum < $pages) {
+                $body .= '<a style="' . $linkStyle . '" href="' . h($buildUrl(['page' => $pageNum + 1])) . '">Siguiente ›</a>';
+            }
+            $body .= '<span style="margin-left:8px;font-size:13px;color:#475569">Por página:</span>';
+            foreach ([10, 25, 50, 100] as $opt) {
+                $body .= $opt === $perPage
+                    ? '<span style="' . $curStyle . '">' . $opt . '</span>'
+                    : '<a style="' . $linkStyle . '" href="' . h($buildUrl(['per_page' => $opt, 'page' => null])) . '">' . $opt . '</a>';
+            }
+            $body .= '</div></div>';
+        }
     }
  
     $body .= '</div>'; // End card

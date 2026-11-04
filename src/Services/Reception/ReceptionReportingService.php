@@ -322,7 +322,9 @@ trait ReceptionReportingServiceTrait
         ?int $equipoTypeId = null,
         ?int $equipoId = null,
         ?string $search = null,
-        ?string $process = null
+        ?string $process = null,
+        ?int $page = null,
+        int $perPage = 25
     ): array {
         $process = strtolower(trim((string)($process ?? 'sellado')));
         if ($process === '') {
@@ -866,9 +868,23 @@ trait ReceptionReportingServiceTrait
         }
 
         $productionEventsByOt = [];
+        // Paginación: el resumen se calcula con todas las órdenes, pero el detalle de eventos
+        // (consulta pesada) solo se carga para las órdenes de la página mostrada.
+        $pageOffset = 0;
+        $pageInfo = null;
+        $eventSourceRows = $rawRows;
+        if ($page !== null) {
+            $perPage = max(5, min(200, $perPage));
+            $totalRawRows = count($rawRows);
+            $totalPages = max(1, (int)ceil($totalRawRows / $perPage));
+            $page = max(1, min($page, $totalPages));
+            $pageOffset = ($page - 1) * $perPage;
+            $eventSourceRows = array_slice($rawRows, $pageOffset, $perPage);
+            $pageInfo = ['page' => $page, 'per_page' => $perPage, 'total' => $totalRawRows, 'pages' => $totalPages];
+        }
         $reportOtIds = array_values(array_filter(array_unique(array_map(
             static fn($row) => (int)($row['ot_id'] ?? 0),
-            $rawRows
+            $eventSourceRows
         ))));
         if (!empty($reportOtIds)) {
             try {
@@ -1257,7 +1273,8 @@ trait ReceptionReportingServiceTrait
         $totalRequested = (float)array_sum($requestedByOrder);
         $totalPending = max(0.0, $totalRequested - $totalProduced);
 
-        $result['rows'] = $formattedRows;
+        $result['rows'] = $pageInfo !== null ? array_slice($formattedRows, $pageOffset, $pageInfo['per_page']) : $formattedRows;
+        $result['pagination'] = $pageInfo;
         $result['summary'] = [
             'total_ots' => count($formattedRows),
             'total_produced_units' => $totalProduced,
