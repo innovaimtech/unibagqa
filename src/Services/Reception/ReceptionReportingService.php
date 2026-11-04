@@ -457,6 +457,11 @@ trait ReceptionReportingServiceTrait
             return '(' . implode(' OR ', array_unique($clauses)) . ')';
         };
 
+        // Rendimiento: las subconsultas agrupadas (eventos, mermas, supervisor) recorrían TODO el historial de
+        // la tabla en cada carga. Se acotan a las OT del período (enteros ya validados, seguros de incrustar).
+        $periodOtIds = 'SELECT w0.id FROM prod_worker_ot w0 WHERE w0.wok_status > 0 AND w0.wok_crtdat BETWEEN '
+            . (int)$startTs . ' AND ' . (int)$endTs;
+
         $baseWhereClauses = [
             't1.wok_status > 0',
             't1.wok_crtdat BETWEEN :start_ts AND :end_ts',
@@ -509,6 +514,7 @@ trait ReceptionReportingServiceTrait
                                 THEN evt_amount ELSE 0 END) AS produced_units
                 FROM prod_worker_ot_events
                 WHERE (evt_status IS NULL OR evt_status > 0)
+                  AND evt_prod_worker_otid IN ({$periodOtIds})
                 GROUP BY evt_prod_worker_otid
             ) pe ON pe.evt_prod_worker_otid = t1.id
             WHERE {$whereProcessCounts}
@@ -666,7 +672,11 @@ trait ReceptionReportingServiceTrait
 
         $whereSql = implode(' AND ', $whereClauses);
 
-        $sql = "SELECT 
+        // En búsqueda histórica (fuera del período) no se acota; en el resto, solo las OT del período.
+        $evtScope = $result['is_historical_search'] ? '' : " AND e.evt_prod_worker_otid IN ({$periodOtIds})";
+        $ctrlScope = $result['is_historical_search'] ? '' : " AND ac.ctr_init_id IN ({$periodOtIds})";
+
+        $sql = "SELECT
             t1.id AS ot_id,
             t1.wok_crtdat,
             t1.wok_enddat,
@@ -791,7 +801,7 @@ trait ReceptionReportingServiceTrait
             INNER JOIN user u ON u.id = ac.ctr_ctrusr
             INNER JOIN prod_worker_ot pw_sub ON pw_sub.id = ac.ctr_init_id
             WHERE ac.ctr_type = 'supervisor'
-              AND pw_sub.wok_status > 0
+              AND pw_sub.wok_status > 0{$ctrlScope}
             GROUP BY ac.ctr_init_id
         ) ctrl ON ctrl.ctr_init_id = t1.id
         LEFT JOIN turnos_config_assign tca ON t3.win_ass_id = tca.id
@@ -825,7 +835,7 @@ trait ReceptionReportingServiceTrait
                 SUM(CASE WHEN LOWER(e.evt_type) = 'pause' AND (e.evt_status IS NULL OR e.evt_status > 0) AND e.evt_enddat > e.evt_crtdat THEN (e.evt_enddat - e.evt_crtdat) ELSE 0 END) AS pause_seconds,
                 MAX(CASE WHEN e.evt_idayudante > 0 THEN e.evt_idayudante ELSE NULL END) AS ayudante_id
             FROM prod_worker_ot_events e
-            WHERE (e.evt_status IS NULL OR e.evt_status > 0)
+            WHERE (e.evt_status IS NULL OR e.evt_status > 0){$evtScope}
             GROUP BY e.evt_prod_worker_otid
         ) pe ON pe.evt_prod_worker_otid = t1.id
         LEFT JOIN workers w_ay ON pe.ayudante_id = w_ay.id
@@ -853,7 +863,7 @@ trait ReceptionReportingServiceTrait
                 SUM(CASE WHEN LOWER(d.evt_type) = 'repair' OR d.evt_repair_typeid > 0 THEN d.evt_amount ELSE 0 END) AS waste_repair_units_raw
             FROM prod_worker_ot_defectunits d
             INNER JOIN prod_worker_ot_events e ON d.evt_refid = e.id
-            WHERE d.evt_status > 0
+            WHERE d.evt_status > 0{$evtScope}
             GROUP BY e.evt_prod_worker_otid
         ) dw ON dw.wok_id = t1.id
         WHERE {$whereSql}
