@@ -245,26 +245,46 @@
                             <i class="fa fa-fw fa-calendar"></i> Fechas de entrega
                         </td>
                     </tr>
+                    <?php
+                    $planTotal = 0.0;
+                    foreach ($entregas as $entPlan) { $planTotal += (float)($entPlan['prodplan_amt'] ?? 0); }
+                    $programadaTotal = $planTotal > 0 ? $planTotal : (float)($agenda['ag_amount'] ?? 0);
+                    $producidaTotal = (float)($stats['total_produced_all'] ?? $stats['total_produced_this'] ?? 0);
+                    $restanteTotal = max(0.0, $programadaTotal - $producidaTotal);
+                    ?>
                     <tr>
                         <td class="tdleft" style="background-color:#EEEEEE;width:calc(50% - 150px)">Cantidad programada</td>
-                        <td class="tdnrm" style="width:150px"><b><?=$fmt($agenda['ag_amount'])?></b></td>
-                        <td class="tdleft" style="background-color:#EEEEEE;width:calc(50% - 150px)">&nbsp;</td>
-                        <td class="tdnrm" style="width:150px">&nbsp;</td>
+                        <td class="tdnrm" style="width:150px"><b><?=$fmt($programadaTotal)?></b></td>
+                        <td class="tdleft" style="background-color:#EEEEEE;width:calc(50% - 150px)">Cantidad producida</td>
+                        <td class="tdnrm" style="width:150px"><b><?=$fmt($producidaTotal)?></b></td>
                     </tr>
                     <?php
                     $hasEntregasPlan = false;
-                    foreach ($entregas as $entrega): 
+                    $porAsignar = $producidaTotal;
+                    foreach ($entregas as $entrega):
                         $hasEntregasPlan = true;
                         $entDate = (int)($entrega['prodplan_date'] ?? 0);
                         $entDateStr = $entDate > 0 ? date('d.m.Y', $entDate) : '-';
+                        $entAmt = (float)($entrega['prodplan_amt'] ?? 0);
+                        $entCubierta = min($entAmt, max(0.0, $porAsignar));
+                        $porAsignar -= $entCubierta;
+                        $entRestante = max(0.0, $entAmt - $entCubierta);
                     ?>
                         <tr>
-                            <td class="tdleft" style="background-color:#EEEEEE;width:calc(50% - 150px)">Cantidad de Bolsas</td>
-                            <td class="tdnrm" style="width:150px"><b><?=$fmt($entrega['prodplan_amt'] ?? 0)?></b></td>
+                            <td class="tdleft" style="background-color:#EEEEEE;width:calc(50% - 150px)">Cantidad de Bolsas (restantes)</td>
+                            <td class="tdnrm" style="width:150px"><b><?=$fmt($entRestante)?></b></td>
                             <td class="tdleft" style="background-color:#EEEEEE;width:calc(50% - 150px)">Fechas de Entrega</td>
                             <td class="tdnrm" style="width:150px"><?=$entDateStr?></td>
                         </tr>
                     <?php endforeach; ?>
+                    <?php if ($hasEntregasPlan): ?>
+                        <tr>
+                            <td class="tdleft" style="background-color:#D5EDEB;width:calc(50% - 150px)">Total restante por producir</td>
+                            <td class="tdnrm" style="width:150px"><b><?=$fmt($restanteTotal)?></b></td>
+                            <td class="tdleft" style="background-color:#D5EDEB;width:calc(50% - 150px)">&nbsp;</td>
+                            <td class="tdnrm" style="width:150px">&nbsp;</td>
+                        </tr>
+                    <?php endif; ?>
                     <?php if (!$hasEntregasPlan): ?>
                         <tr>
                             <td class="tdleft" align="center" colspan="4"><b class="msg_save_err" style="color:#C00;">No hay fechas de entrega registradas</b></td>
