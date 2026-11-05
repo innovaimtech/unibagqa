@@ -7,37 +7,48 @@
     if ($process === 'pulpo') $headers[] = 'Colores';
     if ($process === 'embalaje') array_push($headers, 'Embalaje', 'Und. Por Caja');
     array_push($headers, 'Cantidad programada', 'Cantidad producida', 'Falta producir', 'Imagen', 'Opciones');
-    // Totales por CC/OT: programado (entregas), producido (todas las agendas del mismo tipo de máquina) y lo que falta
+    // Totales por CC/OT (misma lógica que dentro de la OT): programado = suma de entregas (prod_amtplan) o cantidad de agenda;
+    // producido = todo lo producido de la CC en agendas del mismo tipo de máquina, nunca menos que lo de esta agenda.
+    $mtAgIds = [];
     $mtPrdIds = [];
     foreach ($orders as $o) {
+        $aid = (int)($o['ag_id'] ?? 0);
+        if ($aid > 0) $mtAgIds[$aid] = $aid;
         $pid = (int)($o['prdid'] ?? $o['prd_id'] ?? 0);
         if ($pid > 0) $mtPrdIds[$pid] = $pid;
     }
-    $mtPlan = [];
-    $mtProd = [];
     $mtPhase = $process === 'embalaje' ? 1 : 0;
+    $evtFilter = "t3.evt_type = 'prod' AND t3.evt_status > 0 AND t3.overrideembalaje_act = " . (int)$mtPhase
+        . " AND (t3.evt_comments IS NULL OR (t3.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t3.evt_comments NOT LIKE '%ROLL-SE-%'))";
+    $mtPlanByAg = [];
+    $mtProdByAg = [];
+    $mtPlanByPrd = [];
+    $mtProdByPrd = [];
+    $mtQuery = static function (string $sql): array {
+        try {
+            $q = Db::erpPdo()->query($sql);
+            return $q ? $q->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+        } catch (Throwable) {
+            return [];
+        }
+    };
+    if ($mtAgIds !== []) {
+        $in = implode(',', array_map('intval', $mtAgIds));
+        $mtPlanByAg = $mtQuery("SELECT a.id, SUM(p.prodplan_amt) FROM prod_agenda a
+            INNER JOIN prod_amtplan p ON p.prodplan_prdid = a.ag_prdid WHERE a.id IN ($in) GROUP BY a.id");
+        $mtProdByAg = $mtQuery("SELECT a.id, COALESCE(SUM(t3.evt_amount),0) FROM prod_agenda a
+            INNER JOIN prod_agenda pa ON pa.ag_prdid = a.ag_prdid AND pa.ag_equipotype_id = a.ag_equipotype_id
+            INNER JOIN prod_worker_ot t2 ON t2.wok_ag_id = pa.id
+            INNER JOIN prod_worker_ot_events t3 ON t3.evt_prod_worker_otid = t2.id
+            WHERE a.id IN ($in) AND $evtFilter GROUP BY a.id");
+    }
     if ($mtPrdIds !== []) {
         $in = implode(',', array_map('intval', $mtPrdIds));
-        try {
-            $q = Db::erpPdo()->query("SELECT prodplan_prdid, SUM(prodplan_amt) FROM prod_amtplan WHERE prodplan_prdid IN ($in) GROUP BY prodplan_prdid");
-            $mtPlan = $q ? $q->fetchAll(PDO::FETCH_KEY_PAIR) : [];
-        } catch (Throwable) {
-            $mtPlan = [];
-        }
-        try {
-            $q = Db::erpPdo()->query("SELECT pa.ag_prdid, pa.ag_equipotype_id, COALESCE(SUM(t3.evt_amount),0) AS tot
-                FROM prod_agenda pa
-                INNER JOIN prod_worker_ot t2 ON t2.wok_ag_id = pa.id
-                INNER JOIN prod_worker_ot_events t3 ON t3.evt_prod_worker_otid = t2.id
-                WHERE pa.ag_prdid IN ($in) AND t3.evt_type = 'prod' AND t3.overrideembalaje_act = " . (int)$mtPhase . " AND t3.evt_status > 0
-                  AND (t3.evt_comments IS NULL OR (t3.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t3.evt_comments NOT LIKE '%ROLL-SE-%'))
-                GROUP BY pa.ag_prdid, pa.ag_equipotype_id");
-            foreach ($q ? $q->fetchAll(PDO::FETCH_ASSOC) : [] as $r) {
-                $mtProd[(int)$r['ag_prdid']][(int)$r['ag_equipotype_id']] = (float)$r['tot'];
-            }
-        } catch (Throwable) {
-            $mtProd = [];
-        }
+        $mtPlanByPrd = $mtQuery("SELECT prodplan_prdid, SUM(prodplan_amt) FROM prod_amtplan WHERE prodplan_prdid IN ($in) GROUP BY prodplan_prdid");
+        $mtProdByPrd = $mtQuery("SELECT pa.ag_prdid, COALESCE(SUM(t3.evt_amount),0) FROM prod_agenda pa
+            INNER JOIN prod_worker_ot t2 ON t2.wok_ag_id = pa.id
+            INNER JOIN prod_worker_ot_events t3 ON t3.evt_prod_worker_otid = t2.id
+            WHERE pa.ag_prdid IN ($in) AND $evtFilter GROUP BY pa.ag_prdid");
     }
     echo '<div style="overflow-x:auto"><table width="100%" cellpadding="8" cellspacing="0" style="min-width:1300px">';
     echo '<thead><tr>';
@@ -81,11 +92,13 @@
             echo '<td class="tdnrm" style="text-align:right"><b>' . number_format((float)($order['req_embalaje_bolsas_por_caja_amt'] ?? 0), 0, ',', '.') . '</b></td>';
         }
         $rowPrd = (int)($order['prdid'] ?? $order['prd_id'] ?? 0);
-        $rowEq = (int)($order['equipo_type_id'] ?? 0);
-        $rowPlan = (float)($mtPlan[$rowPrd] ?? 0);
+        $rowPlan = (float)($agId > 0 ? ($mtPlanByAg[$agId] ?? 0) : 0);
+        if ($rowPlan <= 0) $rowPlan = (float)($mtPlanByPrd[$rowPrd] ?? 0);
         $rowProgramada = $rowPlan > 0 ? $rowPlan : (float)($order['ag_amount'] ?? $order['item_amount'] ?? 0);
-        $rowProdByType = $mtProd[$rowPrd] ?? [];
-        $rowProducida = $rowEq > 0 ? (float)($rowProdByType[$rowEq] ?? 0) : array_sum($rowProdByType);
+        $rowProducida = max(
+            (float)($order['total_produced'] ?? 0),
+            (float)($agId > 0 ? ($mtProdByAg[$agId] ?? 0) : ($mtProdByPrd[$rowPrd] ?? 0))
+        );
         $rowFalta = max(0.0, $rowProgramada - $rowProducida);
         echo '<td class="tdnrm" style="text-align:right"><b>' . number_format($rowProgramada, 0, ',', '.') . '</b></td>';
         echo '<td class="tdnrm" style="text-align:right"><b>' . number_format($rowProducida, 0, ',', '.') . '</b></td>';
