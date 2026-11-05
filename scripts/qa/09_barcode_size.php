@@ -38,7 +38,7 @@ function contentRows(string $lang, string $cmd): array
 
 foreach (['zpl', 'tspl', 'epl'] as $lang) {
     $printer = new PrintService(['PRINT_LANGUAGE' => $lang]);
-    foreach (['BOX-000123', 'TRZ-2026-11-05-000123-ABCD'] as $code) {
+    foreach (['TRZ5C4687', 'BOX-000123', 'BX-20261105-A1B2C3', 'TRZ-2026-11-05-000123-ABCD'] as $code) {
         $labels = [
             'bobina' => $printer->buildRollCommand(['id' => 1, 'roll_code' => $code, 'sku_code' => 'SKU']),
             'caja OT' => $printer->buildWorkOrderBoxCommand(['ot_code' => $code, 'sku_final' => 'SKU']),
@@ -55,7 +55,8 @@ foreach (['zpl', 'tspl', 'epl'] as $lang) {
             }
             [$module, $height, $x, $y] = $bar;
             $width = (11 * strlen($code) + 35) * $module;
-            checkBar($tag . ': módulo 0,25 mm y 10 mm de alto', $module === 2 && $height === 80);
+            checkBar($tag . ': tamaño según el largo del código', $module === (strlen($code) <= 12 ? 3 : 2) && $height === 100);
+            checkBar($tag . ': no ocupa toda la etiqueta', $width <= 660);
             checkBar($tag . ': centrado y con margen para que lea la pistola', abs($x - (812 - $width) / 2) <= 1 && $x >= 2 * 10 && $x + $width <= 812 - 2 * 10);
             $inside = array_filter(contentRows($lang, $cmd), static fn(int $row): bool => $row >= $y && $row < $y + $height);
             $below = array_filter(contentRows($lang, $cmd), static fn(int $row): bool => $row >= $y + $height);
@@ -103,12 +104,13 @@ function decodeSvgText(string $svg): ?string
     return $start === 104 && $sum % 103 === $check ? $text : null;
 }
 
-$svgCode = 'TRZ-20261105-A1B2C3';
+$svgCode = 'TRZ5C4687';
 $svg = code128Svg($svgCode);
 checkBar('navegador: el código se lee igual que el texto', decodeSvgText($svg) === $svgCode);
 preg_match('/width="([\d.]+)mm" height="([\d.]+)mm" viewBox="0 0 (\d+) /', $svg, $size);
-checkBar('navegador: módulo 0,25 mm y 10 mm de alto', isset($size[3]) && abs((float)$size[1] / (int)$size[3] - 0.25) < 0.0001 && (float)$size[2] === 10.0);
-checkBar('navegador: con su margen cabe en la etiqueta', (float)$size[1] < 90);
+checkBar('navegador: código corto con módulo 0,375 mm y 12,5 mm de alto', isset($size[3]) && abs((float)$size[1] / (int)$size[3] - 0.375) < 0.0001 && (float)$size[2] === 12.5);
+preg_match('/width="([\d.]+)mm" height="[\d.]+mm" viewBox="0 0 (\d+) /', code128Svg('BX-20261105-A1B2C3'), $longSize);
+checkBar('navegador: código largo con módulo 0,25 mm', isset($longSize[2]) && abs((float)$longSize[1] / (int)$longSize[2] - 0.25) < 0.0001);
 
 // El dibujo de la pantalla de ingreso debe dar exactamente las mismas barras.
 $module = (string)file_get_contents(__DIR__ . '/../../src/Http/InventoryModule.php');
@@ -117,11 +119,7 @@ checkBar('ingreso: ya no dibuja Code 39', $noCode39);
 checkBar('ingreso: no estira el código al ancho de la etiqueta', !preg_match('/barcode-svg-wrap svg \{[^}]*(?<!-)width:\s*100%/', $module));
 $node = strtok(trim((string)shell_exec(stripos(PHP_OS, 'WIN') === 0 ? 'where node 2>NUL' : 'command -v node 2>/dev/null')), "\r\n");
 if ($node !== false && $node !== '' && preg_match('/function buildCode128Svg\(value\) \{.*?\R        \}\R/s', $module, $js)) {
-    $source = str_replace(
-        ["' . BARCODE_HEIGHT_MM . '", "' . BARCODE_MODULE_MM . '"],
-        [(string)BARCODE_HEIGHT_MM, (string)BARCODE_MODULE_MM],
-        $js[0]
-    );
+    $source = preg_replace_callback("/' \\. (BARCODE_\\w+) \\. '/", static fn(array $c): string => (string)constant($c[1]), $js[0]);
     $script = tempnam(sys_get_temp_dir(), 'bc') . '.js';
     file_put_contents($script, 'var CODE128_PATTERNS=' . json_encode(code128Patterns()) . ';function escapeHtml(s){return s;}' . $source
         . 'process.stdout.write(buildCode128Svg(' . json_encode(strtolower($svgCode)) . '));');

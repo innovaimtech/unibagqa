@@ -2171,7 +2171,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                 }
             });
             var total = x + 10;
-            return "<div class=\"barcode-svg-wrap\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + (total * ' . BARCODE_MODULE_MM . ') + "mm\" height=\"' . BARCODE_HEIGHT_MM . 'mm\" viewBox=\"0 0 " + total + " ' . BARCODE_HEIGHT_MM . '\" preserveAspectRatio=\"none\" shape-rendering=\"crispEdges\" role=\"img\" aria-label=\"" + escapeHtml(text) + "\">" + bars.join("") + "</svg></div>";
+            var module = (total - 20) * ' . BARCODE_MODULE_MM . ' <= ' . BARCODE_MAX_WIDTH_MM . ' ? ' . BARCODE_MODULE_MM . ' : ' . BARCODE_FINE_MODULE_MM . ';
+            return "<div class=\"barcode-svg-wrap\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + (total * module) + "mm\" height=\"' . BARCODE_HEIGHT_MM . 'mm\" viewBox=\"0 0 " + total + " ' . BARCODE_HEIGHT_MM . '\" preserveAspectRatio=\"none\" shape-rendering=\"crispEdges\" role=\"img\" aria-label=\"" + escapeHtml(text) + "\">" + bars.join("") + "</svg></div>";
         }
 
         function buildLabelCardHtml(data, idx, totalCount) {

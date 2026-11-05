@@ -1430,9 +1430,11 @@ function formatLabelDateTime(?string $value): string
     return date('d.m.Y H:i:s', $ts);
 }
 
-/** Código de barras a 203 ppp: módulo de 2 puntos (0,25 mm) y 10 mm de alto. Debe coincidir con PrintService. */
-const BARCODE_MODULE_MM = 0.25;
-const BARCODE_HEIGHT_MM = 10;
+/** Código de barras a 203 ppp, con la misma regla de tamaño que PrintService. */
+const BARCODE_MODULE_MM = 0.375;
+const BARCODE_FINE_MODULE_MM = 0.25;
+const BARCODE_MAX_WIDTH_MM = 65;
+const BARCODE_HEIGHT_MM = 12.5;
 
 /** Anchos de barras y espacios de cada símbolo Code 128. */
 function code128Patterns(): array
@@ -1492,8 +1494,9 @@ function code128Svg(string $text): string
         }
     }
     $total = $x + 10;
+    $module = ($total - 20) * BARCODE_MODULE_MM <= BARCODE_MAX_WIDTH_MM ? BARCODE_MODULE_MM : BARCODE_FINE_MODULE_MM;
 
-    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . ($total * BARCODE_MODULE_MM) . 'mm" height="' . BARCODE_HEIGHT_MM . 'mm" viewBox="0 0 ' . $total . ' ' . BARCODE_HEIGHT_MM . '" preserveAspectRatio="none" shape-rendering="crispEdges" role="img" aria-label="' . htmlspecialchars($text, ENT_QUOTES, 'UTF-8') . '">' . implode('', $bars) . '</svg>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . ($total * $module) . 'mm" height="' . BARCODE_HEIGHT_MM . 'mm" viewBox="0 0 ' . $total . ' ' . BARCODE_HEIGHT_MM . '" preserveAspectRatio="none" shape-rendering="crispEdges" role="img" aria-label="' . htmlspecialchars($text, ENT_QUOTES, 'UTF-8') . '">' . implode('', $bars) . '</svg>';
 }
 
 /**
