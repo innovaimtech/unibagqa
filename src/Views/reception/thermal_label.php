@@ -30,10 +30,7 @@
     $title = (string)($data['title'] ?? ('Etiqueta 10x7 - ' . $barcodeValue));
 
     // Código de barras vectorial Code 128 nítido y de 36px de alto optimizado para lectura instantánea con pistolas ópticas
-    $barcodeSvg = code128Svg($barcodeValue, 36, 1.35);
-    if ($barcodeSvg === '') {
-        $barcodeSvg = code39Svg($barcodeValue, 36, 1.15, 3);
-    }
+    $barcodeSvg = code128Svg($barcodeValue);
 
     echo '<!doctype html><html lang="es"><head><meta charset="utf-8">';
     echo '<meta name="viewport" content="width=device-width, initial-scale=1">';

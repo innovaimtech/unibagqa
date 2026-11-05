@@ -1430,119 +1430,14 @@ function formatLabelDateTime(?string $value): string
     return date('d.m.Y H:i:s', $ts);
 }
 
-/**
- * Genera un SVG simple con un código de barras Code39.
- *
- * - Valida caracteres permitidos.
- * - Aplica patrón narrow/wide.
- * - Útil para etiquetas internas (rolls/pallets/boxes).
- *
- * ---
- *
- * Generates a simple SVG for a Code39 barcode.
- *
- * - Validates allowed characters.
- * - Applies narrow/wide pattern.
- * - Useful for internal labels (rolls/pallets/boxes).
- */
-function code39Svg(string $data, int $height = 70, int $narrow = 2, int $wide = 5): string
+/** Código de barras a 203 ppp: módulo de 2 puntos (0,25 mm) y 10 mm de alto. Debe coincidir con PrintService. */
+const BARCODE_MODULE_MM = 0.25;
+const BARCODE_HEIGHT_MM = 10;
+
+/** Anchos de barras y espacios de cada símbolo Code 128. */
+function code128Patterns(): array
 {
-    $data = strtoupper(trim($data));
-    if ($data === '') {
-        return '';
-    }
-
-    $allowed = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%';
-    for ($i = 0; $i < strlen($data); $i++) {
-        if (strpos($allowed, $data[$i]) === false) {
-            return '';
-        }
-    }
-
-    $map = [
-        '0' => 'nnnwwnwnn',
-        '1' => 'wnnwnnnnw',
-        '2' => 'nnwwnnnnw',
-        '3' => 'wnwwnnnnn',
-        '4' => 'nnnwwnnnw',
-        '5' => 'wnnwwnnnn',
-        '6' => 'nnwwwnnnn',
-        '7' => 'nnnwnnwnw',
-        '8' => 'wnnwnnwnn',
-        '9' => 'nnwwnnwnn',
-        'A' => 'wnnnnwnnw',
-        'B' => 'nnwnnwnnw',
-        'C' => 'wnwnnwnnn',
-        'D' => 'nnnnwwnnw',
-        'E' => 'wnnnwwnnn',
-        'F' => 'nnwnwwnnn',
-        'G' => 'nnnnnwwnw',
-        'H' => 'wnnnnwwnn',
-        'I' => 'nnwnnwwnn',
-        'J' => 'nnnnwwwnn',
-        'K' => 'wnnnnnnww',
-        'L' => 'nnwnnnnww',
-        'M' => 'wnwnnnnwn',
-        'N' => 'nnnnwnnww',
-        'O' => 'wnnnwnnwn',
-        'P' => 'nnwnwnnwn',
-        'Q' => 'nnnnnnwww',
-        'R' => 'wnnnnnwwn',
-        'S' => 'nnwnnnwwn',
-        'T' => 'nnnnwnwwn',
-        'U' => 'wwnnnnnnw',
-        'V' => 'nwwnnnnnw',
-        'W' => 'wwwnnnnnn',
-        'X' => 'nwnnwnnnw',
-        'Y' => 'wwnnwnnnn',
-        'Z' => 'nwwnwnnnn',
-        '-' => 'nwnnnnwnw',
-        '.' => 'wwnnnnwnn',
-        ' ' => 'nwwnnnwnn',
-        '$' => 'nwnwnwnnn',
-        '/' => 'nwnwnnnwn',
-        '+' => 'nwnnnwnwn',
-        '%' => 'nnnwnwnwn',
-        '*' => 'nwnnwnwnn',
-    ];
-
-    $encoded = '*' . $data . '*';
-    $x = 10;
-    $bars = [];
-    for ($i = 0; $i < strlen($encoded); $i++) {
-        $ch = $encoded[$i];
-        $pat = $map[$ch] ?? null;
-        if ($pat === null) {
-            return '';
-        }
-
-        for ($j = 0; $j < 9; $j++) {
-            $isBar = ($j % 2) === 0;
-            $w = ($pat[$j] === 'w') ? $wide : $narrow;
-            if ($isBar) {
-                $bars[] = '<rect x="' . $x . '" y="0" width="' . $w . '" height="' . $height . '" fill="#000"/>';
-            }
-            $x += $w;
-        }
-        $x += $narrow;
-    }
-    $totalW = $x + 10;
-
-    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" shape-rendering="crispEdges" role="img" aria-label="código de barras">' . implode('', $bars) . '</svg>';
-}
-
-/**
- * Genera un código de barras en formato Code 128 (Juego B) en SVG.
- * Alta densidad, ideal para impresoras térmicas de 203 DPI (Barpos Z220T) y escaneo rápido con pistolas ópticas.
- */
-function code128Svg(string $text, int $height = 42, float $moduleWidth = 1.35): string
-{
-    $text = trim($text);
-    if ($text === '') {
-        return '';
-    }
-
-    $patterns = [
+    return [
         '212222','222122','222221','121223','121322','131222','122213','122312','132212','221213',
         '221312','231212','112232','122132','122231','113222','123122','123221','223211','221132',
         '221231','213212','223112','312131','311222','321122','321221','312212','322112','322211',
@@ -1555,8 +1450,20 @@ function code128Svg(string $text, int $height = 42, float $moduleWidth = 1.35): 
         '214121','412121','111143','111341','131141','114113','114311','411113','411311','113141',
         '114131','311141','411131','211412','211214','211232','2331112'
     ];
+}
 
-    $startCode = 104; // Start Code B
+/**
+ * Código de barras Code 128 (juego B) en SVG, con el mismo tamaño físico que en las etiquetas térmicas.
+ */
+function code128Svg(string $text): string
+{
+    $text = trim($text);
+    if ($text === '') {
+        return '';
+    }
+
+    $patterns = code128Patterns();
+    $startCode = 104;
     $chars = [$startCode];
     $checkSum = $startCode;
 
@@ -1573,26 +1480,20 @@ function code128Svg(string $text, int $height = 42, float $moduleWidth = 1.35): 
     $chars[] = 106; // Stop Code
 
     $bars = [];
-    $quietZone = max(16.0, round($moduleWidth * 10, 1));
-    $x = $quietZone;
+    $x = 10; // Margen de 10 módulos que necesita la pistola
     foreach ($chars as $code) {
-        $pat = $patterns[$code] ?? '';
-        if ($pat === '') {
-            return '';
-        }
-        $isBar = true;
+        $pat = $patterns[$code];
         for ($p = 0; $p < strlen($pat); $p++) {
-            $w = (int)$pat[$p] * $moduleWidth;
-            if ($isBar) {
-                $bars[] = '<rect x="' . round($x, 2) . '" y="0" width="' . round($w, 2) . '" height="' . $height . '" fill="#000"/>';
+            $w = (int)$pat[$p];
+            if ($p % 2 === 0) {
+                $bars[] = '<rect x="' . $x . '" y="0" width="' . $w . '" height="' . BARCODE_HEIGHT_MM . '" fill="#000"/>';
             }
             $x += $w;
-            $isBar = !$isBar;
         }
     }
-    $totalW = (int)ceil($x + $quietZone);
+    $total = $x + 10;
 
-    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . $totalW . '" height="' . $height . '" viewBox="0 0 ' . $totalW . ' ' . $height . '" shape-rendering="crispEdges" role="img" aria-label="' . htmlspecialchars($text, ENT_QUOTES, 'UTF-8') . '">' . implode('', $bars) . '</svg>';
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' . ($total * BARCODE_MODULE_MM) . 'mm" height="' . BARCODE_HEIGHT_MM . 'mm" viewBox="0 0 ' . $total . ' ' . BARCODE_HEIGHT_MM . '" preserveAspectRatio="none" shape-rendering="crispEdges" role="img" aria-label="' . htmlspecialchars($text, ENT_QUOTES, 'UTF-8') . '">' . implode('', $bars) . '</svg>';
 }
 
 /**

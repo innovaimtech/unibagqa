@@ -1354,7 +1354,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         #printableArea { min-height:0; overflow:auto; flex:1; }
         .printable-label { background: #fff; border: 2px solid #000; border-radius: 8px; padding: 10px 12px; text-align: center; color: #000; margin-bottom: 16px; font-family: Arial, sans-serif; }
         .barcode-svg-wrap { width: 94%; margin: 6px auto 4px auto; }
-        .barcode-svg-wrap svg { display: block; width: 100%; height: 48px; }
+        .barcode-svg-wrap svg { display: block; margin: 0 auto; max-width: 100%; }
 
         .trz-fields-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
         .trz-fields-3col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
@@ -2147,39 +2147,33 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             return div.innerHTML;
         }
 
-        function buildCode39Svg(value) {
+        var CODE128_PATTERNS = ' . json_encode(code128Patterns()) . ';
+        function buildCode128Svg(value) {
             var text = String(value || "").trim().toUpperCase();
             if (!text) return "";
-            if (!/^[0-9A-Z. \\-$/+%]+$/.test(text)) return "";
-
-            var map = {
-                "0":"nnnwwnwnn","1":"wnnwnnnnw","2":"nnwwnnnnw","3":"wnwwnnnnn","4":"nnnwwnnnw","5":"wnnwwnnnn","6":"nnwwwnnnn","7":"nnnwnnwnw","8":"wnnwnnwnn","9":"nnwwnnwnn",
-                "A":"wnnnnwnnw","B":"nnwnnwnnw","C":"wnwnnwnnn","D":"nnnnwwnnw","E":"wnnnwwnnn","F":"nnwnwwnnn","G":"nnnnnwwnw","H":"wnnnnwwnn","I":"nnwnnwwnn","J":"nnnnwwwnn",
-                "K":"wnnnnnnww","L":"nnwnnnnww","M":"wnwnnnnwn","N":"nnnnwnnww","O":"wnnnwnnwn","P":"nnwnwnnwn","Q":"nnnnnnwww","R":"wnnnnnwwn","S":"nnwnnnwwn","T":"nnnnwnwwn",
-                "U":"wwnnnnnnw","V":"nwwnnnnnw","W":"wwwnnnnnn","X":"nwnnwnnnw","Y":"wwnnwnnnn","Z":"nwwnwnnnn","-":"nwnnnnwnw",".":"wwnnnnwnn"," ":"nwwnnnwnn","$":"nwnwnwnnn",
-                "/":"nwnwnnnwn","+":"nwnnnwnwn","%":"nnnwnwnwn","*":"nwnnwnwnn"
-            };
-
-            var encoded = "*" + text + "*";
+            var codes = [104];
+            var sum = 104;
+            for (var i = 0; i < text.length; i++) {
+                var val = text.charCodeAt(i) - 32;
+                if (val < 0 || val > 95) return "";
+                codes.push(val);
+                sum += val * (i + 1);
+            }
+            codes.push(sum % 103, 106);
             var x = 10;
-            var narrow = 2;
-            var wide = 5;
             var bars = [];
-            for (var i = 0; i < encoded.length; i++) {
-                var pattern = map[encoded.charAt(i)];
-                if (!pattern) return "";
-                for (var j = 0; j < pattern.length; j++) {
-                    var isBar = (j % 2) === 0;
-                    var width = pattern.charAt(j) === "w" ? wide : narrow;
-                    if (isBar) {
-                        bars.push("<rect x=\"" + x + "\" y=\"0\" width=\"" + width + "\" height=\"72\" fill=\"#000\"></rect>");
+            codes.forEach(function (code) {
+                var pattern = CODE128_PATTERNS[code];
+                for (var p = 0; p < pattern.length; p++) {
+                    var width = parseInt(pattern.charAt(p), 10);
+                    if (p % 2 === 0) {
+                        bars.push("<rect x=\"" + x + "\" y=\"0\" width=\"" + width + "\" height=\"' . BARCODE_HEIGHT_MM . '\" fill=\"#000\"/>");
                     }
                     x += width;
                 }
-                x += narrow;
-            }
-            var totalWidth = x + 10;
-            return "<div class=\"barcode-svg-wrap\"><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 " + totalWidth + " 72\" role=\"img\" aria-label=\"" + escapeHtml(text) + "\">" + bars.join("") + "</svg></div>";
+            });
+            var total = x + 10;
+            return "<div class=\"barcode-svg-wrap\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + (total * ' . BARCODE_MODULE_MM . ') + "mm\" height=\"' . BARCODE_HEIGHT_MM . 'mm\" viewBox=\"0 0 " + total + " ' . BARCODE_HEIGHT_MM . '\" preserveAspectRatio=\"none\" shape-rendering=\"crispEdges\" role=\"img\" aria-label=\"" + escapeHtml(text) + "\">" + bars.join("") + "</svg></div>";
         }
 
         function buildLabelCardHtml(data, idx, totalCount) {
@@ -2188,7 +2182,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             var sku = (data.item_code || "-");
             var desc = data.item_description || "";
             var meta = (data.created_at || "") + " · Op: " + (data.operator_name || "");
-            var barcodeHtml = buildCode39Svg(code);
+            var barcodeHtml = buildCode128Svg(code);
             var bultoBadge = (totalCount > 1 || (data.total_packages && data.total_packages > 1))
                 ? ("<div style=\"font-size:13px;font-weight:900;color:#000;margin-bottom:5px;background:#fff;border:2px solid #000;padding:3px 10px;border-radius:6px;display:inline-block\">BULTO " + (data.package_number || (idx + 1)) + " DE " + (data.total_packages || totalCount) + "</div>")
                 : "";
@@ -2353,7 +2347,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
                 "* { box-sizing: border-box; }" +
                 "body { font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; margin: 0; padding: 0; background: #fff; color: #000; text-align: center; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
                 ".barcode-svg-wrap { width:94%; margin:1mm auto 0.8mm auto; }" +
-                ".barcode-svg-wrap svg { display:block; width:100%; height:11mm; }" +
+                ".barcode-svg-wrap svg { display:block; margin:0 auto; max-width:100%; }" +
                 ".printable-label { width: 100mm; height: 70mm; max-width: 100mm; max-height: 70mm; border: 0.8mm solid #000; border-radius: 0; padding: 1.8mm 2.4mm; margin: 0 auto 10px auto; box-sizing: border-box; page-break-inside: avoid; break-inside: avoid; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-start; color:#000 !important; }" +
                 "@media print {" +
                     "body { margin: 0 !important; padding: 0 !important; width: 100mm !important; height: 70mm !important; }" +

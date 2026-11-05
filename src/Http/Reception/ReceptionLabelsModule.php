@@ -475,8 +475,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
                 if ($specsStr === '') $specsStr = '-';
                 $colorVal = trim((string)($roll['color'] ?? $lData['color'] ?? '-')) ?: '-';
                 $rollCode = (string)$roll['roll_code'];
-                $barcodeSvg = code128Svg($rollCode, 36, 1.35);
-                if ($barcodeSvg === '') $barcodeSvg = code39Svg($rollCode, 36, 1.15, 3);
+                $barcodeSvg = code128Svg($rollCode);
 
                 echo '<div class="label-card">';
                 // 1. Cabecera
@@ -1357,10 +1356,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
         $pvSampleCode = !empty($existingRollsByLine[$pvItemId]) ? (string)$existingRollsByLine[$pvItemId][0]['roll_code'] : ($defaultShortPrefix . '001');
         $pvWarehouseCode = trim((string)($existingRollsByLine[$pvItemId][0]['warehouse_code'] ?? '')) ?: 'Por seleccionar';
 
-        $pvSvg = code128Svg($pvSampleCode, 36, 1.35);
-        if ($pvSvg === '') {
-            $pvSvg = code39Svg($pvSampleCode, 36, 1.15, 3);
-        }
+        $pvSvg = code128Svg($pvSampleCode);
 
         echo '<div style="display:grid;grid-template-columns:minmax(390px, 420px) 1fr;gap:20px;align-items:start">';
 
@@ -1677,7 +1673,7 @@ if (preg_match('#^/reception/labels/([a-f0-9]{32})$#', $path, $m) === 1 && $meth
         echo '<div class="sku">' . h((string)($roll['sku_code'] ?? '')) . '</div><div class="desc">' . h((string)($roll['sku_description'] ?? '')) . '</div>';
         echo '<div class="value">' . h($value) . '</div><div class="desc">Bodega: ' . h((string)($roll['warehouse_code'] ?? '')) . ' ' . h((string)($roll['warehouse_name'] ?? '')) . '</div>';
         echo '<div class="desc">OC: ' . h((string)($roll['po_code'] ?? '-')) . ' | Contenedor: ' . h((string)($roll['container_code'] ?? '-')) . '</div>';
-        echo '<div>' . code128Svg($code, 36, 1.35) . '<div class="code">' . h($code) . '</div></div></section>';
+        echo '<div>' . code128Svg($code) . '<div class="code">' . h($code) . '</div></div></section>';
     }
     if (($_GET['auto_print'] ?? '') === '1') {
         echo '<script>window.addEventListener("load",function(){window.print();});</script>';
@@ -2021,10 +2017,7 @@ if (preg_match('#^/boxes/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     }
 
     $barcodeValue = strtoupper(trim((string)$box['box_code']));
-    $barcodeSvg = code128Svg($barcodeValue, 36, 1.35);
-    if ($barcodeSvg === '') {
-        $barcodeSvg = code39Svg($barcodeValue, 36, 1.15, 3);
-    }
+    $barcodeSvg = code128Svg($barcodeValue);
     $destinationLabel = (string)$box['destination_mode'] === 'CUSTOMER_ORDER'
         ? 'OC cliente: ' . (string)($box['customer_order_ref'] ?? '-')
         : 'Bodega: ' . (string)($box['warehouse_code'] ?? '-');
@@ -2142,10 +2135,7 @@ if (preg_match('#^/pallets/(\d+)/label$#', $path, $m) === 1 && $method === 'GET'
     }
 
     $barcodeValue = strtoupper(trim((string)$pallet['pallet_code']));
-    $barcodeSvg = code128Svg($barcodeValue, 36, 1.35);
-    if ($barcodeSvg === '') {
-        $barcodeSvg = code39Svg($barcodeValue, 36, 1.15, 3);
-    }
+    $barcodeSvg = code128Svg($barcodeValue);
     $destinationLabel = (string)$pallet['destination_mode'] === 'CUSTOMER_ORDER'
         ? 'OC cliente: ' . (string)($pallet['customer_order_ref'] ?? '-')
         : 'Bodega: ' . (string)($pallet['warehouse_code'] ?? '-');
@@ -2266,10 +2256,7 @@ if (preg_match('#^/work-orders/(\d+)/box-label$#', $path, $m) === 1 && $method =
         }
     }
     $barcodeValue = strtoupper(trim((string)$ot['ot_code']));
-    $barcodeSvg = code128Svg($barcodeValue, 36, 1.35);
-    if ($barcodeSvg === '') {
-        $barcodeSvg = code39Svg($barcodeValue, 36, 1.15, 3);
-    }
+    $barcodeSvg = code128Svg($barcodeValue);
 
     echo '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
     echo '<title>Etiqueta cajas</title>';
