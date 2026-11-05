@@ -146,6 +146,36 @@ trait ImportContainerServiceTrait
         return $this->erpImportContainersCache[$containerId];
     }
 
+    /** Trae de una sola vez los contenedores indicados, para no hacer una consulta por cada uno. */
+    private function preloadErpImportContainerMeta(array $containerIds): void
+    {
+        $ids = [];
+        foreach ($containerIds as $id) {
+            $id = (int)$id;
+            if ($id > 0 && !isset($this->erpImportContainersCache[$id])) {
+                $ids[$id] = $id;
+            }
+        }
+        if ($ids === []) {
+            return;
+        }
+        try {
+            $stmt = $this->erpPdo->query('SELECT id, sord_contenedor, sord_eta_puertounibag FROM supplier_contenedor WHERE id IN (' . implode(',', $ids) . ')');
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $this->erpImportContainersCache[(int)$row['id']] = [
+                    'code' => trim((string)($row['sord_contenedor'] ?? '')),
+                    'eta_plant' => (int)($row['sord_eta_puertounibag'] ?? 0) > 0 ? gmdate('Y-m-d', (int)$row['sord_eta_puertounibag']) : '',
+                ];
+                unset($ids[(int)$row['id']]);
+            }
+            foreach ($ids as $missing) {
+                $this->erpImportContainersCache[$missing] = ['code' => '', 'eta_plant' => ''];
+            }
+        } catch (Throwable) {
+            // getErpImportContainerMeta consulta uno a uno si esto falla.
+        }
+    }
+
     private function getErpImportContainerCode(int $containerId): string
     {
         return $this->getErpImportContainerMeta($containerId)['code'];
@@ -1645,6 +1675,7 @@ trait ImportContainerServiceTrait
      */
     private function getErpSyncTargets(): array
     {
+        $this->resolveLegacyErp();
         if ($this->legacyErpConnectionError !== null) {
             throw new RuntimeException('No se pudo conectar al ERP antiguo: ' . $this->legacyErpConnectionError);
         }

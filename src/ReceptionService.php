@@ -105,6 +105,7 @@ final class ReceptionService
     private bool $helperScoreSchemaReady = false;
     private ?PDO $legacyErpPdo = null;
     private ?string $legacyErpConnectionError = null;
+    private bool $legacyErpResolved = false;
 
     /** @var array<int, array<string, mixed>> */
     private array $erpItemsCache = [];
@@ -160,17 +161,6 @@ final class ReceptionService
      */
     public function __construct(private PDO $pdo, private PDO $erpPdo)
     {
-        if (class_exists('Db') && method_exists('Db', 'legacyErpPdoOrNull')) {
-            try {
-                $legacyPdo = Db::legacyErpPdoOrNull();
-                if ($legacyPdo instanceof PDO) {
-                    $this->legacyErpPdo = $legacyPdo;
-                }
-            } catch (Throwable $e) {
-                $this->legacyErpPdo = null;
-                $this->legacyErpConnectionError = $e->getMessage();
-            }
-        }
         $this->inventoryCountService = new InventoryCountService($this->pdo, $this->erpPdo);
         $this->rollReceptionService = new RollReceptionService($this->pdo);
         $this->ensureTrzBaseSchema();
@@ -205,6 +195,26 @@ final class ReceptionService
                 $this->setAppSetting('roll_erp_stock_sync_version', self::ROLL_ERP_STOCK_SYNC_VERSION);
             }
             self::$schemaEnsured = true;
+        }
+    }
+
+    /** Conecta al ERP antiguo solo cuando se necesita (antes se abría esa conexión en cada página). */
+    private function resolveLegacyErp(): void
+    {
+        if ($this->legacyErpResolved) {
+            return;
+        }
+        $this->legacyErpResolved = true;
+        if (class_exists('Db') && method_exists('Db', 'legacyErpPdoOrNull')) {
+            try {
+                $legacyPdo = Db::legacyErpPdoOrNull();
+                if ($legacyPdo instanceof PDO) {
+                    $this->legacyErpPdo = $legacyPdo;
+                }
+            } catch (Throwable $e) {
+                $this->legacyErpPdo = null;
+                $this->legacyErpConnectionError = $e->getMessage();
+            }
         }
     }
 

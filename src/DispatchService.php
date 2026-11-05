@@ -631,6 +631,17 @@ final class DispatchService
             WHERE " . implode(' AND ', $where) . " ORDER BY p.id DESC LIMIT $limit", $params);
     }
 
+    /** Cantidad de pickings por estado. */
+    public function counts(): array
+    {
+        $this->ensureSchema();
+        $counts = ['PICKING' => 0, 'AWAITING_GUIDE' => 0, 'DISPATCHED' => 0, 'CANCELLED' => 0];
+        foreach ($this->all('SELECT status, COUNT(*) AS n FROM dispatch_pickings GROUP BY status') as $r) {
+            $counts[(string)$r['status']] = (int)$r['n'];
+        }
+        return $counts;
+    }
+
     public function detail(string $key): array
     {
         $this->ensureSchema();

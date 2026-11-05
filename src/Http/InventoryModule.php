@@ -257,10 +257,19 @@ function unibagRenderStockPage(ReceptionService $service): void
         $items = $service->getErpStockByStorehouse($storehouseId, $search !== '' ? $search : null, $onlyWithStock);
     }
 
-    $warehouseRolls = $storehouseId > 0 ? $service->listRollsForWarehouseInventory($storehouseId) : [];
-    $totalWarehouseRolls = count($warehouseRolls);
-    $totalWarehouseRollsWeight = array_sum(array_column($warehouseRolls, 'weight_kg'));
-    $totalWarehouseRollsMeters = array_sum(array_column($warehouseRolls, 'meters'));
+    // Rendimiento: el detalle de bobinas solo se trae al abrir esa pestaña o al descargar su Excel.
+    $rollsPanelLoaded = (string)($_GET['tab'] ?? '') === 'rolls' || (string)($_GET['download'] ?? '') === 'rolls_excel';
+    $warehouseRolls = ($rollsPanelLoaded && $storehouseId > 0) ? $service->listRollsForWarehouseInventory($storehouseId) : [];
+    if ($rollsPanelLoaded) {
+        $totalWarehouseRolls = count($warehouseRolls);
+        $totalWarehouseRollsWeight = array_sum(array_column($warehouseRolls, 'weight_kg'));
+        $totalWarehouseRollsMeters = array_sum(array_column($warehouseRolls, 'meters'));
+    } else {
+        $rollsSummary = $storehouseId > 0 ? $service->summarizeRollsForWarehouseInventory($storehouseId) : ['count' => 0, 'weight_kg' => 0.0, 'meters' => 0.0];
+        $totalWarehouseRolls = $rollsSummary['count'];
+        $totalWarehouseRollsWeight = $rollsSummary['weight_kg'];
+        $totalWarehouseRollsMeters = $rollsSummary['meters'];
+    }
 
     if (isset($_GET['download']) && (string)$_GET['download'] === 'excel') {
         unibagOutputErpStockExcel(
@@ -321,7 +330,8 @@ function unibagRenderStockPage(ReceptionService $service): void
     $trzCapacityPallets = 0;
     $trzOccupancy = null;
     try {
-        $trzWhList = $service->listWarehousesWithCapacities();
+        // Rendimiento: solo la bodega consultada y sin forzar la sincronización con el ERP en cada visita.
+        $trzWhList = $storehouseId > 0 ? $service->listWarehousesWithCapacities(false, $storehouseId) : [];
         foreach ($trzWhList as $tw) {
             if ((int)($tw['erp_storehouse_id'] ?? 0) === $storehouseId || (string)($tw['code'] ?? '') === (string)$storehouseId) {
                 $trzPallets = (int)($tw['pallets_count'] ?? 0);
@@ -456,7 +466,7 @@ function unibagRenderStockPage(ReceptionService $service): void
             <input id="stock-live-search" type="text" placeholder="Filtrar en tabla..." style="height:34px;padding:0 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;width:220px" oninput="stockFilterTable(this.value)">
           </div>
         </div>
-        <div class="table-wrap" style="max-height:650px;overflow-y:auto">
+<style>#stock-table .st0{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#f1f5f9;color:#64748b}#stock-table .st1{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#fef2f2;color:#dc2626;border:1px solid #fecaca}#stock-table .st2{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0}#stock-table .st3{display:inline-flex;align-items:center;gap:6px}#stock-table .st4{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11.5px;font-weight:700;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0}#stock-table .st5{font-size:10px;background:#fef3c7;padding:1px 5px;border-radius:4px}#stock-table .st6{font-size:11.5px}#stock-table .st7{border-bottom:1px solid #e2e8f0}#stock-table .st8{padding:10px 14px;font-weight:700;white-space:nowrap;color:#0f172a}#stock-table .st9{padding:10px 14px;font-weight:600;color:#334155}#stock-table .sta{padding:10px 14px;text-align:center;white-space:nowrap;color:#64748b;font-weight:600}#stock-table .stb{padding:10px 14px;text-align:right;font-weight:700}#stock-table .stc{padding:10px 14px;text-align:right;color:#64748b}#stock-table .std{padding:10px 14px;text-align:center}#stock-table .ste{padding:8px 10px;text-align:center;white-space:nowrap}</style><div class="table-wrap" style="max-height:650px;overflow-y:auto">
           <table id="stock-table" style="width:100%;margin:0;border-collapse:collapse;font-size:13px">
             <thead>
               <tr style="background:#f1f5f9;border-bottom:2px solid #cbd5e1;position:sticky;top:0;z-index:2">
@@ -497,45 +507,45 @@ function unibagRenderStockPage(ReceptionService $service): void
             . '&unit=' . rawurlencode((string)$it['unit_name']);
 
         if ($disp <= 0 && $inv <= 0) {
-            $statusBadge = '<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#f1f5f9;color:#64748b">Agotado</span>';
+            $statusBadge = '<span class="st0">Agotado</span>';
         } elseif ($min > 0 && $disp <= $min) {
-            $statusBadge = '<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#fef2f2;color:#dc2626;border:1px solid #fecaca">Crítico</span>';
+            $statusBadge = '<span class="st1">Crítico</span>';
         } else {
-            $statusBadge = '<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0">Disponible</span>';
+            $statusBadge = '<span class="st2">Disponible</span>';
         }
 
         // Columna de trazabilidad
         if ($isFullyTagged) {
-            $trzButton = '<div style="display:inline-flex;align-items:center;gap:6px">';
-            $trzButton .= '<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11.5px;font-weight:700;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0" title="Todo el stock físico está rotulado con código de trazabilidad (' . number_format($alreadyTagged, 1, ',', '.') . ' / ' . number_format($inv, 1, ',', '.') . ' ' . h((string)$it['unit_name']) . ')">✅ Rotulado</span>';
+            $trzButton = '<div class="st3">';
+            $trzButton .= '<span class="st4" title="Todo el stock físico está rotulado con código de trazabilidad (' . number_format($alreadyTagged, 1, ',', '.') . ' / ' . number_format($inv, 1, ',', '.') . ' ' . h((string)$it['unit_name']) . ')">✅ Rotulado</span>';
             $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:3px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver los códigos de trazabilidad de ' . h($sku) . ' (desde ahí también se pueden borrar bultos registrados por error)">🔎 Códigos</a>';
             $trzButton .= '</div>';
         } elseif ($isPartiallyTagged) {
-            $trzButton = '<div style="display:inline-flex;align-items:center;gap:6px">';
-            $trzButton .= '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#fffbeb;color:#b45309;border:1px solid #fde68a;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Faltan ' . number_format($pendingQty, 1, ',', '.') . ' por rotular de ' . number_format($inv, 1, ',', '.') . '">📦 +Trazable <span style="font-size:10px;background:#fef3c7;padding:1px 5px;border-radius:4px">(' . number_format($pendingQty, 0, ',', '.') . ' pend)</span></a>';
+            $trzButton = '<div class="st3">';
+            $trzButton .= '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#fffbeb;color:#b45309;border:1px solid #fde68a;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Faltan ' . number_format($pendingQty, 1, ',', '.') . ' por rotular de ' . number_format($inv, 1, ',', '.') . '">📦 +Trazable <span class="st5">(' . number_format($pendingQty, 0, ',', '.') . ' pend)</span></a>';
             $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:4px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver los códigos de trazabilidad ya rotulados de ' . h($sku) . ' (desde ahí también se pueden borrar bultos)">🔎 Códigos</a>';
             $trzButton .= '</div>';
         } elseif ($inv > 0) {
             $trzButton = '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#f0fdfa;color:#0f766e;border:1px solid #ccfbf1;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Ingresar bulto a bodega con código de trazabilidad">📦 +Trazable</a>';
         } else {
-            $trzButton = '<span class="muted" style="font-size:11.5px">-</span>';
+            $trzButton = '<span class="muted st6">-</span>';
         }
 
-        $body .= '<tr class="stock-row" style="border-bottom:1px solid #e2e8f0"'
+        $body .= '<tr class="stock-row st7"'
             . ' data-inv="' . number_format($inv, 4, '.', '') . '"'
             . ' data-res="' . number_format($res, 4, '.', '') . '"'
             . ' data-disp="' . number_format($disp, 4, '.', '') . '"'
             . ' data-min="' . number_format($min, 4, '.', '') . '"'
             . ' data-trz-cat="' . $trzCat . '">'
-            . '<td style="padding:10px 14px;font-weight:700;white-space:nowrap;color:#0f172a">' . h((string)$it['item_number_prod']) . '</td>'
-            . '<td style="padding:10px 14px;font-weight:600;color:#334155">' . h((string)$it['item_title']) . '</td>'
-            . '<td style="padding:10px 14px;text-align:center;white-space:nowrap;color:#64748b;font-weight:600">' . h((string)$it['unit_name']) . '</td>'
-            . '<td style="padding:10px 14px;text-align:right;font-weight:700">' . number_format($inv, 2, ',', '.') . '</td>'
-            . '<td style="padding:10px 14px;text-align:right;color:#64748b">' . number_format($res, 2, ',', '.') . '</td>'
+            . '<td class="st8">' . h((string)$it['item_number_prod']) . '</td>'
+            . '<td class="st9">' . h((string)$it['item_title']) . '</td>'
+            . '<td class="sta">' . h((string)$it['unit_name']) . '</td>'
+            . '<td class="stb">' . number_format($inv, 2, ',', '.') . '</td>'
+            . '<td class="stc">' . number_format($res, 2, ',', '.') . '</td>'
             . '<td style="padding:10px 14px;text-align:right;font-weight:800;color:' . ($disp > 0 ? '#16a34a' : '#94a3b8') . '">' . number_format($disp, 2, ',', '.') . '</td>'
-            . '<td style="padding:10px 14px;text-align:right;color:#64748b">' . number_format($min, 2, ',', '.') . '</td>'
-            . '<td style="padding:10px 14px;text-align:center">' . $statusBadge . '</td>'
-            . '<td style="padding:8px 10px;text-align:center;white-space:nowrap">' . $trzButton . '</td>'
+            . '<td class="stc">' . number_format($min, 2, ',', '.') . '</td>'
+            . '<td class="std">' . $statusBadge . '</td>'
+            . '<td class="ste">' . $trzButton . '</td>'
             . '</tr>';
     }
 
@@ -563,6 +573,7 @@ function unibagRenderStockPage(ReceptionService $service): void
     $body .= '</div>'; // Fin panel_stock_items
 
     // PANEL 2: Bobinas Físicas en Bodega con Código de Trazabilidad
+    if ($rollsPanelLoaded) {
     $body .= '<div id="panel_stock_rolls" style="' . ($activeMainTab === 'rolls' ? '' : 'display:none') . '">';
     $body .= '<div class="card" style="border-radius:14px;padding:0;overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,.03)">
         <div style="padding:16px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
@@ -584,7 +595,7 @@ function unibagRenderStockPage(ReceptionService $service): void
             </a>
           </div>
         </div>
-        <div class="table-wrap" style="max-height:680px;overflow-y:auto">
+<style>#stock-rolls-table .sr0{border-bottom:1px solid #f1f5f9}#stock-rolls-table .sr1{padding:10px 12px;text-align:center;color:#64748b;font-size:11.5px}#stock-rolls-table .sr2{padding:10px 12px;white-space:nowrap;font-family:monospace;font-weight:800;color:#0f172a}#stock-rolls-table .sr3{padding:10px 12px;white-space:nowrap}#stock-rolls-table .sr4{padding:10px 12px}#stock-rolls-table .sr5{font-weight:700;color:#0f172a}#stock-rolls-table .sr6{font-size:11px;color:#64748b;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#stock-rolls-table .sr7{padding:10px 12px;text-align:right;font-weight:800;font-size:13.5px;color:#0f172a;white-space:nowrap}#stock-rolls-table .sr8{font-size:11px;color:#64748b;font-weight:600}#stock-rolls-table .sr9{padding:10px 12px;text-align:center;font-size:11.5px;color:#475569;white-space:nowrap}#stock-rolls-table .sra{padding:10px 12px;font-size:11.5px;color:#475569;white-space:nowrap}#stock-rolls-table .srb{font-weight:700;color:#334155}#stock-rolls-table .src{font-size:10.5px;color:#64748b}#stock-rolls-table .srd{padding:10px 12px;text-align:center;white-space:nowrap}#stock-rolls-table .sre{display:inline-flex;gap:4px;align-items:center}#stock-rolls-table .srf{padding:4px 8px;font-size:11px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;text-decoration:none;display:inline-flex;align-items:center;gap:3px;font-weight:700}#stock-rolls-table .sr10{padding:4px 7px;font-size:11px;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px}</style><div class="table-wrap" style="max-height:680px;overflow-y:auto">
           <table id="stock-rolls-table" style="width:100%;margin:0;border-collapse:collapse;font-size:12.5px">
             <thead>
               <tr style="background:#0f172a;color:#fff;position:sticky;top:0;z-index:2">
@@ -647,34 +658,34 @@ function unibagRenderStockPage(ReceptionService $service): void
 
         $rowFilterText = mb_strtolower($rCode . ' ' . $rTrzCode . ' ' . $rSku . ' ' . $rDesc . ' ' . $rOp . ' ' . $rDate);
 
-        $body .= '<tr class="stock-roll-row" style="border-bottom:1px solid #f1f5f9"'
+        $body .= '<tr class="stock-roll-row sr0"'
             . ' data-text="' . h($rowFilterText) . '"'
             . ' data-weight="' . number_format($rWeight, 3, '.', '') . '"'
             . ' data-meters="' . number_format($rMeters, 2, '.', '') . '">';
-        $body .= '<td style="padding:10px 12px;text-align:center;color:#64748b;font-size:11.5px">' . $rollIdx . '</td>';
-        $body .= '<td style="padding:10px 12px;white-space:nowrap;font-family:monospace;font-weight:800;color:#0f172a">' . h($rCode) . '</td>';
-        $body .= '<td style="padding:10px 12px;white-space:nowrap">';
+        $body .= '<td class="sr1">' . $rollIdx . '</td>';
+        $body .= '<td class="sr2">' . h($rCode) . '</td>';
+        $body .= '<td class="sr3">';
         $body .= '<button type="button" class="trz-tag-code" style="cursor:pointer;border:1px solid #ccfbf1" onclick="openTraceabilityTreeModal(' . h(json_encode($rTrzCode)) . ')" title="Ver árbol de trazabilidad 360° en vivo">' . h($rTrzCode) . ' 🔍</button>';
         $body .= ' <a href="/stock/traceability?q=' . rawurlencode($rTrzCode) . '" target="_blank" style="font-size:11.5px;color:#0f766e;text-decoration:none;font-weight:700" title="Abrir árbol en pantalla completa">↗</a>';
         $body .= '</td>';
-        $body .= '<td style="padding:10px 12px">';
-        $body .= '<div style="font-weight:700;color:#0f172a">' . h($rSku) . '</div>';
-        $body .= '<div style="font-size:11px;color:#64748b;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' . h($rDesc) . '</div>';
+        $body .= '<td class="sr4">';
+        $body .= '<div class="sr5">' . h($rSku) . '</div>';
+        $body .= '<div class="sr6">' . h($rDesc) . '</div>';
         $body .= '</td>';
-        $body .= '<td style="padding:10px 12px;text-align:right;font-weight:800;font-size:13.5px;color:#0f172a;white-space:nowrap">' . number_format($rWeight, 3, ',', '.') . ' <span style="font-size:11px;color:#64748b;font-weight:600">Kg</span></td>';
-        $body .= '<td style="padding:10px 12px;text-align:center;font-size:11.5px;color:#475569;white-space:nowrap">' . $specLabel . '</td>';
-        $body .= '<td style="padding:10px 12px;white-space:nowrap">' . $originLabel . '</td>';
-        $body .= '<td style="padding:10px 12px;font-size:11.5px;color:#475569;white-space:nowrap">';
-        $body .= '<div style="font-weight:700;color:#334155">' . h($rDate) . '</div>';
+        $body .= '<td class="sr7">' . number_format($rWeight, 3, ',', '.') . ' <span class="sr8">Kg</span></td>';
+        $body .= '<td class="sr9">' . $specLabel . '</td>';
+        $body .= '<td class="sr3">' . $originLabel . '</td>';
+        $body .= '<td class="sra">';
+        $body .= '<div class="srb">' . h($rDate) . '</div>';
         if ($rOp !== '') {
-            $body .= '<div style="font-size:10.5px;color:#64748b">👤 ' . h($rOp) . '</div>';
+            $body .= '<div class="src">👤 ' . h($rOp) . '</div>';
         }
         $body .= '</td>';
-        $body .= '<td style="padding:10px 12px;text-align:center;white-space:nowrap"><span class="badge-type ' . ($rStatus === 'RECEIVED' ? 'PRODUCT' : 'BOX') . '" style="font-size:10.5px">' . ($rStatus === 'RECEIVED' ? '✅ En Bodega' : h($rStatus)) . '</span></td>';
-        $body .= '<td style="padding:10px 12px;text-align:center;white-space:nowrap">';
-        $body .= '<div style="display:inline-flex;gap:4px;align-items:center">';
-        $body .= '<a class="btn" style="padding:4px 8px;font-size:11px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;text-decoration:none;display:inline-flex;align-items:center;gap:3px;font-weight:700" href="/rolls/' . $rId . '/label?auto_print=1" target="_blank" title="Imprimir etiqueta física 10x7 cm">🖨️ 10x7</a>';
-        $body .= '<a class="btn secondary" style="padding:4px 7px;font-size:11px;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" href="/rolls/' . $rId . '/label?server_print=1" target="_blank" title="Impresión térmica directa a impresora de red">⚡</a>';
+        $body .= '<td class="srd"><span class="badge-type ' . ($rStatus === 'RECEIVED' ? 'PRODUCT' : 'BOX') . '" style="font-size:10.5px">' . ($rStatus === 'RECEIVED' ? '✅ En Bodega' : h($rStatus)) . '</span></td>';
+        $body .= '<td class="srd">';
+        $body .= '<div class="sre">';
+        $body .= '<a class="btn srf" href="/rolls/' . $rId . '/label?auto_print=1" target="_blank" title="Imprimir etiqueta física 10x7 cm">🖨️ 10x7</a>';
+        $body .= '<a class="btn secondary sr10" href="/rolls/' . $rId . '/label?server_print=1" target="_blank" title="Impresión térmica directa a impresora de red">⚡</a>';
         $body .= '<button type="button" class="btn secondary" style="padding:4px 7px;font-size:11px;border-radius:6px;cursor:pointer" onclick="openTraceabilityTreeModal(' . h(json_encode($rTrzCode)) . ')" title="Ver árbol de trazabilidad 360°">🌳</button>';
         $body .= '</div>';
         $body .= '</td>';
@@ -694,6 +705,7 @@ function unibagRenderStockPage(ReceptionService $service): void
         . '</tfoot>'
         . '</table></div></div>';
     $body .= '</div>'; // Fin panel_stock_rolls
+    }
 
     // MODAL ÁRBOL DE TRAZABILIDAD 360°
     $body .= '<div class="print-modal" id="traceabilityTreeModal" onclick="if(event.target===this)closeTraceabilityTreeModal()">';
@@ -711,6 +723,12 @@ function unibagRenderStockPage(ReceptionService $service): void
     $body .= '<script>
     var currentTrzTab = "all";
     function switchStockMainTab(tab) {
+        if (tab === "rolls" && !document.getElementById("stock-rolls-table")) {
+            var goRolls = new URL(window.location.href);
+            goRolls.searchParams.set("tab", "rolls");
+            window.location.href = goRolls.toString();
+            return;
+        }
         var panelItems = document.getElementById("panel_stock_items");
         var panelRolls = document.getElementById("panel_stock_rolls");
         var btnItems = document.getElementById("tab_btn_items");
@@ -1209,9 +1227,10 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         $recentEntriesLimit
     );
     $groupedRecentEntries = [];
-    foreach ($recentEntries as $entry) {
+    foreach ($recentEntries as $entryIndex => $entry) {
         $groupSku = strtoupper(trim((string)($entry['item_code'] ?? '')));
         $groupKey = $groupSku !== '' ? ('sku_' . $groupSku) : ('code_' . (string)($entry['traceability_code'] ?? ''));
+        $recentEntries[$entryIndex]['group_key'] = $groupKey;
         if (!isset($groupedRecentEntries[$groupKey])) {
             $groupedRecentEntries[$groupKey] = [
                 'group_key' => $groupKey,
@@ -1627,7 +1646,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         $body .= '<div style="font-size:11px;color:#64748b">👤 ' . h($gOp) . '</div>';
         $body .= '</td>';
         $body .= '<td style="padding:10px 12px;text-align:center;white-space:nowrap">';
-        $body .= '<button type="button" class="btn secondary" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#f8fafc;border:1px solid #cbd5e1;color:#334155" onclick="openPrintLabel(' . h(json_encode($gEntries, JSON_HEX_APOS | JSON_HEX_QUOT)) . ')">🖨️ Ver etiquetas</button>';
+        $body .= '<button type="button" class="btn secondary" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#f8fafc;border:1px solid #cbd5e1;color:#334155" onclick="openPrintLabel(trzGroupEntries(' . h(json_encode((string)$group['group_key'])) . '))">🖨️ Ver etiquetas</button>';
         $body .= ' <a class="btn secondary" style="padding:5px 9px;font-size:11.5px" href="/stock/traceability-entry?bodega=' . $storehouseId . '&show_batches=1&batch_q=' . rawurlencode($gSku) . '">Lotes</a>';
         $body .= ' <button type="button" class="btn" style="padding:5px 9px;font-size:11.5px;font-weight:700;background:#fee2e2;border:1px solid #fca5a5;color:#b91c1c;margin-left:4px;cursor:pointer" onclick="deleteGroupedSku(' . h(json_encode($gSku)) . ', ' . $gCount . ')" title="Eliminar todas las etiquetas agrupadas de este código">🗑️ Borrar grupo</button>';
         $body .= '</td>';
@@ -2204,6 +2223,11 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             }).join("");
             var count = list.length;
             document.getElementById("lbl_modal_label_count").textContent = count > 1 ? (" (" + count + " etiquetas)") : " (1 etiqueta)";
+        }
+
+        // Etiquetas de un grupo, tomadas de recentTraceabilityEntries.
+        function trzGroupEntries(groupKey) {
+            return recentTraceabilityEntries.filter(function (row) { return row.group_key === groupKey; });
         }
 
         function openPrintLabel(dataOrList, exactBatch) {
@@ -3321,7 +3345,7 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     // Tabla de Bobinas con Selección de Checkbox
     $body .= '    <div style="background:#fff;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.05);margin-bottom:20px">';
     $body .= '      <div style="overflow-x:auto;max-height:700px;overflow-y:auto">';
-    $body .= '        <table style="width:100%;border-collapse:collapse;text-align:left;font-size:13px" id="table_mass_rolls">';
+    $body .= '        <style>#table_mass_rolls .tm0{padding:10px 14px;text-align:center}#table_mass_rolls .tm1{padding:10px 14px}#table_mass_rolls .tm2{display:flex;align-items:center;gap:8px}#table_mass_rolls .tm3{font-family:monospace;font-size:13.5px;font-weight:700;color:#0f172a}#table_mass_rolls .tm4{display:inline-flex;align-items:center;gap:4px;background:#eff6ff;color:#1e40af;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #bfdbfe}#table_mass_rolls .tm5{display:inline-flex;align-items:center;gap:4px;background:#fef3c7;color:#92400e;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #fde68a}#table_mass_rolls .tm6{display:inline-flex;align-items:center;gap:4px;background:#f8fafc;color:#475569;font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:12px;border:1px solid #e2e8f0}#table_mass_rolls .tm7{font-weight:700;color:#0f172a}#table_mass_rolls .tm8{font-size:11.5px;color:#64748b;max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#table_mass_rolls .tm9{padding:10px 14px;text-align:right;font-weight:800;color:#0f172a}#table_mass_rolls .tma{padding:10px 14px;text-align:right;font-size:12px;color:#64748b}#table_mass_rolls .tmb{background:#e0f2fe;color:#0369a1;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800}#table_mass_rolls .tmc{background:#f3e8ff;color:#7e22ce;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800}#table_mass_rolls .tmd{background:#f1f5f9;color:#64748b;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600}#table_mass_rolls .tme{padding:10px 14px;text-align:center;white-space:nowrap}</style><table style="width:100%;border-collapse:collapse;text-align:left;font-size:13px" id="table_mass_rolls">';
     $body .= '          <thead style="background:#f8fafc;border-bottom:2px solid #e2e8f0;position:sticky;top:0;z-index:20">';
     $body .= '            <tr>';
     $body .= '              <th style="padding:12px 14px;width:40px;text-align:center">';
@@ -3367,54 +3391,54 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
             $isChild ? 'hija corte child' : 'madre mother mp',
         ]));
 
-        $body .= '            <tr class="mass-roll-row" id="mass_row_' . $rId . '" data-roll-id="' . $rId . '" data-wh-id="' . $rWhId . '" data-stage="' . h($rStage) . '" data-is-child="' . ($isChild ? '1' : '0') . '" data-is-splice="' . ($isSplice ? '1' : '0') . '" data-kg="' . $rKg . '" data-search="' . h($searchBlob) . '" onclick="onMassRowClick(event, this)" style="border-bottom:1px solid #f1f5f9;cursor:pointer;transition:background-color 0.15s">';
-        $body .= '              <td style="padding:10px 14px;text-align:center" onclick="event.stopPropagation()">';
-        $body .= '                <input type="checkbox" name="selected_rolls[]" value="' . $rId . '" class="mass-roll-chk" data-kg="' . $rKg . '" data-code="' . h($rCode) . '" onchange="onMassRowCheckChange(this)" style="width:18px;height:18px;cursor:pointer">';
-        $body .= '              </td>';
-        $body .= '              <td style="padding:10px 14px">';
-        $body .= '                <div style="display:flex;align-items:center;gap:8px">';
-        $body .= '                  <span style="font-family:monospace;font-size:13.5px;font-weight:700;color:#0f172a">' . h($rCode) . '</span>';
-        $body .= '                  <a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" onclick="event.stopPropagation()" style="text-decoration:none;font-size:13px" title="Ver Árbol de Trazabilidad 360°">🌳</a>';
-        $body .= '                </div>';
-        $body .= '              </td>';
-        $body .= '              <td style="padding:10px 14px">';
+        $body .= '<tr class="mass-roll-row" id="mass_row_' . $rId . '" data-roll-id="' . $rId . '" data-wh-id="' . $rWhId . '" data-stage="' . h($rStage) . '" data-is-child="' . ($isChild ? '1' : '0') . '" data-is-splice="' . ($isSplice ? '1' : '0') . '" data-kg="' . $rKg . '" data-search="' . h($searchBlob) . '" onclick="onMassRowClick(event, this)" style="border-bottom:1px solid #f1f5f9;cursor:pointer;transition:background-color 0.15s">';
+        $body .= '<td class="tm0" onclick="event.stopPropagation()">';
+        $body .= '<input type="checkbox" name="selected_rolls[]" value="' . $rId . '" class="mass-roll-chk" data-kg="' . $rKg . '" data-code="' . h($rCode) . '" onchange="onMassRowCheckChange(this)" style="width:18px;height:18px;cursor:pointer">';
+        $body .= '</td>';
+        $body .= '<td class="tm1">';
+        $body .= '<div class="tm2">';
+        $body .= '<span class="tm3">' . h($rCode) . '</span>';
+        $body .= '<a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" onclick="event.stopPropagation()" style="text-decoration:none;font-size:13px" title="Ver Árbol de Trazabilidad 360°">🌳</a>';
+        $body .= '</div>';
+        $body .= '</td>';
+        $body .= '<td class="tm1">';
         if ($isChild) {
-            $body .= '                <span style="display:inline-flex;align-items:center;gap:4px;background:#eff6ff;color:#1e40af;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #bfdbfe">👶 Hija Corte ' . ($rParentCode !== '' ? '(Madre: ' . h($rParentCode) . ')' : '') . '</span>';
+            $body .= '<span class="tm4">👶 Hija Corte ' . ($rParentCode !== '' ? '(Madre: ' . h($rParentCode) . ')' : '') . '</span>';
         } elseif ($isSplice) {
-            $body .= '                <span style="display:inline-flex;align-items:center;gap:4px;background:#fef3c7;color:#92400e;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:12px;border:1px solid #fde68a">🔗 Empalme</span>';
+            $body .= '<span class="tm5">🔗 Empalme</span>';
         } else {
-            $body .= '                <span style="display:inline-flex;align-items:center;gap:4px;background:#f8fafc;color:#475569;font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:12px;border:1px solid #e2e8f0">📦 Madre / MP</span>';
+            $body .= '<span class="tm6">📦 Madre / MP</span>';
         }
-        $body .= '              </td>';
-        $body .= '              <td style="padding:10px 14px">';
-        $body .= '                <div style="font-weight:700;color:#0f172a">' . h($rSku) . '</div>';
-        $body .= '                <div style="font-size:11.5px;color:#64748b;max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' . h($rDesc) . '">' . h($rDesc) . '</div>';
-        $body .= '              </td>';
-        $body .= '              <td style="padding:10px 14px">';
+        $body .= '</td>';
+        $body .= '<td class="tm1">';
+        $body .= '<div class="tm7">' . h($rSku) . '</div>';
+        $body .= '<div class="tm8" title="' . h($rDesc) . '">' . h($rDesc) . '</div>';
+        $body .= '</td>';
+        $body .= '<td class="tm1">';
         $whStyle = $rWhId === 58 ? 'background:#fefce8;color:#854d0e;border:1px solid #fef08a' : 'background:#f1f5f9;color:#334155;border:1px solid #e2e8f0';
-        $body .= '                <span style="' . $whStyle . ';padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700">' . h($rWhCode !== '' ? "{$rWhCode} - {$rWhName}" : $rWhName) . '</span>';
-        $body .= '              </td>';
-        $body .= '              <td style="padding:10px 14px;text-align:right;font-weight:800;color:#0f172a">' . number_format($rKg, 2, ',', '.') . ' kg</td>';
-        $body .= '              <td style="padding:10px 14px;text-align:right;font-size:12px;color:#64748b">';
+        $body .= '<span style="' . $whStyle . ';padding:3px 8px;border-radius:6px;font-size:12px;font-weight:700">' . h($rWhCode !== '' ? "{$rWhCode} - {$rWhName}" : $rWhName) . '</span>';
+        $body .= '</td>';
+        $body .= '<td class="tm9">' . number_format($rKg, 2, ',', '.') . ' kg</td>';
+        $body .= '<td class="tma">';
         $body .= ($rMeters > 0 ? number_format($rMeters, 0, ',', '.') . ' m' : '-');
         if ($rWidth > 0) {
             $body .= ' · ' . number_format($rWidth, 0, ',', '.') . ' mm';
         }
-        $body .= '              </td>';
-        $body .= '              <td style="padding:10px 14px;text-align:center">';
+        $body .= '</td>';
+        $body .= '<td class="tm0">';
         if ($rStage === 'CUT') {
-            $body .= '                <span style="background:#e0f2fe;color:#0369a1;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800">CORTE</span>';
+            $body .= '<span class="tmb">CORTE</span>';
         } elseif ($rStage === 'PRINT') {
-            $body .= '                <span style="background:#f3e8ff;color:#7e22ce;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800">IMPRESIÓN</span>';
+            $body .= '<span class="tmc">IMPRESIÓN</span>';
         } else {
-            $body .= '                <span style="background:#f1f5f9;color:#64748b;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600">' . h($rStage ?: 'STOCK') . '</span>';
+            $body .= '<span class="tmd">' . h($rStage ?: 'STOCK') . '</span>';
         }
-        $body .= '              </td>';
-        $body .= '              <td style="padding:10px 14px;text-align:center;white-space:nowrap" onclick="event.stopPropagation()">';
-        $body .= '                <a href="/rolls/' . $rId . '/label?server_print=1" target="_blank" class="btn" style="background:#15803d;color:#fff;font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none;margin-right:2px" title="Imprimir Zebra (100×70)">🖨️</a>';
-        $body .= '                <a href="/rolls/' . $rId . '/label" target="_blank" class="btn secondary" style="font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none;margin-right:2px" title="Vista Previa Etiqueta">👁️</a>';
-        $body .= '                <a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" class="btn secondary" style="font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none" title="Ver Árbol 360°">🌳</a>';
-        $body .= '              </td>';
+        $body .= '</td>';
+        $body .= '<td class="tme" onclick="event.stopPropagation()">';
+        $body .= '<a href="/rolls/' . $rId . '/label?server_print=1" target="_blank" class="btn" style="background:#15803d;color:#fff;font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none;margin-right:2px" title="Imprimir Zebra (100×70)">🖨️</a>';
+        $body .= '<a href="/rolls/' . $rId . '/label" target="_blank" class="btn secondary" style="font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none;margin-right:2px" title="Vista Previa Etiqueta">👁️</a>';
+        $body .= '<a href="/stock/traceability?q=' . urlencode($rCode) . '" target="_blank" class="btn secondary" style="font-size:11px;padding:3px 7px;border-radius:4px;text-decoration:none" title="Ver Árbol 360°">🌳</a>';
+        $body .= '</td>';
         $body .= '            </tr>';
     }
 

@@ -1004,11 +1004,16 @@ trait WarehouseInventoryServiceTrait
         ];
     }
 
-    public function listWarehousesWithCapacities(): array
+    /**
+     * @param bool $forceSync true = revisa el ERP si pasó más de 1 minuto; false = respeta el intervalo normal (15 min).
+     * @param int|null $onlyErpStorehouseId calcula las existencias ERP solo de esta bodega (mucho más rápido).
+     */
+    public function listWarehousesWithCapacities(bool $forceSync = true, ?int $onlyErpStorehouseId = null): array
     {
-        $this->syncWarehousesFromErp(true);
+        $recentlySynced = (int)$this->getAppSetting('erp_warehouses_synced_at', '0') >= time() - 60;
+        $this->syncWarehousesFromErp($forceSync && !$recentlySynced);
 
-        $summaryRows = $this->stockSummaryWithCapacities();
+        $summaryRows = $this->stockSummaryWithCapacities($onlyErpStorehouseId);
         $summaryByWarehouseId = [];
         foreach ($summaryRows as $row) {
             $warehouseId = (int)($row['warehouse_id'] ?? 0);

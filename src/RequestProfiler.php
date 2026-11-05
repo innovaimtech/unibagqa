@@ -50,6 +50,14 @@ final class RequestProfiler
         foreach (self::$queries as $q) {
             $dbMs += $q['ms'];
         }
+        // Consultas repetidas: delatan bucles N+1 aunque cada una por separado sea rápida.
+        $repeated = [];
+        foreach (self::$queries as $q) {
+            $key = mb_substr(preg_replace('/\s+/', ' ', $q['sql']) ?? '', 0, 120);
+            $repeated[$key] = ($repeated[$key] ?? 0) + 1;
+        }
+        arsort($repeated);
+        $repeated = array_filter(array_slice($repeated, 0, 5, true), static fn(int $n): bool => $n > 1);
         usort(self::$queries, static fn(array $a, array $b): int => $b['ms'] <=> $a['ms']);
         $opcache = ['enabled' => false];
         if (function_exists('opcache_get_status')) {
@@ -80,6 +88,7 @@ final class RequestProfiler
                 'conn' => $q['conn'],
                 'sql' => mb_substr(preg_replace('/\s+/', ' ', $q['sql']) ?? '', 0, 220),
             ], array_slice(self::$queries, 0, 5)),
+            'repeated' => $repeated,
         ];
         $dir = dirname(__DIR__) . '/storage/logs';
         if (!is_dir($dir)) {

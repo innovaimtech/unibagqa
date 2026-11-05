@@ -99,11 +99,15 @@ trait ErpSyncServiceTrait
     private function upsertTraceWarehouse(int $code, string $name, ?int $erpStorehouseId = null): int
     {
         if ($erpStorehouseId !== null && $erpStorehouseId > 0) {
-            $stmt = $this->pdo->prepare('SELECT id, code FROM warehouses WHERE erp_storehouse_id = :erp_id LIMIT 1');
+            $stmt = $this->pdo->prepare('SELECT id, code, name FROM warehouses WHERE erp_storehouse_id = :erp_id LIMIT 1');
             $stmt->execute([':erp_id' => $erpStorehouseId]);
             $row = $stmt->fetch();
             if ($row !== false) {
                 $id = (int)$row['id'];
+                // Rendimiento: si nada cambió no se consulta ni se escribe (eran 3 consultas por bodega).
+                if ((string)$row['name'] === $name && (int)$row['code'] === $code) {
+                    return $id;
+                }
                 $chk = $this->pdo->prepare('SELECT id FROM warehouses WHERE code = :code AND id != :id LIMIT 1');
                 $chk->execute([':code' => $code, ':id' => $id]);
                 if ($chk->fetch() !== false) {

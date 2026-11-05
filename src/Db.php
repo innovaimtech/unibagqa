@@ -33,6 +33,8 @@ final class Db
 {
     /** @var array<string, PDO> */
     private static array $connections = [];
+    /** @var array<string, float> Último momento en que se comprobó cada conexión. */
+    private static array $lastCheck = [];
 
     /**
      * Normaliza valores de configuración provenientes de variables de entorno:
@@ -214,14 +216,21 @@ final class Db
         // Cache de conexiones: si ya existe, verificar que siga viva antes de reusarla.
         // ---
         // Connection cache: if it exists, verify it is still alive before reusing.
+        // Rendimiento: solo se comprueba si lleva más de 30 s sin verificarse; antes era un viaje a la base por cada llamada.
         if (isset(self::$connections[$key])) {
+            $now = microtime(true);
+            if ($now - (self::$lastCheck[$key] ?? 0.0) < 30.0) {
+                return self::$connections[$key];
+            }
             try {
                 self::$connections[$key]->query('SELECT 1');
+                self::$lastCheck[$key] = $now;
                 return self::$connections[$key];
             } catch (Throwable) {
                 unset(self::$connections[$key]);
             }
         }
+        self::$lastCheck[$key] = microtime(true);
 
         // DSN base para MySQL/MariaDB (sin charset). Se arma aparte para soportar fallback.
         // ---

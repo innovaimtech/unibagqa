@@ -5182,7 +5182,7 @@ SQL;
         ];
     }
 
-    public function stockSummaryWithCapacities(): array
+    public function stockSummaryWithCapacities(?int $onlyErpStorehouseId = null): array
     {
         $capacities = [];
         $stmt = $this->pdo->prepare('SELECT warehouse_id, capacity_units_total, capacity_pallets FROM warehouse_capacities');
@@ -5243,7 +5243,7 @@ SQL;
                     FROM item_shops_storehouses iss
                     JOIN item it ON it.id = iss.item_id AND it.item_status = 1
                     LEFT JOIN item_units u ON u.id = it.item_unit
-                    WHERE iss.iss_inventory > 0
+                    WHERE iss.iss_inventory > 0" . ($onlyErpStorehouseId !== null ? ' AND iss.st_id = ' . (int)$onlyErpStorehouseId : '') . "
                     GROUP BY iss.st_id"
                 );
                 foreach ($stmtStock->fetchAll(PDO::FETCH_ASSOC) as $srow) {

@@ -91,6 +91,7 @@ if (handleAuthRoutes($path, $method)) {
     exit;
 }
 unibagEnforceAuthenticatedAreaAccess($path);
+unibagReleaseSessionLockForReadOnlyPage($path, $method);
 
 // 3. Fast-path para lectura de balanza sin abrir conexión a BD
 if ($path === '/api/scale/weight' && $method === 'GET') {

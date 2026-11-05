@@ -72,3 +72,38 @@
         syncPeriodRangeForm: syncPeriodRangeForm
     };
 })();
+
+// Barra de carga: al hacer clic en un enlace o enviar un formulario se ve de inmediato que la página está cargando.
+(function () {
+  var bar = null, timer = null;
+  function hide() {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (bar) { bar.classList.remove('on'); }
+  }
+  function show() {
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'nav-progress';
+      document.body.appendChild(bar);
+    }
+    hide();
+    void bar.offsetWidth;
+    bar.classList.add('on');
+    timer = setTimeout(hide, 10000); // Descargas y otros casos en que la página no cambia.
+  }
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    var a = e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a || a.target === '_blank' || a.hasAttribute('download')) return;
+    var href = a.getAttribute('href') || '';
+    if (href === '' || href.charAt(0) === '#' || /^(javascript|mailto|tel):/i.test(href)) return;
+    if (/[?&]download=|export|\.(xlsx?|pdf|docx?|pptx?|csv|zip)(\?|$)/i.test(href)) return;
+    if (a.origin !== location.origin) return;
+    show();
+  });
+  document.addEventListener('submit', function (e) {
+    if (e.defaultPrevented || (e.target.target && e.target.target !== '_self')) return;
+    show();
+  });
+  window.addEventListener('pageshow', hide);
+})();

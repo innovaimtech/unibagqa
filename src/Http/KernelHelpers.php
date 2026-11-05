@@ -89,6 +89,70 @@ function unibagInjectHardwareAssets(string $html): string
     return $html . PHP_EOL . $assets;
 }
 
+/**
+ * Libera el bloqueo de la sesión en las páginas de solo lectura.
+ *
+ * PHP bloquea el archivo de sesión durante toda la solicitud: si el usuario hace clic en otro enlace mientras una
+ * página pesada sigue calculando, la página nueva queda esperando a que la anterior termine. Con esto la navegación
+ * ya no se encola. Lo que una página escriba en $_SESSION después de liberar se guarda al terminar la solicitud.
+ *
+ * No aplica a Producción ni a Recepción (imprimen etiquetas por GET y usan la cola de impresión de la sesión), ni
+ * cuando hay etiquetas pendientes de entregar al navegador.
+ */
+function unibagReleaseSessionLockForReadOnlyPage(string $path, string $method): void
+{
+    if (($method !== 'GET' && $method !== 'HEAD') || session_status() !== PHP_SESSION_ACTIVE) {
+        return;
+    }
+    if (!empty($_SESSION['unibag_client_print_queue'])) {
+        return;
+    }
+    $readOnly = $path === '/';
+    foreach (['/reports', '/stock', '/warehouses', '/trazabilidad', '/traceability', '/bonificaciones'] as $prefix) {
+        if ($path === $prefix || str_starts_with($path, $prefix . '/')) {
+            $readOnly = true;
+            break;
+        }
+    }
+    if (!$readOnly) {
+        return;
+    }
+    $snapshot = $_SESSION;
+    session_write_close();
+    register_shutdown_function(static function () use ($snapshot): void {
+        unibagSaveLateSessionChanges($snapshot);
+    });
+}
+
+/** Guarda lo que cambió en $_SESSION después de liberar la sesión, sin pisar lo que otra pestaña haya escrito. */
+function unibagSaveLateSessionChanges(array $snapshot): void
+{
+    $current = $_SESSION ?? [];
+    if ($current === $snapshot || session_status() === PHP_SESSION_ACTIVE) {
+        return;
+    }
+    if (headers_sent()) {
+        error_log('Sesión: cambios sin guardar porque la respuesta ya se envió: ' . implode(',', array_keys(array_diff_key($current, $snapshot))));
+        return;
+    }
+    @ini_set('session.use_cookies', '0');
+    session_cache_limiter('');
+    if (!@session_start()) {
+        return;
+    }
+    foreach ($current as $key => $value) {
+        if (!array_key_exists($key, $snapshot) || $snapshot[$key] !== $value) {
+            $_SESSION[$key] = $value;
+        }
+    }
+    foreach (array_keys($snapshot) as $key) {
+        if (!array_key_exists($key, $current)) {
+            unset($_SESSION[$key]);
+        }
+    }
+    session_write_close();
+}
+
 function unibagInjectDatePickerAssets(string $html): string
 {
     $html = unibagInjectHardwareAssets($html);

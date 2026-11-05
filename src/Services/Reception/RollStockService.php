@@ -1477,6 +1477,23 @@ trait RollStockServiceTrait
      *
      * @return array<int, array<string, mixed>>
      */
+    /** Totales de bobinas de la bodega sin traer el detalle (mismo criterio que listRollsForWarehouseInventory). */
+    public function summarizeRollsForWarehouseInventory(int $storehouseIdOrCode, int $limit = 2000): array
+    {
+        $stmt = $this->pdo->prepare('SELECT COUNT(*) AS n, COALESCE(SUM(weight_kg), 0) AS kg, COALESCE(SUM(meters), 0) AS meters FROM (
+                SELECT r.weight_kg, r.meters
+                FROM rolls r
+                JOIN warehouses w ON w.id = r.warehouse_id
+                WHERE (w.id = :id1 OR w.code = :code1 OR w.erp_storehouse_id = :erpid1 OR (:erpid2 IN (16, 3000) AND w.id IN (18, 58)))
+                  AND r.status IN ("RECEIVED", "IN_PROCESS", "BLOCKED")
+                ORDER BY r.id DESC
+                LIMIT ' . max(1, $limit) . '
+            ) t');
+        $stmt->execute([':id1' => $storehouseIdOrCode, ':code1' => $storehouseIdOrCode, ':erpid1' => $storehouseIdOrCode, ':erpid2' => $storehouseIdOrCode]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        return ['count' => (int)($row['n'] ?? 0), 'weight_kg' => (float)($row['kg'] ?? 0), 'meters' => (float)($row['meters'] ?? 0)];
+    }
+
     public function listRollsForWarehouseInventory(int $storehouseIdOrCode, int $limit = 2000): array
     {
         $sql = 'SELECT r.id, r.roll_code, r.weight_kg, r.received_qty, r.reception_mode,
@@ -1515,6 +1532,7 @@ trait RollStockServiceTrait
         $stmt->execute();
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+        $this->preloadErpImportContainerMeta(array_column($rows, 'import_container_id'));
         $containerCodes = [];
         foreach ($rows as &$row) {
             $cId = (int)($row['import_container_id'] ?? 0);
@@ -1783,7 +1801,7 @@ trait RollStockServiceTrait
         static $done = false;
         if ($done) return;
         // Rendimiento: estas verificaciones (ALTER ... MODIFY, information_schema) se corrían en cada página.
-        $schemaVersion = 'twe-v1';
+        $schemaVersion = 'twe-v2';
         $gated = $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql' && class_exists('SchemaGate');
         if ($gated && SchemaGate::done('traceability-entries', $schemaVersion)) {
             $done = true;
@@ -1857,6 +1875,12 @@ trait RollStockServiceTrait
             @$this->pdo->exec("ALTER TABLE pallets MODIFY destination_mode VARCHAR(20) NOT NULL DEFAULT 'BODEGA'");
             @$this->pdo->exec("ALTER TABLE boxes MODIFY source_roll_id BIGINT UNSIGNED NULL DEFAULT NULL");
             @$this->pdo->exec("ALTER TABLE boxes MODIFY destination_mode VARCHAR(20) NOT NULL DEFAULT 'BODEGA'");
+            // Sin este índice, listar las bobinas de una bodega recorría la tabla completa por cada bobina.
+            try {
+                $this->pdo->exec('CREATE INDEX idx_twe_entity ON traceability_warehouse_entries (entity_type, entity_id)');
+            } catch (Throwable) {
+                // El índice ya existe.
+            }
             if ($gated) {
                 SchemaGate::mark('traceability-entries', $schemaVersion);
             }
