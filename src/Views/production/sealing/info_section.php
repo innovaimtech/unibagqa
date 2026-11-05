@@ -249,7 +249,7 @@
                     $planTotal = 0.0;
                     foreach ($entregas as $entPlan) { $planTotal += (float)($entPlan['prodplan_amt'] ?? 0); }
                     $programadaTotal = $planTotal > 0 ? $planTotal : (float)($agenda['ag_amount'] ?? 0);
-                    $producidaTotal = (float)($stats['total_produced_all'] ?? $stats['total_produced_this'] ?? 0);
+                    $producidaTotal = (float)($stats['total_produced_cc'] ?? $stats['total_produced_all'] ?? $stats['total_produced_this'] ?? 0);
                     $restanteTotal = max(0.0, $programadaTotal - $producidaTotal);
                     ?>
                     <tr>

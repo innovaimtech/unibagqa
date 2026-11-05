@@ -1461,6 +1461,34 @@ trait WorkOrderAgendaServiceTrait
             $totMetersAll = $totMetersThis;
         }
 
+        // Total producido de toda la CC/OT (todas las agendas del mismo prd en el mismo tipo de máquina)
+        $totProducedCc = $totProducedAll;
+        try {
+            $stmtCc = $this->erpPdo->prepare(
+                "SELECT SUM(t3.evt_amount) AS tot_cc
+                 FROM prod_agenda pa
+                 INNER JOIN prod_worker_ot t2 ON t2.wok_ag_id = pa.id
+                 INNER JOIN prod_worker_ot_events t3 ON t3.evt_prod_worker_otid = t2.id
+                 WHERE pa.ag_prdid = :prdid
+                   AND pa.ag_equipotype_id = :eqtype
+                   AND t3.evt_type = 'prod'
+                   AND t3.overrideembalaje_act = :phase
+                   AND t3.evt_status > 0
+                   AND (t3.evt_comments IS NULL OR (t3.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t3.evt_comments NOT LIKE '%ROLL-SE-%'))"
+            );
+            $stmtCc->execute([
+                ':prdid' => (int)($agendaData['ag_prdid'] ?? $agendaData['prdid'] ?? 0),
+                ':eqtype' => (int)($agendaData['ag_equipotype_id'] ?? 0),
+                ':phase' => $statsPackaging,
+            ]);
+            $ccRow = $stmtCc->fetch();
+            if (is_array($ccRow) && $ccRow['tot_cc'] !== null) {
+                $totProducedCc = max($totProducedAll, (float)$ccRow['tot_cc']);
+            }
+        } catch (Throwable) {
+            $totProducedCc = $totProducedAll;
+        }
+
         $surplusFrente = max(0.0, $totPulpoFrenteAgenda - $totPulpoDorsoAgenda);
         $surplusDorso = max(0.0, $totPulpoDorsoAgenda - $totPulpoFrenteAgenda);
 
@@ -1731,6 +1759,7 @@ trait WorkOrderAgendaServiceTrait
             'stats' => [
                 'total_produced_this' => $displayProducedThis,
                 'total_produced_all' => $displayProducedAll,
+                'total_produced_cc' => $totProducedCc,
                 'total_meters' => $totMetersThis,
                 'total_kilos' => $totKilosThis,
                 'target_amount' => $targetAmountThis,
