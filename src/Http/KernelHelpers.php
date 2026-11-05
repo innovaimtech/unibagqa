@@ -67,6 +67,11 @@ function unibagInjectHardwareAssets(string $html): string
         'printerName' => trim((string)(class_exists('Env') ? (Env::get('PRINT_PRINTER_NAME', '') ?? '') : '')),
         'printLanguage' => strtolower(trim((string)(class_exists('Env') ? (Env::get('PRINT_LANGUAGE', 'zpl') ?? 'zpl') : 'epl'))),
     ];
+    if (class_exists('PrintService')) {
+        $hwPrintService = new PrintService($_ENV);
+        $hwConfig['printLanguage'] = $hwPrintService->getConfiguredPrintLanguage();
+        $hwConfig['printDefaults'] = $hwPrintService->printTuningDefaults();
+    }
     $queuedJobs = class_exists('PrintService') ? PrintService::drainClientJobs() : [];
 
     $jsonFlags = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP;
@@ -74,7 +79,7 @@ function unibagInjectHardwareAssets(string $html): string
     $queueJson = json_encode($queuedJobs, $jsonFlags) ?: '[]';
 
     $assets = '<script id="unibag-hardware-config">window.__UNIBAG_HW_CONFIG__=' . $cfgJson . ';window.__UNIBAG_PRINT_QUEUE__=' . $queueJson . ';</script>'
-        . '<script src="/assets/js/unibag-hardware.js?v=20261104"></script>';
+        . '<script src="/assets/js/unibag-hardware.js?v=20261105"></script>';
 
     $headPos = stripos($html, '</head>');
     if ($headPos !== false) {

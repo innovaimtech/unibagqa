@@ -91,6 +91,17 @@ final class PrintService
         return $this->getPrintLanguage();
     }
 
+    /** Valores vigentes de intensidad y velocidad; null = los define la propia impresora. */
+    public function printTuningDefaults(): array
+    {
+        $useDevice = (string)($this->env['PRINT_EPL_USE_DEVICE_SETTINGS'] ?? '0') === '1';
+        return [
+            'epl' => ['density' => $useDevice ? null : $this->getEplDensity(), 'speed' => $useDevice ? null : $this->getEplSpeed()],
+            'tspl' => ['density' => $this->getTsplDensity(), 'speed' => $this->getTsplSpeed()],
+            'zpl' => ['density' => $this->getZplDarkness(), 'speed' => 3],
+        ];
+    }
+
     public function getConfiguredPrinterName(): string
     {
         $profile = $this->getPrintProfile();

@@ -8,8 +8,9 @@
  * 1. Balanzas Digitales (LP-7516 / Toledo / CAS / Ohaus / RS-232 a USB):
  *    - Captura 100% nativa en el navegador vía Web Serial API (navigator.serial)
  *      SIN requerir scripts, servicios ni software externo instalado en la PC.
- *    - Auto-reconexión automática al cambiar de página (getPorts()) y liberación
- *      limpia en 'pagehide' para evitar bloqueo de puertos COM en Windows.
+ *    - Balanza: se reabre sola al cambiar de página (getPorts()) y se libera en 'pagehide'.
+ *    - Impresora: queda vinculada al navegador y su puerto se abre solo mientras se imprime,
+ *      así no depende de la página en que se esté ni compite entre pestañas.
  *    - Desactivación explícita de DTR/RTS para compatibilidad con chips CH340,
  *      FTDI y Prolific.
  *    - Soporte simultáneo de transmisión continua y consulta bajo demanda ("R\r\n").
@@ -48,7 +49,11 @@
     serialPrinterBaud: "unibag_hw_serial_printer_baud",
     // Posición del puerto entre los que comparten el mismo VID/PID (dos adaptadores CH340 iguales)
     scaleIdx: "unibag_hw_scale_idx",
-    serialPrinterIdx: "unibag_hw_serial_printer_idx"
+    serialPrinterIdx: "unibag_hw_serial_printer_idx",
+    usbPrinterId: "unibag_hw_usb_printer_id",
+    printTuning: "unibag_hw_print_tuning",
+    lastPrintLanguage: "unibag_hw_last_print_language",
+    bridgeLastOnline: "unibag_hw_bridge_last_online"
   };
 
   function lsGet(key, fallback) {
@@ -89,6 +94,109 @@
       bytes[i] = code <= 0xff ? code : 0x3f;
     }
     return bytes;
+  }
+
+  // --- Intensidad y velocidad elegidas por el usuario en esta PC (se aplican al comando de la etiqueta) ---
+  var TUNING_RANGES = {
+    epl: { density: [0, 15], speed: [1, 6] },
+    tspl: { density: [0, 15], speed: [1, 6] },
+    zpl: { density: [-30, 30], speed: [2, 8] }
+  };
+
+  function normalizeLanguage(language) {
+    var lang = String(language || "").toLowerCase();
+    return TUNING_RANGES[lang] ? lang : "";
+  }
+
+  function readPrintTuning() {
+    try {
+      var data = JSON.parse(lsGet(LS_KEYS.printTuning, "{}"));
+      return data && typeof data === "object" ? data : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function tuningValueFor(language, field) {
+    var lang = normalizeLanguage(language);
+    if (!lang) return null;
+    var saved = readPrintTuning()[lang];
+    var raw = saved ? saved[field] : null;
+    if (raw === null || raw === undefined || raw === "") return null;
+    var num = Number(raw);
+    var range = TUNING_RANGES[lang][field];
+    return isFinite(num) && num >= range[0] && num <= range[1] ? num : null;
+  }
+
+  function savePrintTuning(language, field, value) {
+    var lang = normalizeLanguage(language);
+    if (!lang) return;
+    var data = readPrintTuning();
+    data[lang] = data[lang] || {};
+    if (value === null || value === undefined || value === "") {
+      delete data[lang][field];
+    } else {
+      data[lang][field] = Number(value);
+    }
+    lsSet(LS_KEYS.printTuning, JSON.stringify(data));
+  }
+
+  // Quita las líneas indicadas y agrega las nuevas después de cada línea que inicia una etiqueta.
+  function rewriteCommandLines(content, isOldLine, isStartLine, newLines) {
+    var text = String(content);
+    var eol = text.indexOf("\r\n") >= 0 ? "\r\n" : "\n";
+    var out = [];
+    var inserted = false;
+    text.split(/\r?\n/).forEach(function (line) {
+      if (isOldLine(line)) return;
+      out.push(line);
+      if (isStartLine(line)) {
+        Array.prototype.push.apply(out, newLines);
+        inserted = true;
+      }
+    });
+    if (!inserted) out = newLines.concat(out);
+    return out.join(eol);
+  }
+
+  function applyPrintTuning(content, language, density, speed) {
+    var lang = normalizeLanguage(language);
+    var text = String(content === null || content === undefined ? "" : content);
+    var hasDensity = density !== null && density !== undefined;
+    var hasSpeed = speed !== null && speed !== undefined;
+    if (!lang || (!hasDensity && !hasSpeed)) return text;
+
+    if (lang === "zpl") {
+      if (hasDensity) text = text.replace(/\^MD-?\d+/g, "");
+      if (hasSpeed) text = text.replace(/\^PR\d+(?:,\d+)*/g, "");
+      var zpl = (hasSpeed ? "^PR" + speed : "") + (hasDensity ? "^MD" + density : "");
+      return /\^XA/.test(text) ? text.replace(/\^XA/g, "^XA" + zpl) : zpl + text;
+    }
+    if (lang === "tspl") {
+      var tsplLines = [];
+      if (hasSpeed) tsplLines.push("SPEED " + speed);
+      if (hasDensity) tsplLines.push("DENSITY " + density);
+      return rewriteCommandLines(text, function (line) {
+        return (hasDensity && /^DENSITY\s+\d+\s*$/i.test(line)) || (hasSpeed && /^SPEED\s+[\d.]+\s*$/i.test(line));
+      }, function (line) {
+        return /^SIZE\s/i.test(line);
+      }, tsplLines);
+    }
+    var eplLines = [];
+    if (hasDensity) eplLines.push("D" + density);
+    if (hasSpeed) eplLines.push("S" + speed);
+    return rewriteCommandLines(text, function (line) {
+      return (hasDensity && /^D\d{1,2}\s*$/.test(line)) || (hasSpeed && /^S\d{1,2}\s*$/.test(line));
+    }, function (line) {
+      return /^N\s*$/.test(line);
+    }, eplLines);
+  }
+
+  function tuneJob(job) {
+    var lang = normalizeLanguage(job.language || CFG.printLanguage);
+    if (!lang) return;
+    lsSet(LS_KEYS.lastPrintLanguage, lang);
+    job.content = applyPrintTuning(job.content, lang, tuningValueFor(lang, "density"), tuningValueFor(lang, "speed"));
   }
 
   function portSignature(port) {
@@ -437,7 +545,7 @@
       if (!candidate) {
         for (var j = 0; j < ports.length; j++) {
           var s = portSignature(ports[j]);
-          if (!serialPrinterSig || s !== serialPrinterSig || ports.length === 1) {
+          if (!serialPrinterSig || s !== serialPrinterSig) {
             candidate = ports[j];
             break;
           }
@@ -726,10 +834,9 @@
     };
   }
 
-  // Liberar el puerto COM limpiamente al navegar a otra pantalla
+  // Liberar el puerto COM de la balanza al navegar a otra pantalla (la impresora no lo mantiene abierto)
   window.addEventListener("pagehide", function () {
     disconnectScalePort();
-    disconnectSerialPrinter();
   });
 
   if (scaleState.supported && navigator.serial.addEventListener) {
@@ -738,24 +845,30 @@
         disconnectScalePort();
         showToast("⚠️ Se desconectó el cable USB de la balanza.", "err", 4500);
       }
+      refreshPrinterLink();
     });
     navigator.serial.addEventListener("connect", function () {
       setTimeout(function () {
         autoReconnectScale();
+        refreshPrinterLink();
       }, 300);
     });
+  }
+  if (typeof navigator !== "undefined" && navigator.usb && navigator.usb.addEventListener) {
+    navigator.usb.addEventListener("disconnect", function () { refreshPrinterLink(); });
+    navigator.usb.addEventListener("connect", function () { refreshPrinterLink(); });
   }
 
   // ===========================================================================
   // 2. MOTOR UNIVERSAL DE IMPRESIÓN TÉRMICA (PUENTE LOCAL / WEBUSB / WEBSERIAL)
   // ===========================================================================
+  // usbDevice y serialPrinterPort indican la impresora VINCULADA; el puerto solo se abre durante cada impresión.
   var printerState = {
     webUsbSupported: typeof navigator !== "undefined" && !!navigator.usb,
     usbDevice: null,
-    usbOutEndpoint: 0,
-    usbInterfaceNumber: 0,
     serialPrinterPort: null,
-    bridgeOnline: null,
+    // El estado conocido del servicio local se muestra de inmediato; la comprobación lo corrige si cambió.
+    bridgeOnline: lsGet(LS_KEYS.bridgeLastOnline, "") === "1" ? true : null,
     bridgeCheckedAt: 0,
     installedPrinters: [],
     defaultWindowsPrinter: "",
@@ -808,6 +921,7 @@
         var info = await res.json();
         printerState.bridgeOnline = true;
         printerState.bridgeCheckedAt = Date.now();
+        lsSet(LS_KEYS.bridgeLastOnline, "1");
         if (Array.isArray(info.printers)) {
           printerState.installedPrinters = info.printers;
         }
@@ -828,6 +942,7 @@
       var okHealth = !!(resHealth && resHealth.ok);
       printerState.bridgeOnline = okHealth;
       printerState.bridgeCheckedAt = Date.now();
+      lsSet(LS_KEYS.bridgeLastOnline, okHealth ? "1" : "");
       syncPageBridgeBadge(okHealth);
       updateHardwareUi();
       return okHealth;
@@ -835,6 +950,7 @@
       if (timer) clearTimeout(timer);
       printerState.bridgeOnline = false;
       printerState.bridgeCheckedAt = Date.now();
+      lsSet(LS_KEYS.bridgeLastOnline, "");
       syncPageBridgeBadge(false);
       updateHardwareUi();
       return false;
@@ -961,74 +1077,123 @@
     return fallbackMatch;
   }
 
-  async function openWebUsbPrinterDevice(device) {
-    if (!device) return false;
+  // Solo una pestaña a la vez usa la impresora; las demás esperan su turno.
+  var PRINTER_BUSY_ERROR = "La impresora está ocupada con otro trabajo. Intenta de nuevo en unos segundos.";
+  var PRINT_WRITE_TIMEOUT_MS = 30000;
+
+  async function withPrinterLock(fn) {
+    if (typeof navigator === "undefined" || !navigator.locks || !navigator.locks.request || typeof AbortController === "undefined") {
+      return fn();
+    }
+    var controller = new AbortController();
+    var waitTimer = setTimeout(function () {
+      controller.abort();
+    }, PRINT_WRITE_TIMEOUT_MS + 5000);
     try {
-      if (!device.opened) {
-        await device.open();
-      }
-      if (!device.configuration) {
-        await device.selectConfiguration(1);
-      }
-      var epInfo = findUsbBulkOutEndpoint(device);
-      if (!epInfo) {
-        throw new Error("El dispositivo USB no expone un canal de impresión Bulk OUT.");
-      }
-      await device.claimInterface(epInfo.interfaceNumber);
-      if (typeof epInfo.alternateSetting === "number" && epInfo.alternateSetting !== 0) {
-        try {
-          await device.selectAlternateInterface(epInfo.interfaceNumber, epInfo.alternateSetting);
-        } catch (_) {}
-      }
-      printerState.usbDevice = device;
-      printerState.usbInterfaceNumber = epInfo.interfaceNumber;
-      printerState.usbOutEndpoint = epInfo.endpointNumber;
-      printerState.lastError = "";
-      syncPageBridgeBadge(true);
-      updateHardwareUi();
-      return true;
+      return await navigator.locks.request("unibag-printer", { signal: controller.signal }, function () {
+        clearTimeout(waitTimer);
+        return fn();
+      });
     } catch (err) {
-      printerState.usbDevice = null;
-      var msg = err && err.message ? err.message : "No se pudo abrir la impresora WebUSB.";
-      if (/Access denied|claimInterface|SecurityError/i.test(msg)) {
-        msg = "Windows tiene reservado el driver USB estándar de esta impresora. Usa el Servicio Local Silencioso (1 clic en instalar_servicio_impresora_silencioso.bat) para imprimir por el spooler de Windows.";
+      if (err && err.name === "AbortError") {
+        return { ok: false, error: PRINTER_BUSY_ERROR };
       }
-      printerState.lastError = msg;
-      updateHardwareUi();
+      throw err;
+    } finally {
+      clearTimeout(waitTimer);
+    }
+  }
+
+  // Si la impresora deja de responder, no se queda esperando para siempre.
+  function withWriteTimeout(promise) {
+    var timer = null;
+    var timeout = new Promise(function (_, reject) {
+      timer = setTimeout(function () {
+        reject(new Error("La impresora no respondió a tiempo. Revisa si tiene papel y está encendida."));
+      }, PRINT_WRITE_TIMEOUT_MS);
+    });
+    return Promise.race([promise, timeout]).finally(function () {
+      clearTimeout(timer);
+    });
+  }
+
+  // --- Transporte WebUSB directo (sin servicios externos) ---
+  function usbDeviceId(device) {
+    return device ? [device.vendorId || 0, device.productId || 0, device.serialNumber || ""].join(":") : "";
+  }
+
+  function isUsbPrinterDevice(device) {
+    var cfgs = device.configurations || [];
+    for (var c = 0; c < cfgs.length; c++) {
+      var ifs = cfgs[c].interfaces || [];
+      for (var i = 0; i < ifs.length; i++) {
+        var alts = ifs[i].alternates || [];
+        for (var a = 0; a < alts.length; a++) {
+          if (alts[a].interfaceClass === 7) return true;
+        }
+      }
+    }
+    try {
+      return !!(device.configuration && findUsbBulkOutEndpoint(device));
+    } catch (_) {
       return false;
     }
   }
 
-  async function autoReconnectWebUsbPrinter() {
-    if (!printerState.webUsbSupported || printerState.usbDevice) return false;
+  // Busca sin abrir nada la impresora USB que el navegador ya tiene autorizada.
+  async function findLinkedUsbPrinter() {
+    if (!printerState.webUsbSupported) return null;
     try {
-      var devices = await navigator.usb.getDevices();
-      if (!devices || devices.length === 0) return false;
-      // Solo se reabre un dispositivo USB de clase "Impresora" (0x07); no cualquier USB autorizado.
+      var devices = (await navigator.usb.getDevices()) || [];
+      var savedId = lsGet(LS_KEYS.usbPrinterId, "");
+      var fallback = null;
       for (var d = 0; d < devices.length; d++) {
-        var ep = null;
-        try {
-          if (devices[d].configuration) ep = findUsbBulkOutEndpoint(devices[d]);
-        } catch (_) {}
-        var isPrinterClass = false;
-        var cfgs = devices[d].configurations || [];
-        for (var ci = 0; ci < cfgs.length && !isPrinterClass; ci++) {
-          var ifs = cfgs[ci].interfaces || [];
-          for (var ii = 0; ii < ifs.length && !isPrinterClass; ii++) {
-            var alts = ifs[ii].alternates || [];
-            for (var ai = 0; ai < alts.length; ai++) {
-              if (alts[ai].interfaceClass === 7) { isPrinterClass = true; break; }
-            }
-          }
-        }
-        if (isPrinterClass || ep) {
-          return await openWebUsbPrinterDevice(devices[d]);
-        }
+        if (savedId && usbDeviceId(devices[d]) === savedId) return devices[d];
+        if (!fallback && isUsbPrinterDevice(devices[d])) fallback = devices[d];
       }
-      return false;
+      return fallback;
     } catch (_) {
-      return false;
+      return null;
     }
+  }
+
+  async function openAndClaimUsbPrinter(device) {
+    if (!device.opened) {
+      await device.open();
+    }
+    if (!device.configuration) {
+      await device.selectConfiguration(1);
+    }
+    var epInfo = findUsbBulkOutEndpoint(device);
+    if (!epInfo) {
+      throw new Error("El dispositivo USB no expone un canal de impresión Bulk OUT.");
+    }
+    await device.claimInterface(epInfo.interfaceNumber);
+    if (typeof epInfo.alternateSetting === "number" && epInfo.alternateSetting !== 0) {
+      try {
+        await device.selectAlternateInterface(epInfo.interfaceNumber, epInfo.alternateSetting);
+      } catch (_) {}
+    }
+    return epInfo;
+  }
+
+  async function releaseUsbPrinter(device, epInfo) {
+    if (epInfo) {
+      try {
+        await device.releaseInterface(epInfo.interfaceNumber);
+      } catch (_) {}
+    }
+    try {
+      if (device.opened) await device.close();
+    } catch (_) {}
+  }
+
+  function usbErrorMessage(err) {
+    var msg = err && err.message ? err.message : "No se pudo abrir la impresora WebUSB.";
+    if (/Access denied|claimInterface|SecurityError/i.test(msg)) {
+      msg = "Windows tiene reservado el driver USB estándar de esta impresora. Usa el Servicio Local Silencioso (1 clic en instalar_servicio_impresora_silencioso.bat) para imprimir por el spooler de Windows.";
+    }
+    return msg;
   }
 
   async function connectWebUsbPrinterInteractive() {
@@ -1038,14 +1203,31 @@
     }
     try {
       var device = await navigator.usb.requestDevice({ filters: [] });
-      var ok = await openWebUsbPrinterDevice(device);
-      if (ok) {
-        lsSet(LS_KEYS.printTransport, "webusb");
-        showToast("✅ Impresora USB vinculada directamente al navegador: " + (device.productName || "USB Printer"), "ok", 4000);
-      } else if (printerState.lastError) {
-        showToast("⚠️ " + printerState.lastError, "err", 7500);
+      var check = await withPrinterLock(async function () {
+        var epInfo = null;
+        try {
+          epInfo = await openAndClaimUsbPrinter(device);
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: usbErrorMessage(err) };
+        } finally {
+          await releaseUsbPrinter(device, epInfo);
+        }
+      });
+      if (!check.ok) {
+        printerState.lastError = check.error;
+        updateHardwareUi();
+        showToast("⚠️ " + check.error, "err", 7500);
+        return false;
       }
-      return ok;
+      printerState.usbDevice = device;
+      printerState.lastError = "";
+      lsSet(LS_KEYS.usbPrinterId, usbDeviceId(device));
+      lsSet(LS_KEYS.printTransport, "webusb");
+      syncPageBridgeBadge(true);
+      updateHardwareUi();
+      showToast("✅ Impresora USB vinculada: " + (device.productName || "USB Printer") + ". Queda lista para todas las pantallas.", "ok", 4000);
+      return true;
     } catch (err) {
       if (err && err.name !== "NotFoundError") {
         showToast("⚠️ " + (err.message || "No se pudo seleccionar la impresora USB."), "err", 5000);
@@ -1055,52 +1237,61 @@
   }
 
   async function printViaWebUsb(job) {
-    if (!printerState.usbDevice) {
-      await autoReconnectWebUsbPrinter();
-    }
-    var dev = printerState.usbDevice;
-    if (!dev || !dev.opened) {
+    var dev = await findLinkedUsbPrinter();
+    printerState.usbDevice = dev;
+    if (!dev) {
       return { ok: false, error: "Impresora WebUSB no conectada." };
     }
 
-    try {
-      var bytes = encodeRawPrinterBytes(job.content, job.language);
-      var copies = Math.max(1, parseInt(job.copies || 1, 10) || 1);
-      var chunkSize = 4096;
+    return withPrinterLock(async function () {
+      var epInfo = null;
       var sentAny = false; // si ya salió algo, un fallo posterior deja el estado incierto
-
       try {
+        for (var attempt = 0; attempt < 6 && !epInfo; attempt++) {
+          try {
+            epInfo = await openAndClaimUsbPrinter(dev);
+          } catch (openErr) {
+            if (attempt === 5) throw openErr;
+            await sleep(500);
+          }
+        }
+        var bytes = encodeRawPrinterBytes(job.content, job.language);
+        var copies = Math.max(1, parseInt(job.copies || 1, 10) || 1);
+        var chunkSize = 4096;
         for (var c = 0; c < copies; c++) {
           for (var offset = 0; offset < bytes.length; offset += chunkSize) {
             var slice = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
-            var res = await dev.transferOut(printerState.usbOutEndpoint, slice);
+            var res = await withWriteTimeout(dev.transferOut(epInfo.endpointNumber, slice));
             if (res && res.status && res.status !== "ok") {
               throw new Error("Transferencia USB reportó estado: " + res.status);
             }
             sentAny = true;
           }
         }
-      } catch (inner) {
-        inner.sentAny = sentAny;
-        throw inner;
+        printerState.lastError = "";
+        return {
+          ok: true,
+          transport: "webusb",
+          printer: dev.productName || "Impresora WebUSB"
+        };
+      } catch (err) {
+        var msg = sentAny ? (err && err.message ? err.message : "Fallo al transmitir etiqueta por WebUSB.") : usbErrorMessage(err);
+        printerState.lastError = msg;
+        return { ok: false, ambiguous: sentAny, error: msg };
+      } finally {
+        await releaseUsbPrinter(dev, epInfo);
+        updateHardwareUi();
       }
-      return {
-        ok: true,
-        transport: "webusb",
-        printer: dev.productName || "Impresora WebUSB"
-      };
-    } catch (err) {
-      printerState.usbDevice = null;
-      updateHardwareUi();
-      return {
-        ok: false,
-        ambiguous: !!(err && err.sentAny),
-        error: err && err.message ? err.message : "Fallo al transmitir etiqueta por WebUSB."
-      };
-    }
+    });
   }
 
   // --- Transporte Web Serial para Impresoras Térmicas Serial/Virtual-COM ---
+  async function openPrinterSerialPort(port) {
+    if (port.writable) return;
+    var baud = parseInt(lsGet(LS_KEYS.serialPrinterBaud, "9600"), 10) || 9600;
+    await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none" });
+  }
+
   async function connectSerialPrinterInteractive() {
     if (!scaleState.supported) {
       showToast("⚠️ Web Serial no está disponible en este origen.", "err", 5000);
@@ -1108,9 +1299,21 @@
     }
     try {
       var port = await navigator.serial.requestPort();
-      var baud = parseInt(lsGet(LS_KEYS.serialPrinterBaud, "9600"), 10) || 9600;
-      await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none" });
+      var check = await withPrinterLock(async function () {
+        try {
+          await openPrinterSerialPort(port);
+          await port.close();
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err && err.message ? err.message : "No se pudo abrir el puerto COM de la impresora." };
+        }
+      });
+      if (!check.ok) {
+        showToast("⚠️ " + check.error, "err", 5500);
+        return false;
+      }
       printerState.serialPrinterPort = port;
+      printerState.lastError = "";
       var sig = portSignature(port);
       if (sig) {
         lsSet(LS_KEYS.serialPrinterVidPid, sig);
@@ -1119,100 +1322,108 @@
       lsSet(LS_KEYS.printTransport, "webserial");
       syncPageBridgeBadge(true);
       updateHardwareUi();
-      showToast("✅ Impresora térmica Serial/COM vinculada correctamente.", "ok", 4000);
+      showToast("✅ Impresora Serial/COM vinculada. Queda lista para todas las pantallas.", "ok", 4000);
       return true;
     } catch (err) {
       if (err && err.name !== "NotFoundError") {
-        showToast("⚠️ " + (err.message || "No se pudo abrir el puerto COM de la impresora."), "err", 5500);
+        showToast("⚠️ " + (err.message || "No se pudo seleccionar el puerto COM de la impresora."), "err", 5500);
       }
       return false;
     }
   }
 
-  // Reabre sin diálogo el puerto COM de la impresora ya autorizado en este navegador.
-  var serialPrinterReconnecting = null;
-  async function autoReconnectSerialPrinter() {
-    if (printerState.serialPrinterPort && printerState.serialPrinterPort.writable) return true;
-    if (!scaleState.supported) return false;
-    if (serialPrinterReconnecting) return serialPrinterReconnecting;
-    serialPrinterReconnecting = (async function () {
-      try {
-        var ports = await navigator.serial.getPorts();
-        var sig = lsGet(LS_KEYS.serialPrinterVidPid, "");
-        var candidates = [];
-        for (var i = 0; i < (ports || []).length; i++) {
-          if (scaleState.port && ports[i] === scaleState.port) continue;
-          candidates.push(ports[i]);
-        }
-        var chosen = null;
-        if (sig) {
-          chosen = pickPortBySig(ports, sig, LS_KEYS.serialPrinterIdx, [scaleState.port]);
-        }
-        // Los COM Bluetooth no exponen VID/PID: si queda un solo puerto autorizado, es el de la impresora.
-        if (!chosen && candidates.length === 1) chosen = candidates[0];
-        if (!chosen) return false;
-        if (!chosen.writable) {
-          var baud = parseInt(lsGet(LS_KEYS.serialPrinterBaud, "9600"), 10) || 9600;
-          await chosen.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none" });
-        }
-        printerState.serialPrinterPort = chosen;
-        syncPageBridgeBadge(true);
-        updateHardwareUi();
-        return true;
-      } catch (_) {
-        return false;
-      } finally {
-        serialPrinterReconnecting = null;
+  // Busca sin abrir nada el puerto COM de la impresora ya autorizado en este navegador.
+  async function findLinkedSerialPrinter() {
+    if (!scaleState.supported) return null;
+    try {
+      var ports = (await navigator.serial.getPorts()) || [];
+      var sig = lsGet(LS_KEYS.serialPrinterVidPid, "");
+      if (sig) {
+        var bySig = pickPortBySig(ports, sig, LS_KEYS.serialPrinterIdx, [scaleState.port]);
+        if (bySig) return bySig;
       }
-    })();
-    return serialPrinterReconnecting;
+      // Los COM Bluetooth no exponen VID/PID: si queda un solo puerto autorizado que no es la balanza, es la impresora.
+      if (lsGet(LS_KEYS.printTransport, "auto") !== "webserial") return null;
+      var scaleSig = lsGet(LS_KEYS.scaleVidPid, "");
+      var candidates = ports.filter(function (p) {
+        return p !== scaleState.port && (!scaleSig || portSignature(p) !== scaleSig);
+      });
+      return candidates.length === 1 ? candidates[0] : null;
+    } catch (_) {
+      return null;
+    }
   }
 
-  async function disconnectSerialPrinter() {
-    var p = printerState.serialPrinterPort;
-    printerState.serialPrinterPort = null;
-    if (p) {
-      try {
-        await p.close();
-      } catch (_) {}
+  // Actualiza qué impresora está vinculada, sin abrir puertos. Es lo que mantiene el estado "lista" en todas las páginas.
+  async function refreshPrinterLink() {
+    var transport = lsGet(LS_KEYS.printTransport, "auto");
+    if (scaleState.supported && (transport === "webserial" || lsGet(LS_KEYS.serialPrinterVidPid, ""))) {
+      printerState.serialPrinterPort = await findLinkedSerialPrinter();
     }
+    if (printerState.webUsbSupported && transport === "webusb") {
+      printerState.usbDevice = await findLinkedUsbPrinter();
+    }
+    syncPageBridgeBadge(printerState.bridgeOnline === true);
     updateHardwareUi();
   }
 
   async function printViaWebSerial(job) {
-    var port = printerState.serialPrinterPort;
-    if (!port || !port.writable) {
+    var port = await findLinkedSerialPrinter();
+    printerState.serialPrinterPort = port;
+    if (!port) {
       return { ok: false, error: "Impresora Serial no conectada." };
     }
-    var writer = null;
-    try {
-      writer = port.writable.getWriter();
-      var bytes = encodeRawPrinterBytes(job.content, job.language);
-      var copies = Math.max(1, parseInt(job.copies || 1, 10) || 1);
+
+    return withPrinterLock(async function () {
+      var writer = null;
       var written = 0;
+      var finished = false;
       try {
+        // El puerto puede seguir liberándose unos instantes tras cambiar de página.
+        for (var attempt = 0; attempt < 8; attempt++) {
+          try {
+            await openPrinterSerialPort(port);
+            break;
+          } catch (openErr) {
+            if (attempt === 7) {
+              throw new Error("El puerto COM de la impresora está ocupado por otro programa o no responde.");
+            }
+            await sleep(500);
+          }
+        }
+        writer = port.writable.getWriter();
+        var bytes = encodeRawPrinterBytes(job.content, job.language);
+        var copies = Math.max(1, parseInt(job.copies || 1, 10) || 1);
         for (var c = 0; c < copies; c++) {
-          await writer.write(bytes);
+          await withWriteTimeout(writer.write(bytes));
           written++;
         }
-      } catch (inner) {
-        inner.sentAny = written > 0;
-        throw inner;
-      }
-      return { ok: true, transport: "webserial", printer: "Impresora Serial COM" };
-    } catch (err) {
-      return {
-        ok: false,
-        ambiguous: !!(err && err.sentAny),
-        error: err && err.message ? err.message : "Error de escritura serial."
-      };
-    } finally {
-      if (writer) {
+        // Espera a que el puerto termine de enviar todo antes de cerrarlo.
+        await withWriteTimeout(writer.close());
+        finished = true;
+        printerState.lastError = "";
+        return { ok: true, transport: "webserial", printer: "Impresora Serial COM" };
+      } catch (err) {
+        var msg = err && err.message ? err.message : "Error de escritura serial.";
+        printerState.lastError = msg;
+        return { ok: false, ambiguous: written > 0, error: msg };
+      } finally {
+        if (writer) {
+          if (!finished) {
+            try {
+              await writer.abort();
+            } catch (_) {}
+          }
+          try {
+            writer.releaseLock();
+          } catch (_) {}
+        }
         try {
-          writer.releaseLock();
+          await port.close();
         } catch (_) {}
+        updateHardwareUi();
       }
-    }
+    });
   }
 
   // --- Orquestador Principal de Trabajo de Impresión ---
@@ -1230,6 +1441,7 @@
     if (!job.job_id) {
       job.job_id = newJobId();
     }
+    tuneJob(job);
 
     // Si un transporte pudo haber imprimido parcialmente o su respuesta es incierta,
     // se DETIENE la cascada: probar otro transporte duplicaría la etiqueta.
@@ -1242,13 +1454,7 @@
       return { ok: false, ambiguous: true, error: msg };
     }
 
-    if (preferred === "webserial" && !printerState.serialPrinterPort) {
-      // Tras cambiar de página el puerto puede seguir liberándose: se reintenta unos segundos antes de rendirse.
-      for (var tryN = 0; tryN < 6 && !printerState.serialPrinterPort; tryN++) {
-        if (tryN > 0) await sleep(500);
-        await autoReconnectSerialPrinter();
-      }
-    }
+    await refreshPrinterLink();
 
     // 1. Si el usuario configuró explícitamente WebUSB o WebSerial primero
     if (preferred === "webusb" && printerState.webUsbSupported) {
@@ -1258,7 +1464,7 @@
         return result;
       }
       if (result.ambiguous) return stopAmbiguous(result);
-    } else if (preferred === "webserial" && printerState.serialPrinterPort) {
+    } else if (preferred === "webserial") {
       result = await printViaWebSerial(job);
       if (result.ok) {
         notifyPrintSuccess(job, result, opts);
@@ -1299,7 +1505,7 @@
     }
 
     // 5. Ningún transporte local pudo emitir aún: actualizar banner si existe y mostrar aviso interactivo limpio
-    var errDetail = bridgeErrorMsg || "No se detectó impresora térmica activa en esta PC.";
+    var errDetail = bridgeErrorMsg || (result && result.error) || "No se detectó impresora térmica activa en esta PC.";
     updatePagePrintBanner(false, errDetail);
     if (!opts.silentFallback) {
       showInteractivePrintFallbackToast(job, opts.fallbackUrl || "", errDetail);
@@ -1715,6 +1921,9 @@
     if (!uiRefs.modalBackdrop || uiRefs.modalBackdrop.style.display === "none") return;
     var body = document.getElementById("unibag-hw-mbody");
     if (!body) return;
+    // No redibujar mientras se elige un valor: la lectura de la balanza cerraría la lista desplegable.
+    var focused = document.activeElement;
+    if (focused && focused.tagName === "SELECT" && body.contains(focused)) return;
 
     var origin = window.location.origin || "";
     var isSecure = window.isSecureContext;
@@ -1747,13 +1956,13 @@
     var printOk = printerState.bridgeOnline === true || !!printerState.usbDevice || !!printerState.serialPrinterPort;
     var printStatusHtml = "";
     if (printerState.usbDevice) {
-      printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 WebUSB Directa (' + escapeHtml(printerState.usbDevice.productName || "USB") + ")</span>";
+      printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Lista · USB (' + escapeHtml(printerState.usbDevice.productName || "USB") + ")</span>";
     } else if (printerState.serialPrinterPort) {
-      printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Serial COM Directa</span>';
+      printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Lista · Serial COM</span>';
     } else if (printerState.bridgeOnline) {
-      printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Servicio Windows Local Activo (Puerto 8767)</span>';
+      printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Lista · Servicio Windows Local</span>';
     } else {
-      printStatusHtml = '<span style="color:#b45309;font-weight:800">🟠 Sin conexión local activa</span>';
+      printStatusHtml = '<span style="color:#b45309;font-weight:800">🟠 Sin vincular</span>';
     }
 
     var savedDefaultPrinter = lsGet(LS_KEYS.printerDefault, "");
@@ -1763,6 +1972,31 @@
       var sel = pName === savedDefaultPrinter ? " selected" : "";
       printerOptionsHtml += '<option value="' + escapeHtml(pName) + '"' + sel + ">" + escapeHtml(pName) + "</option>";
     }
+
+    // Ajuste de intensidad y velocidad según el lenguaje de la impresora de esta PC
+    var tuneLang = normalizeLanguage(lsGet(LS_KEYS.lastPrintLanguage, "")) || normalizeLanguage(CFG.printLanguage) || "epl";
+    var tuneRange = TUNING_RANGES[tuneLang];
+    var tuneDefaults = (CFG.printDefaults && CFG.printDefaults[tuneLang]) || {};
+    function tuningOptions(field, step) {
+      var current = tuningValueFor(tuneLang, field);
+      var base = tuneDefaults[field];
+      var html = '<option value="">Predeterminada' + (base !== null && base !== undefined ? " (" + escapeHtml(base) + ")" : " de la impresora") + "</option>";
+      for (var v = tuneRange[field][0]; v <= tuneRange[field][1]; v += step) {
+        html += '<option value="' + v + '"' + (current === v ? " selected" : "") + ">" + v + "</option>";
+      }
+      return html;
+    }
+    var densityHint = tuneRange.density[0] + " suave · " + tuneRange.density[1] + " fuerte";
+    var speedHint = tuneRange.speed[0] + " lenta · " + tuneRange.speed[1] + " rápida";
+    var tuningHtml =
+      '<div class="unibag-hw-row">' +
+      '  <label style="font-size:12px;font-weight:700;color:#334155">Intensidad <span style="font-weight:500;color:#64748b">(' + densityHint + ")</span>" +
+      '    <select class="unibag-hw-select" id="hw-sel-print-density" style="display:block;margin-top:4px;min-width:170px">' + tuningOptions("density", tuneLang === "zpl" ? 5 : 1) + "</select>" +
+      "  </label>" +
+      '  <label style="font-size:12px;font-weight:700;color:#334155">Velocidad <span style="font-weight:500;color:#64748b">(' + speedHint + ")</span>" +
+      '    <select class="unibag-hw-select" id="hw-sel-print-speed" style="display:block;margin-top:4px;min-width:170px">' + tuningOptions("speed", 1) + "</select>" +
+      "  </label>" +
+      "</div>";
 
     body.innerHTML =
       '<div class="unibag-hw-sec">' +
@@ -1802,6 +2036,7 @@
         : '<div style="margin-top:8px;padding:8px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;font-size:11.5px;color:#334155">' +
           "💡 Para imprimir sin instalar nada: pulsa <b>Impresora Serial (COM)</b> y elige el puerto de la impresora (una sola vez; el navegador lo recuerda). Alternativa: el servicio <code>instalar_servicio_impresora_silencioso.bat</code> en esta PC." +
           "</div>") +
+      tuningHtml +
       '  <div class="unibag-hw-row">' +
       (printerState.webUsbSupported
         ? '<button type="button" class="unibag-hw-btn" id="hw-btn-usb-printer">🔌 Vincular USB Directo (WebUSB)</button>'
@@ -1857,6 +2092,20 @@
         showToast("🖨️ Impresora local fijada: " + (selWinPrinter.value || "Automática"), "ok", 2800);
       };
     }
+    var selDensity = document.getElementById("hw-sel-print-density");
+    if (selDensity) {
+      selDensity.onchange = function () {
+        savePrintTuning(tuneLang, "density", selDensity.value);
+        showToast("🖨️ Intensidad guardada en esta PC. Imprime una prueba para revisarla.", "ok", 2800);
+      };
+    }
+    var selSpeed = document.getElementById("hw-sel-print-speed");
+    if (selSpeed) {
+      selSpeed.onchange = function () {
+        savePrintTuning(tuneLang, "speed", selSpeed.value);
+        showToast("🖨️ Velocidad guardada en esta PC. Imprime una prueba para revisarla.", "ok", 2800);
+      };
+    }
     var btnUsbPrinter = document.getElementById("hw-btn-usb-printer");
     if (btnUsbPrinter) {
       btnUsbPrinter.onclick = function () {
@@ -1896,9 +2145,8 @@
     }
   }
 
-  // Reconexión persistente: el navegador cierra los puertos al salir de una página y la siguiente puede
-  // intentar abrirlos mientras el puerto aún está liberándose. Se reintenta con espera creciente hasta que
-  // todo lo recordado (balanza, impresora serial, impresora USB) quede conectado.
+  // Reconexión persistente de la balanza: el navegador cierra los puertos al salir de una página y la siguiente
+  // puede intentar abrirlos mientras el puerto aún está liberándose. Se reintenta con espera creciente.
   var reconnectRunning = false;
   async function reconnectRememberedDevices() {
     if (reconnectRunning) return;
@@ -1908,21 +2156,12 @@
       for (var a = 0; a < delays.length; a++) {
         if (delays[a] > 0) await sleep(delays[a]);
         var wantScale = !!lsGet(LS_KEYS.scaleVidPid, "") || (!!scaleState.supported && !lsGet(LS_KEYS.serialPrinterVidPid, ""));
-        var wantSerialPrinter = !!lsGet(LS_KEYS.serialPrinterVidPid, "") || lsGet(LS_KEYS.printTransport, "auto") === "webserial";
-        var wantUsb = lsGet(LS_KEYS.printTransport, "auto") === "webusb";
         if (wantScale && scaleState.supported && !scaleState.connected && !scaleState.connecting) {
           await autoReconnectScale();
         }
-        if (wantSerialPrinter && scaleState.supported && !(printerState.serialPrinterPort && printerState.serialPrinterPort.writable)) {
-          await autoReconnectSerialPrinter();
-        }
-        if (wantUsb && !printerState.usbDevice) {
-          await autoReconnectWebUsbPrinter();
-        }
+        if (a === 0) await refreshPrinterLink();
         var scaleOk = !wantScale || scaleState.connected || !scaleState.supported;
-        var serOk = !wantSerialPrinter || !!(printerState.serialPrinterPort && printerState.serialPrinterPort.writable) || !scaleState.supported;
-        var usbOk = !wantUsb || !!printerState.usbDevice;
-        if (scaleOk && serOk && usbOk) break;
+        if (scaleOk) break;
       }
     } catch (_) {
     } finally {
@@ -1946,14 +2185,12 @@
     setupGlobalPrintLinkInterceptor();
     reconnectRememberedDevices();
 
-    if (pageHasHardwareControls()) {
-      probeLocalPrintBridge(false);
+    if (pageHasHardwareControls() || printerState.bridgeOnline === true) {
+      probeLocalPrintBridge(true);
     }
 
     if (INITIAL_QUEUE.length > 0) {
       processInitialPrintQueue();
-    } else if (lsGet(LS_KEYS.printTransport, "auto") === "webserial") {
-      autoReconnectSerialPrinter();
     }
   }
 
@@ -1973,6 +2210,7 @@
     connectWebUsbPrinter: connectWebUsbPrinterInteractive,
     connectSerialPrinter: connectSerialPrinterInteractive,
     probePrintBridge: probeLocalPrintBridge,
+    applyPrintTuning: applyPrintTuning,
     openModal: openHardwareModal,
     showPrintFallbackToast: showPrintFallbackToast
   };
