@@ -515,9 +515,9 @@
                         <td class="tdheader">Colores</td>
                         <td class="tdheader" align="center">Rodillo [Z]</td>
                         <td class="tdheader" align="center">Ubicación Clisé</td>
-                        <td class="tdheader" align="right" style="min-width:95px">Planificación</td>
-                        <td class="tdheader" align="right" style="min-width:95px">Producidas</td>
-                        <td class="tdheader" align="right" style="min-width:105px;color:#0284C7">Total CC</td>
+                        <td class="tdheader" align="right" style="min-width:95px">Programada CC</td>
+                        <td class="tdheader" align="right" style="min-width:95px">Producida CC</td>
+                        <td class="tdheader" align="right" style="min-width:105px;color:#0284C7">Falta producir</td>
                         <td class="tdheader" align="center">Imagen</td>
                         <td class="tdheader" align="center">Opciones</td>
                     </tr>
@@ -565,6 +565,10 @@
                         $producidasMts = (float)($so['total_produced_meters'] ?? 0);
                         $totalCcBolsas = (float)($so['total_cc_units'] ?? $producidas);
                         $totalCcMts = (float)($so['total_cc_meters'] ?? $producidasMts);
+                        $progCcBolsas = (float)($so['plan_cc_units'] ?? $cantBolsas);
+                        $progCcMts = (float)($so['plan_cc_meters'] ?? $metros);
+                        $faltaBolsas = max(0.0, $progCcBolsas - $totalCcBolsas);
+                        $faltaMts = max(0.0, $progCcMts - $totalCcMts);
                     ?>
                         <tr onmouseover="this.style.backgroundColor='#F0F7F6'" onmouseout="this.style.backgroundColor='transparent'">
                             <td class="tdnrm"><b><?=htmlspecialchars((string)$so['req_number'])?></b></td>
@@ -608,16 +612,16 @@
                                 <?php endif; ?>
                             </td>
                             <td class="tdnrm" align="right" style="white-space:nowrap">
-                                <div style="font-weight:700;color:#0F172A;font-size:12.5px"><?=number_format($metros, 0, ',', '.')?> m</div>
-                                <div style="font-size:11px;color:#64748B;font-weight:600"><?=number_format($cantBolsas, 0, ',', '.')?> un.</div>
+                                <div style="font-weight:700;color:#0F172A;font-size:12.5px"><?=number_format($progCcMts, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#64748B;font-weight:600"><?=number_format($progCcBolsas, 0, ',', '.')?> un.</div>
                             </td>
                             <td class="tdnrm" align="right" style="white-space:nowrap">
-                                <div style="font-weight:700;color:#0F766E;font-size:12.5px"><?=number_format($producidasMts, 0, ',', '.')?> m</div>
-                                <div style="font-size:11px;color:#0F766E;font-weight:600"><?=number_format($producidas, 0, ',', '.')?> un.</div>
+                                <div style="font-weight:700;color:#0F766E;font-size:12.5px"><?=number_format($totalCcMts, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#0F766E;font-weight:600"><?=number_format($totalCcBolsas, 0, ',', '.')?> un.</div>
                             </td>
                             <td class="tdnrm" align="right" style="white-space:nowrap;background-color:rgba(2, 132, 199, 0.05)">
-                                <div style="font-weight:800;color:#0369A1;font-size:12.5px"><?=number_format($totalCcMts, 0, ',', '.')?> m</div>
-                                <div style="font-size:11px;color:#0284C7;font-weight:700"><?=number_format($totalCcBolsas, 0, ',', '.')?> un.</div>
+                                <div style="font-weight:800;color:#0369A1;font-size:12.5px"><?=number_format($faltaMts, 0, ',', '.')?> m</div>
+                                <div style="font-size:11px;color:#0284C7;font-weight:700"><?=number_format($faltaBolsas, 0, ',', '.')?> un.</div>
                             </td>
                             <td class="tdnrm" align="center">
                                 <?php if ($hasImg): ?>

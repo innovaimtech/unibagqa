@@ -727,6 +727,31 @@ trait WorkOrderAgendaServiceTrait
             } catch (Throwable) {}
         }
 
+        // Total de la CC/OT: todas las agendas del mismo prd y tipo de máquina; y programado = suma de entregas
+        $ccByAg = [];
+        $planByAg = [];
+        if (!empty($agIds)) {
+            $inAg = implode(',', array_map('intval', $agIds));
+            try {
+                $q = $this->erpPdo->query("
+                    SELECT a.id, COALESCE(SUM(t_ev.evt_amount),0) AS units, COALESCE(SUM(t_ev.evt_amount_metros_lineales),0) AS meters
+                    FROM prod_agenda a
+                    INNER JOIN prod_agenda pa ON pa.ag_prdid = a.ag_prdid AND pa.ag_equipotype_id = a.ag_equipotype_id
+                    INNER JOIN prod_worker_ot t_ot ON t_ot.wok_ag_id = pa.id
+                    INNER JOIN prod_worker_ot_events t_ev ON t_ev.evt_prod_worker_otid = t_ot.id
+                    WHERE a.id IN ($inAg) AND t_ev.evt_type = 'prod' AND t_ev.evt_status > 0
+                      AND (t_ev.evt_comments IS NULL OR (t_ev.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t_ev.evt_comments NOT LIKE '%ROLL-SE-%'))
+                    GROUP BY a.id");
+                while ($q && ($r = $q->fetch(PDO::FETCH_ASSOC))) {
+                    $ccByAg[(int)$r['id']] = ['units' => (float)$r['units'], 'meters' => (float)$r['meters']];
+                }
+            } catch (Throwable) {}
+            try {
+                $q = $this->erpPdo->query("SELECT a.id, SUM(p.prodplan_amt) FROM prod_agenda a INNER JOIN prod_amtplan p ON p.prodplan_prdid = a.ag_prdid WHERE a.id IN ($inAg) GROUP BY a.id");
+                $planByAg = $q ? $q->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+            } catch (Throwable) {}
+        }
+
         foreach ($orders as &$ord) {
             $isFlexo = ((int)($ord['equipo_type_id'] ?? 0) === 7)
                 || ((int)($ord['equipo_prod_isprinter_flexo'] ?? 0) === 1)
@@ -800,8 +825,17 @@ trait WorkOrderAgendaServiceTrait
                 $ccUnits = round($ccMeters / $corteM2);
             }
 
-            $ccUnits = max($ccUnits, $agUnits);
-            $ccMeters = max($ccMeters, $agMeters);
+            $ccUnits = max($ccUnits, $agUnits, (float)($ccByAg[$agId]['units'] ?? 0));
+            $ccMeters = max($ccMeters, $agMeters, (float)($ccByAg[$agId]['meters'] ?? 0));
+            if ($ccMeters <= 0 && $ccUnits > 0 && $corteM2 > 0) {
+                $ccMeters = round($ccUnits * $corteM2);
+            }
+            $planUnits = (float)($planByAg[$agId] ?? 0);
+            if ($planUnits <= 0) {
+                $planUnits = $cantBolsas;
+            }
+            $planMlin = round($planUnits * $corteM2);
+            $planMeters = round($planMlin + $planMlin / 100 * $mermaPerc);
 
             $ord['flexo_z'] = $corteZ;
             $ord['flexo_corte_m2'] = $corteM2;
@@ -810,6 +844,8 @@ trait WorkOrderAgendaServiceTrait
             $ord['total_produced_meters'] = $agMeters;
             $ord['total_cc_units'] = $ccUnits;
             $ord['total_cc_meters'] = $ccMeters;
+            $ord['plan_cc_units'] = $planUnits;
+            $ord['plan_cc_meters'] = $planMeters;
         }
         unset($ord);
     }
@@ -1595,7 +1631,7 @@ trait WorkOrderAgendaServiceTrait
         $targetAmountThis = $agAmount;
         $orderAmountDisplay = (float)($agendaData['item_amount'] ?? $agAmount);
         $displayProducedThis = $totProducedThis;
-        $displayProducedAll = $totProducedAll;
+        $displayProducedAll = max($totProducedAll, $totProducedCc);
 
         $orderBagAmount = (float)($agendaData['item_amount'] ?? $agAmount);
         $orderMlinProg = round($orderBagAmount * $corteM2);
