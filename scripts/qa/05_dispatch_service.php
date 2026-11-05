@@ -36,26 +36,32 @@ CREATE TABLE orders_delivery (id INTEGER PRIMARY KEY, dlv_num INTEGER, dlv_docnu
   dlv_annotation TEXT, dlv_externprod_act INTEGER DEFAULT 0, dlv_externprod_ccnum TEXT);
 CREATE TABLE orders_delivery_items (id INTEGER PRIMARY KEY, dlv_id INTEGER, item_id INTEGER, item_pos INTEGER, item_amount_shipped REAL, item_desc TEXT);
 INSERT INTO customer VALUES (1,'Cliente SA','11.111.111-1','Calle 1');
-INSERT INTO item VALUES (1,'Bolsa A','SKU-A'),(2,'Bolsa B','SKU-B');
+INSERT INTO item VALUES (1,'Bolsa A','SKU-A'),(2,'Bolsa B','SKU-B'),(3,'Producto','SKU-P');
 INSERT INTO orders_delivery (id,dlv_num,dlv_docnum,dlv_status,dlv_mode,dlv_delivery_date,dlv_cust_id,dlv_direccion_destino) VALUES
  (10,100,'5001',2,0,1700000000,1,'Dir 1'),
  (11,101,'5002',5,0,1700000000,1,'Dir 1'),
  (12,102,'PENDIENTE_SII',2,0,1700000000,1,'Dir 1'),
  (13,103,'5004',2,3,1700000000,1,'Dir 1'),
- (14,104,'5005',2,0,1700000000,1,'Dir 1');
+ (14,104,'5005',2,0,1700000000,1,'Dir 1'),
+ (15,105,'5006',2,0,1700000000,1,'Dir 1'),
+ (16,106,'5007',2,0,1700000000,1,'Dir 1'),
+ (17,107,'5008',2,0,1700000000,1,'Dir 1');
 INSERT INTO orders_delivery_items (dlv_id,item_id,item_pos,item_amount_shipped) VALUES
- (10,1,1,300),(11,1,1,300),(12,1,1,300),(13,1,1,300),(14,1,1,999);");
-$trz->exec("CREATE TABLE warehouses (id INTEGER PRIMARY KEY, code INTEGER, name TEXT);
+ (10,1,1,300),(11,1,1,300),(12,1,1,300),(13,1,1,300),(14,1,1,999),(15,2,1,70),(16,2,1,30),(17,3,1,40);");
+$trz->exec("CREATE TABLE warehouses (id INTEGER PRIMARY KEY, code INTEGER, name TEXT, erp_storehouse_id INTEGER);
 CREATE TABLE pallets (id INTEGER PRIMARY KEY, pallet_code TEXT, final_sku TEXT, warehouse_id INTEGER, status TEXT DEFAULT 'CREATED');
 CREATE TABLE boxes (id INTEGER PRIMARY KEY, box_code TEXT, final_sku TEXT, units_qty REAL, pallet_id INTEGER, warehouse_id INTEGER, status TEXT DEFAULT 'CREATED');
 CREATE TABLE movements (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT, entity_id INTEGER, movement_type TEXT, from_warehouse_id INTEGER, to_warehouse_id INTEGER, payload TEXT);
 CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, payload TEXT);
-CREATE TABLE traceability_warehouse_entries (id INTEGER PRIMARY KEY, traceability_code TEXT, entity_type TEXT, entity_id INTEGER, warehouse_id INTEGER, status TEXT DEFAULT 'IN_WAREHOUSE');
-INSERT INTO warehouses VALUES (1,400,'Producto terminado'),(2,500,'Otra');
+CREATE TABLE traceability_warehouse_entries (id INTEGER PRIMARY KEY, traceability_code TEXT, entity_type TEXT, entity_id INTEGER, warehouse_id INTEGER, warehouse_name TEXT, item_code TEXT, quantity REAL DEFAULT 1, status TEXT DEFAULT 'IN_WAREHOUSE');
+INSERT INTO warehouses VALUES (1,400,'Producto terminado',16),(2,500,'Otra',17);
 INSERT INTO pallets VALUES (1,'PAL-001','SKU-A',1,'STORED'),(2,'PAL-002','SKU-B',1,'STORED');
 INSERT INTO boxes VALUES (1,'BOX-001','SKU-A',100,1,1,'STORED'),(2,'BOX-002','SKU-A',100,1,1,'STORED'),(3,'BOX-003','SKU-A',100,1,1,'STORED'),
  (4,'BOX-004','SKU-B',50,NULL,1,'STORED'),(5,'BOX-005','SKU-B',50,NULL,2,'STORED'),(6,'BOX-006','SKU-B',50,2,1,'STORED');
-INSERT INTO traceability_warehouse_entries (traceability_code, entity_type, entity_id, warehouse_id) VALUES ('TRZ-BOX-4','BOX',4,1),('TRZ-PAL-1','PALLET',1,1);");
+INSERT INTO traceability_warehouse_entries (traceability_code, entity_type, entity_id, warehouse_id) VALUES ('TRZ-BOX-4','BOX',4,1),('TRZ-PAL-1','PALLET',1,1);
+INSERT INTO traceability_warehouse_entries (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name, item_code, quantity) VALUES
+ ('TRZ5C4687','PRODUCT',NULL,17,'500 Otra','SKU-P',100),('TRZ000000','PRODUCT',NULL,17,'500 Otra','SKU-P',5);
+UPDATE traceability_warehouse_entries SET status='CONSUMED' WHERE traceability_code='TRZ000000';");
 
 $svc = new DispatchService($erp, $trz);
 $actor = ['name' => 'Tester', 'user_id' => 1];
@@ -63,17 +69,15 @@ $k1 = bin2hex(random_bytes(16));
 $k2 = bin2hex(random_bytes(16));
 
 // ---- creación
-$check('picking sin tipo se rechaza', $throws(fn() => $svc->createPicking($k1, '', 1, '', $actor), 'venta directa'));
-$check('picking sin bodega válida se rechaza', $throws(fn() => $svc->createPicking($k1, 'SALE', 99, '', $actor), 'bodega'));
-$svc->createPicking($k1, 'SALE', 1, 'nota', $actor);
-$svc->createPicking($k1, 'SALE', 1, 'nota', $actor);
+$check('picking sin tipo se rechaza', $throws(fn() => $svc->createPicking($k1, '', '', $actor), 'venta directa'));
+$svc->createPicking($k1, 'SALE', 'nota', $actor);
+$svc->createPicking($k1, 'SALE', 'nota', $actor);
 $check('crear es idempotente', (int)$trz->query('SELECT COUNT(*) FROM dispatch_pickings')->fetchColumn() === 1);
 $check('código DSP generado', str_starts_with((string)$trz->query('SELECT code FROM dispatch_pickings')->fetchColumn(), 'DSP-'));
 
 // ---- escaneo
 $check('no cierra vacío', $throws(fn() => $svc->close($k1, $actor), 'al menos'));
 $check('código inexistente', $throws(fn() => $svc->scan($k1, 'XXX-999', $actor), 'no registrado'));
-$check('caja de otra bodega se bloquea', $throws(fn() => $svc->scan($k1, 'BOX-005', $actor), 'bodega de origen'));
 $svc->scan($k1, 'PAL-001', $actor);
 $check('pallet suma sus cajas', (float)$trz->query("SELECT qty FROM dispatch_picking_items WHERE code='PAL-001'")->fetchColumn() === 300.0
     && (int)$trz->query("SELECT box_count FROM dispatch_picking_items WHERE code='PAL-001'")->fetchColumn() === 3);
@@ -83,7 +87,7 @@ $svc->scan($k1, 'TRZ-BOX-4', $actor);
 $check('código de ingreso trazable resuelve la caja', (int)$trz->query("SELECT COUNT(*) FROM dispatch_picking_items WHERE code='BOX-004'")->fetchColumn() === 1);
 
 // ---- segundo picking no puede tomar lo mismo
-$svc->createPicking($k2, 'MAQUILA', 1, '', $actor);
+$svc->createPicking($k2, 'MAQUILA', '', $actor);
 $check('código en otro picking se bloquea', $throws(fn() => $svc->scan($k2, 'BOX-004', $actor), 'ya está en el picking'));
 
 // ---- quitar / liberar
@@ -127,17 +131,91 @@ $svc->confirmGuide($k1, '5001', false, $actor);
 $check('reintento es idempotente', (int)$trz->query('SELECT COUNT(*) FROM movements')->fetchColumn() === $mov);
 $d = $svc->dispatchOf('PALLET', 1);
 $check('trazabilidad del pallet muestra el despacho', $d !== null && $d['guide_number'] === '5001');
-$check('el despacho no escribió en el ERP', (int)$erp->query('SELECT COUNT(*) FROM orders_delivery')->fetchColumn() === 5);
+$check('el despacho no escribió en el ERP', (int)$erp->query('SELECT COUNT(*) FROM orders_delivery')->fetchColumn() === 8);
 
 // ---- una guía no se reutiliza y lo despachado no se vuelve a pickear
 $svc->close($k2, $actor);
 $check('guía ya usada se rechaza', $svc->validation($k2, '5001')['compare']['errors'] !== []);
 $k3 = bin2hex(random_bytes(16));
-$svc->createPicking($k3, 'SALE', 1, '', $actor);
+$svc->createPicking($k3, 'SALE', '', $actor);
 $check('pallet despachado no se vuelve a pickear', $throws(fn() => $svc->scan($k3, 'PAL-001', $actor), 'ya salió'));
 $svc->cancel($k3, 'prueba de cancelación', $actor);
 $check('cancelar deja el picking cancelado', (string)$trz->query('SELECT status FROM dispatch_pickings WHERE picking_key=' . $trz->quote($k3))->fetchColumn() === 'CANCELLED');
 $check('listado filtra por estado', count($svc->list('DISPATCHED')) === 1 && count($svc->list('', 'MAQUILA')) === 1);
+
+// ---- varias bodegas y despacho parcial
+$itemId = fn(string $key, string $code): int => (int)$trz->query("SELECT i.id FROM dispatch_picking_items i JOIN dispatch_pickings p ON p.id = i.picking_id
+    WHERE p.picking_key = " . $trz->quote($key) . " AND i.code = " . $trz->quote($code) . " AND i.status = 'PICKED'")->fetchColumn();
+$k4 = bin2hex(random_bytes(16));
+$svc->createPicking($k4, 'SALE', '', $actor);
+$svc->scan($k4, 'BOX-005', $actor);
+$svc->scan($k4, 'BOX-006', $actor);
+$rows = $trz->query("SELECT i.code, i.from_warehouse_id, i.from_warehouse_name FROM dispatch_picking_items i JOIN dispatch_pickings p ON p.id = i.picking_id WHERE p.picking_key = " . $trz->quote($k4) . " ORDER BY i.id")->fetchAll();
+$check('cada código toma la bodega donde está', (int)$rows[0]['from_warehouse_id'] === 2 && $rows[0]['from_warehouse_name'] === 'Otra' && (int)$rows[1]['from_warehouse_id'] === 1 && $rows[1]['from_warehouse_name'] === 'Producto terminado');
+$detail = $svc->detail($k4);
+$check('el picking muestra las dos bodegas', str_contains((string)$detail['warehouse_name'], 'Otra') && str_contains((string)$detail['warehouse_name'], 'Producto terminado'));
+$i6 = $itemId($k4, 'BOX-006');
+$check('cantidad cero se rechaza', $throws(fn() => $svc->setQuantity($i6, '0', $actor), 'mayor que cero'));
+$check('cantidad no numérica se rechaza', $throws(fn() => $svc->setQuantity($i6, 'abc', $actor), 'mayor que cero'));
+$check('no se despacha más de lo que tiene la caja', $throws(fn() => $svc->setQuantity($i6, '51', $actor), 'solo tiene 50'));
+$svc->setQuantity($i6, '20', $actor);
+$check('el picking no toca la caja antes de confirmar', (float)$trz->query('SELECT units_qty FROM boxes WHERE id=6')->fetchColumn() === 50.0);
+$check('la guía compara con la cantidad parcial', $svc->validation($k4, '5006')['compare']['errors'] === [] && $svc->validation($k4, '5006')['compare']['warnings'] === []);
+$svc->close($k4, $actor);
+$check('tras cerrar no cambia la cantidad', $throws(fn() => $svc->setQuantity($i6, '10', $actor), 'abierto'));
+$svc->confirmGuide($k4, '5006', false, $actor);
+$b6 = $trz->query('SELECT * FROM boxes WHERE id=6')->fetch();
+$check('la caja queda con su saldo en la misma bodega', (float)$b6['units_qty'] === 30.0 && (int)$b6['warehouse_id'] === 1 && $b6['status'] === 'STORED');
+$check('se conservan las unidades originales', (float)$b6['units_initial'] === 50.0);
+$check('el código de la caja no cambia', $b6['box_code'] === 'BOX-006');
+$check('la caja completa de la otra bodega sale', (string)$trz->query('SELECT status FROM boxes WHERE id=5')->fetchColumn() === 'DISPATCHED');
+$check('el movimiento indica lo despachado y el saldo', str_contains((string)$trz->query("SELECT payload FROM movements WHERE entity_type='BOX' AND entity_id=6 ORDER BY id DESC LIMIT 1")->fetchColumn(), '"remaining":30'));
+$k5 = bin2hex(random_bytes(16));
+$svc->createPicking($k5, 'SALE', '', $actor);
+$svc->scan($k5, 'BOX-006', $actor);
+$check('el saldo se puede pickear después y trae solo lo que queda', (float)$trz->query("SELECT qty FROM dispatch_picking_items WHERE id=" . $itemId($k5, 'BOX-006'))->fetchColumn() === 30.0);
+$svc->close($k5, $actor);
+$svc->confirmGuide($k5, '5007', false, $actor);
+$b6 = $trz->query('SELECT * FROM boxes WHERE id=6')->fetch();
+$check('con el último saldo la caja sale y no pierde sus unidades originales', $b6['status'] === 'DISPATCHED' && (float)$b6['units_initial'] === 50.0 && $b6['warehouse_id'] === null);
+$k6 = bin2hex(random_bytes(16));
+$svc->createPicking($k6, 'SALE', '', $actor);
+$check('caja sin saldo no se vuelve a pickear', $throws(fn() => $svc->scan($k6, 'BOX-006', $actor), 'ya salió'));
+
+// ---- producto con código de trazabilidad
+$check('producto no disponible se rechaza', $throws(fn() => $svc->scan($k6, 'TRZ000000', $actor), 'no está disponible'));
+$svc->scan($k6, 'trz5c4687', $actor);
+$p1 = $itemId($k6, 'TRZ5C4687');
+$rowP = $trz->query("SELECT * FROM dispatch_picking_items WHERE id=$p1")->fetch();
+$check('el producto toma la bodega de su ingreso', $rowP['entity_type'] === 'PRODUCT' && (int)$rowP['from_warehouse_id'] === 2 && $rowP['from_warehouse_name'] === '500 Otra' && $rowP['sku'] === 'SKU-P');
+$svc->setQuantity($p1, '40', $actor);
+$svc->close($k6, $actor);
+$svc->confirmGuide($k6, '5008', false, $actor);
+$entry = $trz->query("SELECT * FROM traceability_warehouse_entries WHERE traceability_code='TRZ5C4687'")->fetch();
+$check('el producto queda con saldo y en bodega', (float)$entry['quantity'] === 60.0 && (float)$entry['quantity_initial'] === 100.0 && $entry['status'] === 'IN_WAREHOUSE');
+$check('el movimiento del producto lleva su código', str_contains((string)$trz->query("SELECT payload FROM movements WHERE entity_type='PRODUCT' ORDER BY id DESC LIMIT 1")->fetchColumn(), 'TRZ5C4687'));
+
+// ---- pallet completo y cancelar
+$k7 = bin2hex(random_bytes(16));
+$svc->createPicking($k7, 'SALE', '', $actor);
+$svc->scan($k7, 'PAL-002', $actor);
+$check('el pallet no admite cantidad parcial', $throws(fn() => $svc->setQuantity($itemId($k7, 'PAL-002'), '1', $actor), 'pallet'));
+$svc->voidItem($itemId($k7, 'PAL-002'), 'prueba quitar', $actor);
+$svc->scan($k7, 'TRZ5C4687', $actor);
+$svc->setQuantity($itemId($k7, 'TRZ5C4687'), '10', $actor);
+$svc->cancel($k7, 'prueba de cancelación', $actor);
+$check('cancelar no descuenta nada', (float)$trz->query("SELECT quantity FROM traceability_warehouse_entries WHERE traceability_code='TRZ5C4687'")->fetchColumn() === 60.0);
+
+// ---- la etiqueta conserva las unidades originales
+require_once dirname(__DIR__, 2) . '/src/PrintService.php';
+foreach (['epl', 'zpl', 'tspl'] as $lang) {
+    $printer = new PrintService(['PRINT_LANGUAGE' => $lang]);
+    $cmd = $printer->buildBoxCommand(['box_code' => 'BOX-006', 'final_sku' => 'X', 'units_qty' => 30, 'units_initial' => 50]);
+    $check(strtoupper($lang) . ': etiqueta de caja con unidades originales', str_contains($cmd, 'UNIDADES: 50') && !str_contains($cmd, 'UNIDADES: 30'));
+    $cmd = $printer->buildTraceabilityEntryCommand(['traceability_code' => 'TRZ5C4687', 'item_code' => 'X', 'quantity' => 60, 'quantity_initial' => 100]);
+    $check(strtoupper($lang) . ': etiqueta de ingreso con cantidad original', str_contains($cmd, 'CANT: 100') && !str_contains($cmd, 'CANT: 60'));
+}
+$check('la cantidad parcial no escribió en el ERP', (int)$erp->query('SELECT COUNT(*) FROM orders_delivery')->fetchColumn() === 8);
 
 echo $fail === 0 ? "\nDESPACHO OK\n" : "\nDESPACHO: $fail fallas\n";
 exit($fail === 0 ? 0 : 1);

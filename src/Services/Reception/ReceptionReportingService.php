@@ -3712,7 +3712,7 @@ trait ReceptionReportingServiceTrait
             'pallets' => 0,
             'units' => 0.0,
         ];
-        $stmt = $this->pdo->query('SELECT COUNT(*) AS box_count, COALESCE(SUM(units_qty), 0) AS units_total FROM boxes');
+        $stmt = $this->pdo->query('SELECT COUNT(*) AS box_count, COALESCE(SUM(COALESCE(units_initial, units_qty)), 0) AS units_total FROM boxes');
         $row = $stmt->fetch() ?: [];
         $packaging['boxes'] = (int)($row['box_count'] ?? 0);
         $packaging['units'] = (float)($row['units_total'] ?? 0);
@@ -4971,12 +4971,12 @@ SQL;
 
     public function getProductionDashboardKpis(string $startAt, string $endAt): array
     {
-        $stmt = $this->pdo->prepare('SELECT COALESCE(SUM(units_qty), 0) AS produced_units FROM boxes WHERE created_at BETWEEN :start AND :end');
+        $stmt = $this->pdo->prepare('SELECT COALESCE(SUM(COALESCE(units_initial, units_qty)), 0) AS produced_units FROM boxes WHERE created_at BETWEEN :start AND :end');
         $stmt->execute([':start' => $startAt, ':end' => $endAt]);
         $producedUnits = (float)($stmt->fetchColumn() ?: 0);
 
         $stmt = $this->pdo->prepare(
-            'SELECT COALESCE(SUM(units_qty), 0) AS dispatched_units
+            'SELECT COALESCE(SUM(COALESCE(units_initial, units_qty)), 0) AS dispatched_units
              FROM boxes
              WHERE destination_mode = "CUSTOMER_ORDER"
                AND created_at BETWEEN :start AND :end'
@@ -5063,8 +5063,8 @@ SQL;
              LEFT JOIN erp_work_order_sync sync ON sync.work_order_id = wo.id
              LEFT JOIN (
                 SELECT work_order_id,
-                       COALESCE(SUM(units_qty), 0) AS produced_units,
-                       COALESCE(SUM(CASE WHEN destination_mode = "CUSTOMER_ORDER" THEN units_qty ELSE 0 END), 0) AS dispatched_units,
+                       COALESCE(SUM(COALESCE(units_initial, units_qty)), 0) AS produced_units,
+                       COALESCE(SUM(CASE WHEN destination_mode = "CUSTOMER_ORDER" THEN COALESCE(units_initial, units_qty) ELSE 0 END), 0) AS dispatched_units,
                        COUNT(*) AS boxes_count,
                        MAX(created_at) AS last_box_at
                 FROM boxes

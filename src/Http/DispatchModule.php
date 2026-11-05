@@ -8,7 +8,7 @@ declare(strict_types=1);
  * Rutas:
  *  - /stock/dispatch ............ Nuevo picking y listado de pickeados.
  *  - /stock/dispatch/view ....... Detalle de un picking: escaneo, cierre, validación de guía y confirmación.
- *  - /stock/dispatch/create|scan|void|close|cancel|confirm (POST).
+ *  - /stock/dispatch/create|scan|qty|void|close|cancel|confirm (POST).
  */
 
 require_once __DIR__ . '/../DispatchService.php';
@@ -20,7 +20,7 @@ function dispatchActor(string $name): array
 
 function dispatchRoute(string $path): bool
 {
-    return in_array($path, ['/stock/dispatch', '/stock/dispatch/view', '/stock/dispatch/create', '/stock/dispatch/scan',
+    return in_array($path, ['/stock/dispatch', '/stock/dispatch/view', '/stock/dispatch/create', '/stock/dispatch/scan', '/stock/dispatch/qty',
         '/stock/dispatch/void', '/stock/dispatch/close', '/stock/dispatch/cancel', '/stock/dispatch/confirm'], true);
 }
 
@@ -42,13 +42,18 @@ function handleDispatchRoutes(string $path, string $method, string $name): bool
             requireCsrf();
             $sep = str_contains($back, '?') ? '&' : '?';
             if ($path === '/stock/dispatch/create') {
-                $key = $service->createPicking($key, (string)($_POST['dispatch_type'] ?? ''), (int)($_POST['warehouse_id'] ?? 0), (string)($_POST['note'] ?? ''), $actor);
+                $key = $service->createPicking($key, (string)($_POST['dispatch_type'] ?? ''), (string)($_POST['note'] ?? ''), $actor);
                 redirectResponse('/stock/dispatch/view?key=' . $key . '&saved=1');
                 return true;
             }
             if ($path === '/stock/dispatch/scan') {
                 $code = $service->scan($key, (string)($_POST['code'] ?? ''), $actor);
                 redirectResponse($back . $sep . 'saved=' . rawurlencode('Agregado ' . $code));
+                return true;
+            }
+            if ($path === '/stock/dispatch/qty') {
+                $service->setQuantity((int)($_POST['item_id'] ?? 0), (string)($_POST['qty'] ?? ''), $actor);
+                redirectResponse($back . $sep . 'saved=' . rawurlencode('Cantidad actualizada'));
                 return true;
             }
             if ($path === '/stock/dispatch/void') {
@@ -101,7 +106,7 @@ function handleDispatchRoutes(string $path, string $method, string $name): bool
 
 function dispatchStyles(): string
 {
-    return '<link rel="stylesheet" href="/assets/css/unibag-dispatch.css?v=20261105">';
+    return '<link rel="stylesheet" href="/assets/css/unibag-dispatch.css?v=20261105b">';
 }
 
 function dispatchIcon(string $name): string
@@ -122,6 +127,11 @@ function dispatchPill(string $status): string
 function dispatchNum(float $n): string
 {
     return number_format($n, 0, ',', '.');
+}
+
+function dispatchWarehouses(?string $names): string
+{
+    return str_replace(',', ', ', (string)$names);
 }
 
 function dispatchDate(?string $value): string
@@ -176,11 +186,7 @@ function dispatchNewTab(DispatchService $service): string
         . '<div class="dsp-types">'
         . '<label class="dsp-type"><input type="radio" name="dispatch_type" value="SALE" required><span class="dsp-type-box">' . dispatchIcon('shopping-cart') . 'Venta directa</span></label>'
         . '<label class="dsp-type"><input type="radio" name="dispatch_type" value="MAQUILA" required><span class="dsp-type-box">' . dispatchIcon('industry') . 'Envío a procesar a otra empresa</span></label>'
-        . '</div><div class="dsp-field"><label class="dsp-lbl" for="dsp-wh">Bodega de origen</label><select id="dsp-wh" name="warehouse_id" required><option value="">Seleccionar</option>';
-    foreach ($service->warehouses() as $w) {
-        $html .= '<option value="' . (int)$w['id'] . '">' . h($w['code'] . ' · ' . $w['name']) . '</option>';
-    }
-    $html .= '</select></div><div class="dsp-field"><label class="dsp-lbl" for="dsp-note">Nota</label><input id="dsp-note" type="text" name="note" maxlength="200"></div>'
+        . '</div><div class="dsp-field"><label class="dsp-lbl" for="dsp-note">Nota</label><input id="dsp-note" type="text" name="note" maxlength="200"></div>'
         . '<button class="dsp-btn block" type="submit">' . dispatchIcon('plus') . 'Crear picking</button></div></form><div>';
     foreach (['PICKING' => 'Pickings en curso', 'AWAITING_GUIDE' => 'Esperando guía'] as $status => $title) {
         $rows = $service->list($status);
@@ -218,7 +224,7 @@ function dispatchTable(array $rows, bool $withGuide): string
         $html .= '<tr class="link" onclick="location.href=\'' . $url . '\'">'
             . '<td class="dsp-code"><a href="' . $url . '">' . h($r['code']) . '</a></td>'
             . '<td class="dsp-nowrap">' . h(DispatchService::typeLabel((string)$r['dispatch_type'])) . '</td>'
-            . '<td>' . h($r['warehouse_name'] ?? '') . '</td>'
+            . '<td>' . h(dispatchWarehouses($r['warehouse_name'] ?? '')) . '</td>'
             . '<td>' . dispatchPill((string)$r['status']) . '</td>'
             . '<td class="num">' . (int)$r['item_count'] . '</td>'
             . '<td class="num">' . h(dispatchNum((float)$r['qty_total'])) . '</td>'
@@ -252,7 +258,7 @@ function dispatchViewPage(DispatchService $service, string $key, string $guideNu
         . '<a class="dsp-back" href="/stock/dispatch?tab=list" aria-label="Volver a pickeados">' . dispatchIcon('arrow-left') . '</a>'
         . '<h1>' . h($p['code']) . '</h1>' . dispatchPill($status)
         . '<div class="dsp-meta"><span>' . dispatchIcon($p['dispatch_type'] === 'SALE' ? 'shopping-cart' : 'industry') . h(DispatchService::typeLabel((string)$p['dispatch_type'])) . '</span>'
-        . '<span>' . dispatchIcon('warehouse') . h($p['warehouse_name'] ?? '') . '</span></div></div></div>' . dispatchFlash();
+        . (!empty($p['warehouse_name']) ? '<span>' . dispatchIcon('warehouse') . h(dispatchWarehouses($p['warehouse_name'])) . '</span>' : '') . '</div></div></div>' . dispatchFlash();
 
     if ($status === 'CANCELLED') {
         $html .= '<div class="dsp-alert warn">' . dispatchIcon('ban') . '<div>Picking cancelado: ' . h($p['cancel_reason']) . '</div></div>';
@@ -263,7 +269,7 @@ function dispatchViewPage(DispatchService $service, string $key, string $guideNu
     $html .= '<div class="dsp-layout"><div>';
     if ($status === 'PICKING') {
         $html .= '<form class="dsp-card dsp-scan" method="post" action="/stock/dispatch/scan">' . $csrf
-            . '<div class="dsp-scan-input">' . dispatchIcon('barcode') . '<input type="text" name="code" placeholder="Escanear pallet o caja" aria-label="Código de pallet o caja" autocomplete="off" autofocus required></div>'
+            . '<div class="dsp-scan-input">' . dispatchIcon('barcode') . '<input type="text" name="code" placeholder="Escanear pallet, caja o producto" aria-label="Código de pallet, caja o producto" autocomplete="off" autofocus required></div>'
             . '<button class="dsp-btn" type="submit">' . dispatchIcon('plus') . 'Agregar</button></form>';
     } elseif ($status === 'AWAITING_GUIDE') {
         $html .= '<form class="dsp-card dsp-scan" method="get" action="/stock/dispatch/view"><input type="hidden" name="key" value="' . h($key) . '">'
@@ -285,15 +291,16 @@ function dispatchViewPage(DispatchService $service, string $key, string $guideNu
     if ($p['items'] === []) {
         $html .= '<div class="dsp-empty">' . dispatchIcon('barcode') . 'Sin códigos</div>';
     } else {
-        $html .= '<div class="dsp-wrap"><table class="dsp-table"><thead><tr><th>Código</th><th>Tipo</th><th>Artículo</th><th class="num">Cajas</th><th class="num">Unidades</th><th>Estado</th>' . ($canVoid ? '<th></th>' : '') . '</tr></thead><tbody>';
+        $html .= '<div class="dsp-wrap"><table class="dsp-table"><thead><tr><th>Código</th><th>Tipo</th><th>Bodega</th><th>Artículo</th><th class="num">Cajas</th><th class="num">Unidades</th><th>Estado</th>' . ($canVoid ? '<th></th>' : '') . '</tr></thead><tbody>';
         foreach ($p['items'] as $it) {
             $voided = $it['status'] === 'VOIDED';
             $itemStatus = $it['status'] === 'PICKED' ? 'Pickeado' : ($it['status'] === 'DISPATCHED' ? 'Despachado' : 'Quitado');
             $html .= '<tr' . ($voided ? ' class="voided"' : '') . '><td class="dsp-code">' . h($it['code']) . '</td>'
-                . '<td><span class="dsp-chip">' . ($it['entity_type'] === 'PALLET' ? 'Pallet' : 'Caja') . '</span></td>'
+                . '<td><span class="dsp-chip">' . (['PALLET' => 'Pallet', 'BOX' => 'Caja', 'PRODUCT' => 'Producto'][$it['entity_type']] ?? '') . '</span></td>'
+                . '<td>' . h($it['from_warehouse_name'] ?? '') . '</td>'
                 . '<td>' . h($it['sku']) . '</td>'
                 . '<td class="num">' . (int)$it['box_count'] . '</td>'
-                . '<td class="num">' . h(dispatchNum((float)$it['qty'])) . '</td>'
+                . '<td class="num">' . dispatchQtyCell($it, $canVoid, $csrf) . '</td>'
                 . '<td>' . h($itemStatus) . ($voided && $it['void_reason'] ? '<span class="dsp-sub">' . h($it['void_reason']) . '</span>' : '') . '</td>';
             if ($canVoid) {
                 $html .= '<td class="num">';
@@ -343,6 +350,22 @@ function dispatchViewPage(DispatchService $service, string $key, string $guideNu
     return $html . '</ul></div></aside></div></div>';
 }
 
+/** Unidades de la línea: editable mientras el picking está abierto, con el saldo que dejará en el código. */
+function dispatchQtyCell(array $it, bool $editable, string $csrf): string
+{
+    $qty = (float)$it['qty'];
+    $full = (float)($it['full_qty'] ?? $qty);
+    $balance = $full - $qty > 0.0005 ? '<span class="dsp-sub">de ' . h(dispatchNum($full)) . ' · saldo ' . h(dispatchNum($full - $qty)) . '</span>' : '';
+    if (!$editable || $it['status'] !== 'PICKED' || $it['entity_type'] === 'PALLET') {
+        return h(dispatchNum($qty)) . $balance;
+    }
+    $value = rtrim(rtrim(number_format($qty, 3, '.', ''), '0'), '.');
+    return '<form class="dsp-qty" method="post" action="/stock/dispatch/qty">' . $csrf
+        . '<input type="hidden" name="item_id" value="' . (int)$it['id'] . '">'
+        . '<input type="number" name="qty" value="' . h($value) . '" min="0.001" max="' . h((string)$full) . '" step="any" required aria-label="Unidades a despachar de ' . h($it['code']) . '">'
+        . '<button class="dsp-btn sec sm" type="submit">Guardar</button></form>' . $balance;
+}
+
 function dispatchAuditLabel(string $action, string $detailJson): string
 {
     $detail = json_decode($detailJson, true);
@@ -350,6 +373,7 @@ function dispatchAuditLabel(string $action, string $detailJson): string
     return match ($action) {
         'CREATE' => 'Picking creado',
         'SCAN' => 'Agregado ' . ($detail['code'] ?? ''),
+        'QTY' => 'Cantidad de ' . ($detail['code'] ?? '') . ': ' . dispatchNum((float)($detail['qty'] ?? 0)) . ' de ' . dispatchNum((float)($detail['available'] ?? 0)),
         'VOID' => 'Quitado ' . ($detail['code'] ?? ''),
         'CLOSE' => 'Picking cerrado',
         'CANCEL' => 'Picking cancelado',
@@ -409,7 +433,7 @@ function dispatchGuidePanel(DispatchService $service, string $key, string $numbe
         if ($cmp['warnings'] !== []) {
             $html .= '<label><input type="checkbox" name="accept_differences" value="1" required> Acepto las diferencias y confirmo que esta es la guía correcta</label>';
         }
-        $html .= '<button class="dsp-btn" type="submit" onclick="return confirm(\'Se descontarán los códigos de la bodega y quedarán asociados a la guía. ¿Confirmar?\')">' . dispatchIcon('truck') . 'Confirmar guía y despachar</button></form>';
+        $html .= '<button class="dsp-btn" type="submit" onclick="return confirm(\'Se descontarán de cada bodega las unidades indicadas y quedarán asociadas a la guía. ¿Confirmar?\')">' . dispatchIcon('truck') . 'Confirmar guía y despachar</button></form>';
     }
     return $html . '</div>';
 }

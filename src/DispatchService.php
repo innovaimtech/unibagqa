@@ -10,13 +10,16 @@ declare(strict_types=1);
  * 3) ingresar el número de guía: se traen sus datos del ERP y se comparan; 4) al confirmar, los códigos salen
  * de la bodega (TRZ) y quedan asociados a la guía con movimientos, evento y copia de la guía.
  *
+ * La bodega de cada línea sale del código escaneado, así un picking puede juntar varias bodegas. De una caja o
+ * producto se puede despachar una parte: el saldo queda en el mismo código (la etiqueta no cambia).
+ *
  * El ERP ya descuenta el stock al confirmar la guía; por eso este servicio NO escribe en el ERP (solo lo lee).
  */
 final class DispatchService
 {
     public const TYPE_SALE = 'SALE';
     public const TYPE_MAQUILA = 'MAQUILA';
-    private const SCHEMA_VERSION = 'dispatch-2026-11-04-a';
+    private const SCHEMA_VERSION = 'dispatch-2026-11-05-a';
 
     private bool $ready = false;
 
@@ -103,6 +106,8 @@ final class DispatchService
             qty DECIMAL(12,3) NOT NULL DEFAULT 0,
             box_count INT NOT NULL DEFAULT 0,
             from_warehouse_id INT NULL,
+            from_warehouse_name VARCHAR(120) NULL,
+            full_qty DECIMAL(12,3) NULL,
             active_code VARCHAR(40) NULL UNIQUE,
             status VARCHAR(12) NOT NULL DEFAULT 'PICKED',
             void_reason TEXT NULL,
@@ -116,6 +121,20 @@ final class DispatchService
             detail TEXT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )$engine");
+        foreach ([
+            'ALTER TABLE dispatch_picking_items ADD COLUMN from_warehouse_name VARCHAR(120) NULL',
+            'ALTER TABLE dispatch_picking_items ADD COLUMN full_qty DECIMAL(12,3) NULL',
+            'ALTER TABLE boxes ADD COLUMN units_initial DECIMAL(12,3) NULL',
+            'ALTER TABLE traceability_warehouse_entries ADD COLUMN quantity_initial DECIMAL(12,3) NULL',
+            'UPDATE dispatch_picking_items SET from_warehouse_name = (SELECT w.name FROM warehouses w WHERE w.id = from_warehouse_id) WHERE from_warehouse_name IS NULL',
+            'UPDATE dispatch_picking_items SET full_qty = qty WHERE full_qty IS NULL',
+        ] as $ddl) {
+            try {
+                $this->trz->exec($ddl);
+            } catch (Throwable) {
+                // La columna ya existe.
+            }
+        }
         if (!$this->sqlite()) {
             foreach ([
                 'CREATE INDEX idx_dpi_picking ON dispatch_picking_items (picking_id)',
@@ -151,15 +170,9 @@ final class DispatchService
             ->execute([$pickingId, $action, $actor, json_encode($detail, JSON_UNESCAPED_UNICODE)]);
     }
 
-    /** Bodegas internas disponibles como origen del picking. */
-    public function warehouses(): array
-    {
-        return $this->all('SELECT id, code, name FROM warehouses ORDER BY code ASC');
-    }
-
     // ------------------------------------------------------------------ picking
 
-    public function createPicking(string $key, string $type, int $warehouseId, string $note, array $actor): string
+    public function createPicking(string $key, string $type, string $note, array $actor): string
     {
         $this->ensureSchema();
         $who = $this->actorName($actor);
@@ -172,18 +185,15 @@ final class DispatchService
         if ($this->one('SELECT id FROM dispatch_pickings WHERE picking_key = ?', [$key])) {
             return $key;
         }
-        if (!$this->one('SELECT id FROM warehouses WHERE id = ?', [$warehouseId])) {
-            throw new RuntimeException('Selecciona la bodega de origen del picking.');
-        }
         $this->trz->beginTransaction();
         try {
             $this->trz->prepare('INSERT INTO dispatch_pickings (picking_key, code, dispatch_type, warehouse_id, note, status, created_by)
                 VALUES (?,?,?,?,?,?,?)')
-                ->execute([$key, $key, $type, $warehouseId, trim($note) !== '' ? trim($note) : null, 'PICKING', $who]);
+                ->execute([$key, $key, $type, 0, trim($note) !== '' ? trim($note) : null, 'PICKING', $who]);
             $id = (int)$this->trz->lastInsertId();
             $this->trz->prepare('UPDATE dispatch_pickings SET code = ? WHERE id = ?')
                 ->execute([sprintf('DSP-%s-%04d', date('Ym'), $id), $id]);
-            $this->audit($id, 'CREATE', $who, ['type' => $type, 'warehouse_id' => $warehouseId]);
+            $this->audit($id, 'CREATE', $who, ['type' => $type]);
             $this->trz->commit();
         } catch (Throwable $e) {
             if ($this->trz->inTransaction()) {
@@ -203,7 +213,7 @@ final class DispatchService
         return $row;
     }
 
-    /** Resuelve un código leído a un pallet o una caja de TRZ (por código propio o por código de ingreso trazable). */
+    /** Resuelve un código leído a un pallet, una caja o un producto (por código propio o por código de ingreso trazable). */
     private function resolveCode(string $raw): array
     {
         $code = strtoupper(preg_replace('/\s+/', '', trim($raw)) ?? '');
@@ -219,11 +229,15 @@ final class DispatchService
             return ['BOX', $box];
         }
         try {
-            $entry = $this->one("SELECT entity_type, entity_id FROM traceability_warehouse_entries
-                WHERE UPPER(REPLACE(traceability_code, ' ', '')) = ? AND entity_type IN ('PALLET','BOX') AND entity_id IS NOT NULL
+            $entry = $this->one("SELECT * FROM traceability_warehouse_entries
+                WHERE UPPER(REPLACE(traceability_code, ' ', '')) = ?
+                  AND (entity_type = 'PRODUCT' OR (entity_type IN ('PALLET','BOX') AND entity_id IS NOT NULL))
                 ORDER BY id DESC LIMIT 1", [$code]);
         } catch (Throwable) {
             $entry = null;
+        }
+        if ($entry && $entry['entity_type'] === 'PRODUCT') {
+            return ['PRODUCT', $entry];
         }
         if ($entry) {
             $table = $entry['entity_type'] === 'PALLET' ? 'pallets' : 'boxes';
@@ -232,7 +246,38 @@ final class DispatchService
                 return [$entry['entity_type'], $row];
             }
         }
-        throw new RuntimeException('Código no registrado como pallet o caja: ' . $code . '. En despacho solo se pickean pallets y cajas.');
+        throw new RuntimeException('Código no registrado como pallet o caja: ' . $code . '. En despacho solo se pickean pallets, cajas y productos.');
+    }
+
+    private function codeOf(string $type, array $row): string
+    {
+        return (string)$row[['PALLET' => 'pallet_code', 'BOX' => 'box_code', 'PRODUCT' => 'traceability_code'][$type]];
+    }
+
+    /** Bodega donde está el código: el ingreso trazable guarda la bodega del ERP; pallets y cajas, la interna. */
+    private function warehouseOf(string $type, array $row): array
+    {
+        $id = (int)($row['warehouse_id'] ?? 0);
+        if ($id <= 0) {
+            throw new RuntimeException('El código ' . $this->codeOf($type, $row) . ' no tiene bodega asignada.');
+        }
+        if ($type === 'PRODUCT') {
+            $w = $this->one('SELECT id, name FROM warehouses WHERE erp_storehouse_id = ? LIMIT 1', [$id])
+                ?? $this->one('SELECT id, name FROM warehouses WHERE id = ?', [$id]);
+            $name = trim((string)($row['warehouse_name'] ?? ''));
+            return [$w ? (int)$w['id'] : null, $name !== '' ? $name : (string)($w['name'] ?? '')];
+        }
+        $w = $this->one('SELECT name FROM warehouses WHERE id = ?', [$id]);
+        return [$id, (string)($w['name'] ?? '')];
+    }
+
+    /** Unidades que tiene hoy una caja o un producto. */
+    private function available(string $type, int $id): float
+    {
+        $row = $type === 'BOX'
+            ? $this->one('SELECT units_qty AS q FROM boxes WHERE id = ?', [$id])
+            : $this->one('SELECT quantity AS q FROM traceability_warehouse_entries WHERE id = ?', [$id]);
+        return (float)($row['q'] ?? 0);
     }
 
     private function isActive(string $type, int $id): ?array
@@ -254,14 +299,15 @@ final class DispatchService
                 throw new RuntimeException('El picking ya está cerrado; no se pueden agregar códigos.');
             }
             $status = strtoupper((string)($row['status'] ?? ''));
+            $label = $this->codeOf($type, $row);
             if (in_array($status, ['DISPATCHED', 'IN_MAQUILA'], true)) {
-                throw new RuntimeException('El código ' . ($row[$type === 'PALLET' ? 'pallet_code' : 'box_code']) . ' ya salió de la bodega (' . $status . ').');
+                throw new RuntimeException('El código ' . $label . ' ya salió de la bodega (' . $status . ').');
             }
-            if ((int)($row['warehouse_id'] ?? 0) !== (int)$p['warehouse_id']) {
-                throw new RuntimeException('El código no está en la bodega de origen de este picking.');
+            if ($type === 'PRODUCT' && $status !== 'IN_WAREHOUSE') {
+                throw new RuntimeException('El código ' . $label . ' no está disponible en bodega (' . $status . ').');
             }
+            [$warehouseId, $warehouseName] = $this->warehouseOf($type, $row);
             $id = (int)$row['id'];
-            $label = (string)($row[$type === 'PALLET' ? 'pallet_code' : 'box_code']);
             if ($busy = $this->isActive($type, $id)) {
                 throw new RuntimeException('El código ' . $label . ' ya está en el picking ' . $busy['picking_code'] . '.');
             }
@@ -276,6 +322,9 @@ final class DispatchService
                     $qty += (float)$b['units_qty'];
                 }
                 $boxCount = count($boxes);
+            } elseif ($type === 'PRODUCT') {
+                $qty = (float)$row['quantity'];
+                $boxCount = 1;
             } else {
                 if ((int)($row['pallet_id'] ?? 0) > 0 && $this->isActive('PALLET', (int)$row['pallet_id'])) {
                     throw new RuntimeException('La caja pertenece a un pallet que ya está en un picking.');
@@ -283,10 +332,14 @@ final class DispatchService
                 $qty = (float)$row['units_qty'];
                 $boxCount = 1;
             }
-            $this->trz->prepare('INSERT INTO dispatch_picking_items (picking_id, entity_type, entity_id, code, sku, qty, box_count, from_warehouse_id, active_code, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?)')
-                ->execute([(int)$p['id'], $type, $id, $label, (string)($row['final_sku'] ?? ''), $qty, $boxCount,
-                    (int)$p['warehouse_id'], $type . ':' . $id, 'PICKED']);
+            // Un pallet de ingreso directo no tiene cajas registradas: su suma es 0 y se puede despachar igual.
+            if ($type !== 'PALLET' && $qty <= 0) {
+                throw new RuntimeException('El código ' . $label . ' no tiene unidades disponibles.');
+            }
+            $this->trz->prepare('INSERT INTO dispatch_picking_items (picking_id, entity_type, entity_id, code, sku, qty, full_qty, box_count, from_warehouse_id, from_warehouse_name, active_code, status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+                ->execute([(int)$p['id'], $type, $id, $label, (string)($row[$type === 'PRODUCT' ? 'item_code' : 'final_sku'] ?? ''), $qty, $qty, $boxCount,
+                    $warehouseId, $warehouseName, $type . ':' . $id, 'PICKED']);
             $this->audit((int)$p['id'], 'SCAN', $who, ['code' => $label, 'type' => $type, 'qty' => $qty]);
             $this->trz->commit();
         } catch (Throwable $e) {
@@ -299,6 +352,40 @@ final class DispatchService
             throw $e;
         }
         return $label;
+    }
+
+    /** Fija cuántas unidades se despachan de una caja o producto; el resto queda de saldo al confirmar la guía. */
+    public function setQuantity(int $itemId, string $rawQty, array $actor): void
+    {
+        $this->ensureSchema();
+        $who = $this->actorName($actor);
+        $text = str_replace(',', '.', trim($rawQty));
+        $qty = is_numeric($text) ? round((float)$text, 3) : 0.0;
+        if ($qty <= 0) {
+            throw new RuntimeException('Indica una cantidad mayor que cero.');
+        }
+        $this->trz->beginTransaction();
+        try {
+            $it = $this->one('SELECT i.*, p.status AS picking_status FROM dispatch_picking_items i JOIN dispatch_pickings p ON p.id = i.picking_id WHERE i.id = ?' . $this->lock(), [$itemId]);
+            if (!$it || $it['status'] !== 'PICKED' || $it['picking_status'] !== 'PICKING') {
+                throw new RuntimeException('Solo se puede cambiar la cantidad en un picking abierto.');
+            }
+            if ($it['entity_type'] === 'PALLET') {
+                throw new RuntimeException('El pallet sale completo. Para despachar una parte, escanea la caja.');
+            }
+            $available = $this->available((string)$it['entity_type'], (int)$it['entity_id']);
+            if ($qty > $available + 0.0005) {
+                throw new RuntimeException('El código ' . $it['code'] . ' solo tiene ' . rtrim(rtrim(number_format($available, 3, '.', ''), '0'), '.') . ' unidades.');
+            }
+            $this->trz->prepare('UPDATE dispatch_picking_items SET qty = ?, full_qty = ? WHERE id = ?')->execute([$qty, $available, $itemId]);
+            $this->audit((int)$it['picking_id'], 'QTY', $who, ['code' => $it['code'], 'qty' => $qty, 'available' => $available]);
+            $this->trz->commit();
+        } catch (Throwable $e) {
+            if ($this->trz->inTransaction()) {
+                $this->trz->rollBack();
+            }
+            throw $e;
+        }
     }
 
     public function voidItem(int $itemId, string $reason, array $actor): void
@@ -563,13 +650,9 @@ final class DispatchService
                         $this->markEntries('BOX', array_map(static fn($b) => (int)$b['id'], $boxes));
                     }
                 } else {
-                    $this->trz->prepare("UPDATE boxes SET status = 'DISPATCHED', warehouse_id = NULL WHERE id = ?")->execute([(int)$it['entity_id']]);
-                    $this->movement('BOX', (int)$it['entity_id'], $from, $ctx + ['code' => $it['code']]);
-                    if ($hasEntries) {
-                        $this->markEntries('BOX', [(int)$it['entity_id']]);
-                    }
+                    $this->dispatchUnits($it, $from, $ctx, $hasEntries);
                 }
-                $this->trz->prepare("UPDATE dispatch_picking_items SET status = 'DISPATCHED' WHERE id = ?")->execute([(int)$it['id']]);
+                $this->trz->prepare("UPDATE dispatch_picking_items SET status = 'DISPATCHED', active_code = NULL WHERE id = ?")->execute([(int)$it['id']]);
             }
             $this->trz->prepare("UPDATE dispatch_pickings SET status = 'DISPATCHED', guide_id = ?, guide_number = ?, guide_snapshot = ?,
                 confirmed_by = ?, confirmed_at = CURRENT_TIMESTAMP WHERE id = ?")
@@ -585,6 +668,37 @@ final class DispatchService
             }
             throw $e;
         }
+    }
+
+    /** Saca de bodega la cantidad pickeada de una caja o producto. Si queda saldo, el código sigue en su bodega con ese saldo. */
+    private function dispatchUnits(array $it, int $from, array $ctx, bool $hasEntries): void
+    {
+        $type = (string)$it['entity_type'];
+        $id = (int)$it['entity_id'];
+        $available = $this->available($type, $id);
+        $qty = (float)$it['qty'];
+        if ($qty > $available + 0.0005) {
+            throw new RuntimeException('El código ' . $it['code'] . ' ya no tiene las unidades pickeadas. Revisa el picking.');
+        }
+        $remaining = round($available - $qty, 3);
+        $partial = $remaining > 0.0005;
+        if ($type === 'BOX') {
+            if ($partial) {
+                $this->trz->prepare('UPDATE boxes SET units_initial = COALESCE(units_initial, units_qty), units_qty = ? WHERE id = ?')->execute([$remaining, $id]);
+            } else {
+                $this->trz->prepare("UPDATE boxes SET status = 'DISPATCHED', warehouse_id = NULL WHERE id = ?")->execute([$id]);
+            }
+        }
+        if ($type === 'PRODUCT' || $hasEntries) {
+            $where = $type === 'PRODUCT' ? 'id = ?' : "entity_type = 'BOX' AND entity_id = ?";
+            if ($partial) {
+                $this->trz->prepare("UPDATE traceability_warehouse_entries SET quantity_initial = COALESCE(quantity_initial, quantity), quantity = ? WHERE $where")->execute([$remaining, $id]);
+            } else {
+                $this->trz->prepare("UPDATE traceability_warehouse_entries SET status = 'DISPATCHED' WHERE $where")->execute([$id]);
+            }
+        }
+        $this->movement($type, $id, $from, $ctx + ['code' => $it['code'], 'quantity' => $qty, 'remaining' => $remaining]
+            + ($type === 'PRODUCT' ? ['traceability_code' => $it['code']] : []));
     }
 
     private function movement(string $type, int $id, int $fromWarehouse, array $payload): void
@@ -624,10 +738,10 @@ final class DispatchService
             array_push($params, $like, $like, $like);
         }
         $limit = max(1, min(300, $limit));
-        return $this->all("SELECT p.*, w.name AS warehouse_name,
+        return $this->all("SELECT p.*, (SELECT GROUP_CONCAT(DISTINCT i.from_warehouse_name) FROM dispatch_picking_items i WHERE i.picking_id = p.id AND i.status <> 'VOIDED') AS warehouse_name,
                 (SELECT COUNT(*) FROM dispatch_picking_items i WHERE i.picking_id = p.id AND i.status IN ('PICKED','DISPATCHED')) AS item_count,
                 (SELECT COALESCE(SUM(i.qty),0) FROM dispatch_picking_items i WHERE i.picking_id = p.id AND i.status IN ('PICKED','DISPATCHED')) AS qty_total
-            FROM dispatch_pickings p LEFT JOIN warehouses w ON w.id = p.warehouse_id
+            FROM dispatch_pickings p
             WHERE " . implode(' AND ', $where) . " ORDER BY p.id DESC LIMIT $limit", $params);
     }
 
@@ -645,7 +759,7 @@ final class DispatchService
     public function detail(string $key): array
     {
         $this->ensureSchema();
-        $p = $this->one('SELECT p.*, w.name AS warehouse_name FROM dispatch_pickings p LEFT JOIN warehouses w ON w.id = p.warehouse_id WHERE p.picking_key = ?', [$key]);
+        $p = $this->one("SELECT p.*, (SELECT GROUP_CONCAT(DISTINCT i.from_warehouse_name) FROM dispatch_picking_items i WHERE i.picking_id = p.id AND i.status <> 'VOIDED') AS warehouse_name FROM dispatch_pickings p WHERE p.picking_key = ?", [$key]);
         if (!$p) {
             throw new RuntimeException('El picking no existe.');
         }
@@ -660,7 +774,7 @@ final class DispatchService
     {
         try {
             $this->ensureSchema();
-            return $this->one("SELECT p.code, p.dispatch_type, p.guide_number, p.guide_snapshot, p.confirmed_by, p.confirmed_at
+            return $this->one("SELECT p.code, p.dispatch_type, p.guide_number, p.guide_snapshot, p.confirmed_by, p.confirmed_at, i.qty, i.full_qty
                 FROM dispatch_picking_items i JOIN dispatch_pickings p ON p.id = i.picking_id
                 WHERE i.entity_type = ? AND i.entity_id = ? AND i.status = 'DISPATCHED' AND p.status = 'DISPATCHED'
                 ORDER BY p.id DESC LIMIT 1", [$entityType, $entityId]);

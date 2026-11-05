@@ -95,7 +95,7 @@ final class ReceptionService
         'warehouse_id', 'item_code', 'item_description', 'entity_type', 'operator_name',
         'unit_name', 'total_packages', 'quantity', 'lot_number', 'location_ref', 'order_ref',
     ];
-    private const RECEPTION_SCHEMA_VERSION = 'reception_v10';
+    private const RECEPTION_SCHEMA_VERSION = 'reception_v10-units-initial';
     private const PRODUCTION_WAREHOUSE_SYNC_VERSION = 'production_warehouse_sync_v1';
     private const ROLL_WAREHOUSE_TRACEABILITY_SYNC_VERSION = 'roll_warehouse_traceability_sync_v1';
     private const ROLL_ERP_STOCK_SYNC_VERSION = 'roll_erp_stock_sync_v1';

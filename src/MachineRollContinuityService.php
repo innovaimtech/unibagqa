@@ -48,6 +48,47 @@ final class MachineRollContinuityService
             'machine_id'=>(int)($payload['machine_id']??0),'event'=>$event,'payload'=>$payload];
     }
 
+    /** Quien cargo fisicamente la bobina. Un traspaso entre OT no cambia ese nombre. */
+    public function loaderOf(int $rollId): string
+    {
+        $state=$this->state($rollId);
+        $operator=trim((string)($state['payload']['operator']??''));
+        $originalId=(int)($state['payload']['original_mount_event_id']??0);
+        if ($operator==='' && $originalId>0) {
+            $payload=$this->query($this->trz,'SELECT payload FROM events WHERE id=?',[$originalId])->fetchColumn();
+            $operator=trim((string)((json_decode((string)$payload,true)?:[])['operator']??''));
+        }
+        return $operator;
+    }
+
+    /**
+     * Cargas reales de la bobina en maquina, de la mas antigua a la mas nueva. Excluye los traspasos entre OT.
+     *
+     * @return list<array{operator:string,worker_ot_id:int,machine_id:int,weight_kg:float,created_at:string}>
+     */
+    public function loadHistory(int $rollId): array
+    {
+        $rows=$this->query($this->trz,"SELECT payload,created_at FROM events
+            WHERE type IN ('ROLL_MOUNTED_ON_MACHINE','ROLL_LOADED_TO_OT','ROLL_LOADED_WITHOUT_TRACEABILITY') AND ".$this->jsonId('roll_id')."=?
+            ORDER BY id",[(string)$rollId])->fetchAll(PDO::FETCH_ASSOC);
+        $history=[];
+        foreach ($rows as $row) {
+            $payload=json_decode((string)$row['payload'],true)?:[];
+            if (!empty($payload['continuity'])) continue;
+            $otId=(int)($payload['worker_ot_id']??0);
+            // Cargar y montar son dos eventos de una misma carga: se muestra una sola vez.
+            $last=$history===[]?null:$history[count($history)-1];
+            if ($last!==null && $last['worker_ot_id']===$otId) {
+                $history[count($history)-1]['operator']=$last['operator']!==''?$last['operator']:trim((string)($payload['operator']??''));
+                continue;
+            }
+            $history[]=['operator'=>trim((string)($payload['operator']??'')),'worker_ot_id'=>$otId,
+                'machine_id'=>(int)($payload['machine_id']??0),
+                'weight_kg'=>(float)($payload['entry_weight_kg']??$payload['weight_kg']??0),'created_at'=>(string)$row['created_at']];
+        }
+        return $history;
+    }
+
     /** Bloqueos compartidos con montaje, salida y devolucion para evitar carreras.
      * Locks shared by mount, output and return operations to prevent races. */
     public function lockRolls(array $rollIds): array
@@ -166,6 +207,9 @@ final class MachineRollContinuityService
                 $source=$this->context($state['worker_ot_id']);
                 if (!$source || (int)$source['wok_status']<=0 || (int)$source['win_equipoid']!==(int)$target['win_equipoid']) continue;
                 if ($state['machine_id']>0 && $state['machine_id']!==(int)$target['win_equipoid']) continue;
+                // Si otro operador sigue con su OT abierta en la maquina, la bobina sigue siendo suya.
+                if ((int)$source['win_wrkid']!==(int)$target['win_wrkid'] && (int)$source['wok_status']===1
+                    && in_array((int)$source['win_status'],[1,3],true)) continue;
                 $eligible[(int)$id]=$state;
             }
             if (!$eligible) return [];
@@ -203,7 +247,7 @@ final class MachineRollContinuityService
                     'original_mount_event_id'=>$state['payload']['original_mount_event_id']??(int)$state['event']['id'],
                     'physical_mount_created_at'=>$state['payload']['physical_mount_created_at']??$state['event']['created_at'],
                     'entry_weight_kg'=>(float)$roll['weight_kg'],'weight_kg'=>(float)$roll['weight_kg'],
-                    'operator_worker_id'=>(int)$target['win_wrkid'],'timestamp'=>time(),
+                    'operator'=>$this->loaderOf($id),'operator_worker_id'=>(int)$target['win_wrkid'],'timestamp'=>time(),
                     'comments'=>'La bobina permanece cargada en la misma maquina al cambiar de CC.'];
                 $this->query($this->trz,'INSERT INTO events (type,payload) VALUES (?,?)',
                     [$state['mounted']?'ROLL_MOUNTED_ON_MACHINE':'ROLL_LOADED_TO_OT',json_encode($payload,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE)]);

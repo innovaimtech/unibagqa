@@ -59,6 +59,9 @@
 .dsp label.dsp-lbl{display:block;margin-bottom:5px;font-size:12px;font-weight:700;color:#475569}
 .dsp input[type=text],.dsp select{width:100%;height:40px;padding:0 12px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;font:inherit;color:var(--ink)}
 .dsp input[type=text]:focus,.dsp select:focus{outline:0;border-color:var(--brand-2);box-shadow:0 0 0 3px rgba(0,169,166,.15)}
+.dsp-qty{display:inline-flex;align-items:center;justify-content:flex-end;gap:6px;margin:0}
+.dsp-qty input[type=number]{width:96px;height:32px;padding:0 8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;font:inherit;color:var(--ink);text-align:right}
+.dsp-qty input[type=number]:focus{outline:0;border-color:var(--brand-2);box-shadow:0 0 0 3px rgba(0,169,166,.15)}
 .dsp-types{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
 .dsp-type{display:block;margin:0;cursor:pointer}
 .dsp-type input{position:absolute;opacity:0;pointer-events:none}

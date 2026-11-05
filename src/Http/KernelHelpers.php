@@ -1430,6 +1430,27 @@ function formatLabelDateTime(?string $value): string
     return date('d.m.Y H:i:s', $ts);
 }
 
+/** Bloque del árbol de trazabilidad: quién cargó la bobina, en qué máquina y OT. */
+function unibagRollLoadsHtml(array $loads): string
+{
+    if ($loads === []) {
+        return '';
+    }
+    $html = '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin-bottom:14px">'
+        . '<div style="font-size:13px;font-weight:800;color:#0f172a;margin-bottom:8px">Cargas en máquina</div><div style="overflow:auto"><table style="width:100%;font-size:12.5px;border-collapse:collapse">'
+        . '<thead><tr style="text-align:left;color:#64748b"><th style="padding:5px 8px">Fecha</th><th style="padding:5px 8px">Cargada por</th><th style="padding:5px 8px">Máquina</th><th style="padding:5px 8px">OT</th><th style="padding:5px 8px;text-align:right">Peso</th></tr></thead><tbody>';
+    foreach ($loads as $load) {
+        $when = strtotime((string)($load['created_at'] ?? ''));
+        $weight = (float)($load['weight_kg'] ?? 0);
+        $html .= '<tr style="border-top:1px solid #f1f5f9"><td style="padding:5px 8px;white-space:nowrap">' . ($when ? date('d/m/Y H:i', $when) : '-') . '</td>'
+            . '<td style="padding:5px 8px;font-weight:700">' . htmlspecialchars((string)(($load['operator'] ?? '') !== '' ? $load['operator'] : 'Sin registro'), ENT_QUOTES, 'UTF-8') . '</td>'
+            . '<td style="padding:5px 8px">' . htmlspecialchars((string)($load['machine_name'] ?? ''), ENT_QUOTES, 'UTF-8') . '</td>'
+            . '<td style="padding:5px 8px">' . htmlspecialchars((string)($load['ot_number'] ?? ''), ENT_QUOTES, 'UTF-8') . '</td>'
+            . '<td style="padding:5px 8px;text-align:right;white-space:nowrap">' . ($weight > 0 ? number_format($weight, 1, ',', '.') . ' kg' : '-') . '</td></tr>';
+    }
+    return $html . '</tbody></table></div></div>';
+}
+
 /** Código de barras a 203 ppp, con la misma regla de tamaño que PrintService. */
 const BARCODE_MODULE_MM = 0.375;
 const BARCODE_FINE_MODULE_MM = 0.25;

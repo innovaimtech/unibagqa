@@ -204,6 +204,7 @@
     }
     $body .= '</div>';
     $body .= '<div style="padding:18px">';
+    $body .= unibagRollLoadsHtml((array)($tree['roll_loads'] ?? []));
 
     if ($wo) {
         $body .= '<div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:16px">';

@@ -2222,7 +2222,8 @@ trait ProductionMaterialsServiceTrait
                     'machine_id' => 0,
                     'machine_name' => '',
                     'process_name' => '',
-                    'operator_name' => (string)($payload['operator'] ?? ''),
+                    // Quien la cargo; quien abrio la OT solo se usa si no hay registro de la carga.
+                    'operator_name' => (new MachineRollContinuityService($this->erpPdo, $this->trzPdo))->loaderOf($rollId),
                 ];
 
                 if ($resolvedWorkerOtId > 0 && $this->erpPdo !== null) {
@@ -3081,6 +3082,8 @@ trait ProductionMaterialsServiceTrait
             'customer' => (string)($g['customer'] ?? ''),
             'confirmed_by' => (string)$row['confirmed_by'],
             'confirmed_at' => (string)$row['confirmed_at'],
+            'qty' => (float)($row['qty'] ?? 0),
+            'full_qty' => (float)($row['full_qty'] ?? $row['qty'] ?? 0),
         ];
     }
 
@@ -3111,9 +3114,63 @@ trait ProductionMaterialsServiceTrait
         }
     }
 
+    /**
+     * OT del ERP (prod_worker_ot) de una bobina. La bobina puede guardar el id de la OT de trazabilidad o el del ERP,
+     * y usar uno como el otro mostraria una OT ajena: primero se usa el evento de carga y luego se traduce el id.
+     */
+    private function resolveRollWorkerOt(array $roll): int
+    {
+        $rollId = (int)($roll['id'] ?? 0);
+        $fromEvents = $rollId > 0 ? (new MachineRollContinuityService($this->erpPdo, $this->trzPdo))->state($rollId)['worker_ot_id'] : 0;
+        if ($fromEvents > 0) {
+            return $fromEvents;
+        }
+        $stored = (int)($roll['current_work_order_id'] ?? 0) ?: (int)($roll['source_work_order_id'] ?? 0);
+        if ($stored <= 0) {
+            return 0;
+        }
+        $stmt = $this->trzPdo->prepare('SELECT ot_code FROM work_orders WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $stored]);
+        $otCode = strtoupper(trim((string)$stmt->fetchColumn()));
+        if ($otCode === '') {
+            return $stored;
+        }
+        if (preg_match('/^WOT-(\d+)$/D', $otCode, $m) === 1) {
+            return (int)$m[1];
+        }
+        $stmt = $this->erpPdo->prepare('SELECT pwo.id FROM prod_worker_ot pwo
+            JOIN prod_agenda ag ON pwo.wok_ag_id = ag.id
+            LEFT JOIN prod_header ph ON ag.ag_prdid = ph.id
+            LEFT JOIN orders o ON ag.ag_reqid = o.id
+            WHERE ph.prd_number = :ot OR o.req_number = :req
+            ORDER BY pwo.id DESC LIMIT 1');
+        $stmt->execute([':ot' => $otCode, ':req' => $otCode]);
+        return (int)$stmt->fetchColumn();
+    }
+
+    /** Cargas de la bobina en maquina con operador, maquina y OT, para el arbol de trazabilidad. */
+    private function rollLoadsForTree(int $rollId): array
+    {
+        $loads = (new MachineRollContinuityService($this->erpPdo, $this->trzPdo))->loadHistory($rollId);
+        $stmt = $this->erpPdo->prepare('SELECT ph.prd_number, q.equipo_name FROM prod_worker_ot pwo
+            LEFT JOIN prod_worker_init i ON i.id = pwo.wok_init_id
+            LEFT JOIN equipo q ON q.id = i.win_equipoid
+            LEFT JOIN prod_agenda ag ON ag.id = pwo.wok_ag_id
+            LEFT JOIN prod_header ph ON ph.id = ag.ag_prdid
+            WHERE pwo.id = :id LIMIT 1');
+        foreach ($loads as &$load) {
+            $stmt->execute([':id' => $load['worker_ot_id']]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $load['ot_number'] = (string)($row['prd_number'] ?? '');
+            $load['machine_name'] = (string)($row['equipo_name'] ?? '');
+        }
+        unset($load);
+        return $loads;
+    }
+
     public function getTraceabilityTree(string $queryCode): ?array
     {
-        $queryCode = trim($queryCode);
+        $queryCode = $this->normalizeTraceabilityCode($queryCode);
         if ($queryCode === '' || $this->trzPdo === null) {
             return null;
         }
@@ -3163,8 +3220,8 @@ trait ProductionMaterialsServiceTrait
         $stmtRoll = $this->trzPdo->prepare(
             "SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
              FROM rolls r
-             INNER JOIN skus s ON r.sku_id = s.id
-             INNER JOIN warehouses w ON r.warehouse_id = w.id
+             LEFT JOIN skus s ON r.sku_id = s.id
+             LEFT JOIN warehouses w ON r.warehouse_id = w.id
              WHERE r.roll_code = :q OR r.id = :id OR (r.id = :lookup_rid AND :lookup_rid > 0)
              LIMIT 1"
         );
@@ -3190,7 +3247,7 @@ trait ProductionMaterialsServiceTrait
                 $stmtParent = $this->trzPdo->prepare(
                     "SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                      FROM rolls r
-                     INNER JOIN skus s ON r.sku_id = s.id
+                     LEFT JOIN skus s ON r.sku_id = s.id
                      LEFT JOIN warehouses w ON r.warehouse_id = w.id
                      WHERE r.id = :pid LIMIT 1"
                 );
@@ -3229,7 +3286,7 @@ trait ProductionMaterialsServiceTrait
             $stmtChildren = $this->trzPdo->prepare(
                 "SELECT r.*, s.code AS sku_code, s.description AS sku_desc
                  FROM rolls r
-                 INNER JOIN skus s ON r.sku_id = s.id
+                 LEFT JOIN skus s ON r.sku_id = s.id
                  WHERE r.parent_roll_id = :pid
                  ORDER BY r.id ASC"
             );
@@ -3237,7 +3294,9 @@ trait ProductionMaterialsServiceTrait
             $result['child_rolls'] = $stmtChildren->fetchAll();
 
             // Buscar OT vinculada
-            $woId = (int)($roll['current_work_order_id'] ?? $roll['source_work_order_id'] ?? 0);
+            $result['roll_loads'] = $this->rollLoadsForTree((int)$roll['id']);
+            $storedWoId = (int)($roll['current_work_order_id'] ?? $roll['source_work_order_id'] ?? 0);
+            $woId = $this->resolveRollWorkerOt($roll);
             if ($woId > 0) {
                 $stmtOt = $this->erpPdo->prepare(
                     "SELECT t1.*, t4.prd_number, t5.req_number, t7.equipo_name, t8.type_ant_title,
@@ -3294,9 +3353,9 @@ trait ProductionMaterialsServiceTrait
 
                 // Cajas vinculadas a la OT
                 $stmtBoxes = $this->trzPdo->prepare(
-                    "SELECT * FROM boxes WHERE work_order_id = :woid ORDER BY id ASC"
+                    "SELECT * FROM boxes WHERE work_order_id = :woid OR (work_order_id = :stored AND :stored2 > 0) ORDER BY id ASC"
                 );
-                $stmtBoxes->execute([':woid' => $woId]);
+                $stmtBoxes->execute([':woid' => $woId, ':stored' => $storedWoId, ':stored2' => $storedWoId]);
                 $result['boxes'] = $stmtBoxes->fetchAll();
             }
 
@@ -3347,7 +3406,7 @@ trait ProductionMaterialsServiceTrait
                 $stmtR = $this->trzPdo->prepare("
                     SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                     FROM rolls r
-                    INNER JOIN skus s ON r.sku_id = s.id
+                    LEFT JOIN skus s ON r.sku_id = s.id
                     LEFT JOIN warehouses w ON r.warehouse_id = w.id
                     WHERE r.id = :rid LIMIT 1
                 ");
@@ -3358,7 +3417,7 @@ trait ProductionMaterialsServiceTrait
                     $stmtParent = $this->trzPdo->prepare("
                         SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                         FROM rolls r
-                        INNER JOIN skus s ON r.sku_id = s.id
+                        LEFT JOIN skus s ON r.sku_id = s.id
                         LEFT JOIN warehouses w ON r.warehouse_id = w.id
                         WHERE r.id = :pid LIMIT 1
                     ");
@@ -3369,7 +3428,7 @@ trait ProductionMaterialsServiceTrait
                         $stmtV = $this->trzPdo->prepare("
                             SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                             FROM rolls r
-                            INNER JOIN skus s ON r.sku_id = s.id
+                            LEFT JOIN skus s ON r.sku_id = s.id
                             LEFT JOIN warehouses w ON r.warehouse_id = w.id
                             WHERE r.id = :vid LIMIT 1
                         ");
@@ -3483,7 +3542,7 @@ trait ProductionMaterialsServiceTrait
                 $stmtR = $this->trzPdo->prepare("
                     SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                     FROM rolls r
-                    INNER JOIN skus s ON r.sku_id = s.id
+                    LEFT JOIN skus s ON r.sku_id = s.id
                     LEFT JOIN warehouses w ON r.warehouse_id = w.id
                     WHERE r.id = :rid LIMIT 1
                 ");
@@ -3494,7 +3553,7 @@ trait ProductionMaterialsServiceTrait
                     $stmtParent = $this->trzPdo->prepare("
                         SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                         FROM rolls r
-                        INNER JOIN skus s ON r.sku_id = s.id
+                        LEFT JOIN skus s ON r.sku_id = s.id
                         LEFT JOIN warehouses w ON r.warehouse_id = w.id
                         WHERE r.id = :pid LIMIT 1
                     ");
@@ -3505,7 +3564,7 @@ trait ProductionMaterialsServiceTrait
                         $stmtV = $this->trzPdo->prepare("
                             SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                             FROM rolls r
-                            INNER JOIN skus s ON r.sku_id = s.id
+                            LEFT JOIN skus s ON r.sku_id = s.id
                             LEFT JOIN warehouses w ON r.warehouse_id = w.id
                             WHERE r.id = :vid LIMIT 1
                         ");
@@ -3672,8 +3731,8 @@ trait ProductionMaterialsServiceTrait
                 $stmtPoRolls = $this->trzPdo->prepare(
                     "SELECT r.*, s.code AS sku_code, s.description AS sku_desc, w.name AS warehouse_name
                      FROM rolls r
-                     INNER JOIN skus s ON r.sku_id = s.id
-                     INNER JOIN warehouses w ON r.warehouse_id = w.id
+                     LEFT JOIN skus s ON r.sku_id = s.id
+                     LEFT JOIN warehouses w ON r.warehouse_id = w.id
                      WHERE r.purchase_order_id = :po_id
                      ORDER BY r.id ASC LIMIT 1"
                 );

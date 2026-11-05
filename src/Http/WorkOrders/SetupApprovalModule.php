@@ -100,7 +100,7 @@ function renderWorkOrderSetupScreen(
     $suggestedAniloxColors = extractSuggestedAniloxColors($colorSlots, $chemicalInputs, $aniloxSlots);
     $totalUnitsQty = 0;
     foreach ($boxes as $box) {
-        $totalUnitsQty += (int)($box['units_qty'] ?? 0);
+        $totalUnitsQty += (int)($box['units_initial'] ?? $box['units_qty'] ?? 0);
     }
     $targetQtyNumber = is_numeric((string)$targetQtyLabel) ? (float)$targetQtyLabel : 0.0;
     $producedPercent = $targetQtyNumber > 0 ? ($totalUnitsQty * 100) / $targetQtyNumber : 0.0;

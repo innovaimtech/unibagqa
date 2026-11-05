@@ -887,7 +887,7 @@ final class PrintService
         $sku = strtoupper($this->t((string)($e['item_code'] ?? '')));
         $descLines = explode("\n", wordwrap(strtoupper($this->t(mb_substr(trim((string)($e['item_description'] ?? '')), 0, 120))), 58, "\n", true));
         $descLines = array_slice($descLines, 0, 2);
-        $qtyNum = (float)($e['quantity'] ?? 0);
+        $qtyNum = (float)($e['quantity_initial'] ?? $e['quantity'] ?? 0);
         $qty = rtrim(rtrim(number_format($qtyNum, 2, '.', ''), '0'), '.');
         $unit = strtoupper($this->t((string)($e['unit_name'] ?? '')));
         $pkgNo = (int)($e['package_number'] ?? 1);
@@ -1264,7 +1264,7 @@ final class PrintService
         $otCode = $this->z((string)($box['ot_code'] ?? ''));
         $product = $this->z((string)($box['final_sku'] ?? ''));
         $sourceRoll = $this->z((string)($box['source_roll_code'] ?? ''));
-        $units = $this->z((string)($box['units_qty'] ?? ''));
+        $units = $this->z((string)($box['units_initial'] ?? $box['units_qty'] ?? ''));
         $palletCode = $this->z((string)($box['pallet_code'] ?? ''));
         $operator = $this->z((string)($box['operator_name'] ?? ''));
         $destinationMode = $this->z((string)($box['destination_mode'] ?? ''));
@@ -1396,7 +1396,7 @@ final class PrintService
         $otCode = $this->t((string)($box['ot_code'] ?? ''));
         $product = $this->t((string)($box['final_sku'] ?? ''));
         $sourceRoll = $this->t((string)($box['source_roll_code'] ?? ''));
-        $units = $this->t((string)($box['units_qty'] ?? ''));
+        $units = $this->t((string)($box['units_initial'] ?? $box['units_qty'] ?? ''));
         $palletCode = $this->t((string)($box['pallet_code'] ?? ''));
         $operator = $this->t((string)($box['operator_name'] ?? ''));
         $destinationMode = $this->t((string)($box['destination_mode'] ?? ''));
@@ -1508,7 +1508,7 @@ final class PrintService
         $otCode = strtoupper($this->t((string)($box['ot_code'] ?? '-')));
         $product = strtoupper($this->t((string)($box['final_sku'] ?? '')));
         $sourceRoll = strtoupper($this->t((string)($box['source_roll_code'] ?? '-')));
-        $units = strtoupper($this->t((string)($box['units_qty'] ?? '0')));
+        $units = strtoupper($this->t((string)($box['units_initial'] ?? $box['units_qty'] ?? '0')));
         $palletCode = strtoupper($this->t((string)($box['pallet_code'] ?? '-')));
         $operator = strtoupper($this->t((string)($box['operator_name'] ?? '-')));
         $destinationMode = (string)($box['destination_mode'] ?? '');

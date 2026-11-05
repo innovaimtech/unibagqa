@@ -284,7 +284,7 @@ function renderWorkOrderRequestMaterialsScreen(
     $aniloxSlots = buildWorkOrderAniloxSlots($colorSlots, $chemicalInputs, $savedAniloxAssignments, null);
     $totalUnitsQty = 0;
     foreach ($boxes as $box) {
-        $totalUnitsQty += (int)($box['units_qty'] ?? 0);
+        $totalUnitsQty += (int)($box['units_initial'] ?? $box['units_qty'] ?? 0);
     }
     $targetQtyNumber = is_numeric((string)$targetQtyLabel) ? (float)$targetQtyLabel : 0.0;
     $producedPercent = $targetQtyNumber > 0 ? ($totalUnitsQty * 100) / $targetQtyNumber : 0.0;
@@ -1021,7 +1021,7 @@ function buildWorkOrderPackagingDisplayData(
     $palletCount = count($pallets);
     $unitsTotal = 0.0;
     foreach ($boxes as $box) {
-        $unitsTotal += (float)($box['units_qty'] ?? 0);
+        $unitsTotal += (float)($box['units_initial'] ?? $box['units_qty'] ?? 0);
     }
 
     $boxesPerPallet = '-';
@@ -1034,7 +1034,7 @@ function buildWorkOrderPackagingDisplayData(
     }
 
     $unitsPerBoxLabel = $boxCount > 0 ? rtrim(rtrim(number_format($unitsTotal / $boxCount, 3, '.', ''), '0'), '.') : '-';
-    $finalBoxUnitsLabel = $boxCount > 0 ? rtrim(rtrim(number_format((float)($boxes[0]['units_qty'] ?? 0), 3, '.', ''), '0'), '.') : '0';
+    $finalBoxUnitsLabel = $boxCount > 0 ? rtrim(rtrim(number_format((float)($boxes[0]['units_initial'] ?? $boxes[0]['units_qty'] ?? 0), 3, '.', ''), '0'), '.') : '0';
 
     return $base + [
         'bag_type_label' => $bagTypeLabel,
@@ -1790,7 +1790,7 @@ function renderWorkOrderMaterialUsageScreen(
     $suggestedAniloxColors = extractSuggestedAniloxColors($colorSlots, $chemicalInputs, $aniloxSlots);
     $totalUnitsQty = 0;
     foreach ($boxes as $box) {
-        $totalUnitsQty += (int)($box['units_qty'] ?? 0);
+        $totalUnitsQty += (int)($box['units_initial'] ?? $box['units_qty'] ?? 0);
     }
     $targetQtyNumber = is_numeric((string)$targetQtyLabel) ? (float)$targetQtyLabel : 0.0;
     $producedPercent = $targetQtyNumber > 0 ? ($totalUnitsQty * 100) / $targetQtyNumber : 0.0;
@@ -2688,7 +2688,7 @@ function renderWorkOrderStartScreen(
     }
     $totalUnitsQty = 0;
     foreach ($boxes as $box) {
-        $totalUnitsQty += (int)($box['units_qty'] ?? 0);
+        $totalUnitsQty += (int)($box['units_initial'] ?? $box['units_qty'] ?? 0);
     }
     $totalBoxesOnPallets = 0;
     foreach ($pallets as $pallet) {

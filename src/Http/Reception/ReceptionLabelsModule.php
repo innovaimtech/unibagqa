@@ -2062,7 +2062,7 @@ if (preg_match('#^/boxes/(\d+)/label$#', $path, $m) === 1 && $method === 'GET') 
     echo '<div class="k">Caja</div><div class="v">' . h((string)$box['box_code']) . '</div>';
     echo '<div class="k">OT</div><div class="v">' . h((string)($box['ot_code'] ?? '-')) . '</div>';
     echo '<div class="k">Bobina origen</div><div class="v">' . h((string)$box['source_roll_code']) . '</div>';
-    echo '<div class="k">Unidades</div><div class="v">' . h((string)$box['units_qty']) . '</div>';
+    echo '<div class="k">Unidades</div><div class="v">' . h((string)($box['units_initial'] ?? $box['units_qty'])) . '</div>';
     echo '<div class="k">Pallet</div><div class="v">' . h((string)($box['pallet_code'] ?? '-')) . '</div>';
     echo '<div class="k">Operador</div><div class="v">' . h((string)$box['operator_name']) . '</div>';
     echo '<div class="k">Destino</div><div class="v">' . h($destinationLabel) . '</div>';

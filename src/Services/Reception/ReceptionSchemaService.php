@@ -106,6 +106,10 @@ trait ReceptionSchemaServiceTrait
      */
     private function ensureReceptionSchema(): void
     {
+        // Unidades originales de una caja a la que Despacho le dejó saldo (producción y etiquetas usan este valor).
+        if ($this->tableExists('boxes') && !$this->columnExists('boxes', 'units_initial')) {
+            $this->pdo->exec('ALTER TABLE boxes ADD COLUMN units_initial DECIMAL(12,3) NULL AFTER units_qty');
+        }
         if (!$this->columnExists('rolls', 'purchase_order_id')) {
             $this->pdo->exec("ALTER TABLE rolls ADD COLUMN purchase_order_id BIGINT UNSIGNED NULL AFTER status");
         }
