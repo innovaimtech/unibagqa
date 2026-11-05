@@ -98,7 +98,8 @@ final class PrintService
         return [
             'epl' => ['density' => $useDevice ? null : $this->getEplDensity(), 'speed' => $useDevice ? null : $this->getEplSpeed()],
             'tspl' => ['density' => $this->getTsplDensity(), 'speed' => $this->getTsplSpeed()],
-            'zpl' => ['density' => $this->getZplDarkness(), 'speed' => 3],
+            // La etiqueta ZPL ajusta sobre la intensidad guardada en la impresora (^MD es relativo).
+            'zpl' => ['density' => null, 'speed' => 3],
         ];
     }
 

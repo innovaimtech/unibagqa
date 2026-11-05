@@ -53,6 +53,7 @@
     usbPrinterId: "unibag_hw_usb_printer_id",
     printTuning: "unibag_hw_print_tuning",
     lastPrintLanguage: "unibag_hw_last_print_language",
+    printerType: "unibag_hw_printer_type",
     bridgeLastOnline: "unibag_hw_bridge_last_online"
   };
 
@@ -100,7 +101,7 @@
   var TUNING_RANGES = {
     epl: { density: [0, 15], speed: [1, 6] },
     tspl: { density: [0, 15], speed: [1, 6] },
-    zpl: { density: [-30, 30], speed: [2, 8] }
+    zpl: { density: [0, 30], speed: [2, 8] }
   };
 
   function normalizeLanguage(language) {
@@ -167,10 +168,16 @@
     if (!lang || (!hasDensity && !hasSpeed)) return text;
 
     if (lang === "zpl") {
-      if (hasDensity) text = text.replace(/\^MD-?\d+/g, "");
-      if (hasSpeed) text = text.replace(/\^PR\d+(?:,\d+)*/g, "");
-      var zpl = (hasSpeed ? "^PR" + speed : "") + (hasDensity ? "^MD" + density : "");
-      return /\^XA/.test(text) ? text.replace(/\^XA/g, "^XA" + zpl) : zpl + text;
+      if (hasSpeed) {
+        text = text.replace(/\^PR\d+(?:,\d+)*/g, "");
+        text = /\^XA/.test(text) ? text.replace(/\^XA/g, "^XA^PR" + speed) : "^PR" + speed + text;
+      }
+      // ~SD fija la intensidad exacta; ^MD se le sumaría, por eso se quita.
+      if (hasDensity) {
+        text = text.replace(/\^MD-?\d+/g, "").replace(/~SD\d+/g, "");
+        text = "~SD" + (density < 10 ? "0" : "") + density + text;
+      }
+      return text;
     }
     if (lang === "tspl") {
       var tsplLines = [];
@@ -192,11 +199,25 @@
     }, eplLines);
   }
 
+  // Si la PC tiene elegido otro tipo de impresora que el lenguaje de la etiqueta, su ajuste se lleva a la escala de ese lenguaje.
+  function tuningForJob(lang, field) {
+    var type = normalizeLanguage(lsGet(LS_KEYS.printerType, ""));
+    if (type && type !== lang) {
+      var value = tuningValueFor(type, field);
+      if (value !== null) {
+        var from = TUNING_RANGES[type][field];
+        var to = TUNING_RANGES[lang][field];
+        return Math.round(to[0] + ((value - from[0]) / (from[1] - from[0])) * (to[1] - to[0]));
+      }
+    }
+    return tuningValueFor(lang, field);
+  }
+
   function tuneJob(job) {
     var lang = normalizeLanguage(job.language || CFG.printLanguage);
     if (!lang) return;
     lsSet(LS_KEYS.lastPrintLanguage, lang);
-    job.content = applyPrintTuning(job.content, lang, tuningValueFor(lang, "density"), tuningValueFor(lang, "speed"));
+    job.content = applyPrintTuning(job.content, lang, tuningForJob(lang, "density"), tuningForJob(lang, "speed"));
   }
 
   function portSignature(port) {
@@ -210,11 +231,11 @@
     return "";
   }
 
-  // Recuerda la posición del puerto entre los autorizados con el mismo VID/PID.
+  // Recuerda la posición del puerto entre los autorizados con el mismo VID/PID (o entre los que no lo tienen).
   async function rememberPortIndex(port, key) {
     try {
       var sig = portSignature(port);
-      if (!sig || !navigator.serial) return;
+      if (!navigator.serial) return;
       var ports = await navigator.serial.getPorts();
       var same = [];
       for (var i = 0; i < ports.length; i++) {
@@ -262,6 +283,9 @@
     bridgeCheckedAt: 0,
     error: ""
   };
+
+  // Mientras se vincula la impresora nadie más toca los puertos: al cerrar el selector la ventana recupera el foco.
+  var printerLinking = false;
 
   // Antigüedad máxima (ms) aceptada para un peso leído desde la balanza.
   var MAX_WEIGHT_AGE_MS = 1500;
@@ -518,7 +542,7 @@
   }
 
   async function autoReconnectScale() {
-    if (!scaleState.supported || scaleState.connected || scaleState.connecting) {
+    if (!scaleState.supported || scaleState.connected || scaleState.connecting || printerLinking) {
       return false;
     }
     try {
@@ -528,6 +552,7 @@
       }
       var serialPrinterSig = lsGet(LS_KEYS.serialPrinterVidPid, "");
       var preferredSig = lsGet(LS_KEYS.scaleVidPid, "");
+      var printerPort = await findLinkedSerialPrinter();
       var candidate = null;
       // Con la impresora por COM y sin balanza recordada, no se adivina: se podría abrir el COM de la impresora.
       if (!preferredSig && lsGet(LS_KEYS.printTransport, "auto") === "webserial") {
@@ -535,7 +560,11 @@
       }
 
       if (preferredSig) {
-        candidate = pickPortBySig(ports, preferredSig, LS_KEYS.scaleIdx, [printerState.serialPrinterPort]);
+        // La balanza recordada no está conectada: no se prueba con otro puerto, que puede ser la impresora.
+        candidate = pickPortBySig(ports, preferredSig, LS_KEYS.scaleIdx, [printerPort]);
+        if (!candidate) {
+          return false;
+        }
       }
       // Sin una balanza recordada y con varios puertos autorizados NO se adivina:
       // se podría abrir el puerto de la impresora como si fuera la balanza.
@@ -545,7 +574,7 @@
       if (!candidate) {
         for (var j = 0; j < ports.length; j++) {
           var s = portSignature(ports[j]);
-          if (!serialPrinterSig || s !== serialPrinterSig) {
+          if (ports[j] !== printerPort && (!serialPrinterSig || s !== serialPrinterSig)) {
             candidate = ports[j];
             break;
           }
@@ -1297,8 +1326,12 @@
       showToast("⚠️ Web Serial no está disponible en este origen.", "err", 5000);
       return false;
     }
+    printerLinking = true;
     try {
       var port = await navigator.serial.requestPort();
+      if (scaleState.port === port) {
+        await disconnectScalePort();
+      }
       var check = await withPrinterLock(async function () {
         try {
           await openPrinterSerialPort(port);
@@ -1313,11 +1346,18 @@
         return false;
       }
       printerState.serialPrinterPort = port;
+      printerState.usbDevice = null;
       printerState.lastError = "";
+      // Se reemplaza lo recordado aunque este puerto no tenga VID/PID: si no, seguiría apuntando a la impresora anterior.
       var sig = portSignature(port);
-      if (sig) {
-        lsSet(LS_KEYS.serialPrinterVidPid, sig);
-        rememberPortIndex(port, LS_KEYS.serialPrinterIdx);
+      lsSet(LS_KEYS.serialPrinterVidPid, sig);
+      await rememberPortIndex(port, LS_KEYS.serialPrinterIdx);
+      // Si este puerto quedó recordado como balanza, esa memoria estaba equivocada.
+      if (sig && lsGet(LS_KEYS.scaleVidPid, "") === sig) {
+        var authorized = await navigator.serial.getPorts();
+        if (authorized.filter(function (p) { return portSignature(p) === sig; }).length === 1) {
+          lsSet(LS_KEYS.scaleVidPid, "");
+        }
       }
       lsSet(LS_KEYS.printTransport, "webserial");
       syncPageBridgeBadge(true);
@@ -1329,6 +1369,8 @@
         showToast("⚠️ " + (err.message || "No se pudo seleccionar el puerto COM de la impresora."), "err", 5500);
       }
       return false;
+    } finally {
+      printerLinking = false;
     }
   }
 
@@ -1337,13 +1379,18 @@
     if (!scaleState.supported) return null;
     try {
       var ports = (await navigator.serial.getPorts()) || [];
+      var current = printerState.serialPrinterPort;
+      if (current && current !== scaleState.port && ports.indexOf(current) >= 0) return current;
       var sig = lsGet(LS_KEYS.serialPrinterVidPid, "");
       if (sig) {
-        var bySig = pickPortBySig(ports, sig, LS_KEYS.serialPrinterIdx, [scaleState.port]);
-        if (bySig) return bySig;
+        return pickPortBySig(ports, sig, LS_KEYS.serialPrinterIdx, [scaleState.port]);
       }
-      // Los COM Bluetooth no exponen VID/PID: si queda un solo puerto autorizado que no es la balanza, es la impresora.
       if (lsGet(LS_KEYS.printTransport, "auto") !== "webserial") return null;
+      // Los COM físicos y Bluetooth no exponen VID/PID: se identifican por su posición entre los puertos sin VID/PID.
+      if (parseInt(lsGet(LS_KEYS.serialPrinterIdx, "-1"), 10) >= 0) {
+        return pickPortBySig(ports, "", LS_KEYS.serialPrinterIdx, [scaleState.port]);
+      }
+      // Vinculada antes de recordar la posición: si queda un solo puerto autorizado que no es la balanza, es la impresora.
       var scaleSig = lsGet(LS_KEYS.scaleVidPid, "");
       var candidates = ports.filter(function (p) {
         return p !== scaleState.port && (!scaleSig || portSignature(p) !== scaleSig);
@@ -1356,6 +1403,7 @@
 
   // Actualiza qué impresora está vinculada, sin abrir puertos. Es lo que mantiene el estado "lista" en todas las páginas.
   async function refreshPrinterLink() {
+    if (printerLinking) return;
     var transport = lsGet(LS_KEYS.printTransport, "auto");
     if (scaleState.supported && (transport === "webserial" || lsGet(LS_KEYS.serialPrinterVidPid, ""))) {
       printerState.serialPrinterPort = await findLinkedSerialPrinter();
@@ -1974,14 +2022,16 @@
     }
 
     // Ajuste de intensidad y velocidad según el lenguaje de la impresora de esta PC
-    var tuneLang = normalizeLanguage(lsGet(LS_KEYS.lastPrintLanguage, "")) || normalizeLanguage(CFG.printLanguage) || "epl";
+    var tuneLang = normalizeLanguage(lsGet(LS_KEYS.printerType, "")) || normalizeLanguage(lsGet(LS_KEYS.lastPrintLanguage, "")) || normalizeLanguage(CFG.printLanguage) || "epl";
     var tuneRange = TUNING_RANGES[tuneLang];
     var tuneDefaults = (CFG.printDefaults && CFG.printDefaults[tuneLang]) || {};
-    function tuningOptions(field, step) {
+    var serverLang = normalizeLanguage(CFG.printLanguage);
+    var printerTypeNames = { zpl: "Zebra (ZPL)", epl: "HPRT (EPL)", tspl: "Barpos (TSPL)" };
+    function tuningOptions(field) {
       var current = tuningValueFor(tuneLang, field);
       var base = tuneDefaults[field];
       var html = '<option value="">Predeterminada' + (base !== null && base !== undefined ? " (" + escapeHtml(base) + ")" : " de la impresora") + "</option>";
-      for (var v = tuneRange[field][0]; v <= tuneRange[field][1]; v += step) {
+      for (var v = tuneRange[field][0]; v <= tuneRange[field][1]; v++) {
         html += '<option value="' + v + '"' + (current === v ? " selected" : "") + ">" + v + "</option>";
       }
       return html;
@@ -1990,13 +2040,23 @@
     var speedHint = tuneRange.speed[0] + " lenta · " + tuneRange.speed[1] + " rápida";
     var tuningHtml =
       '<div class="unibag-hw-row">' +
+      '  <label style="font-size:12px;font-weight:700;color:#334155">Impresora de esta PC' +
+      '    <select class="unibag-hw-select" id="hw-sel-printer-type" style="display:block;margin-top:4px;min-width:150px">' +
+      Object.keys(printerTypeNames).map(function (lang) {
+        return '<option value="' + lang + '"' + (lang === tuneLang ? " selected" : "") + ">" + printerTypeNames[lang] + "</option>";
+      }).join("") +
+      "    </select>" +
+      "  </label>" +
       '  <label style="font-size:12px;font-weight:700;color:#334155">Intensidad <span style="font-weight:500;color:#64748b">(' + densityHint + ")</span>" +
-      '    <select class="unibag-hw-select" id="hw-sel-print-density" style="display:block;margin-top:4px;min-width:170px">' + tuningOptions("density", tuneLang === "zpl" ? 5 : 1) + "</select>" +
+      '    <select class="unibag-hw-select" id="hw-sel-print-density" style="display:block;margin-top:4px;min-width:170px">' + tuningOptions("density") + "</select>" +
       "  </label>" +
       '  <label style="font-size:12px;font-weight:700;color:#334155">Velocidad <span style="font-weight:500;color:#64748b">(' + speedHint + ")</span>" +
-      '    <select class="unibag-hw-select" id="hw-sel-print-speed" style="display:block;margin-top:4px;min-width:170px">' + tuningOptions("speed", 1) + "</select>" +
+      '    <select class="unibag-hw-select" id="hw-sel-print-speed" style="display:block;margin-top:4px;min-width:170px">' + tuningOptions("speed") + "</select>" +
       "  </label>" +
-      "</div>";
+      "</div>" +
+      (serverLang && serverLang !== tuneLang
+        ? '<div style="margin-top:6px;font-size:11.5px;color:#b45309;font-weight:700">⚠️ El sistema envía las etiquetas en ' + serverLang.toUpperCase() + ": si esta impresora no las imprime, hay que cambiar PRINT_LANGUAGE en el servidor.</div>"
+        : "");
 
     body.innerHTML =
       '<div class="unibag-hw-sec">' +
@@ -2090,6 +2150,14 @@
       selWinPrinter.onchange = function () {
         lsSet(LS_KEYS.printerDefault, selWinPrinter.value);
         showToast("🖨️ Impresora local fijada: " + (selWinPrinter.value || "Automática"), "ok", 2800);
+      };
+    }
+    var selPrinterType = document.getElementById("hw-sel-printer-type");
+    if (selPrinterType) {
+      selPrinterType.onchange = function () {
+        lsSet(LS_KEYS.printerType, selPrinterType.value);
+        selPrinterType.blur();
+        refreshModalContents();
       };
     }
     var selDensity = document.getElementById("hw-sel-print-density");
