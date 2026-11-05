@@ -6,8 +6,40 @@
     array_push($headers, 'Producto', 'Medidas');
     if ($process === 'pulpo') $headers[] = 'Colores';
     if ($process === 'embalaje') array_push($headers, 'Embalaje', 'Und. Por Caja');
-    array_push($headers, 'Cantidad Bolsas', 'Imagen', 'Opciones');
-    echo '<div style="overflow-x:auto"><table width="100%" cellpadding="8" cellspacing="0" style="min-width:1150px">';
+    array_push($headers, 'Cantidad programada', 'Cantidad producida', 'Falta producir', 'Imagen', 'Opciones');
+    // Totales por CC/OT: programado (entregas), producido (todas las agendas del mismo tipo de máquina) y lo que falta
+    $mtPrdIds = [];
+    foreach ($orders as $o) {
+        $pid = (int)($o['prdid'] ?? $o['prd_id'] ?? 0);
+        if ($pid > 0) $mtPrdIds[$pid] = $pid;
+    }
+    $mtPlan = [];
+    $mtProd = [];
+    $mtPhase = $process === 'embalaje' ? 1 : 0;
+    if ($mtPrdIds !== []) {
+        $in = implode(',', array_map('intval', $mtPrdIds));
+        try {
+            $q = Db::erpPdo()->query("SELECT prodplan_prdid, SUM(prodplan_amt) FROM prod_amtplan WHERE prodplan_prdid IN ($in) GROUP BY prodplan_prdid");
+            $mtPlan = $q ? $q->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+        } catch (Throwable) {
+            $mtPlan = [];
+        }
+        try {
+            $q = Db::erpPdo()->query("SELECT pa.ag_prdid, pa.ag_equipotype_id, COALESCE(SUM(t3.evt_amount),0) AS tot
+                FROM prod_agenda pa
+                INNER JOIN prod_worker_ot t2 ON t2.wok_ag_id = pa.id
+                INNER JOIN prod_worker_ot_events t3 ON t3.evt_prod_worker_otid = t2.id
+                WHERE pa.ag_prdid IN ($in) AND t3.evt_type = 'prod' AND t3.overrideembalaje_act = " . (int)$mtPhase . " AND t3.evt_status > 0
+                  AND (t3.evt_comments IS NULL OR (t3.evt_comments NOT LIKE '%Bobina Semielaborada%' AND t3.evt_comments NOT LIKE '%ROLL-SE-%'))
+                GROUP BY pa.ag_prdid, pa.ag_equipotype_id");
+            foreach ($q ? $q->fetchAll(PDO::FETCH_ASSOC) : [] as $r) {
+                $mtProd[(int)$r['ag_prdid']][(int)$r['ag_equipotype_id']] = (float)$r['tot'];
+            }
+        } catch (Throwable) {
+            $mtProd = [];
+        }
+    }
+    echo '<div style="overflow-x:auto"><table width="100%" cellpadding="8" cellspacing="0" style="min-width:1300px">';
     echo '<thead><tr>';
     foreach ($headers as $header) {
         echo '<th class="tdheader" style="text-align:left">' . $escape($header) . '</th>';
@@ -48,7 +80,16 @@
             echo '<td class="tdnrm">' . $escape($order['req_embalaje_medidas_caja'] ?? '-') . '</td>';
             echo '<td class="tdnrm" style="text-align:right"><b>' . number_format((float)($order['req_embalaje_bolsas_por_caja_amt'] ?? 0), 0, ',', '.') . '</b></td>';
         }
-        echo '<td class="tdnrm" style="text-align:right"><b>' . number_format((float)($order['ag_amount'] ?? $order['item_amount'] ?? 0), 0, ',', '.') . '</b></td>';
+        $rowPrd = (int)($order['prdid'] ?? $order['prd_id'] ?? 0);
+        $rowEq = (int)($order['equipo_type_id'] ?? 0);
+        $rowPlan = (float)($mtPlan[$rowPrd] ?? 0);
+        $rowProgramada = $rowPlan > 0 ? $rowPlan : (float)($order['ag_amount'] ?? $order['item_amount'] ?? 0);
+        $rowProdByType = $mtProd[$rowPrd] ?? [];
+        $rowProducida = $rowEq > 0 ? (float)($rowProdByType[$rowEq] ?? 0) : array_sum($rowProdByType);
+        $rowFalta = max(0.0, $rowProgramada - $rowProducida);
+        echo '<td class="tdnrm" style="text-align:right"><b>' . number_format($rowProgramada, 0, ',', '.') . '</b></td>';
+        echo '<td class="tdnrm" style="text-align:right"><b>' . number_format($rowProducida, 0, ',', '.') . '</b></td>';
+        echo '<td class="tdnrm" style="text-align:right"><b style="color:' . ($rowFalta > 0 ? '#B45309' : '#047857') . '">' . number_format($rowFalta, 0, ',', '.') . '</b></td>';
         $hash = trim((string)($order['fab_design_imagehash'] ?? ''));
         if ($hash === '' || $hash === 'dummy') $hash = trim((string)($order['item_img_hash'] ?? ''));
         echo '<td class="tdnrm" style="text-align:center">';
