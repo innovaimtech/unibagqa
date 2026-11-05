@@ -1995,18 +1995,16 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
         }
 
         function autoGenerateCode() {
-            var type = document.getElementById("input_entity_type").value || "PRODUCT";
-            var prefix = "TRZ";
-            if (type === "PALLET") prefix = "PL";
-            if (type === "BOX") prefix = "BX";
-            if (type === "ROLL") prefix = "RB";
-            var now = new Date();
-            var y = now.getFullYear();
-            var m = String(now.getMonth() + 1).padStart(2, "0");
-            var d = String(now.getDate()).padStart(2, "0");
-            var rand = Math.random().toString(36).substring(2, 8).toUpperCase();
-            var code = prefix + "-" + y + m + d + "-" + rand;
-            document.getElementById("input_trace_code").value = code;
+            var typeInput = document.getElementById("input_entity_type");
+            var type = typeInput.value || "PRODUCT";
+            fetch("/stock/traceability-code-suggest?type=" + encodeURIComponent(type), { credentials: "same-origin" })
+                .then(function (resp) { return resp.json(); })
+                .then(function (data) {
+                    if (data && data.ok && data.code && (typeInput.value || "PRODUCT") === type) {
+                        document.getElementById("input_trace_code").value = data.code;
+                    }
+                })
+                .catch(function () {});
         }
 
         function calcTotals() {
@@ -2879,7 +2877,7 @@ function unibagRenderStockTraceabilityTreePage(ReceptionService $service, ?Produ
         $body .= '<input type="hidden" name="bodega" value="' . $bodegaId . '">';
     }
     $body .= '<div style="flex:1;min-width:280px">';
-    $body .= '<input type="text" name="q" class="form-control" style="font-size:14px;background:#fff;border-color:#99f6e4" value="' . h($query) . '" placeholder="🔍 Ingrese código trazable (TRZ-...), bobina (ROLL-...), caja (BOX-...), pallet (PL-...), OT u OC..." required autofocus>';
+    $body .= '<input type="text" name="q" class="form-control" style="font-size:14px;background:#fff;border-color:#99f6e4" value="' . h($query) . '" placeholder="🔍 Ingrese código trazable (TRZ...), bobina (ROLL-...), caja (BOX-...), pallet (PL-...), OT u OC..." required autofocus>';
     $body .= '</div>';
     $body .= '<button type="submit" class="btn" style="background:#00A9A6;color:#fff;padding:0 20px;height:42px;font-weight:700">🔍 Rastrear 360°</button>';
     if ($query !== '') {

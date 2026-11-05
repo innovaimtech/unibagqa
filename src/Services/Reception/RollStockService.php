@@ -1889,7 +1889,7 @@ trait RollStockServiceTrait
     }
 
     /**
-     * Genera un código de trazabilidad único con prefijo según el tipo de bulto y fecha actual.
+     * Genera un código de trazabilidad corto (TRZ5C4687) que no exista aún. La fecha ya está en los datos del ingreso.
      */
     public function generateTraceabilityCode(string $type = 'PRODUCT'): string
     {
@@ -1899,9 +1899,16 @@ trait RollStockServiceTrait
             'ROLL' => 'RB',
             default => 'TRZ',
         };
-        $date = date('Ymd');
-        $rand = strtoupper(bin2hex(random_bytes(3)));
-        return $prefix . '-' . $date . '-' . $rand;
+        $this->ensureTraceabilityWarehouseEntriesTable();
+        // Sin la fecha, un código puede repetirse con el tiempo: se revisa contra los ya usados.
+        $exists = $this->pdo->prepare('SELECT 1 FROM traceability_warehouse_entries WHERE traceability_code = ? LIMIT 1');
+        do {
+            $code = $prefix . strtoupper(bin2hex(random_bytes(3)));
+            $exists->execute([$code]);
+            $taken = $exists->fetchColumn() !== false;
+            $exists->closeCursor();
+        } while ($taken);
+        return $code;
     }
 
     /**
@@ -2136,8 +2143,6 @@ trait RollStockServiceTrait
                     $entryCode = $code;
                 } else {
                     $entryCode = $this->generateTraceabilityCode($entityType);
-                    // Asegurar código único
-                    usleep(1500);
                 }
 
                 $packageNumber = $i + 1;
