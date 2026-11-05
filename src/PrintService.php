@@ -32,6 +32,10 @@ declare(strict_types=1);
  */
 final class PrintService
 {
+    /** Código de barras a 203 ppp: módulo de 2 puntos (0,25 mm) y 80 puntos de alto (10 mm). */
+    private const BARCODE_MODULE_DOTS = 2;
+    private const BARCODE_HEIGHT_DOTS = 80;
+
     /**
      * @param array<string, mixed> $env Variables de entorno con credenciales y configuración de impresión.
      */
@@ -821,13 +825,36 @@ final class PrintService
         return max(8, (int)floor((812 - $width) / 2));
     }
 
-    /** Ancho (narrow) y X de un Code 128 centrado: cada carácter ocupa ~11 módulos + 35 de inicio/fin/control. */
-    private function code128Layout(string $code, int $maxWidth = 780): array
+    /** X que centra un Code 128: cada carácter ocupa 11 módulos, más 35 de inicio, control y fin. */
+    private function code128X(string $code): int
     {
-        $modules = 11 * max(1, strlen($code)) + 35;
-        $narrow = $modules * 3 <= $maxWidth ? 3 : 2;
-        $width = $modules * $narrow;
-        return ['narrow' => $narrow, 'x' => max(8, (int)floor((812 - $width) / 2))];
+        $width = (11 * max(1, strlen($code)) + 35) * self::BARCODE_MODULE_DOTS;
+        return max(8, (int)floor((812 - $width) / 2));
+    }
+
+    private function zplBarcode(string $code, int $y): string
+    {
+        return '^BY' . self::BARCODE_MODULE_DOTS . ',2,' . self::BARCODE_HEIGHT_DOTS . "\n"
+            . '^FO' . $this->code128X($code) . ',' . $y . '^BCN,' . self::BARCODE_HEIGHT_DOTS . ',N,N,N^FD' . $code . '^FS';
+    }
+
+    private function tsplBarcode(string $code, int $y): string
+    {
+        $m = self::BARCODE_MODULE_DOTS;
+        return 'BARCODE ' . $this->code128X($code) . ',' . $y . ',"128",' . self::BARCODE_HEIGHT_DOTS . ',0,0,' . $m . ',' . $m . ',"' . $code . '"';
+    }
+
+    private function eplBarcode(string $code, int $y): string
+    {
+        $m = self::BARCODE_MODULE_DOTS;
+        return 'B' . $this->code128X($code) . ',' . $y . ',0,1,' . $m . ',' . $m . ',' . self::BARCODE_HEIGHT_DOTS . ',N,"' . $code . '"';
+    }
+
+    /** Coordenada X que centra un texto TSPL en la etiqueta de 812 puntos de ancho. */
+    private function tsplCenterX(string $text, int $font, int $mult = 1): int
+    {
+        $charWidth = [1 => 8, 2 => 12, 3 => 16, 4 => 24, 5 => 32][$font] ?? 16;
+        return max(8, (int)floor((812 - strlen($text) * $charWidth * $mult) / 2));
     }
 
     /**
@@ -856,18 +883,15 @@ final class PrintService
         $meta = trim($when . ($op !== '' ? ' - OP: ' . $op : ''));
         $meta = mb_substr($meta, 0, 78);
         $lang = $this->getPrintLanguage();
-        $bc = $this->code128Layout($code);
         $skuMult = strlen($sku) <= 17 ? 3 : (strlen($sku) <= 27 ? 2 : 1);
 
         if ($lang === 'tspl') {
-            $tw = [1 => 8, 2 => 12, 3 => 16, 4 => 24, 5 => 32];
-            $cx = static fn(string $t, int $f, int $m = 1): int => max(8, (int)floor((812 - strlen($t) * $tw[$f] * $m) / 2));
             $out = $this->buildTsplHeader() . "\r\n"
                 . 'BAR 20,300,772,3' . "\r\n"
-                . 'TEXT ' . $cx('UNIBAG CHILE', 4, 2) . ',10,"4",0,2,2,"UNIBAG CHILE"' . "\r\n"
-                . 'TEXT ' . $cx($wh, 3) . ',64,"3",0,1,1,"' . $wh . '"' . "\r\n"
-                . 'BARCODE ' . $bc['x'] . ',96,"128",140,0,0,' . $bc['narrow'] . ',' . $bc['narrow'] . ',"' . $code . '"' . "\r\n"
-                . 'TEXT ' . $cx($code, 4, 2) . ',244,"4",0,2,2,"' . $code . '"' . "\r\n"
+                . 'TEXT ' . $this->tsplCenterX('UNIBAG CHILE', 4, 2) . ',10,"4",0,2,2,"UNIBAG CHILE"' . "\r\n"
+                . 'TEXT ' . $this->tsplCenterX($wh, 3) . ',64,"3",0,1,1,"' . $wh . '"' . "\r\n"
+                . $this->tsplBarcode($code, 150) . "\r\n"
+                . 'TEXT ' . $this->tsplCenterX($code, 4, 2) . ',244,"4",0,2,2,"' . $code . '"' . "\r\n"
                 . 'TEXT 20,312,"4",0,' . $skuMult . ',' . $skuMult . ',"' . $sku . '"' . "\r\n";
             foreach ($descLines as $i => $line) {
                 $out .= 'TEXT 20,' . (394 + 26 * $i) . ',"3",0,1,1,"' . $line . '"' . "\r\n";
@@ -876,7 +900,7 @@ final class PrintService
             if ($pkgLine !== '') {
                 $out .= 'TEXT ' . max(8, 792 - strlen($pkgLine) * 24) . ',454,"4",0,1,1,"' . $pkgLine . '"' . "\r\n";
             }
-            return $out . 'TEXT ' . $cx($meta, 2) . ',520,"2",0,1,1,"' . $meta . '"' . "\r\n" . 'PRINT 1,1';
+            return $out . 'TEXT ' . $this->tsplCenterX($meta, 2) . ',520,"2",0,1,1,"' . $meta . '"' . "\r\n" . 'PRINT 1,1';
         }
 
         if ($lang === 'epl') {
@@ -888,7 +912,7 @@ final class PrintService
                 'LO20,300,772,3',
                 'A' . $this->eplCenterX('UNIBAG CHILE', 4, 2) . ',10,0,4,2,2,N,"UNIBAG CHILE"',
                 'A' . $this->eplCenterX($wh, 3) . ',64,0,3,1,1,N,"' . $wh . '"',
-                'B' . $bc['x'] . ',96,0,1,' . $bc['narrow'] . ',' . $bc['narrow'] . ',140,N,"' . $code . '"',
+                $this->eplBarcode($code, 150),
                 'A' . $this->eplCenterX($code, 4, 2) . ',244,0,4,2,2,N,"' . $code . '"',
                 'A20,312,0,4,' . $skuMult . ',' . $skuMult . ',N,"' . $sku . '"',
             ];
@@ -917,8 +941,7 @@ final class PrintService
 ^MD" . $this->getZplDarkness() . "
 ^FO0,10^FB812,1,0,C,0^A0N,50,44^FDUNIBAG CHILE^FS
 ^FO0,64^FB812,1,0,C,0^A0N,24,22^FD{$wh}^FS
-^BY" . $bc['narrow'] . ",2,140
-^FO" . $bc['x'] . ",96^BCN,140,N,N,N^FD{$code}^FS
+" . $this->zplBarcode($code, 150) . "
 ^FO0,244^FB812,1,0,C,0^A0N,50,44^FD{$code}^FS
 ^FO20,300^GB772,3,3^FS
 ^FO20,312^A0N," . (24 * $skuMult) . "," . (20 * $skuMult) . "^FD{$sku}^FS
@@ -1027,8 +1050,7 @@ final class PrintService
 
 ^FO18,336^GB776,1,1^FS
 
-^BY3,2,96
-^FO56,350^BCN,96,N,N,N^FD{$barcodeValue}^FS
+" . $this->zplBarcode($barcodeValue, 366) . "
 
 ^CF0,30
 ^FO0,462^FB812,1,0,C,0^FD{$barcodeValue}^FS
@@ -1113,8 +1135,8 @@ final class PrintService
             . 'TEXT 24,282,"2",0,1,1,"ORDEN COMPRA: ' . $poCode . '"' . "\r\n"
             . 'TEXT 392,282,"2",0,1,1,"CONTENEDOR: ' . $containerCode . '"' . "\r\n"
             . 'TEXT 24,308,"2",0,1,1,"PROVEEDOR: ' . $supplierName . '"' . "\r\n"
-            . 'BARCODE 56,350,"128",96,0,0,3,3,"' . $barcodeValue . '"' . "\r\n"
-            . 'TEXT 210,466,"4",0,1,1,"' . $barcodeValue . '"' . "\r\n"
+            . $this->tsplBarcode($barcodeValue, 366) . "\r\n"
+            . 'TEXT ' . $this->tsplCenterX($barcodeValue, 4) . ',466,"4",0,1,1,"' . $barcodeValue . '"' . "\r\n"
             . 'TEXT 120,510,"2",0,1,1,"ETAPA: ' . $processStage . ' | CONTROL DE CALIDAD UNIBAG"' . "\r\n"
             . 'PRINT 1,1';
     }
@@ -1177,8 +1199,8 @@ final class PrintService
             'A24,282,0,2,1,1,N,"OC: ' . $poCode . '"',
             'A392,282,0,2,1,1,N,"CONT: ' . $containerCode . '"',
             'A24,308,0,2,1,1,N,"PROV: ' . $supplierName . '"',
-            'B56,350,0,1,3,8,96,N,"' . $barcodeValue . '"',
-            'A180,468,0,4,1,1,N,"' . $barcodeValue . '"',
+            $this->eplBarcode($barcodeValue, 366),
+            'A' . $this->eplCenterX($barcodeValue, 4) . ',468,0,4,1,1,N,"' . $barcodeValue . '"',
             'A120,510,0,2,1,1,N,"ETAPA: ' . $processStage . ' | CONTROL DE CALIDAD UNIBAG"',
             'P1',
         ]) . "\r\n";
@@ -1213,8 +1235,7 @@ final class PrintService
 ^FO20,222^FDOPERADOR: {$operator}^FS
 ^FO20,250^FDCANTIDAD CAJAS: {$boxQty}^FS
 
-^BY3,2,96
-^FO56,292^BCN,96,N,N,N^FD{$barcodeValue}^FS
+" . $this->zplBarcode($barcodeValue, 308) . "
 ^CF0,32
 ^FO0,418^FB812,1,0,C,0^FD{$barcodeValue}^FS
 ^XZ";
@@ -1261,8 +1282,7 @@ final class PrintService
 ^FO20,306^FDOPERADOR: {$operator}^FS
 ^FO20,334^FDDESTINO: {$destinationLabel}^FS
 
-^BY3,2,96
-^FO42,378^BCN,96,N,N,N^FD{$boxCode}^FS
+" . $this->zplBarcode($boxCode, 420) . "
 ^CF0,32
 ^FO0,514^FB812,1,0,C,0^FD{$boxCode}^FS
 ^XZ";
@@ -1324,8 +1344,7 @@ final class PrintService
 ^FO20,306^FDDESTINO: {$destinationLabel}^FS
 ^FO20,334^FB770,2,0,L,0^FDCODIGOS CAJA: {$boxSummary}^FS
 
-^BY3,2,96
-^FO42,388^BCN,96,N,N,N^FD{$palletCode}^FS
+" . $this->zplBarcode($palletCode, 404) . "
 ^CF0,32
 ^FO0,496^FB812,1,0,C,0^FD{$palletCode}^FS
 ^XZ";
@@ -1349,8 +1368,8 @@ final class PrintService
             . 'TEXT 20,194,"2",0,1,1,"FECHA CIERRE: ' . $finishedAt . '"' . "\r\n"
             . 'TEXT 20,222,"2",0,1,1,"OPERADOR: ' . $operator . '"' . "\r\n"
             . 'TEXT 20,250,"2",0,1,1,"CANTIDAD CAJAS: ' . $boxQty . '"' . "\r\n"
-            . 'BARCODE 56,292,"128",96,0,0,3,3,"' . $barcodeValue . '"' . "\r\n"
-            . 'TEXT 176,418,"4",0,1,1,"' . $barcodeValue . '"' . "\r\n"
+            . $this->tsplBarcode($barcodeValue, 308) . "\r\n"
+            . 'TEXT ' . $this->tsplCenterX($barcodeValue, 4) . ',418,"4",0,1,1,"' . $barcodeValue . '"' . "\r\n"
             . 'PRINT 1,1';
     }
 
@@ -1383,8 +1402,8 @@ final class PrintService
             . 'TEXT 20,278,"2",0,1,1,"PALLET: ' . $palletCode . '"' . "\r\n"
             . 'TEXT 20,306,"2",0,1,1,"OPERADOR: ' . $operator . '"' . "\r\n"
             . 'TEXT 20,334,"2",0,1,1,"DESTINO: ' . $destinationLabel . '"' . "\r\n"
-            . 'BARCODE 42,378,"128",96,0,0,3,3,"' . $boxCode . '"' . "\r\n"
-            . 'TEXT 164,514,"4",0,1,1,"' . $boxCode . '"' . "\r\n"
+            . $this->tsplBarcode($boxCode, 420) . "\r\n"
+            . 'TEXT ' . $this->tsplCenterX($boxCode, 4) . ',514,"4",0,1,1,"' . $boxCode . '"' . "\r\n"
             . 'PRINT 1,1';
     }
 
@@ -1431,8 +1450,8 @@ final class PrintService
             . 'TEXT 20,278,"2",0,1,1,"OPERADOR: ' . $operator . '"' . "\r\n"
             . 'TEXT 20,306,"2",0,1,1,"DESTINO: ' . $destinationLabel . '"' . "\r\n"
             . 'TEXT 20,334,"2",0,1,1,"CODIGOS CAJA: ' . $boxSummary . '"' . "\r\n"
-            . 'BARCODE 42,388,"128",96,0,0,3,3,"' . $palletCode . '"' . "\r\n"
-            . 'TEXT 154,524,"4",0,1,1,"' . $palletCode . '"' . "\r\n"
+            . $this->tsplBarcode($palletCode, 430) . "\r\n"
+            . 'TEXT ' . $this->tsplCenterX($palletCode, 4) . ',524,"4",0,1,1,"' . $palletCode . '"' . "\r\n"
             . 'PRINT 1,1';
     }
 
@@ -1460,7 +1479,7 @@ final class PrintService
             'A380,152,0,3,1,1,N,"CANTIDAD CAJAS: ' . $boxQty . '"',
             'A20,192,0,3,1,1,N,"FECHA CIERRE: ' . $finishedAt . '"',
             'A20,232,0,3,1,1,N,"OPERADOR: ' . $operator . '"',
-            'B56,294,0,1,3,8,166,N,"' . $barcodeValue . '"',
+            $this->eplBarcode($barcodeValue, 380),
             'A' . $this->eplCenterX($barcodeValue, 4, 2) . ',472,0,4,2,2,N,"' . $barcodeValue . '"',
             'P1',
         ]) . "\r\n";
@@ -1502,7 +1521,7 @@ final class PrintService
             'A20,214,0,2,1,1,N,"PALLET: ' . $palletCode . '"',
             'A380,214,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
             'A20,246,0,2,1,1,N,"DESTINO: ' . $destinationLabel . '"',
-            'B42,290,0,1,3,8,170,N,"' . $boxCode . '"',
+            $this->eplBarcode($boxCode, 380),
             'A' . $this->eplCenterX($boxCode, 4, 2) . ',474,0,4,2,2,N,"' . $boxCode . '"',
             'P1',
         ]) . "\r\n";
@@ -1559,7 +1578,7 @@ final class PrintService
             'A20,214,0,2,1,1,N,"OPERADOR: ' . $operator . '"',
             'A380,214,0,2,1,1,N,"DESTINO: ' . $destinationLabel . '"',
             'A20,246,0,2,1,1,N,"CAJAS ORIGEN: ' . $boxSummary . '"',
-            'B42,306,0,1,3,8,160,N,"' . $palletCode . '"',
+            $this->eplBarcode($palletCode, 386),
             'A' . $this->eplCenterX($palletCode, 4, 2) . ',476,0,4,2,2,N,"' . $palletCode . '"',
             'P1',
         ]) . "\r\n";
