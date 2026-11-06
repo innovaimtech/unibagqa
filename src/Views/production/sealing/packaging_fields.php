@@ -566,12 +566,13 @@
     }
 
     $rowIdx = 0;
+    $mainStockIsAutomatic = (int)($agenda['equipo_type_id'] ?? $agenda['ag_equipotype_id'] ?? 0) === UNIBAG_CYS_EQUIPO_TYPE_ID;
     $renderRow = static function(
         int $idx,
         array $ord,
         array $savedItem = [],
         bool $isMain = false
-    ) use ($escape): void {
+    ) use ($escape, $mainStockIsAutomatic): void {
         $reqNum = trim((string)($ord['req_number'] ?? $savedItem['req_number'] ?? ''));
         $orderId = (int)($ord['id'] ?? $savedItem['order_id'] ?? 0);
         $itemId = (int)($ord['item_id'] ?? $savedItem['id_item'] ?? 0);
@@ -594,16 +595,28 @@
                 . '</a>';
         }
 
-        $whOptions = '<option value="">-- Misma bodega --</option>';
+        $savedOrigin = (int)($savedItem['origin_wh'] ?? 0);
+        $originListed = $savedOrigin <= 0;
+        $whOptions = $isMain
+            ? '<option value="">-- Misma bodega --</option>'
+            : '<option value="">-- Elegir bodega --</option><option value="-1"' . ($savedOrigin === -1 ? ' selected' : '') . '>Ya está en la bodega de destino</option>';
         if (!empty($ord['bodegas'])) {
             foreach ($ord['bodegas'] as $b) {
                 $whId = (int)$b['id'];
                 $whName = $escape((string)$b['st_name']);
                 $stk = (int)round((float)($b['stock'] ?? 0));
                 $stkOrd = (int)round((float)($b['stock_order'] ?? 0));
-                $whOptions .= '<option value="' . $whId . '">' . $whName . ' (Stock: ' . $stk . ' · este CC: ' . $stkOrd . ')</option>';
+                $originListed = $originListed || $whId === $savedOrigin;
+                $whOptions .= '<option value="' . $whId . '"' . ($whId === $savedOrigin ? ' selected' : '') . '>' . $whName . ' (Stock: ' . $stk . ' · este CC: ' . $stkOrd . ')</option>';
             }
         }
+        if (!$originListed) {
+            $whOptions .= '<option value="' . $savedOrigin . '" selected>Bodega registrada en este cierre</option>';
+        }
+        // En selladora el CC del cierre entra solo a la bodega de destino: no se traspasa.
+        $originCell = $isMain && $mainStockIsAutomatic
+            ? '<span style="font-size:12px;color:#0F766E;font-weight:600">Entra solo a la bodega de destino</span>'
+            : '<select name="req_id_bodega_' . $idx . '" class="inptxt' . ($isMain ? '' : ' mixed-origin') . '">' . $whOptions . '</select>';
 
         $badge = $isMain ? '<span style="font-size:10px;background:#0F766E;color:white;padding:2px 6px;border-radius:4px;margin-left:5px;font-weight:700">OT Actual</span>' : '';
         $removeBtn = $isMain
@@ -623,7 +636,7 @@
             . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_caja_final_' . $idx . '" id="bolsas_caja_final_' . $idx . '" class="inptxt" style="text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bcf . '" oninput="calcEmbalajeMixto()"></td>'
             . '<td style="text-align:center"><input type="number" min="0" step="1" name="bolsas_sobrante_' . $idx . '" id="bolsas_sobrante_' . $idx . '" class="inptxt" style="text-align:center' . ($isMain ? ';background:#F1F5F9" readonly title="Se carga desde Cantidades de Embalaje (arriba)' : '') . '" value="' . $bsobr . '" oninput="calcEmbalajeMixto()"></td>'
             . '<td style="text-align:center"><input type="number" name="total_bolsas_' . $idx . '" id="total_bolsas_' . $idx . '" class="inptxt" style="text-align:center;background:#F8FAFC;font-weight:800;color:#0F766E" value="' . $totBolsas . '" readonly></td>'
-            . '<td><select name="req_id_bodega_' . $idx . '" class="inptxt" >' . $whOptions . '</select></td>'
+            . '<td>' . $originCell . '</td>'
             . '<td style="text-align:center">' . $removeBtn . '</td>'
             . '</tr>';
     };
@@ -739,6 +752,7 @@
                 calcEmbalajeMixto();
             } else {
                 if (help) help.innerHTML = "Cajas completas &times; unidades por caja + caja final + sobrantes + showroom";
+                document.querySelectorAll("select.mixed-origin").forEach(function(s) { s.required = false; });
                 var f = document.getElementById("pack_total_units")?.form;
                 if (f) calculatePackagingUnits(f, "");
             }
@@ -769,7 +783,8 @@
                 if (inpTot) inpTot.value = rowTotal;
                 sumBoxes += cajas + (bcf > 0 ? 1 : 0);
                 sumUnits += rowTotal;
-
+                var origin = row.querySelector("select.mixed-origin");
+                if (origin) origin.required = rowTotal > 0;
             });
 
             var lblBoxes = document.getElementById("lbl_mixed_total_boxes");
@@ -899,8 +914,9 @@
                         }
                     }
                     var tbody = document.getElementById("table_mixto_body");
-                    var nextIdx = tbody.querySelectorAll("tr").length;
-                    var whOptions = "<option value=\'\'>-- Misma bodega --</option>";
+                    var nextIdx = 0;
+                    tbody.querySelectorAll("tr[data-idx]").forEach(function(r) { nextIdx = Math.max(nextIdx, (parseInt(r.getAttribute("data-idx")) || 0) + 1); });
+                    var whOptions = "<option value=\'\'>-- Elegir bodega --</option><option value=\'-1\'>Ya está en la bodega de destino</option>";
                     if (o.bodegas && o.bodegas.length) {
                         o.bodegas.forEach(function(b) {
                             whOptions += "<option value=\'" + b.id + "\'>" + (b.st_name || ("Bodega " + b.id)) + " (Stock: " + Math.round(b.stock) + " · este CC: " + Math.round(b.stock_order || 0) + ")</option>";
@@ -924,7 +940,7 @@
                         + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_caja_final_" + nextIdx + "\' id=\'bolsas_caja_final_" + nextIdx + "\' class=\'inptxt\' style=\'text-align:center\' value=\'" + 0 + "\' oninput=\'calcEmbalajeMixto()\'></td>"
                         + "<td style=\'text-align:center\'><input type=\'number\' min=\'0\' step=\'1\' name=\'bolsas_sobrante_" + nextIdx + "\' id=\'bolsas_sobrante_" + nextIdx + "\' class=\'inptxt\' style=\'text-align:center\' value=\'0\' oninput=\'calcEmbalajeMixto()\'></td>"
                         + "<td style=\'text-align:center\'><input type=\'number\' name=\'total_bolsas_" + nextIdx + "\' id=\'total_bolsas_" + nextIdx + "\' class=\'inptxt\' style=\'text-align:center;background:#F8FAFC;font-weight:800;color:#0F766E\' value=\'0\' readonly></td>"
-                        + "<td><select name=\'req_id_bodega_" + nextIdx + "\' class=\'inptxt\'>" + whOptions + "</select></td>"
+                        + "<td><select name=\'req_id_bodega_" + nextIdx + "\' class=\'inptxt mixed-origin\'>" + whOptions + "</select></td>"
                         + "<td style=\'text-align:center\'><button type=\'button\' class=\'btnred\' style=\'padding:5px 9px;font-size:11px;border-radius:4px\' onclick=\'removeMixedRow(" + nextIdx + ")\' title=\'Quitar este CC\'><i class=\'fa fa-trash\'></i></button></td>";
 
                     tr.children[2].title = ((o.item_number_prod || "") + " " + (o.item_title || "")).trim();

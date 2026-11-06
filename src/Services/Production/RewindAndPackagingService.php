@@ -11,6 +11,7 @@ declare(strict_types=1);
 const UNIBAG_CYS_EQUIPO_TYPE_ID = 8;
 const UNIBAG_PACKAGING_EQUIPO_ID = 25;
 const UNIBAG_PACKAGING_EQUIPO_TYPE_ID = 15;
+const UNIBAG_MIXED_ORIGIN_AT_DESTINATION = -1;
 
 trait RewindAndPackagingServiceTrait
 {
@@ -200,6 +201,18 @@ trait RewindAndPackagingServiceTrait
         $detStmt->execute([(int)$mixto['id']]);
         $details = $detStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
+        // El origen se deduce del traspaso registrado; una línea guardada sin traspaso ya estaba en destino.
+        foreach ($details as &$line) {
+            $line['origin_wh'] = UNIBAG_MIXED_ORIGIN_AT_DESTINATION;
+            foreach ($this->mixedTransferNet($embalajeId, trim((string)($line['req_number'] ?? ''))) as $pair => $qty) {
+                if ($qty > 0) {
+                    $line['origin_wh'] = (int)explode('>', (string)$pair)[0];
+                    break;
+                }
+            }
+        }
+        unset($line);
+
         return [
             'header' => $mixto,
             'items' => $details,
@@ -224,9 +237,28 @@ trait RewindAndPackagingServiceTrait
             throw new RuntimeException('No se encontró el pedido ' . $reqNumber . ' para registrar el traspaso de bodega.');
         }
         $prefix = '[TRZ-EMB:' . $embalajeId . ':' . $reqNumber . ':';
-        // Neto ya registrado por (origen>destino) para este embalaje y CC
+        $net = $this->mixedTransferNet($embalajeId, $reqNumber);
+        $want = $fromWh . '>' . $toWh;
+        // Pares anteriores distintos al deseado: se revierten
+        foreach ($net as $pair => $qty) {
+            if ($pair === $want || $qty <= 0) continue;
+            [$a, $b] = array_map('intval', explode('>', $pair));
+            $this->postStorehouseTransfer($o, $itemId, $b, $a, $qty, $reqNumber, $prefix . $b . '>' . $a . ':' . $qty . '] reversa por cambio de bodega');
+        }
+        $delta = $amount - (int)($net[$want] ?? 0);
+        if ($delta > 0) {
+            $this->warnIfOriginWithoutStock($itemId, (int)$o['req_shop_id'], $fromWh, (int)$o['id'], $delta, $reqNumber);
+            $this->postStorehouseTransfer($o, $itemId, $fromWh, $toWh, $delta, $reqNumber, $prefix . $fromWh . '>' . $toWh . ':' . $delta . ']');
+        } elseif ($delta < 0) {
+            $this->postStorehouseTransfer($o, $itemId, $toWh, $fromWh, -$delta, $reqNumber, $prefix . $toWh . '>' . $fromWh . ':' . (-$delta) . '] reversa por menor cantidad');
+        }
+    }
+
+    /** Neto ya traspasado por (origen>destino) para este embalaje y CC, según las marcas de los documentos. */
+    private function mixedTransferNet(int $embalajeId, string $reqNumber): array
+    {
         $docs = $this->erpPdo->prepare('SELECT strc_desc FROM storehousechanges WHERE strc_desc LIKE ?');
-        $docs->execute(['%' . $prefix . '%']);
+        $docs->execute(['%[TRZ-EMB:' . $embalajeId . ':' . $reqNumber . ':%']);
         $net = [];
         foreach ($docs->fetchAll(PDO::FETCH_COLUMN) as $desc) {
             if (preg_match('/\[TRZ-EMB:' . preg_quote((string)$embalajeId, '/') . ':' . preg_quote($reqNumber, '/') . ':(\d+)>(\d+):(\d+)\]/', (string)$desc, $m) === 1) {
@@ -243,18 +275,40 @@ trait RewindAndPackagingServiceTrait
                 $net[$opp] -= $d;
             }
         }
-        $want = $fromWh . '>' . $toWh;
-        // Pares anteriores distintos al deseado: se revierten
-        foreach ($net as $pair => $qty) {
-            if ($pair === $want || $qty <= 0) continue;
-            [$a, $b] = array_map('intval', explode('>', $pair));
-            $this->postStorehouseTransfer($o, $itemId, $b, $a, $qty, $reqNumber, $prefix . $b . '>' . $a . ':' . $qty . '] reversa por cambio de bodega');
+        return $net;
+    }
+
+    /** El traspaso se registra igual porque las bolsas ya se movieron; el aviso permite a bodega corregir el stock. */
+    private function warnIfOriginWithoutStock(int $itemId, int $shopId, int $fromWh, int $orderId, int $qty, string $reqNumber): void
+    {
+        $stmt = $this->erpPdo->prepare('SELECT iss_inventory FROM item_shops_storehouses WHERE item_id = ? AND shop_id = ? AND st_id = ? AND iss_order_id = ?');
+        $stmt->execute([$itemId, $shopId, $fromWh, $orderId]);
+        $available = (float)$stmt->fetchColumn();
+        if ($available >= $qty) {
+            return;
         }
-        $delta = $amount - (int)($net[$want] ?? 0);
-        if ($delta > 0) {
-            $this->postStorehouseTransfer($o, $itemId, $fromWh, $toWh, $delta, $reqNumber, $prefix . $fromWh . '>' . $toWh . ':' . $delta . ']');
-        } elseif ($delta < 0) {
-            $this->postStorehouseTransfer($o, $itemId, $toWh, $fromWh, -$delta, $reqNumber, $prefix . $toWh . '>' . $fromWh . ':' . (-$delta) . '] reversa por menor cantidad');
+        $name = $this->erpPdo->prepare('SELECT st_name FROM company_shops_storehouses WHERE id = ?');
+        $name->execute([$fromWh]);
+        $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning . ' CC ' . $reqNumber . ': la bodega '
+            . (string)($name->fetchColumn() ?: $fromWh) . ' tenía ' . (int)round($available) . ' y salieron ' . $qty
+            . '. Quedó con stock negativo: avisa a bodega.');
+    }
+
+    /** Si un CC se quitó del pallet al corregir el cierre, deshace su traspaso. */
+    private function revertRemovedMixedTransfers(int $embalajeId, array $keepReqNumbers, int $destWh): void
+    {
+        $stmt = $this->erpPdo->prepare('SELECT h.strc_desc, si.item_id FROM storehousechanges h JOIN storehousechanges_items si ON si.strc_id = h.id WHERE h.strc_desc LIKE ?');
+        $stmt->execute(['%[TRZ-EMB:' . $embalajeId . ':%']);
+        $items = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $doc) {
+            if (preg_match('/\[TRZ-EMB:' . $embalajeId . ':([^:\]]+):/', (string)$doc['strc_desc'], $m) === 1) {
+                $items[$m[1]] = (int)$doc['item_id'];
+            }
+        }
+        foreach ($items as $reqNumber => $itemId) {
+            if (!in_array((string)$reqNumber, $keepReqNumbers, true)) {
+                $this->transferMixedStock($embalajeId, $itemId, $destWh, $destWh, 0, (string)$reqNumber);
+            }
         }
     }
 
@@ -300,7 +354,7 @@ trait RewindAndPackagingServiceTrait
 
         // Documento de traspaso + líneas + kardex
         $counter = (int)$c['company_numcounter_storehouse'] + 1;
-        $number = ($c['company_numformat_storehouse'] ?: 'TR') . sprintf('%08d', $counter);
+        $number = ($c['company_numformat_storehouse'] ?: 'TR') . sprintf('%07d', $counter);
         $this->erpPdo->prepare('UPDATE company_data SET company_numcounter_storehouse = ? WHERE id = ?')->execute([$counter, $companyId]);
         $now = time();
         $userId = (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0);
@@ -425,8 +479,15 @@ trait RewindAndPackagingServiceTrait
                 $totalMixedUnits += (int)($m['total_bolsas'] ?? 0);
             }
         } else {
-            $idx = 0;
-            while (isset($input['mixed_req_number_' . $idx]) || isset($input['total_cajas_' . $idx])) {
+            // Se recorren los índices enviados: al quitar una fila quedan huecos y las siguientes también cuentan.
+            $indexes = [];
+            foreach (array_keys($input) as $key) {
+                if (preg_match('/^(?:mixed_req_number|total_cajas)_(\d+)$/', (string)$key, $m) === 1) {
+                    $indexes[(int)$m[1]] = true;
+                }
+            }
+            ksort($indexes);
+            foreach (array_keys($indexes) as $idx) {
                 $reqNum = trim((string)($input['mixed_req_number_' . $idx] ?? ''));
                 $totCajas = (int)($input['total_cajas_' . $idx] ?? 0);
                 $bpc = (int)($input['bolsas_por_caja_' . $idx] ?? 0);
@@ -435,6 +496,10 @@ trait RewindAndPackagingServiceTrait
                 $itemId = (int)($input['mixed_item_id_' . $idx] ?? 0);
                 $whId = (int)($input['req_id_bodega_' . $idx] ?? 0);
                 $totBolsas = ($totCajas * $bpc) + $bcf + $bsobr;
+                // La fila 0 es el CC del cierre. Sin esto, las bolsas de otro CC quedarían en su bodega sin aviso.
+                if ($isMixto && $idx > 0 && $totBolsas > 0 && $whId === 0) {
+                    throw new RuntimeException('Elige la bodega de origen de las bolsas del CC ' . $reqNum . '.');
+                }
 
                 if ($reqNum !== '' || $totCajas > 0 || $totBolsas > 0) {
                     $mixedItems[] = [
@@ -450,7 +515,6 @@ trait RewindAndPackagingServiceTrait
                     $totalMixedBoxes += $totCajas + ($bcf > 0 ? 1 : 0);
                     $totalMixedUnits += $totBolsas;
                 }
-                $idx++;
             }
         }
         $detail['mixed_items'] = $mixedItems;
@@ -500,12 +564,16 @@ trait RewindAndPackagingServiceTrait
             throw new RuntimeException('Las credenciales del supervisor no son validas.');
         }
         // Un embalaje de selladora ya cerrado vive en la OT de Embalaje, enlazado con la OT de la selladora.
-        $stmt = $this->erpPdo->prepare('SELECT a.ag_reqid FROM prod_worker_ot_events e JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid JOIN prod_agenda a ON a.id = ot.wok_ag_id WHERE e.id = :event AND (ot.id = :ot OR (e.overrideembalaje_act = 1 AND e.overrideembalaje_selladora_evtrefid = :linked_ot))');
+        $stmt = $this->erpPdo->prepare('SELECT a.ag_reqid, a.ag_equipotype_id, e.overrideembalaje_selladora_evtrefid AS linked_ot, o.req_number FROM prod_worker_ot_events e JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid JOIN prod_agenda a ON a.id = ot.wok_ag_id LEFT JOIN orders o ON o.id = a.ag_reqid WHERE e.id = :event AND (ot.id = :ot OR (e.overrideembalaje_act = 1 AND e.overrideembalaje_selladora_evtrefid = :linked_ot))');
         $stmt->execute([':event' => $eventId, ':ot' => $workerOtId, ':linked_ot' => $workerOtId]);
-        $requestId = (int)$stmt->fetchColumn();
+        $eventOrder = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $requestId = (int)($eventOrder['ag_reqid'] ?? 0);
         if ($requestId <= 0) {
             throw new RuntimeException('No se encontro el pedido asociado al evento.');
         }
+        // En selladora, el CC del cierre entra por el stock automático: si además se traspasa, queda doble en destino.
+        $mainStockIsAutomatic = (int)($eventOrder['ag_equipotype_id'] ?? 0) === UNIBAG_CYS_EQUIPO_TYPE_ID || (int)($eventOrder['linked_ot'] ?? 0) > 0;
+        $mainReqNumber = trim((string)($eventOrder['req_number'] ?? ''));
         $warehouse = $this->erpPdo->prepare('SELECT st_name FROM company_shops_storehouses WHERE id = :id AND st_status = 1');
         $warehouse->execute([':id' => $detail['req_id_bodega']]);
         $destName = $warehouse->fetchColumn();
@@ -576,6 +644,10 @@ trait RewindAndPackagingServiceTrait
 
                     $origWh = (int)($m['req_id_bodega'] ?? 0);
                     $destWh = (int)$detail['req_id_bodega'];
+                    if ($origWh === UNIBAG_MIXED_ORIGIN_AT_DESTINATION
+                        || ($mainStockIsAutomatic && trim((string)($m['req_number'] ?? '')) === $mainReqNumber)) {
+                        $origWh = $destWh; // No hay nada que mover; si ya se había traspasado, se revierte.
+                    }
                     $itemId = (int)($m['id_item'] ?? 0);
                     $totTraspaso = (int)($m['total_bolsas'] ?? 0);
                     if ($origWh > 0 && $destWh > 0 && $itemId > 0) {
@@ -592,17 +664,31 @@ trait RewindAndPackagingServiceTrait
             }
         }
 
+        if ($existing !== []) {
+            try {
+                $keep = $detail['req_codigo_cierre'] === '50'
+                    ? array_map(static fn(array $m): string => trim((string)($m['req_number'] ?? '')), $mixedItems) : [];
+                $this->revertRemovedMixedTransfers($embalajeId, $keep, (int)$detail['req_id_bodega']);
+            } catch (Throwable $e) {
+                error_log('Reversa de traspaso mixto, embalaje ' . $embalajeId . ': ' . $e->getMessage());
+                $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning
+                    . ' NO se pudo revertir el traspaso de un CC quitado del pallet: ' . $e->getMessage());
+            }
+        }
+
         // Consumo automático de insumos de embalaje en Bodega 3000 (pallets, cajas y cinta de papel)
         try {
             // Se envían también los CC del pallet mixto (antes se quitaban y el consumo de cajas
             // y pallets de un cierre mixto se calculaba solo con la fila principal).
             $supplyResult = $this->consumePackagingSupplies($workerOtId, $eventId, $detail + ['mixed_items' => $mixedItems], $supervisor);
             if (($supplyResult['ok'] ?? true) !== true) {
-                $this->lastSupplyConsumptionWarning = (string)($supplyResult['error'] ?? 'No se pudo descontar el stock de embalaje.');
+                $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning . ' '
+                    . (string)($supplyResult['error'] ?? 'No se pudo descontar el stock de embalaje.'));
             }
         } catch (Throwable $e) {
             error_log('Error en consumePackagingSupplies: ' . $e->getMessage());
-            $this->lastSupplyConsumptionWarning = 'No se pudo descontar el stock de embalaje: ' . $e->getMessage();
+            $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning
+                . ' No se pudo descontar el stock de embalaje: ' . $e->getMessage());
         }
 
         // El correo a facturación se envía DESPUÉS de confirmar la transacción (ver sendPendingPackagingBillingMail).
