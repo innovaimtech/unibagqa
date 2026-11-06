@@ -227,15 +227,22 @@ trait ProductionEventsServiceTrait
     /** Recupera el detalle de embalaje del evento, sin crear stock ni etiquetas. */
     public function getPackagingEventDetail(int $eventId, int $workerOtId): array
     {
-        $stmt = $this->erpPdo->prepare('SELECT * FROM prod_worker_embalajes WHERE req_v2refid = :event AND evt_prod_worker_otid = :ot ORDER BY id DESC LIMIT 1');
-        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId]);
+        // El evento decide a qué OT pertenece: el embalaje de una selladora pasa a la OT de Embalaje al cerrarse.
+        $stmt = $this->erpPdo->prepare('SELECT pe.* FROM prod_worker_embalajes pe
+            JOIN prod_worker_ot_events e ON e.id = pe.req_v2refid
+            WHERE pe.req_v2refid = :event
+              AND (e.evt_prod_worker_otid = :ot OR (e.overrideembalaje_act = 1 AND e.overrideembalaje_selladora_evtrefid = :linked_ot))
+            ORDER BY pe.id DESC LIMIT 1');
+        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId, ':linked_ot' => $workerOtId]);
         return $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
     }
 
+    /** Evento de la OT, o embalaje enlazado a ella (como en getWorkOrderEvents). */
     public function getEventById(int $eventId, int $workerOtId): ?array
     {
-        $stmt = $this->erpPdo->prepare('SELECT * FROM prod_worker_ot_events WHERE id = :event AND evt_prod_worker_otid = :ot AND evt_status > 0');
-        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId]);
+        $stmt = $this->erpPdo->prepare('SELECT * FROM prod_worker_ot_events WHERE id = :event AND evt_status > 0
+            AND (evt_prod_worker_otid = :ot OR (overrideembalaje_act = 1 AND overrideembalaje_selladora_evtrefid = :linked_ot))');
+        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId, ':linked_ot' => $workerOtId]);
         return $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
     }
 

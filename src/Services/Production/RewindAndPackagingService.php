@@ -7,6 +7,11 @@ declare(strict_types=1);
 // (src/Services/Production/RewindAndPackagingService.php)
 // =============================================================================
 
+/** Tipo de máquina Selladoras, y máquina y tipo Embalaje del ERP: los embalajes de Corte y Sellado se registran en esta última. */
+const UNIBAG_CYS_EQUIPO_TYPE_ID = 8;
+const UNIBAG_PACKAGING_EQUIPO_ID = 25;
+const UNIBAG_PACKAGING_EQUIPO_TYPE_ID = 15;
+
 trait RewindAndPackagingServiceTrait
 {
     /** Aviso (si lo hubo) del último descuento de stock de embalaje; la pantalla lo muestra al operador. */
@@ -494,8 +499,9 @@ trait RewindAndPackagingServiceTrait
         if (!$this->validateSupervisor($supervisor, $password)) {
             throw new RuntimeException('Las credenciales del supervisor no son validas.');
         }
-        $stmt = $this->erpPdo->prepare('SELECT a.ag_reqid FROM prod_worker_ot_events e JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid JOIN prod_agenda a ON a.id = ot.wok_ag_id WHERE e.id = :event AND ot.id = :ot');
-        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId]);
+        // Un embalaje de selladora ya cerrado vive en la OT de Embalaje, enlazado con la OT de la selladora.
+        $stmt = $this->erpPdo->prepare('SELECT a.ag_reqid FROM prod_worker_ot_events e JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid JOIN prod_agenda a ON a.id = ot.wok_ag_id WHERE e.id = :event AND (ot.id = :ot OR (e.overrideembalaje_act = 1 AND e.overrideembalaje_selladora_evtrefid = :linked_ot))');
+        $stmt->execute([':event' => $eventId, ':ot' => $workerOtId, ':linked_ot' => $workerOtId]);
         $requestId = (int)$stmt->fetchColumn();
         if ($requestId <= 0) {
             throw new RuntimeException('No se encontro el pedido asociado al evento.');
@@ -603,6 +609,214 @@ trait RewindAndPackagingServiceTrait
         $this->pendingBillingMail = [$eventId, $workerOtId, $embalajeId, $requestId, $detail, $mixedItems, $totalUnitsForMail];
 
         return $embalajeId;
+    }
+
+    /**
+     * Termina un embalaje hecho desde una selladora: lo pasa a la máquina Embalaje y actualiza el stock.
+     * El embalaje ya quedó guardado, así que un error aquí nunca interrumpe el cierre: queda como aviso.
+     *
+     * @param bool $closingNow true solo cuando el embalaje se cierra en esta acción. Sin un cierre nuevo, el stock
+     *                         se toca únicamente si este embalaje ya lo había cargado, porque los anteriores los ajustó bodega.
+     */
+    public function finalizeCysPackagingEvent(int $eventId, int $workerOtId, bool $closingNow): void
+    {
+        try {
+            $this->linkCysPackagingEvent($eventId);
+        } catch (Throwable $e) {
+            error_log('Embalaje CyS, evento ' . $eventId . ' de OT ' . $workerOtId . ': ' . $e->getMessage());
+            $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning
+                . ' El embalaje se guardó, pero NO quedó en la producción de Embalaje. Avisa a sistemas (evento ' . $eventId . ').');
+        }
+        try {
+            $this->syncCysPackagingStock($eventId, $closingNow);
+        } catch (Throwable $e) {
+            error_log('Stock de embalaje CyS, evento ' . $eventId . ': ' . $e->getMessage());
+            $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning
+                . ' El embalaje se guardó, pero NO se pudo cargar el stock a bodega: avisa a bodega para ajustarlo.');
+        }
+    }
+
+    /**
+     * Datos del evento de embalaje y de la OT donde está hoy. Solo eventos terminados de tipo embalaje.
+     */
+    private function closedPackagingEventRow(int $eventId): ?array
+    {
+        $stmt = $this->erpPdo->prepare("SELECT e.id, e.evt_crtdat, e.evt_enddat, e.evt_amount, e.evt_prod_worker_otid,
+                e.overrideembalaje_selladora_evtrefid AS linked_ot, ot.wok_ag_id, a.ag_equipotype_id, a.ag_prdid, a.ag_reqid,
+                a.ag_plantaid, i.win_wrkid, i.win_plantaid
+            FROM prod_worker_ot_events e
+            JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid
+            JOIN prod_agenda a ON a.id = ot.wok_ag_id
+            LEFT JOIN prod_worker_init i ON i.id = ot.wok_init_id
+            WHERE e.id = ? AND e.evt_type = 'prod' AND e.overrideembalaje_act = 1 AND e.evt_status > 0 AND e.evt_enddat > 0");
+        $stmt->execute([$eventId]);
+        return $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+
+    /**
+     * Pasa un embalaje hecho desde una selladora a la máquina Embalaje, como hacía el sistema antiguo: registro de
+     * máquina, agenda oculta y OT cerrada, con el enlace a la OT de la selladora. Los informes leen el tipo de máquina
+     * de la agenda, así que esto saca las unidades de Corte y Sellado y las deja en Embalaje, en su fecha real.
+     *
+     * No toca stock. Las tablas del ERP son MyISAM y no permiten deshacer: el evento se mueve al final, y un fallo
+     * previo solo deja registros sin eventos, que los informes no leen.
+     *
+     * @return array{event_id:int, moved:bool, source_ot:int, packaging_ot:int}|null null si el evento no corresponde.
+     */
+    public function linkCysPackagingEvent(int $eventId): ?array
+    {
+        $event = $this->closedPackagingEventRow($eventId);
+        if ($event === null || (float)$event['evt_amount'] <= 0) {
+            return null;
+        }
+        $amount = (float)$event['evt_amount'];
+        $currentOt = (int)$event['evt_prod_worker_otid'];
+        $moveDetail = $this->erpPdo->prepare('UPDATE prod_worker_embalajes SET evt_prod_worker_otid = ? WHERE req_v2refid = ?');
+
+        if ((int)$event['linked_ot'] > 0) {
+            // Ya movido: una corrección solo actualiza la cantidad y devuelve el detalle a la OT de Embalaje.
+            $this->erpPdo->prepare('UPDATE prod_agenda SET ag_amount = ? WHERE id = ?')->execute([$amount, (int)$event['wok_ag_id']]);
+            $moveDetail->execute([$currentOt, $eventId]);
+            return ['event_id' => $eventId, 'moved' => false, 'source_ot' => (int)$event['linked_ot'], 'packaging_ot' => $currentOt];
+        }
+        if ((int)$event['ag_equipotype_id'] !== UNIBAG_CYS_EQUIPO_TYPE_ID) {
+            return null;
+        }
+
+        $closedAt = (int)$event['evt_enddat'];
+        $this->erpPdo->prepare('INSERT INTO prod_worker_init
+                (win_crtdat, win_enddat, win_wrkid, win_status, win_plantaid, win_equipoid, win_ass_id, win_day, win_month, win_year)
+                VALUES (?, ?, ?, 2, ?, ?, 0, ?, ?, ?)')
+            ->execute([$closedAt, $closedAt, (int)$event['win_wrkid'], (int)$event['win_plantaid'], UNIBAG_PACKAGING_EQUIPO_ID,
+                (int)date('j', $closedAt), (int)date('n', $closedAt), (int)date('Y', $closedAt)]);
+        $initId = (int)$this->erpPdo->lastInsertId();
+        $this->erpPdo->prepare('INSERT INTO prod_agenda
+                (ag_date, ag_date_stamp, ag_equipo_id, ag_equipotype_id, ag_amount, ag_prdid, ag_reqid, ag_plantaid, ag_crtdat, ag_crtusr, ag_status, ag_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 0)')
+            ->execute([date('d.m.Y', $closedAt), $closedAt, UNIBAG_PACKAGING_EQUIPO_ID, UNIBAG_PACKAGING_EQUIPO_TYPE_ID, $amount,
+                (int)$event['ag_prdid'], (int)$event['ag_reqid'], (int)$event['ag_plantaid'], $closedAt]);
+        $agendaId = (int)$this->erpPdo->lastInsertId();
+        $this->erpPdo->prepare('INSERT INTO prod_worker_ot (wok_ag_id, wok_init_id, wok_crtdat, wok_enddat, wok_status) VALUES (?, ?, ?, ?, 2)')
+            ->execute([$agendaId, $initId, (int)$event['evt_crtdat'], $closedAt]);
+        $packagingOt = (int)$this->erpPdo->lastInsertId();
+
+        $moveDetail->execute([$packagingOt, $eventId]);
+        $this->erpPdo->prepare('UPDATE prod_worker_ot_events SET evt_prod_worker_otid = ?, overrideembalaje_selladora_evtrefid = ?
+                WHERE id = ? AND overrideembalaje_selladora_evtrefid = 0')
+            ->execute([$packagingOt, $currentOt, $eventId]);
+        return ['event_id' => $eventId, 'moved' => true, 'source_ot' => $currentOt, 'packaging_ot' => $packagingOt];
+    }
+
+    /**
+     * Deja en bodega lo embalado desde una selladora. Cada documento lleva la marca [TRZ-EMB-STOCK:evento:bodega:cantidad],
+     * y solo se registra la diferencia con lo ya cargado: repetir no duplica y una corrección ajusta lo justo.
+     */
+    private function syncCysPackagingStock(int $eventId, bool $closingNow): void
+    {
+        $event = $this->closedPackagingEventRow($eventId);
+        if ($event === null) {
+            return;
+        }
+        if ((int)$event['linked_ot'] <= 0 && (int)$event['ag_equipotype_id'] !== UNIBAG_CYS_EQUIPO_TYPE_ID) {
+            return; // Máquina Embalaje propia: no es parte de este flujo.
+        }
+        $stmt = $this->erpPdo->prepare('SELECT * FROM prod_worker_embalajes WHERE req_v2refid = ? ORDER BY id DESC LIMIT 1');
+        $stmt->execute([$eventId]);
+        $detail = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$detail) {
+            return;
+        }
+
+        $docs = $this->erpPdo->prepare('SELECT stk_annotation FROM stockchanges WHERE stk_annotation LIKE ?');
+        $docs->execute(['%[TRZ-EMB-STOCK:' . $eventId . ':%']);
+        $loaded = [];
+        $hasDocuments = false;
+        foreach ($docs->fetchAll(PDO::FETCH_COLUMN) as $annotation) {
+            if (preg_match('/\[TRZ-EMB-STOCK:' . $eventId . ':(\d+):(-?\d+)\]/', (string)$annotation, $m) === 1) {
+                $loaded[(int)$m[1]] = ($loaded[(int)$m[1]] ?? 0) + (int)$m[2];
+                $hasDocuments = true;
+            }
+        }
+        // Sin cierre nuevo ni carga previa: es un embalaje que ya ajustó bodega.
+        if (!$closingNow && !$hasDocuments) {
+            return;
+        }
+
+        // En un cierre mixto entra lo del CC principal; los demás CC llegan por su traspaso de bodega.
+        $units = (int)$detail['req_embalaje_cajas_completas_amt'] * (int)$detail['req_embalaje_bolsas_por_caja_amt']
+            + (int)$detail['req_embalaje_caja_final'] + (int)$detail['req_embalaje_bolsas_sobrantes_amt'] + (int)$detail['req_embalaje_showroom'];
+        $warehouse = (int)$detail['req_id_bodega'];
+        if ($warehouse <= 0) {
+            throw new RuntimeException('El embalaje no tiene bodega de destino.');
+        }
+        $targets = array_fill_keys(array_keys($loaded), 0);
+        $targets[$warehouse] = $units;
+        foreach ($targets as $st => $target) {
+            $delta = $target - (int)($loaded[$st] ?? 0);
+            if ($delta !== 0) {
+                $this->postPackagingStockChange($eventId, (int)$event['ag_reqid'], (int)$st, $delta);
+            }
+        }
+    }
+
+    /** Documento de ajuste de stock, igual al del sistema antiguo: entra (o sale) del stock del pedido en la bodega. */
+    private function postPackagingStockChange(int $eventId, int $orderId, int $warehouse, int $delta): void
+    {
+        $stmt = $this->erpPdo->prepare('SELECT o.req_number, o.req_company_id, o.req_shop_id, oi.item_id, i.item_title
+            FROM orders o JOIN orders_items oi ON oi.req_id = o.id LEFT JOIN item i ON i.id = oi.item_id WHERE o.id = ? LIMIT 1');
+        $stmt->execute([$orderId]);
+        $order = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$order || (int)$order['item_id'] <= 0) {
+            throw new RuntimeException('No se encontró el artículo del pedido ' . $orderId . '.');
+        }
+        $companyId = (int)$order['req_company_id'];
+        $shopId = (int)$order['req_shop_id'];
+        $itemId = (int)$order['item_id'];
+        $stmt = $this->erpPdo->prepare('SELECT company_numformat_stockchange, company_numcounter_stockchange FROM company_data WHERE id = ?');
+        $stmt->execute([$companyId]);
+        $company = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$company) {
+            throw new RuntimeException('Contador de ajustes no disponible para la empresa ' . $companyId . '.');
+        }
+        $counter = (int)$company['company_numcounter_stockchange'] + 1;
+        // 7 dígitos, como los documentos de embalaje del sistema antiguo (IA0033662).
+        $number = (trim((string)$company['company_numformat_stockchange']) ?: 'IA') . sprintf('%07d', $counter);
+        $this->erpPdo->prepare('UPDATE company_data SET company_numcounter_stockchange = ? WHERE id = ?')->execute([$counter, $companyId]);
+
+        $now = time();
+        $userId = (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0);
+        $negative = $delta < 0;
+        $qty = abs($delta);
+        $issue = $negative ? 19 : 20;
+
+        // La marca se escribe primero: sin transacciones, un reintento nunca volverá a sumar el stock.
+        $this->erpPdo->prepare('INSERT INTO stockchanges
+                (stk_num, stk_annotation, stk_issueid, stk_companyid, stk_shopid, stk_bookdate, stk_negative, stk_status, stk_crtdat, stk_crtusr,
+                 stk_upddat, stk_updusr, stk_fixedsthid, sth_fromprodotid, sth_fromrebo_agid, sth_order_id, sth_order_num,
+                 stk_cinumber, stk_vintnumber, sth_fromrebo_agid_grphash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, 0, 0, ?, ?, \'\', \'\', \'\')')
+            ->execute([$number, 'Registrado por sistema de producción [TRZ-EMB-STOCK:' . $eventId . ':' . $warehouse . ':' . $delta . ']',
+                $issue, $companyId, $shopId, $now, $negative ? 1 : 0, $now, $userId, $now, $userId, $warehouse, $orderId, (string)$order['req_number']]);
+        $documentId = (int)$this->erpPdo->lastInsertId();
+        $this->erpPdo->prepare("INSERT INTO stockchanges_items (stk_id, item_id, item_pos, item_amount, item_type, item_st_id) VALUES (?, ?, 0, ?, 'item', ?)")
+            ->execute([$documentId, $itemId, $qty, $warehouse]);
+
+        $stmt = $this->erpPdo->prepare('SELECT iss_inventory FROM item_shops_storehouses WHERE item_id = ? AND shop_id = ? AND st_id = ? AND iss_order_id = ?');
+        $stmt->execute([$itemId, $shopId, $warehouse, $orderId]);
+        $current = $stmt->fetchColumn();
+        if ($current === false) {
+            $this->erpPdo->prepare('INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_order_amount, iss_inventory_min, iss_inventory, iss_inventory_reserved, iss_order_id)
+                VALUES (?, ?, ?, 0, 0, 0, 0, ?)')->execute([$itemId, $shopId, $warehouse, $orderId]);
+            $current = 0;
+        }
+        $this->erpPdo->prepare('UPDATE item_shops_storehouses SET iss_inventory = iss_inventory + ? WHERE item_id = ? AND shop_id = ? AND st_id = ? AND iss_order_id = ?')
+            ->execute([$delta, $itemId, $shopId, $warehouse, $orderId]);
+        $this->erpPdo->prepare("INSERT INTO tran_data
+                (tran_id, tran_pos, tran_type, tran_number, tran_currstock, tran_amount, tran_company_id, tran_shop_id, tran_st_id, tran_issueid,
+                 item_id, item_title, item_type, tran_day, tran_month, tran_year, tran_crtusr, tran_crtdat, tran_order_id)
+                VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'item', ?, ?, ?, ?, ?, ?)")
+            ->execute([$documentId, $negative ? 'stockchangedown' : 'stockchangeup', $number, (float)$current, $qty, $companyId, $shopId, $warehouse, $issue,
+                $itemId, (string)$order['item_title'], (int)date('j', $now), (int)date('n', $now), (int)date('Y', $now), $userId, $now, $orderId]);
     }
 
     /**

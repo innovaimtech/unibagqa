@@ -152,7 +152,7 @@ function handleProductionEventsRoutes(
         }
         if ($eventId > 0) {
             $event = $prodService->getEventById($eventId, $workerOtId);
-            if ($event === null || (int)$event['evt_prod_worker_otid'] !== $workerOtId) {
+            if ($event === null) {
                 redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error=' . rawurlencode('El evento no corresponde a esta OT.'));
                 return true;
             }
@@ -401,6 +401,8 @@ function handleProductionEventsRoutes(
 
         $packagingDetail = null;
         $packagingPdo = null;
+        // Solo un embalaje que se cierra ahora carga stock: corregir uno ya cerrado no debe sumarlo de nuevo.
+        $packagingClosingNow = $isEnd && $eventId > 0 && (int)($event['evt_enddat'] ?? 0) === 0;
         try {
             if ($overrideEmbalaje === 1 && $isEnd && !empty($_REQUEST['close_without_production'])) {
                 // Cierre de embalaje sin producción: no se registra detalle de cajas, no hay descuento de insumos ni correo.
@@ -457,6 +459,7 @@ function handleProductionEventsRoutes(
                     (string)($_REQUEST['pack_supervisor_user'] ?? ''), (string)($_REQUEST['pack_supervisor_pass'] ?? ''));
                 $packagingPdo->commit();
                 $prodService->sendPendingPackagingBillingMail();
+                $prodService->finalizeCysPackagingEvent((int)$productionResult['event_id'], $workerOtId, $packagingClosingNow);
             }
         } catch (Throwable $e) {
             if ($packagingPdo !== null && $packagingPdo->inTransaction()) $packagingPdo->rollBack();
@@ -1036,7 +1039,7 @@ function renderProductionOperatorConsole(
     $overrideEmbalaje = (int)($_GET['overrideembalaje'] ?? 0);
     if ($refId > 0) {
         $selectedEvent = (new ProductionService(Db::erpPdo(), Db::trzPdo()))->getEventById($refId, $workerOtId);
-        if ($selectedEvent !== null && (int)$selectedEvent['evt_prod_worker_otid'] === $workerOtId) {
+        if ($selectedEvent !== null) {
             $overrideEmbalaje = (int)($selectedEvent['overrideembalaje_act'] ?? 0);
         }
     }

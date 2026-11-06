@@ -124,6 +124,9 @@ if (handleMaterialSupplyRoutes($path, $method, $prodService, $currentOperatorNam
 if (handleDispatchRoutes($path, $method, $currentOperatorName)) {
     exit;
 }
+if (handleWarehouseBonusRoutes($path, $method, $currentOperatorName)) {
+    exit;
+}
 if (handleExpectedStockRoutes($path, $method, $currentOperatorName)) {
     exit;
 }
