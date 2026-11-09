@@ -23,6 +23,9 @@ storage/logs/
 storage/calendar/
 storage/audits/
 src/Http/docs_cache/
+# Imágenes del ERP descargadas (scripts/sync_erp_docs.php y el visor); no se versionan.
+src/Http/docs/order/*
+src/Http/docs/prod/*
 public/docs_cache/
 
 # Salidas locales no versionables

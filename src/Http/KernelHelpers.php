@@ -451,28 +451,16 @@ function unibagServeErpDocument(string $path): bool
         exit;
     }
 
-    $remoteFolders = ($folder === 'auto') ? ['docs.order', 'docs.prod'] : [$folder];
+    // El ERP antiguo (www.erp-unibag.cl) quedó fuera de servicio; ErpDocumentFetcher prueba primero el servidor nuevo
+    // (ERP_DOCS_BASE_URLS) y descarta páginas de error. Si la carpeta pedida no lo tiene, prueba la otra.
+    require_once dirname(__DIR__) . '/ErpDocumentFetcher.php';
+    $remoteFolders = ($folder === 'docs.prod') ? ['docs.prod', 'docs.order'] : ['docs.order', 'docs.prod'];
     $downloadedData = null;
-
-    foreach ($remoteFolders as $f) {
-        $remoteUrl = 'https://www.erp-unibag.cl/' . $f . '/' . rawurlencode($hash);
-        $ch = curl_init($remoteUrl);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 8);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
-        $result = curl_exec($ch);
-        $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $remoteMime = (string)curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-        curl_close($ch);
-
-        if ($httpCode === 200 && is_string($result) && strlen($result) > 0) {
-            $downloadedData = $result;
-            if ($remoteMime !== '' && !str_contains($remoteMime, 'text/html')) {
-                $contentType = explode(';', $remoteMime)[0];
-            }
-            break;
+    $got = ErpDocumentFetcher::download($hash, $remoteFolders);
+    if ($got !== null) {
+        $downloadedData = $got['data'];
+        if ($got['mime'] !== '') {
+            $contentType = $got['mime'];
         }
     }
 
@@ -481,16 +469,7 @@ function unibagServeErpDocument(string $path): bool
     }
 
     if ($downloadedData !== null) {
-        @file_put_contents($cachedFile, $downloadedData);
-        if ($folder === 'docs.order') {
-            $orderDir = __DIR__ . '/docs/order';
-            if (!is_dir($orderDir)) @mkdir($orderDir, 0777, true);
-            @file_put_contents($orderDir . '/' . $hash, $downloadedData);
-        } elseif ($folder === 'docs.prod') {
-            $prodDir = __DIR__ . '/docs/prod';
-            if (!is_dir($prodDir)) @mkdir($prodDir, 0777, true);
-            @file_put_contents($prodDir . '/' . $hash, $downloadedData);
-        }
+        ErpDocumentFetcher::store($hash, (string)$got['folder'], $downloadedData);
         if (!$isImage && ($contentType === 'application/octet-stream' || $contentType === '')) {
             $sniffed = @getimagesizefromstring($downloadedData);
             if (is_array($sniffed) && !empty($sniffed['mime'])) {
