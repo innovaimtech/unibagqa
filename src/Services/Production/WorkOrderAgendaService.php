@@ -1621,7 +1621,8 @@ trait WorkOrderAgendaServiceTrait
 
         $isFlexo = !empty($openInit['equipo_prod_isprinter_flexo']);
         $isSeri = !empty($openInit['equipo_prod_isprinter_seri']);
-        $isSeriPulpo = $isSeri && (strpos($equipoName, 'PULPO') !== false);
+        $isSeriPulpo = MachineKind::isPulpo((int)($openInit['win_equipoid'] ?? 0), $equipoName, (int)($openInit['equipo_type_id'] ?? 0), $isSeri);
+        $isSeri = $isSeri || $isSeriPulpo;
         $isRebobinadora = ((int)($openInit['equipo_type_id'] ?? 0) === 12)
             || strpos($typeAntTitle, 'REBOBIN') !== false
             || strpos($equipoName, 'REBOB') !== false;

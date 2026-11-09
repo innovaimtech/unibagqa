@@ -767,16 +767,35 @@ trait ReceptionReportingServiceTrait
             t10.fab_print_colors_front_4,
             t10.fab_print_colors_front_5,
             t10.fab_print_colors_front_6,
+            t10.fab_print_colors_front_7,
+            t10.fab_print_colors_front_8,
+            t10.fab_print_colors_front_9,
+            t10.fab_print_colors_front_10,
             t10.fab_print_colors_back_1,
             t10.fab_print_colors_back_2,
             t10.fab_print_colors_back_3,
             t10.fab_print_colors_back_4,
             t10.fab_print_colors_back_5,
             t10.fab_print_colors_back_6,
+            t10.fab_print_colors_back_7,
+            t10.fab_print_colors_back_8,
+            t10.fab_print_colors_back_9,
+            t10.fab_print_colors_back_10,
             t10.fab_print_colordesc_1,
             t10.fab_print_colordesc_2,
             t10.fab_print_colordesc_3,
-            t10.fab_print_colordesc_4
+            t10.fab_print_colordesc_4,
+            t10.fab_print_colordesc_5,
+            t10.fab_print_colordesc_6,
+            t10.fab_print_colordesc_7,
+            t10.fab_print_colordesc_8,
+            t10.fab_print_colordesc_9,
+            t10.fab_print_colordesc_10,
+            t9.req_operador_bastidoramt,
+            t9.req_operador_mermaperc,
+            t9.req_solic_devprints_cc,
+            COALESCE(pe.pasadas_frente, 0) AS pasadas_frente,
+            COALESCE(pe.pasadas_dorso, 0) AS pasadas_dorso
         FROM prod_worker_ot t1
         INNER JOIN prod_agenda t2 ON t1.wok_ag_id = t2.id
         INNER JOIN prod_worker_init t3 ON t1.wok_init_id = t3.id
@@ -833,7 +852,9 @@ trait ReceptionReportingServiceTrait
                     ELSE NULL END) AS speed_m_min,
                 SUM(CASE WHEN LOWER(e.evt_type) = 'setup' AND (e.evt_status IS NULL OR e.evt_status > 0) AND e.evt_enddat > e.evt_crtdat THEN (e.evt_enddat - e.evt_crtdat) ELSE 0 END) AS setup_seconds,
                 SUM(CASE WHEN LOWER(e.evt_type) = 'pause' AND (e.evt_status IS NULL OR e.evt_status > 0) AND e.evt_enddat > e.evt_crtdat THEN (e.evt_enddat - e.evt_crtdat) ELSE 0 END) AS pause_seconds,
-                MAX(CASE WHEN e.evt_idayudante > 0 THEN e.evt_idayudante ELSE NULL END) AS ayudante_id
+                MAX(CASE WHEN e.evt_idayudante > 0 THEN e.evt_idayudante ELSE NULL END) AS ayudante_id,
+                SUM(CASE WHEN LOWER(e.evt_type) = 'prod' AND (e.evt_status IS NULL OR e.evt_status > 0) THEN COALESCE(e.evt_amount_pulpo_frente, 0) ELSE 0 END) AS pasadas_frente,
+                SUM(CASE WHEN LOWER(e.evt_type) = 'prod' AND (e.evt_status IS NULL OR e.evt_status > 0) THEN COALESCE(e.evt_amount_pulpo_dorso, 0) ELSE 0 END) AS pasadas_dorso
             FROM prod_worker_ot_events e
             WHERE (e.evt_status IS NULL OR e.evt_status > 0){$evtScope}
             GROUP BY e.evt_prod_worker_otid
@@ -993,6 +1014,26 @@ trait ReceptionReportingServiceTrait
         }
 
         $formattedRows = [];
+        // Tinta registrada y bolsas usadas de cajas (Pulpo), por OT, desde trazabilidad.
+        $printExtras = ['ink' => [], 'bags' => []];
+        $extraOtIds = array_values(array_filter(array_unique(array_map(static fn($r) => (int)($r['ot_id'] ?? 0), $rawRows ?? []))));
+        if ($extraOtIds !== []) {
+            $in = implode(',', array_map('intval', $extraOtIds));
+            try {
+                foreach ($this->pdo->query("SELECT worker_ot_id, SUM(consumed_qty) AS kg FROM work_order_machine_ink_loads WHERE worker_ot_id IN ($in) GROUP BY worker_ot_id")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $printExtras['ink'][(int)$r['worker_ot_id']] = (float)$r['kg'];
+                }
+            } catch (Throwable) {
+                // tabla aún no creada
+            }
+            try {
+                foreach ($this->pdo->query("SELECT worker_ot_id, SUM(qty) AS q FROM box_unit_moves WHERE kind = 'CONSUME' AND state = 'DONE' AND worker_ot_id IN ($in) GROUP BY worker_ot_id")->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                    $printExtras['bags'][(int)$r['worker_ot_id']] = (float)$r['q'];
+                }
+            } catch (Throwable) {
+                // tabla aún no creada
+            }
+        }
         $totalProduced = 0.0;
         $totalProducedKg = 0.0;
         $totalRequested = 0.0;
@@ -1187,19 +1228,17 @@ trait ReceptionReportingServiceTrait
                     ' - ' . sprintf('%02d:%02d', (int)($row['ass_end_hour'] ?? 0), (int)($row['ass_end_min'] ?? 0));
             }
 
-            // Colores frente y dorso
+            // Colores frente y dorso: el nombre del color (antes salía la marca «1» de cada color), hasta 10 colores.
             $colorsFront = [];
-            for ($ci = 1; $ci <= 6; $ci++) {
-                $cf = trim((string)($row['fab_print_colors_front_' . $ci] ?? ''));
-                if ($cf !== '' && $cf !== '0') {
-                    $colorsFront[] = $cf;
-                }
-            }
             $colorsBack = [];
-            for ($ci = 1; $ci <= 6; $ci++) {
-                $cb = trim((string)($row['fab_print_colors_back_' . $ci] ?? ''));
-                if ($cb !== '' && $cb !== '0') {
-                    $colorsBack[] = $cb;
+            for ($ci = 1; $ci <= 10; $ci++) {
+                $desc = trim((string)($row['fab_print_colordesc_' . $ci] ?? ''));
+                $label = $desc !== '' ? $desc : ('Color ' . $ci);
+                if ((int)($row['fab_print_colors_front_' . $ci] ?? 0) > 0) {
+                    $colorsFront[] = $label;
+                }
+                if ((int)($row['fab_print_colors_back_' . $ci] ?? 0) > 0) {
+                    $colorsBack[] = $label;
                 }
             }
 
@@ -1271,6 +1310,15 @@ trait ReceptionReportingServiceTrait
                 'unit_weight_grs' => round($unitWeightKg * 1000.0, 2),
                 'colors_front' => implode(', ', $colorsFront),
                 'colors_back' => implode(', ', $colorsBack),
+                'colors_count' => count($colorsFront) + count($colorsBack),
+                // Impresión (serigrafía y pulpo), como el informe del sistema antiguo
+                'pasadas_frente' => (float)($row['pasadas_frente'] ?? 0),
+                'pasadas_dorso' => (float)($row['pasadas_dorso'] ?? 0),
+                'bastidor_images' => (int)($row['req_operador_bastidoramt'] ?? 0),
+                'devprints' => (int)($row['req_solic_devprints_cc'] ?? 0),
+                'waste_planned_percent' => (float)($row['req_operador_mermaperc'] ?? 0),
+                'ink_kg' => (float)($printExtras['ink'][$currentOtId] ?? 0),
+                'bags_used' => (float)($printExtras['bags'][$currentOtId] ?? 0),
                 'wok_status' => $status,
                 'wok_crtdat' => $startTsRow,
                 'wok_enddat' => $endTsRow,
@@ -1710,6 +1758,12 @@ trait ReceptionReportingServiceTrait
         }
     }
 
+    private function packagingStockReverser(): ProductionService
+    {
+        require_once dirname(__DIR__, 2) . '/ProductionService.php';
+        return new ProductionService($this->erpPdo, null);
+    }
+
     public function deleteProductionEvent(int $otId, int $eventId, ?string $userName = null): array
     {
         if ($otId <= 0 || $eventId <= 0) {
@@ -1736,6 +1790,9 @@ trait ReceptionReportingServiceTrait
 
             $editor = trim((string)($userName ?? 'Usuario'));
             $auditStamp = ' | [Evento anulado por ' . $editor . ' ' . date('Y-m-d H:i') . ']';
+
+            // Sin esto, la producción desaparece y el stock de ese embalaje queda en bodega. Si falla, no se anula.
+            $this->packagingStockReverser()->reversePackagingEventStock($eventId);
 
             if (!$this->erpPdo->inTransaction()) {
                 $this->erpPdo->beginTransaction();
@@ -1825,15 +1882,29 @@ trait ReceptionReportingServiceTrait
             $prdNumber = trim((string)($baseRec['prd_number'] ?? ''));
             $editor = trim((string)($userName ?? 'Usuario'));
 
-            // 2. Transacción ACID
-            if (!$this->erpPdo->inTransaction()) {
-                $this->erpPdo->beginTransaction();
+            // Los embalajes de esta selladora viven en otra OT: eliminarla los dejaría contados y sin origen.
+            $stLinked = $this->erpPdo->prepare("SELECT COUNT(*) FROM prod_worker_ot_events WHERE overrideembalaje_act = 1 AND overrideembalaje_selladora_evtrefid = :ot_id AND evt_status > 0");
+            $stLinked->execute([':ot_id' => $otId]);
+            $linkedCount = (int)$stLinked->fetchColumn();
+            if ($linkedCount > 0) {
+                return ['ok' => false, 'error' => 'Esta OT tiene ' . $linkedCount . ' embalaje(s) registrados en la máquina Embalaje. Elimínalos primero.'];
             }
 
             // 2.1 Obtener todos los IDs de eventos asociados a esta OT
             $stEvts = $this->erpPdo->prepare("SELECT id FROM prod_worker_ot_events WHERE evt_prod_worker_otid = :ot_id");
             $stEvts->execute([':ot_id' => $otId]);
             $evtIds = $stEvts->fetchAll(PDO::FETCH_COLUMN) ?: [];
+
+            // Sin esto, la producción desaparece y el stock de sus embalajes queda en bodega. Si falla, no se elimina.
+            $stockReverser = $this->packagingStockReverser();
+            foreach ($evtIds as $evtId) {
+                $stockReverser->reversePackagingEventStock((int)$evtId);
+            }
+
+            // 2. Transacción ACID
+            if (!$this->erpPdo->inTransaction()) {
+                $this->erpPdo->beginTransaction();
+            }
 
             // 2.2 Eliminar mermas/defectos de esos eventos
             if (!empty($evtIds)) {

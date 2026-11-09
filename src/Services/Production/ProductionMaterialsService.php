@@ -7,6 +7,7 @@ declare(strict_types=1);
 // (src/Services/Production/ProductionMaterialsService.php)
 // =============================================================================
 
+require_once dirname(__DIR__, 2) . '/StockLedgerService.php';
 trait ProductionMaterialsServiceTrait
 {
     // =========================================================================
@@ -714,42 +715,18 @@ trait ProductionMaterialsServiceTrait
                             ':comments' => $erpComment,
                         ]);
 
-                        // Reflejar el traspaso físico al stock de Bodega 3000 en ERP
+                        // Traspaso de la bobina a la Bodega 3000 con documento y kardex (antes: solo stock, sin documento).
                         try {
                             if ($stId !== $productionStorehouseId) {
-                                $this->erpPdo->prepare("
-                                    UPDATE item_shops_storehouses
-                                    SET iss_inventory = GREATEST(0, iss_inventory - 1)
-                                    WHERE item_id = :itid AND st_id = :stid
-                                ")->execute([':itid' => $itemId, ':stid' => $stId]);
-                            }
-
-                            $upd3000 = $this->erpPdo->prepare("
-                                UPDATE item_shops_storehouses
-                                SET iss_inventory = iss_inventory + 1
-                                WHERE item_id = :itid AND st_id = :stid
-                            ");
-                            $upd3000->execute([':itid' => $itemId, ':stid' => $productionStorehouseId]);
-                            if ($upd3000->rowCount() === 0) {
-                                $shopId = 1;
-                                try {
-                                    $stShop = $this->erpPdo->query("SELECT id FROM company_shops ORDER BY id ASC LIMIT 1");
-                                    $shopId = (int)($stShop ? $stShop->fetchColumn() : 1);
-                                    if ($shopId <= 0) {
-                                        $shopId = 1;
-                                    }
-                                } catch (Throwable) {}
-
-                                $this->erpPdo->prepare("
-                                    INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_inventory)
-                                    VALUES (:itid, :shopid, :stid, 1)
-                                ")->execute([
-                                    ':itid' => $itemId,
-                                    ':shopid' => $shopId,
-                                    ':stid' => $productionStorehouseId,
+                                (new StockLedgerService($this->erpPdo))->transfer([
+                                    'key' => 'rollreq.' . bin2hex(random_bytes(8)), 'item_id' => (int)$itemId, 'from_st' => (int)$stId,
+                                    'to_st' => (int)$productionStorehouseId, 'qty' => 1, 'allow_negative' => true,
+                                    'text' => 'Bobina solicitada para la OT ' . $workerOtId . ($operatorName !== '' ? ' por ' . $operatorName : '') . '.',
                                 ]);
                             }
-                        } catch (Throwable) {}
+                        } catch (Throwable $e) {
+                            error_log('Traspaso de bobina a Bodega 3000 (OT ' . $workerOtId . '): ' . $e->getMessage());
+                        }
 
                         $assignedCount++;
                     }
@@ -3078,6 +3055,7 @@ trait ProductionMaterialsServiceTrait
         return [
             'picking' => (string)$row['code'],
             'type' => (string)$row['dispatch_type'],
+            'document' => DispatchService::documentLabel((string)($row['document_type'] ?? DispatchService::DOC_GUIDE)),
             'guide' => (string)$row['guide_number'],
             'customer' => (string)($g['customer'] ?? ''),
             'confirmed_by' => (string)$row['confirmed_by'],
@@ -4649,6 +4627,21 @@ trait ProductionMaterialsServiceTrait
             $remainingQty = max(0.0, $loadedQty - $newConsumedQty - $newReturnedQty);
             $newStatus = $remainingQty > 0.0001 ? 'ACTIVE' : 'CLOSED';
 
+            // La tinta consumida sale de Bodega 3000 con documento y kardex (la carga y la devolución no mueven stock:
+            // la tinta sigue siendo de la bodega hasta que se usa). La clave usa el acumulado: repetir no descuenta dos veces.
+            $stockWarning = '';
+            if ($action === 'consume' && (int)($load['item_id'] ?? 0) > 0) {
+                $posted = (new StockLedgerService($this->erpPdo))->post([
+                    'key' => 'ink.' . $loadId . '.c.' . (int)round($newConsumedQty * 1000), 'item_id' => (int)$load['item_id'],
+                    'st_id' => 16, 'delta' => -round($qty, 3), 'allow_negative' => true,
+                    'text' => 'Tinta usada en máquina, OT ' . $workerOtId . ($operatorName !== '' ? ', ' . $operatorName : '') . '.',
+                ]);
+                if ($posted['stock_after'] < -0.0005) {
+                    $stockWarning = 'La tinta ' . (string)($load['item_code'] ?? '') . ' quedó con stock negativo en Bodega 3000 ('
+                        . StockLedgerService::fmt($posted['stock_after']) . ' kg): avisa a bodega.';
+                }
+            }
+
             $stmtUpd = $this->trzPdo->prepare("
                 UPDATE work_order_machine_ink_loads
                 SET consumed_qty = :consumed_qty,
@@ -4706,7 +4699,7 @@ trait ProductionMaterialsServiceTrait
                     . ($comments !== '' ? ' | Obs: ' . $comments : ''),
             ]);
 
-            return ['ok' => true, 'remaining_qty' => $remainingQty];
+            return ['ok' => true, 'remaining_qty' => $remainingQty, 'warning' => $stockWarning];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al actualizar la carga de tinta: ' . $e->getMessage()];
         }
@@ -4832,19 +4825,24 @@ trait ProductionMaterialsServiceTrait
             ]);
             $loadId = (int)$this->trzPdo->lastInsertId();
 
-            // 2. Descontar inventario en Bodega 3000 (item_shops_storehouses st_id = 16)
+            // 2. Descontar la tinta de Bodega 3000 con documento y kardex. Si el ERP no lo acepta, no queda el registro a medias.
+            $stockWarning = '';
             if ($consumedKg > 0.0) {
                 try {
-                    $updStock = $this->erpPdo->prepare("
-                        UPDATE item_shops_storehouses
-                        SET iss_inventory = GREATEST(0, iss_inventory - :amt)
-                        WHERE item_id = :item_id AND st_id = 16
-                    ");
-                    $updStock->execute([
-                        ':amt' => $consumedKg,
-                        ':item_id' => $itemId,
+                    $posted = (new StockLedgerService($this->erpPdo))->post([
+                        'key' => 'ink.' . $loadId, 'item_id' => $itemId, 'st_id' => 16, 'delta' => -$consumedKg,
+                        'allow_negative' => true,
+                        'text' => 'Tinta usada en serigrafía' . ($colorLabel !== '' ? ' (' . $colorLabel . ')' : '') . ', OT ' . $workerOtId
+                            . ($operatorName !== '' ? ', ' . $operatorName : '') . '.',
                     ]);
-                } catch (Throwable) {}
+                    if ($posted['stock_after'] < -0.0005) {
+                        $stockWarning = 'La tinta ' . ($itemCode !== '' ? $itemCode : $itemName) . ' quedó con stock negativo en Bodega 3000 ('
+                            . StockLedgerService::fmt($posted['stock_after']) . ' kg): avisa a bodega.';
+                    }
+                } catch (Throwable $e) {
+                    $this->trzPdo->prepare('DELETE FROM work_order_machine_ink_loads WHERE id = ?')->execute([$loadId]);
+                    return ['ok' => false, 'error' => 'No se pudo descontar la tinta del inventario: ' . $e->getMessage()];
+                }
             }
 
             // 3. Registrar evento en bitácora de la OT en el ERP (prod_worker_ot_events)
@@ -4912,6 +4910,7 @@ trait ProductionMaterialsServiceTrait
                 'consumed_kg' => $consumedKg,
                 'item_code' => $itemCode,
                 'item_name' => $itemName,
+                'warning' => $stockWarning,
             ];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al registrar consumo de tinta de serigrafía: ' . $e->getMessage()];
@@ -4947,39 +4946,45 @@ trait ProductionMaterialsServiceTrait
             $consumedQty = (float)($load['consumed_qty'] ?? 0);
             $whCode = (int)($load['warehouse_code'] ?? 16);
 
-            // Reintegrar stock a Bodega 3000 si fue consumido
-            if ($itemId > 0 && $consumedQty > 0.0 && $whCode === 16) {
-                try {
-                    $this->erpPdo->prepare("
-                        UPDATE item_shops_storehouses
-                        SET iss_inventory = iss_inventory + :amt
-                        WHERE item_id = :item_id AND st_id = 16
-                    ")->execute([
-                        ':amt' => $consumedQty,
-                        ':item_id' => $itemId,
-                    ]);
-
-                    // Registrar evento de anulación claro para los operadores en la OT
-                    if ($workerOtId > 0) {
-                        $delCode = trim((string)($load['item_code'] ?? ''));
-                        $delName = $this->simplifyInkTitle((string)($load['item_name'] ?? ''));
-                        $delComment = "Anulación Tinta: " . ($delCode !== '' ? $delCode . ' - ' : '') . ($delName !== '' ? $delName : 'Tinta')
-                            . " | Reintegrados " . number_format($consumedQty, 2, ',', '.') . " kg a Bodega 3000"
-                            . ($operatorName !== '' ? " (por {$operatorName})" : "");
-
-                        $this->erpPdo->prepare("
-                            INSERT INTO prod_worker_ot_events
-                                (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
-                            VALUES
-                                (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
-                        ")->execute([
-                            ':ot_id' => $workerOtId,
-                            ':crtdat' => time(),
-                            ':enddat' => time(),
-                            ':comments' => $delComment,
-                        ]);
+            // Devolver a Bodega 3000 solo lo que se descontó: el consumo con kardex se revierte con su documento; un registro
+            // de serigrafía anterior al kardex (descontado directo) se devuelve con un documento nuevo; una carga de flexo
+            // nunca descontó stock, así que no se devuelve nada (antes se sumaba stock que nunca había salido).
+            $reintegrated = 0.0;
+            if ($itemId > 0 && $consumedQty > 0.0) {
+                $ledger = new StockLedgerService($this->erpPdo);
+                $key = 'ink.' . $loadId;
+                $flexoKeys = $ledger->openKeys($key . '.c.');
+                if ($ledger->findPosted($key) !== null) {
+                    $ledger->reverse($key, 'tinta anulada' . ($operatorName !== '' ? ' por ' . $operatorName : ''));
+                    $reintegrated = $consumedQty;
+                } elseif ($flexoKeys !== []) {
+                    foreach ($flexoKeys as $flexoKey) {
+                        $ledger->reverse($flexoKey, 'tinta anulada' . ($operatorName !== '' ? ' por ' . $operatorName : ''));
                     }
-                } catch (Throwable) {}
+                    $reintegrated = $consumedQty;
+                } elseif ($whCode === 16 && strtoupper((string)($load['machine_process'] ?? '')) === 'SERIGRAFIA') {
+                    $ledger->post(['key' => $key . '.R', 'item_id' => $itemId, 'st_id' => 16, 'delta' => $consumedQty,
+                        'text' => 'Devolución de tinta anulada (registro anterior al kardex), OT ' . $workerOtId . '.']);
+                    $reintegrated = $consumedQty;
+                }
+                if ($reintegrated > 0 && $workerOtId > 0) {
+                    $delCode = trim((string)($load['item_code'] ?? ''));
+                    $delName = $this->simplifyInkTitle((string)($load['item_name'] ?? ''));
+                    $delComment = "Anulación Tinta: " . ($delCode !== '' ? $delCode . ' - ' : '') . ($delName !== '' ? $delName : 'Tinta')
+                        . " | Reintegrados " . number_format($consumedQty, 2, ',', '.') . " kg a Bodega 3000"
+                        . ($operatorName !== '' ? " (por {$operatorName})" : "");
+                    $this->erpPdo->prepare("
+                        INSERT INTO prod_worker_ot_events
+                            (evt_prod_worker_otid, evt_amount, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                        VALUES
+                            (:ot_id, 0, :crtdat, :enddat, 2, 'materiales', :comments)
+                    ")->execute([
+                        ':ot_id' => $workerOtId,
+                        ':crtdat' => time(),
+                        ':enddat' => time(),
+                        ':comments' => $delComment,
+                    ]);
+                }
             }
 
             // Eliminar registro
@@ -4991,13 +4996,13 @@ trait ProductionMaterialsServiceTrait
                 ':payload' => json_encode([
                     'load_id' => $loadId,
                     'item_id' => $itemId,
-                    'consumed_reintegrated' => $consumedQty,
+                    'consumed_reintegrated' => $reintegrated,
                     'operator' => $operatorName,
                     'timestamp' => time(),
                 ], JSON_UNESCAPED_UNICODE),
             ]);
 
-            return ['ok' => true, 'reintegrated_kg' => $consumedQty];
+            return ['ok' => true, 'reintegrated_kg' => $reintegrated];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => 'Error al revertir registro de tinta: ' . $e->getMessage()];
         }
@@ -5651,7 +5656,11 @@ trait ProductionMaterialsServiceTrait
         return $rolls;
     }
 
-    private function adjustBodega3000InventoryBySku(string $skuCode, float $delta): bool
+    /**
+     * Mueve el stock de una bobina en la Bodega 3000 (descuento al montar, devolución de sobrante o de bobina) con
+     * documento y kardex. Antes solo cambiaba item_shops_storehouses y el movimiento no quedaba en el kardex.
+     */
+    private function adjustBodega3000InventoryBySku(string $skuCode, float $delta, string $text = ''): bool
     {
         $skuCode = trim($skuCode);
         if ($skuCode === '' || abs($delta) < 0.0001) {
@@ -5672,10 +5681,10 @@ trait ProductionMaterialsServiceTrait
             }
 
             $stmtRow = $this->erpPdo->prepare("
-                SELECT iss.st_id, COALESCE(iss.shop_id, 1) AS shop_id
+                SELECT iss.st_id, iss.shop_id
                 FROM item_shops_storehouses iss
                 INNER JOIN company_shops_storehouses css ON css.id = iss.st_id
-                WHERE iss.item_id = :item_id
+                WHERE iss.item_id = :item_id AND iss.iss_order_id = 0
                   AND (iss.st_id IN (16, 27) OR css.st_name LIKE '%3000%')
                 ORDER BY iss.iss_inventory DESC, iss.st_id ASC
                 LIMIT 1
@@ -5683,52 +5692,14 @@ trait ProductionMaterialsServiceTrait
             $stmtRow->execute([':item_id' => $itemId]);
             $row = $stmtRow->fetch(PDO::FETCH_ASSOC) ?: [];
 
-            $stId = (int)($row['st_id'] ?? 16);
-            $shopId = (int)($row['shop_id'] ?? 1);
-
-            if ($delta < 0) {
-                $qty = abs($delta);
-                $stmtUpd = $this->erpPdo->prepare("
-                    UPDATE item_shops_storehouses
-                    SET iss_inventory = GREATEST(0, iss_inventory - :qty)
-                    WHERE item_id = :item_id
-                      AND st_id = :st_id
-                ");
-                $stmtUpd->execute([
-                    ':qty' => $qty,
-                    ':item_id' => $itemId,
-                    ':st_id' => $stId,
-                ]);
-                return $stmtUpd->rowCount() > 0;
-            }
-
-            $stmtUpd = $this->erpPdo->prepare("
-                UPDATE item_shops_storehouses
-                SET iss_inventory = iss_inventory + :qty
-                WHERE item_id = :item_id
-                  AND st_id = :st_id
-            ");
-            $stmtUpd->execute([
-                ':qty' => $delta,
-                ':item_id' => $itemId,
-                ':st_id' => $stId,
-            ]);
-            if ($stmtUpd->rowCount() > 0) {
-                return true;
-            }
-
-            $stmtIns = $this->erpPdo->prepare("
-                INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_inventory)
-                VALUES (:item_id, :shop_id, :st_id, :qty)
-            ");
-            $stmtIns->execute([
-                ':item_id' => $itemId,
-                ':shop_id' => $shopId,
-                ':st_id' => $stId,
-                ':qty' => $delta,
+            (new StockLedgerService($this->erpPdo))->post([
+                'key' => 'roll3000.' . bin2hex(random_bytes(8)), 'item_id' => $itemId, 'st_id' => (int)($row['st_id'] ?? 16),
+                'shop_id' => (int)($row['shop_id'] ?? 0), 'delta' => $delta, 'allow_negative' => true,
+                'text' => $text !== '' ? $text : (($delta < 0 ? 'Bobina usada en producción: ' : 'Bobina devuelta a Bodega 3000: ') . $skuCode . '.'),
             ]);
             return true;
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            error_log('Stock de bobina ' . $skuCode . ' en Bodega 3000: ' . $e->getMessage());
             return false;
         }
     }
@@ -6307,19 +6278,15 @@ trait ProductionMaterialsServiceTrait
                 );
             }
 
-            $stmtConsume3000 = $this->erpPdo->prepare("
-                UPDATE item_shops_storehouses
-                SET iss_inventory = GREATEST(0, iss_inventory - 1)
-                WHERE item_id = :item_id
-                  AND st_id = :st_id
-                  AND iss_inventory >= 1
-            ");
-            $stmtConsume3000->execute([
-                ':item_id' => $itemId,
-                ':st_id' => $stId,
-            ]);
-            if ($stmtConsume3000->rowCount() <= 0) {
-                return ['ok' => false, 'error' => 'La bobina ya no tiene stock disponible en Bodega 3000.'];
+            // Descuento de la bobina de la Bodega 3000 con documento y kardex.
+            $consume3000Key = 'rollassign.' . bin2hex(random_bytes(8));
+            try {
+                (new StockLedgerService($this->erpPdo))->post([
+                    'key' => $consume3000Key, 'item_id' => (int)$itemId, 'st_id' => (int)$stId, 'delta' => -1,
+                    'text' => 'Bobina usada en la OT ' . $workerOtId . ($operatorName !== '' ? ' por ' . $operatorName : '') . '.',
+                ]);
+            } catch (Throwable $e) {
+                return ['ok' => false, 'error' => 'La bobina ya no tiene stock disponible en Bodega 3000. ' . $e->getMessage()];
             }
 
             // Si TRZ disponible, crear roll en TRZ en Bodega 3000 con estado IN_PROCESS
@@ -6383,15 +6350,11 @@ trait ProductionMaterialsServiceTrait
                         ], JSON_UNESCAPED_UNICODE),
                     ]);
                 } catch (Throwable $e) {
-                    $this->erpPdo->prepare("
-                        UPDATE item_shops_storehouses
-                        SET iss_inventory = iss_inventory + 1
-                        WHERE item_id = :item_id
-                          AND st_id = :st_id
-                    ")->execute([
-                        ':item_id' => $itemId,
-                        ':st_id' => $stId,
-                    ]);
+                    try {
+                        (new StockLedgerService($this->erpPdo))->reverse($consume3000Key, 'no se pudo registrar la bobina en trazabilidad');
+                    } catch (Throwable $revErr) {
+                        error_log('Reversa de bobina ' . $consume3000Key . ': ' . $revErr->getMessage());
+                    }
                     return ['ok' => false, 'error' => 'No se pudo registrar la bobina en trazabilidad: ' . $e->getMessage()];
                 }
             }

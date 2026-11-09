@@ -111,6 +111,23 @@
                         <?php endif; ?>
                     </td>
                 </tr>
+                <?php for ($x = 0; $x < 5; $x++): // Adjuntos de producción, como en la ficha del sistema antiguo
+                    if (empty($agenda["req_prod_adjfile_{$x}"])) continue;
+                    $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
+                    $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
+                    $adjIsImage = function_exists('unibagAttachmentIsImage') ? unibagAttachmentIsImage($adjFile) : (bool)preg_match('/\.(png|jpe?g|gif|bmp|webp)$/i', $adjFile); ?>
+                <tr>
+                    <td class="tdleft" colspan="2">Adjunto #<?=($x + 1)?></td>
+                    <td class="tdnrm" colspan="2">
+                        <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px">
+                            <i class="fa fa-fw fa-<?=$adjIsImage ? 'image' : 'file'?>" style="color:white;"></i> <?=$adjIsImage ? 'Mostrar Imagen' : 'Mostrar Documento'?>
+                        </a>
+                        <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
+                            <span style="margin-left:8px;color:#64748B;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php endfor; ?>
                 <tr>
                     <td class="tdleft" colspan="2">% de merma</td>
                     <td class="tdnrm" colspan="2"><?=$fmt($agenda['req_operador_mermaperc'], 2)?> %</td>
@@ -160,9 +177,10 @@
                     </tr>
                 <?php endif; ?>
                 <tr>
-                    <td class="tdleft">Contador total estimado</td>
+                    <td class="tdleft">Pasadas totales a imprimir</td>
                     <td class="tdnrm" colspan="3">
-                        <b><?=$fmt(round((float)$agenda['ag_amount'] / max(1, (int)($agenda['req_solic_devprints_cc'] ?? 1))))?></b>
+                        <?php // Como el sistema antiguo: bolsas de la OT ÷ imágenes impresas en bastidor (el valor que se elige abajo). ?>
+                        <b><?=$fmt(round((float)$agenda['ag_amount'] / max(1, (int)($agenda['req_operador_bastidoramt'] ?? 1))))?></b>
                     </td>
                 </tr>
                 <tr>
@@ -192,6 +210,10 @@
                 <tr>
                     <td class="tdleft">Máquina</td>
                     <td class="tdnrm" colspan="3"><?=htmlspecialchars((string)($machineInit['equipo_name'] ?? '-'))?></td>
+                </tr>
+                <tr>
+                    <td class="tdleft">Ayudante</td>
+                    <td class="tdnrm" colspan="3"><?=htmlspecialchars((string)($aperturaAyudanteName ?? '-'))?></td>
                 </tr>
                 <tr>
                     <td class="tdleft">Comentarios Apertura</td>
@@ -287,8 +309,7 @@
                             <td class="tdheader" width="150">Malla / Mesh</td>
                             <td class="tdheader" align="center" width="120">Temp. Secador (°C)</td>
                             <td class="tdheader" align="center" width="100">Tinta Utilizada</td>
-                            <td class="tdheader" align="center" width="95">Carga Tinta</td>
-                            <td class="tdheader" align="center" width="95">Sobrante Tinta</td>
+
                         </tr>
                     </thead>
                     <tbody>
@@ -314,8 +335,6 @@
                         $savedMesh = (float)($unit['val_mesh'] ?? 0);
                         $savedTempSec = (float)($unit['val_temp_secador'] ?? 0);
                         $savedTotalTinta = (float)($unit['val_total_tinta'] ?? 0);
-                        $savedCargaTinta = (float)($unit['val_carga_tinta'] ?? 0);
-                        $savedSobranteTinta = (float)($unit['val_sobrante_tinta'] ?? 0);
                     ?>
                     <tr>
                         <td class="tdnrm" align="center" style="font-weight:bold;background:#F8FAFC"><?=$px + 1?></td>
@@ -346,14 +365,9 @@
                         <td class="tdnrm" align="center">
                             <input type="number" step="1" name="unit_temp_sec_<?=$px?>" class="inptxt" style="width:95px;text-align:center" value="<?=$savedTempSec > 0 ? (int)$savedTempSec : ''?>" placeholder="°C">
                         </td>
-                        <td class="tdnrm" align="center">
-                            <input type="number" step="0.01" name="unit_tinta_<?=$px?>" class="inptxt" style="width:85px;text-align:center" value="<?=$savedTotalTinta > 0 ? $savedTotalTinta : ''?>" placeholder="0.00">
-                        </td>
-                        <td class="tdnrm" align="center">
-                            <input type="number" step="0.01" name="unit_carga_tinta_<?=$px?>" class="inptxt" style="width:80px;text-align:center" value="<?=$savedCargaTinta > 0 ? $savedCargaTinta : ''?>" placeholder="0.00">
-                        </td>
-                        <td class="tdnrm" align="center">
-                            <input type="number" step="0.01" name="unit_sobrante_tinta_<?=$px?>" class="inptxt" style="width:80px;text-align:center" value="<?=$savedSobranteTinta > 0 ? $savedSobranteTinta : ''?>" placeholder="0.00">
+                        <td class="tdnrm" align="center" title="Tinta registrada en Consumo de tinta para este color (se descuenta del inventario)">
+                            <?php $inkKg = ($savedColor !== '' && $savedColor !== '-1') ? (float)($pulpoInkByColor[(int)$savedColor] ?? $savedTotalTinta) : 0.0; ?>
+                            <b><?=$inkKg > 0 ? number_format($inkKg, 2, ',', '.') . ' kg' : '—'?></b>
                         </td>
                     </tr>
                     <?php endfor; ?>

@@ -5,17 +5,21 @@ declare(strict_types=1);
 /**
  * Módulo HTTP · Stock esperado (Informes)
  *
- *  - /reports/stock-esperado ........... Informe (stock ERP contra objetivo) y maestro editable.
+ *  - /reports/stock-esperado ........... Informe (stock ERP, reservado, en producción, proyectado) y maestro editable.
  *  - /reports/stock-esperado/data ...... JSON del informe (refresco automático).
+ *  - /reports/stock-esperado/detail .... JSON (o Excel con format=xlsx) de la ventana: type=reserved (NV sin despachar)
+ *                                         o type=production (CC/OT por fabricar). Solo lectura.
  *  - /reports/stock-esperado/excel ..... Exportación a Excel.
  *  - /reports/stock-esperado/save|add|import (POST) .... Cambios al maestro.
  */
 
 require_once __DIR__ . '/../ExpectedStockService.php';
 
+const EXPECTED_STOCK_ASSET_VERSION = '20261109c';
+
 function expectedStockRoute(string $path): bool
 {
-    return in_array($path, ['/reports/stock-esperado', '/reports/stock-esperado/data', '/reports/stock-esperado/excel',
+    return in_array($path, ['/reports/stock-esperado', '/reports/stock-esperado/data', '/reports/stock-esperado/excel', '/reports/stock-esperado/detail',
         '/reports/stock-esperado/save', '/reports/stock-esperado/add', '/reports/stock-esperado/import'], true);
 }
 
@@ -56,9 +60,39 @@ function handleExpectedStockRoutes(string $path, string $method, string $name): 
             return false;
         }
         if ($path === '/reports/stock-esperado/data') {
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
             header('Content-Type: application/json; charset=utf-8');
             header('Cache-Control: no-store');
             echo json_encode($service->report(), JSON_UNESCAPED_UNICODE);
+            return true;
+        }
+        if ($path === '/reports/stock-esperado/detail') {
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_write_close();
+            }
+            $type = (string)($_GET['type'] ?? '') === 'production' ? 'production' : 'reserved';
+            $code = (string)($_GET['code'] ?? '');
+            $asExcel = (string)($_GET['format'] ?? '') === 'xlsx';
+            try {
+                $detail = $type === 'production' ? $service->productionDetail($code) : $service->reservedDetail($code);
+            } catch (Throwable $e) {
+                if ($asExcel) {
+                    throw $e;
+                }
+                header('Content-Type: application/json; charset=utf-8');
+                header('Cache-Control: no-store');
+                echo json_encode(['ok' => false, 'error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+                return true;
+            }
+            if ($asExcel) {
+                expectedStockDetailExcel($type, $detail);
+                return true;
+            }
+            header('Content-Type: application/json; charset=utf-8');
+            header('Cache-Control: no-store');
+            echo json_encode(['ok' => true, 'type' => $type] + $detail, JSON_UNESCAPED_UNICODE);
             return true;
         }
         if ($path === '/reports/stock-esperado/excel') {
@@ -79,50 +113,50 @@ function handleExpectedStockRoutes(string $path, string $method, string $name): 
 
 function expectedStockExcel(array $report): void
 {
-    $html = '<table><tr><th>Código</th><th>Descripción</th><th>Bodega</th><th>Stock</th><th>Reservado</th><th>Disponible</th><th>Pallets</th><th>Cajas</th><th>Unid. sueltas</th>'
-        . '<th>Objetivo</th><th>Mínimo</th><th>Diferencia</th><th>Estado</th><th>Otra bodega</th></tr>';
+    $cell = static fn($v): string => '<td>' . h($v === null ? '' : (string)$v) . '</td>';
+    $html = '<table><tr><th>Código</th><th>Descripción</th><th>Grupo</th><th>Bodega</th><th>Stock</th><th>Pallets</th><th>Cajas</th><th>Unid. sueltas</th>'
+        . '<th>Vendido sin despachar (NV)</th><th>N° NV</th><th>Libre</th><th>Esperando impresión</th><th>Esperando corte y sellado</th><th>N° CC</th><th>Proyectado</th>'
+        . '<th>Objetivo</th><th>Mínimo</th><th>Diferencia</th><th>Diferencia proyectada</th><th>Estado</th><th>Estado proyectado</th><th>Otra bodega</th></tr>';
     foreach ($report['rows'] as $r) {
-        $html .= '<tr><td>' . h($r['code']) . '</td><td>' . h($r['description']) . '</td><td>' . h($r['warehouse_code'] ?? '') . '</td><td>' . (int)$r['stock'] . '</td><td>' . (int)$r['reserved']
-            . '</td><td>' . (int)$r['available'] . '</td><td>' . h($r['pallets'] ?? '') . '</td><td>' . h($r['boxes'] ?? '') . '</td><td>' . h($r['loose'] ?? '')
-            . '</td><td>' . h($r['target_units'] ?? '') . '</td><td>' . h($r['min_units'] ?? '') . '</td><td>' . h($r['diff'] ?? '') . '</td><td>' . h($r['status'])
-            . '</td><td>' . (int)$r['other_stock'] . '</td></tr>';
+        $html .= '<tr>' . $cell($r['code']) . $cell($r['description']) . $cell($r['group_label'] ?? '') . $cell($r['warehouse_code'] ?? '') . $cell((int)$r['stock'])
+            . $cell($r['pallets'] ?? '') . $cell($r['boxes'] ?? '') . $cell($r['loose'] ?? '')
+            . $cell($r['reserved']) . $cell($r['reserved_orders'] ?? '') . $cell($r['free']) . $cell($r['to_print'] ?? '') . $cell($r['to_seal'] ?? '') . $cell($r['production_orders'] ?? '')
+            . $cell($r['projected']) . $cell($r['target_units'] ?? '') . $cell($r['min_units'] ?? '') . $cell($r['diff'] ?? '') . $cell($r['projected_diff'] ?? '')
+            . $cell($r['status']) . $cell($r['projected_status'] ?? '') . $cell((int)$r['other_stock']) . '</tr>';
     }
     SimpleXlsx::streamHtml('stock_esperado_' . date('Ymd_Hi') . '.xlsx', $html . '</table>', 'Stock esperado');
 }
 
+function expectedStockDetailExcel(string $type, array $detail): void
+{
+    $cell = static fn($v): string => '<td>' . h($v === null ? '' : (string)$v) . '</td>';
+    $code = (string)($detail['item']['code'] ?? '');
+    if ($type === 'production') {
+        $html = '<table><tr><th>CC</th><th>OT</th><th>Cliente</th><th>Vendedor</th><th>Fecha NV</th><th>Entrega comprometida</th><th>Próxima entrega planificada</th>'
+            . '<th>Pedido</th><th>Impreso</th><th>Sellado/embalado</th><th>Esperando impresión</th><th>Esperando corte y sellado</th><th>Avance %</th><th>Etapa</th><th>Última actividad</th><th>Stock de la CC</th><th>Estado NV</th><th>Máquinas</th></tr>';
+        foreach ($detail['rows'] as $r) {
+            $machines = implode(' | ', array_map(static fn($a) => $a['process'] . ' ' . $a['machine'] . ' (' . $a['date'] . '): ' . $a['produced'] . '/' . $a['planned'] . ' ' . $a['unit'] . ' ' . $a['state'], $r['agendas']));
+            $html .= '<tr>' . $cell($r['cc']) . $cell($r['ot']) . $cell($r['customer']) . $cell($r['seller']) . $cell($r['created']) . $cell($r['due']) . $cell($r['next_plan'])
+                . $cell($r['ordered']) . $cell($r['needs_print'] ? $r['printed'] : 'sin impresión') . $cell($r['sealed']) . $cell($r['to_print']) . $cell($r['to_seal']) . $cell($r['progress']) . $cell($r['stage']) . $cell($r['last_activity'])
+                . $cell($r['stock']) . $cell($r['status']) . $cell($machines) . '</tr>';
+        }
+        $title = 'En producción ' . $code;
+    } else {
+        $html = '<table><tr><th>NV</th><th>Cliente</th><th>Vendedor</th><th>OC cliente</th><th>Fecha NV</th><th>Días</th><th>Entrega comprometida</th><th>Estado</th>'
+            . '<th>Pedido</th><th>Despachado</th><th>Pendiente</th><th>Guías</th><th>Última guía</th><th>Stock asignado</th><th>Dónde</th><th>OT</th></tr>';
+        foreach ($detail['rows'] as $r) {
+            $html .= '<tr>' . $cell($r['nv']) . $cell($r['customer']) . $cell($r['seller']) . $cell($r['oc']) . $cell($r['created']) . $cell($r['age_days'])
+                . $cell($r['due']) . $cell($r['status']) . $cell($r['ordered']) . $cell($r['shipped']) . $cell($r['pending']) . $cell($r['guides'])
+                . $cell($r['last_guide']) . $cell($r['stock']) . $cell($r['stock_places']) . $cell($r['ots']) . '</tr>';
+        }
+        $title = 'Vendido sin despachar ' . $code;
+    }
+    SimpleXlsx::streamHtml(($type === 'production' ? 'en_produccion_' : 'nv_pendientes_') . preg_replace('/\W/', '', $code) . '_' . date('Ymd_Hi') . '.xlsx', $html . '</table>', $title);
+}
+
 function expectedStockStyles(): string
 {
-    return '<style>
-.es-shell{max-width:1500px;margin:0 auto;padding:6px 2px}
-.es-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:12px}
-.es-title{font-size:24px;font-weight:800;color:#0f172a}
-.es-tabs{display:flex;gap:8px;flex-wrap:wrap}
-.es-tab{padding:9px 16px;border-radius:10px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;font-weight:700;text-decoration:none}
-.es-tab.on{background:#0f766e;border-color:#0f766e;color:#fff}
-.es-card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px;margin-bottom:14px}
-.es-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
-.es-bar label{display:block;font-size:12px;font-weight:700;color:#475569;margin-bottom:3px}
-.es-bar input,.es-bar select,.es-card textarea,.es-in{padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;box-sizing:border-box}
-.es-btn{display:inline-block;padding:9px 16px;border:0;border-radius:10px;background:#0f766e;color:#fff;font-weight:800;font-size:14px;cursor:pointer;text-decoration:none}
-.es-btn.sec{background:#475569}
-.es-wrap{overflow-x:auto}
-.es-table{width:100%;border-collapse:collapse;font-size:13.5px}
-.es-table th{background:#f1f5f9;text-align:left;padding:8px;font-size:11.5px;color:#475569;text-transform:uppercase;white-space:nowrap;position:sticky;top:0}
-.es-table td{padding:7px 8px;border-top:1px solid #e2e8f0;vertical-align:middle}
-.es-table td.n,.es-table th.n{text-align:right;font-variant-numeric:tabular-nums}
-.es-pill{display:inline-block;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:800;white-space:nowrap;background:#e2e8f0;color:#0f172a}
-.es-pill.ok{background:#dcfce7;color:#166534}.es-pill.low{background:#fef3c7;color:#92400e}.es-pill.crit{background:#fee2e2;color:#991b1b}
-.es-pill.cfg{background:#dbeafe;color:#1e40af}.es-pill.na{background:#f1f5f9;color:#64748b}
-.es-alert{padding:12px 16px;border-radius:10px;margin-bottom:12px;font-weight:700}
-.es-alert.err{background:#fee2e2;color:#991b1b}.es-alert.ok{background:#dcfce7;color:#166534}
-.es-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-.es-chip{border:1px solid #cbd5e1;border-radius:999px;padding:4px 12px;font-size:13px;font-weight:700;background:#fff;cursor:pointer}
-.es-chip.on{background:#0f766e;color:#fff;border-color:#0f766e}
-.es-in{width:100%}.es-in.num{width:90px;text-align:right}
-.es-foot td{font-weight:800;background:#f8fafc}
-.es-stamp{font-size:12px;color:#64748b}
-@media(max-width:700px){.es-title{font-size:20px}}
-</style>';
+    return '<link rel="stylesheet" href="/assets/css/unibag-expected-stock.css?v=' . EXPECTED_STOCK_ASSET_VERSION . '">';
 }
 
 function expectedStockFlash(): string
@@ -139,7 +173,8 @@ function expectedStockFlash(): string
 
 function expectedStockPage(ExpectedStockService $service, string $tab): string
 {
-    $html = expectedStockStyles() . '<div class="es-shell"><div class="es-head"><div class="es-title">Stock esperado</div><div class="es-tabs">'
+    $html = expectedStockStyles() . '<div class="es-shell"><div class="es-head"><div><div class="es-title">Stock esperado</div>'
+        . '<div class="es-stamp" id="es_stamp"></div></div><div class="es-tabs">'
         . '<a class="es-tab' . ($tab === 'report' ? ' on' : '') . '" href="/reports/stock-esperado?tab=report">Informe</a>'
         . '<a class="es-tab' . ($tab === 'master' ? ' on' : '') . '" href="/reports/stock-esperado?tab=master">Maestro</a>'
         . '</div></div>' . expectedStockFlash();
@@ -150,66 +185,47 @@ function expectedStockReport(ExpectedStockService $service): string
 {
     $report = $service->report();
     $json = json_encode($report, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP);
-    $html = '<div class="es-card"><div class="es-bar">'
-        . '<div><label>Bodega</label><select id="es_wh"><option value="">Todas</option><option value="1000">1000</option><option value="400">400</option></select></div>'
-        . '<div><label>Buscar</label><input type="text" id="es_q" placeholder="Código o descripción"></div>'
-        . '<div><a class="es-btn sec" href="/reports/stock-esperado/excel">Excel</a></div>'
-        . '<div class="es-stamp" id="es_stamp" style="margin-left:auto"></div></div></div>'
-        . '<div class="es-chips" id="es_chips"></div><div id="es_err"></div>'
-        . '<div class="es-card"><div class="es-wrap"><table class="es-table"><thead><tr>'
-        . '<th>Código</th><th>Descripción</th><th>Bodega</th><th class="n">Stock</th><th class="n">Reservado</th><th class="n">Disponible</th>'
-        . '<th class="n">Pallets</th><th class="n">Cajas</th><th class="n">Sueltas</th><th class="n">Objetivo</th><th class="n">Mínimo</th><th class="n">Diferencia</th>'
-        . '<th>Estado</th><th class="n">Otra bodega</th></tr></thead><tbody id="es_body"></tbody><tfoot id="es_foot"></tfoot></table></div></div>';
-    $js = <<<'JS'
-(function(){
-  var state = window.__ES, filterStatus = '', cls = {'OK':'ok','Bajo':'low','Crítico':'crit','Falta configurar':'cfg','Sin objetivo':'na','No existe en ERP':'crit','Sin conexión ERP':'crit'};
-  function n(v){ return v===null||v===undefined ? '' : Number(v).toLocaleString('es-CL'); }
-  function esc(s){ var d=document.createElement('div'); d.textContent=(s===null||s===undefined)?'':String(s); return d.innerHTML; }
-  function visible(){
-    var wh=document.getElementById('es_wh').value, q=document.getElementById('es_q').value.trim().toLowerCase();
-    return state.rows.filter(function(r){
-      return (!wh || String(r.warehouse_code)===wh) && (!filterStatus || r.status===filterStatus) &&
-        (!q || (r.code+' '+r.description).toLowerCase().indexOf(q)>=0);
-    });
-  }
-  function render(){
-    var rows=visible(), counts={}, body='';
-    state.rows.forEach(function(r){ counts[r.status]=(counts[r.status]||0)+1; });
-    var chips='<span class="es-chip'+(filterStatus===''?' on':'')+'" data-s="">Todos '+state.rows.length+'</span>';
-    Object.keys(counts).sort().forEach(function(s){ chips+='<span class="es-chip'+(filterStatus===s?' on':'')+'" data-s="'+esc(s)+'">'+esc(s)+' '+counts[s]+'</span>'; });
-    document.getElementById('es_chips').innerHTML=chips;
-    var tot={1000:{s:0,p:0},400:{s:0,p:0}};
-    rows.forEach(function(r){
-      body+='<tr title="'+esc(r.erp_title)+'"><td><b>'+esc(r.code)+'</b></td><td>'+esc(r.description)+'</td><td>'+esc(r.warehouse_code||'')+'</td>'+
-        '<td class="n"><b>'+n(r.stock)+'</b></td><td class="n">'+n(r.reserved)+'</td><td class="n">'+n(r.available)+'</td>'+
-        '<td class="n">'+n(r.pallets)+'</td><td class="n">'+n(r.boxes)+'</td><td class="n">'+n(r.loose)+'</td>'+
-        '<td class="n">'+n(r.target_units)+'</td><td class="n">'+n(r.min_units)+'</td>'+
-        '<td class="n" style="color:'+(r.diff!==null&&r.diff<0?'#b91c1c':'#166534')+'">'+(r.diff===null?'':(r.diff>0?'+':'')+n(r.diff))+'</td>'+
-        '<td><span class="es-pill '+(cls[r.status]||'')+'">'+esc(r.status)+'</span></td><td class="n">'+n(r.other_stock)+'</td></tr>';
-      if(tot[r.warehouse_code]){ tot[r.warehouse_code].s+=r.stock; tot[r.warehouse_code].p+=(r.pallets||0); }
-    });
-    document.getElementById('es_body').innerHTML=body||'<tr><td colspan="14">Sin productos.</td></tr>';
-    document.getElementById('es_foot').innerHTML=[1000,400].map(function(w){
-      return '<tr class="es-foot"><td colspan="3">Total bodega '+w+'</td><td class="n">'+n(tot[w].s)+'</td><td colspan="2"></td><td class="n">'+n(tot[w].p)+'</td><td colspan="7"></td></tr>';
-    }).join('');
-    document.getElementById('es_stamp').textContent='Actualizado '+state.generated_at.substr(11,8)+' · se refresca cada 30 s';
-    document.getElementById('es_err').innerHTML=state.error?'<div class="es-alert err">'+esc(state.error)+'</div>':'';
-  }
-  document.getElementById('es_chips').addEventListener('click',function(e){ var s=e.target.getAttribute('data-s'); if(s!==null){ filterStatus=s; render(); } });
-  document.getElementById('es_wh').addEventListener('change',render);
-  document.getElementById('es_q').addEventListener('input',render);
-  function refresh(){
-    if(document.hidden) return;
-    fetch('/reports/stock-esperado/data',{credentials:'same-origin',cache:'no-store'}).then(function(r){ return r.json(); })
-      .then(function(d){ if(d&&d.rows){ state=d; render(); } })
-      .catch(function(){ document.getElementById('es_err').innerHTML='<div class="es-alert err">Sin conexión con el servidor; se reintenta en 30 s.</div>'; });
-  }
-  setInterval(refresh,30000);
-  document.addEventListener('visibilitychange',function(){ if(!document.hidden) refresh(); });
-  render();
-})();
-JS;
-    return $html . '<script>window.__ES=' . $json . ';</script><script>' . $js . '</script>';
+    $groups = array_values(array_unique(array_filter(array_map(static fn($r) => trim((string)($r['group_label'] ?? '')), $report['rows']))));
+    sort($groups);
+    $groupOpts = '';
+    foreach ($groups as $g) {
+        $groupOpts .= '<option value="' . h($g) . '">' . h($g) . '</option>';
+    }
+    $html = '<div class="es-kpis" id="es_kpis"></div>'
+        . '<div class="es-card es-filters"><div class="es-bar">'
+        . '<div><label for="es_q">Buscar</label><input type="search" id="es_q" placeholder="Código o descripción" autocomplete="off"></div>'
+        . '<div><label for="es_wh">Bodega</label><select id="es_wh"><option value="">Todas</option><option value="1000">1000</option><option value="400">400</option></select></div>'
+        . ($groupOpts !== '' ? '<div><label for="es_grp">Grupo</label><select id="es_grp"><option value="">Todos</option>' . $groupOpts . '</select></div>' : '')
+        . '<div class="es-checks"><label class="es-check"><input type="checkbox" id="es_only_res"> Con reservas</label>'
+        . '<label class="es-check"><input type="checkbox" id="es_only_prod"> En producción</label></div>'
+        . '<div class="es-bar-end"><button type="button" class="es-btn ghost" id="es_reset">Limpiar filtros</button>'
+        . '<a class="es-btn sec" href="/reports/stock-esperado/excel"><i class="fas fa-file-excel"></i> Excel</a></div>'
+        . '</div><div class="es-chips" id="es_chips"></div></div>'
+        . '<div id="es_err"></div>'
+        . '<div class="es-card es-table-card"><div class="es-wrap"><table class="es-table" id="es_table"><thead>'
+        . '<tr class="es-groups"><th colspan="2" class="g-prod">Producto</th><th colspan="2" class="g-stock">Stock en bodega</th>'
+        . '<th colspan="2" class="g-res">Comprometido</th><th colspan="2" class="g-mfg">Producción (CC en curso)</th><th colspan="2" class="g-proj">Proyección</th>'
+        . '<th colspan="2" class="g-goal">Meta</th><th colspan="2" class="g-state">Estado</th></tr>'
+        . '<tr class="es-cols">'
+        . '<th data-sort="code" class="sticky">Producto</th><th data-sort="warehouse_code">Bodega</th>'
+        . '<th data-sort="stock" class="n">Stock</th><th data-sort="pallets" class="n">Pallets · cajas</th>'
+        . '<th data-sort="reserved" class="n" title="Vendido en NV de venta de los últimos 90 días que aún no se despacha">Vendido sin despachar</th><th data-sort="free" class="n" title="Stock − reservado">Libre</th>'
+        . '<th data-sort="to_print" class="n" title="Unidades de CC en curso que aún no pasan por flexografía o serigrafía">Esperando impresión</th>'
+        . '<th data-sort="to_seal" class="n" title="Unidades ya impresas (o sin impresión) que aún no pasan por corte y sellado">Esperando corte y sellado</th>'
+        . '<th data-sort="projected" class="n" title="Stock + en producción − reservado">Proyectado</th><th data-sort="projected_diff" class="n">vs objetivo</th>'
+        . '<th data-sort="target_units" class="n">Objetivo</th><th data-sort="min_units" class="n">Mínimo</th>'
+        . '<th data-sort="status_rank">Hoy</th><th data-sort="projected_rank">Proyectado</th>'
+        . '</tr></thead><tbody id="es_body"></tbody><tfoot id="es_foot"></tfoot></table></div></div>'
+        . '<div class="es-legend">Vendido sin despachar = NV de venta (no las CC de fabricación) de los últimos ' . ExpectedStockService::SALES_MAX_AGE_DAYS . ' días, menos lo despachado en la NV o en sus guías · '
+        . 'CC en curso = CC de fabricación con producción o embalaje en los últimos ' . ExpectedStockService::PRODUCTION_IDLE_DAYS . ' días (o nuevas aún sin empezar) · '
+        . 'Esperando impresión = pedido − impreso · Esperando corte y sellado = impreso (o pedido si no lleva impresión) − sellado · '
+        . 'Proyectado = stock + esperando impresión + esperando corte y sellado − vendido sin despachar. Haz clic en esas cifras para ver el detalle.</div>'
+        . '<div class="es-modal" id="es_modal" hidden><div class="es-modal-box" role="dialog" aria-modal="true" aria-labelledby="es_modal_title">'
+        . '<div class="es-modal-head"><div><div class="es-modal-kicker" id="es_modal_kicker"></div><div class="es-modal-title" id="es_modal_title"></div></div>'
+        . '<button type="button" class="es-modal-x" id="es_modal_close" aria-label="Cerrar">&times;</button></div>'
+        . '<div class="es-modal-body" id="es_modal_body"></div></div></div>';
+    return $html . '<script>window.__ES=' . $json . ';</script>'
+        . '<script src="/assets/js/unibag-expected-stock.js?v=' . EXPECTED_STOCK_ASSET_VERSION . '"></script>';
 }
 
 function expectedStockMaster(ExpectedStockService $service): string
@@ -221,11 +237,11 @@ function expectedStockMaster(ExpectedStockService $service): string
         . '<div><label>Descripción</label><input type="text" name="description" maxlength="200" style="width:280px"></div>'
         . '<div><button class="es-btn" type="submit">Agregar</button></div></form></div></div>'
         . '<div class="es-card"><form method="post" action="/reports/stock-esperado/import">' . $csrf
-        . '<label style="font-size:12px;font-weight:700;color:#475569">Pegar lista (una línea por producto: descripción y código separados por tabulación)</label>'
+        . '<label style="font-size:12px;font-weight:700;color:var(--es-muted)">Pegar lista (una línea por producto: descripción y código separados por tabulación)</label>'
         . '<textarea name="list" rows="4" style="width:100%;margin:6px 0"></textarea><button class="es-btn sec" type="submit">Agregar lista</button></form></div>';
     $rows = $service->master(false);
     $html .= '<form method="post" action="/reports/stock-esperado/save" class="es-card">' . $csrf
-        . '<div class="es-wrap"><table class="es-table"><thead><tr><th>Código</th><th>Descripción</th><th>Grupo</th><th>Bodega</th>'
+        . '<div class="es-wrap"><table class="es-table es-master"><thead><tr><th>Código</th><th>Descripción</th><th>Grupo</th><th>Bodega</th>'
         . '<th class="n">Unid. por caja</th><th class="n">Cajas por pallet</th><th class="n">Objetivo</th><th class="n">Mínimo</th><th>Activo</th></tr></thead><tbody>';
     foreach ($rows as $r) {
         $id = (int)$r['id'];
@@ -240,7 +256,7 @@ function expectedStockMaster(ExpectedStockService $service): string
             . '<td><input type="hidden" name="rows[' . $id . '][active]" value="0"><input type="checkbox" name="rows[' . $id . '][active]" value="1"' . ((int)$r['active'] === 1 ? ' checked' : '') . '></td></tr>';
     }
     $html .= '</tbody></table></div><div style="margin-top:12px"><button class="es-btn" type="submit">Guardar cambios</button></div></form>';
-    $html .= '<div class="es-card"><b>Historial de cambios</b><div class="es-wrap"><table class="es-table"><thead><tr><th>Fecha</th><th>Código</th><th>Campo</th><th>Antes</th><th>Después</th><th>Usuario</th></tr></thead><tbody>';
+    $html .= '<div class="es-card"><b>Historial de cambios</b><div class="es-wrap"><table class="es-table es-master"><thead><tr><th>Fecha</th><th>Código</th><th>Campo</th><th>Antes</th><th>Después</th><th>Usuario</th></tr></thead><tbody>';
     foreach ($service->history(60) as $hrow) {
         $html .= '<tr><td>' . h(substr((string)$hrow['created_at'], 0, 16)) . '</td><td>' . h($hrow['item_code']) . '</td><td>' . h(ExpectedStockService::fieldLabel((string)$hrow['field']))
             . '</td><td>' . h($hrow['old_value'] ?? '') . '</td><td>' . h($hrow['new_value'] ?? '') . '</td><td>' . h($hrow['actor']) . '</td></tr>';

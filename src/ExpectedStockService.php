@@ -8,6 +8,10 @@ declare(strict_types=1);
  * Maestro editable (TRZ) con los códigos a controlar: bodega (1000 ó 400), unidades por caja, cajas por pallet,
  * stock objetivo y stock mínimo. El informe cruza el maestro con el stock del ERP (solo lectura) y calcula
  * pallets, cajas, saldo y estado contra el objetivo.
+ *
+ * Además (solo lectura): reservado = vendido sin despachar en NV de venta (req_isfabricate = 0) de los últimos
+ * SALES_MAX_AGE_DAYS días; en producción = lo que falta embalar de las CC de fabricación vivas (con movimiento en
+ * PRODUCTION_IDLE_DAYS días o nuevas); proyectado = stock + en producción − reservado. Ventanas de detalle: reservedDetail() y productionDetail().
  */
 final class ExpectedStockService
 {
@@ -226,7 +230,7 @@ final class ExpectedStockService
                         GROUP BY it.id, it.item_number_prod, it.item_title, iss.st_id";
                 foreach ($this->all($this->erp, $sql, $codes) as $r) {
                     $code = self::normalizeCode((string)$r['item_number_prod']);
-                    $items[$code] = ['title' => trim((string)$r['item_title'])];
+                    $items[$code] = ['id' => (int)$r['item_id'], 'title' => trim((string)$r['item_title'])];
                     if ($r['st_id'] !== null) {
                         $stock[$code][(int)$r['st_id']] = ['inv' => (float)$r['inv'], 'res' => (float)$r['res']];
                     }
@@ -250,31 +254,729 @@ final class ExpectedStockService
             }
             return [$inv, $res];
         };
+        // NV sin despachar y producción pendiente (consultas agrupadas, con caché corta).
+        $flow = ['reserved' => [], 'production' => []];
+        $flowOk = false;
+        $flowError = '';
+        $itemIds = array_values(array_filter(array_map(static fn($i) => (int)$i['id'], $items)));
+        if ($erpOk && $itemIds !== []) {
+            try {
+                $flow = $this->flowSummary($itemIds);
+                $flowOk = true;
+            } catch (Throwable $e) {
+                $flowError = 'No se pudieron leer las NV y la producción del ERP: ' . $e->getMessage();
+            }
+        }
         $rows = [];
         foreach ($master as $m) {
             $code = self::normalizeCode((string)$m['item_code']);
             $wcode = (int)($m['warehouse_code'] ?? 0);
             $exists = isset($items[$code]);
-            [$inv, $res] = in_array($wcode, self::WAREHOUSES, true) ? $sumFor($stock[$code] ?? [], $wh[$wcode] ?? []) : [0.0, 0.0];
+            [$inv] = in_array($wcode, self::WAREHOUSES, true) ? $sumFor($stock[$code] ?? [], $wh[$wcode] ?? []) : [0.0, 0.0];
             $otherCode = $wcode === 1000 ? 400 : ($wcode === 400 ? 1000 : 0);
             [$otherInv] = $otherCode > 0 ? $sumFor($stock[$code] ?? [], $wh[$otherCode] ?? []) : [0.0];
             $calc = self::compute($m, $inv, $exists || !$erpOk);
             if (!$erpOk) {
                 $calc['status'] = 'Sin conexión ERP';
             }
+            $itemId = (int)($items[$code]['id'] ?? 0);
+            $stockQty = (int)floor($inv + 1e-9);
+            $res = $flow['reserved'][$itemId] ?? ['qty' => 0, 'orders' => 0, 'due' => 0];
+            $prod = ($flow['production'][$itemId] ?? []) + ['qty' => 0, 'orders' => 0, 'print' => 0, 'seal' => 0];
+            $reserved = ($flowOk && $exists) ? (int)round($res['qty']) : null;
+            $inProd = ($flowOk && $exists) ? (int)round($prod['qty']) : null;
+            $projected = ($reserved !== null && $inProd !== null) ? $stockQty + $inProd - $reserved : null;
+            $projCalc = $projected !== null ? self::compute($m, max(0, $projected), $exists) : null;
             $rows[] = [
                 'id' => (int)$m['id'], 'code' => (string)$m['item_code'], 'description' => (string)$m['description'],
+                'group_label' => (string)($m['group_label'] ?? ''),
                 'erp_title' => $items[$code]['title'] ?? '', 'warehouse_code' => $wcode > 0 ? $wcode : null,
                 'units_per_box' => $m['units_per_box'] !== null ? (int)$m['units_per_box'] : null,
                 'boxes_per_pallet' => $m['boxes_per_pallet'] !== null ? (int)$m['boxes_per_pallet'] : null,
                 'target_units' => $m['target_units'] !== null ? (int)$m['target_units'] : null,
                 'min_units' => $m['min_units'] !== null ? (int)$m['min_units'] : null,
-                'stock' => (int)floor($inv + 1e-9), 'reserved' => (int)floor($res + 1e-9),
-                'available' => (int)floor($inv - $res + 1e-9), 'other_stock' => (int)floor($otherInv + 1e-9),
+                'stock' => $stockQty, 'other_stock' => (int)floor($otherInv + 1e-9),
+                'reserved' => $reserved, 'reserved_orders' => (int)$res['orders'],
+                'oldest_due' => (int)$res['due'] > 0 ? date('Y-m-d', (int)$res['due']) : '',
+                'free' => $reserved !== null ? $stockQty - $reserved : null,
+                'in_production' => $inProd, 'production_orders' => (int)$prod['orders'],
+                'to_print' => $inProd !== null ? (int)round($prod['print']) : null, 'to_seal' => $inProd !== null ? (int)round($prod['seal']) : null,
+                'projected' => $projected,
+                'projected_diff' => ($projected !== null && $calc['diff'] !== null) ? $projected - (int)$m['target_units'] : null,
+                'projected_status' => $projCalc === null ? '' : ($projected < 0 && in_array($projCalc['status'], ['OK', 'Bajo', 'Sin objetivo'], true) ? 'Crítico' : $projCalc['status']),
                 'exists' => $exists,
             ] + $calc;
         }
-        return ['rows' => $rows, 'erp_ok' => $erpOk, 'error' => $error, 'generated_at' => date('Y-m-d H:i:s')];
+        return ['rows' => $rows, 'erp_ok' => $erpOk, 'error' => $error, 'flow_ok' => $flowOk, 'flow_error' => $flowError,
+            'generated_at' => date('Y-m-d H:i:s')];
+    }
+
+    // ------------------------------------------------------------------ NV y producción (solo lectura del ERP)
+
+    private const FLOW_CACHE_TTL = 120;
+    private const PROCESS_NAMES = [7 => 'Flexografía', 8 => 'Corte y Sellado', 11 => 'Serigrafía', 22 => 'Pulpo Serigráfico',
+        12 => 'Rebobinado', 15 => 'Embalaje'];
+    /** Procesos que cuentan en bolsas (flexo y rebobinado cuentan en metros). */
+    private const UNIT_PROCESSES = [7, 8, 11, 22, 15];
+
+    /** @var array<string,array<string,bool>> */
+    private array $erpColumnCache = [];
+
+    /** @return array<string,bool> columnas en minúscula; vacío si no se pudo consultar */
+    private function erpColumns(string $table): array
+    {
+        if (isset($this->erpColumnCache[$table])) {
+            return $this->erpColumnCache[$table];
+        }
+        $cols = [];
+        try {
+            if ($this->erp->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+                foreach ($this->all($this->erp, 'PRAGMA table_info(' . preg_replace('/\W/', '', $table) . ')') as $r) {
+                    $cols[strtolower((string)$r['name'])] = true;
+                }
+            } else {
+                foreach ($this->all($this->erp, 'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [$table]) as $r) {
+                    $cols[strtolower((string)$r['COLUMN_NAME'])] = true;
+                }
+            }
+        } catch (Throwable) {
+            $cols = [];
+        }
+        if ($cols !== []) {
+            $this->erpColumnCache[$table] = $cols; // si no se pudo leer (o la tabla aún no existe), se reintenta la próxima vez
+        }
+        return $cols;
+    }
+
+    /** La columna existe (si no se pudo consultar el esquema, se asume que sí). */
+    private function has(string $table, string $column): bool
+    {
+        $cols = $this->erpColumns($table);
+        return $cols === [] || isset($cols[strtolower($column)]);
+    }
+
+    private function col(string $table, string $alias, string $column, string $fallback = '0'): string
+    {
+        return $this->has($table, $column) ? $alias . '.' . $column : $fallback;
+    }
+
+    private static function inList(array $ids): string
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids), static fn($v) => $v > 0)));
+        return $ids === [] ? '0' : implode(',', $ids);
+    }
+
+    /** Condiciones de línea abierta de una NV (regla del informe «Stock reservado» del sistema antiguo). */
+    private function openLineWhere(): string
+    {
+        return ($this->has('orders_items', 'item_type') ? " AND oi.item_type = 'item'" : '')
+            . ($this->has('orders_items', 'item_amount_shipped_stop') ? ' AND oi.item_amount_shipped_stop = 0' : '');
+    }
+
+    /** NV de venta: solo se cuentan las creadas en estos días (las más antiguas abiertas en el ERP son ventas ya entregadas sin cerrar). */
+    public const SALES_MAX_AGE_DAYS = 90;
+    /** CC de fabricación: cuenta si tuvo producción o embalaje en estos días… */
+    public const PRODUCTION_IDLE_DAYS = 30;
+    /** …o si aún no empieza y se creó hace menos de estos días. */
+    public const PRODUCTION_NEW_DAYS = 120;
+    /** CC con al menos esta fracción embalada se da por terminada (el saldo es merma). */
+    public const PRODUCTION_DONE_RATIO = 0.95;
+
+    private function hasFabricateFlag(): bool
+    {
+        $cols = $this->erpColumns('orders');
+        return $cols !== [] && isset($cols['req_isfabricate']);
+    }
+
+    /**
+     * NV de venta pendientes de despacho (una fila por NV y SKU con saldo).
+     * Solo NV de venta (no las CC de fabricación, que nunca se despachan contra sí mismas), aprobadas o con despacho
+     * parcial, sin cerrar. Despachado = lo mayor entre lo marcado en la NV y lo de sus guías no anuladas.
+     *
+     * @param bool $old false: NV de los últimos SALES_MAX_AGE_DAYS (se cuentan); true: las más antiguas (solo se informan)
+     * @return array<int,array<string,mixed>>
+     */
+    private function pendingSales(array $itemIds, bool $old = false): array
+    {
+        $cutoff = strtotime(date('Y-m-d')) - self::SALES_MAX_AGE_DAYS * 86400;
+        $sql = 'SELECT oi.item_id, o.id AS order_id, o.req_number, o.req_status, o.req_crtdat, o.req_cust_id,
+                       ' . $this->col('orders', 'o', 'req_fec_despacho') . ' AS due_at,
+                       ' . $this->col('orders', 'o', 'req_oc_number', "''") . ' AS oc_number,
+                       ' . $this->col('orders', 'o', 'req_userid_seller') . ' AS seller_id,
+                       ' . $this->col('orders', 'o', 'req_isreserva') . ' AS is_reserva,
+                       SUM(oi.item_amount) AS ordered, SUM(oi.item_amount_shipped) AS shipped_nv
+                FROM orders o
+                JOIN orders_items oi ON oi.req_id = o.id
+                WHERE oi.item_id IN (' . self::inList($itemIds) . ') AND o.req_status IN (2,3)'
+            . ($this->hasFabricateFlag() ? ' AND o.req_isfabricate = 0' : '')
+            . ($this->has('orders', 'req_order_shipped') ? ' AND o.req_order_shipped = 0' : '')
+            . $this->openLineWhere()
+            . ' AND oi.item_amount > oi.item_amount_shipped
+                  AND o.req_crtdat ' . ($old ? '<' : '>=') . ' ' . $cutoff . '
+                GROUP BY oi.item_id, o.id, o.req_number, o.req_status, o.req_crtdat, o.req_cust_id, due_at, oc_number, seller_id, is_reserva
+                ORDER BY o.id';
+        $lines = $this->all($this->erp, $sql);
+        if ($lines === []) {
+            return [];
+        }
+        $guides = [];
+        $statusWhere = $this->has('orders_delivery', 'dlv_status') ? ' AND od.dlv_status <> 5' : '';
+        $dateCol = $this->col('orders_delivery', 'od', 'dlv_delivery_date');
+        foreach ($this->all($this->erp, "SELECT od.dlv_order_id, odi.item_id, SUM(odi.item_amount_shipped) AS qty, COUNT(DISTINCT od.id) AS n, MAX($dateCol) AS last_at
+                FROM orders_delivery od JOIN orders_delivery_items odi ON odi.dlv_id = od.id
+                WHERE od.dlv_order_id IN (" . self::inList(array_column($lines, 'order_id')) . ') AND odi.item_id IN (' . self::inList($itemIds) . ")$statusWhere
+                GROUP BY od.dlv_order_id, odi.item_id") as $g) {
+            $guides[(int)$g['dlv_order_id'] . ':' . (int)$g['item_id']] = ['qty' => (float)$g['qty'], 'n' => (int)$g['n'], 'last_at' => (int)$g['last_at']];
+        }
+        $out = [];
+        foreach ($lines as $l) {
+            $g = $guides[(int)$l['order_id'] . ':' . (int)$l['item_id']] ?? ['qty' => 0.0, 'n' => 0, 'last_at' => 0];
+            $shipped = max((float)$l['shipped_nv'], $g['qty']);
+            $pending = (float)$l['ordered'] - $shipped;
+            if ($pending < 0.5) {
+                continue;
+            }
+            $out[] = $l + ['shipped' => $shipped, 'pending' => $pending, 'guides' => $g['n'], 'last_guide_at' => $g['last_at']];
+        }
+        return $out;
+    }
+
+    /**
+     * CC con unidades por fabricar del SKU: CC de fabricación (o con OT), aprobadas, con línea abierta.
+     * Pendiente = pedido − lo ya embalado de la CC (repartido por línea si la CC tiene varios productos).
+     * Cuenta solo si está viva: con producción o embalaje en los últimos PRODUCTION_IDLE_DAYS días, o sin empezar
+     * y creada hace menos de PRODUCTION_NEW_DAYS. Las demás quedaron con saldo de merma o se dejaron de hacer.
+     *
+     * @param bool $stale false: las vivas (se cuentan); true: las con saldo sin movimiento (solo se informan)
+     * @return array<int,array<string,mixed>> una fila por SKU y CC con pendiente > 0
+     */
+    private function productionLines(array $itemIds, bool $stale = false): array
+    {
+        $key = implode(',', $itemIds);
+        $this->productionMemo[$key] ??= $this->productionCandidates($itemIds);
+        return array_values(array_filter($this->productionMemo[$key], static fn($c) => $c['alive'] !== $stale));
+    }
+
+    /** @var array<string,array<int,array<string,mixed>>> */
+    private array $productionMemo = [];
+
+    /** Todas las CC con saldo, marcadas como vivas o no (con el motivo). */
+    private function productionCandidates(array $itemIds): array
+    {
+        $fabricate = $this->hasFabricateFlag() ? ' OR o.req_isfabricate = 1' : '';
+        $sql = 'SELECT oi.item_id, o.id AS order_id, o.req_number, o.req_status, o.req_crtdat, o.req_cust_id,
+                       ' . $this->col('orders', 'o', 'req_fec_despacho') . ' AS due_at,
+                       ' . $this->col('orders', 'o', 'req_userid_seller') . ' AS seller_id,
+                       SUM(oi.item_amount) AS ordered, MAX(' . $this->col('orders_items', 'oi', 'fab_printtype', "''") . ') AS print_type
+                FROM orders o
+                JOIN orders_items oi ON oi.req_id = o.id
+                WHERE oi.item_id IN (' . self::inList($itemIds) . ') AND o.req_status IN (2,3)' . $this->openLineWhere() . '
+                  AND (o.id IN (SELECT ph.prd_reqid FROM prod_header ph WHERE ph.prd_status > 0)' . $fabricate . ')
+                GROUP BY oi.item_id, o.id, o.req_number, o.req_status, o.req_crtdat, o.req_cust_id, due_at, seller_id
+                ORDER BY o.id';
+        $lines = $this->all($this->erp, $sql);
+        if ($lines === []) {
+            return [];
+        }
+        $orderIn = self::inList(array_column($lines, 'order_id'));
+        // Total pedido de cada CC (todas sus líneas de producto), para repartir lo embalado.
+        $orderTotal = [];
+        foreach ($this->all($this->erp, 'SELECT oi.req_id, SUM(oi.item_amount) AS total, COUNT(DISTINCT oi.item_id) AS products
+                FROM orders_items oi WHERE oi.req_id IN (' . $orderIn . ')' . $this->openLineWhere() . ' GROUP BY oi.req_id') as $r) {
+            $orderTotal[(int)$r['req_id']] = ['total' => (float)$r['total'], 'products' => (int)$r['products']];
+        }
+        $packed = [];
+        $pe = static fn(string $c): string => 'COALESCE(pe.' . $c . ',0)';
+        $packExpr = $pe('req_embalaje_cajas_completas_amt') . ' * ' . $pe('req_embalaje_bolsas_por_caja_amt') . ' + ' . $pe('req_embalaje_caja_final')
+            . ($this->has('prod_worker_embalajes', 'req_embalaje_bolsas_sobrantes_amt') ? ' + ' . $pe('req_embalaje_bolsas_sobrantes_amt') : '')
+            . ($this->has('prod_worker_embalajes', 'req_embalaje_showroom') ? ' + ' . $pe('req_embalaje_showroom') : '');
+        foreach ($this->all($this->erp, "SELECT pe.evt_reqid, SUM($packExpr) AS packed, MAX(pe.evt_crtdat) AS last_at
+                FROM prod_worker_embalajes pe WHERE pe.evt_reqid IN ($orderIn) GROUP BY pe.evt_reqid") as $r) {
+            $packed[(int)$r['evt_reqid']] = ['qty' => (float)$r['packed'], 'last_at' => (int)$r['last_at']];
+        }
+        $candidates = [];
+        foreach ($lines as $l) {
+            $oid = (int)$l['order_id'];
+            $ordered = (float)$l['ordered'];
+            $tot = $orderTotal[$oid] ?? ['total' => $ordered, 'products' => 1];
+            $share = ($tot['products'] > 1 && $tot['total'] > 0) ? $ordered / $tot['total'] : 1.0;
+            $packedQty = ($packed[$oid]['qty'] ?? 0.0) * $share;
+            $pending = max(0.0, $ordered - $packedQty);
+            if ($pending < 0.5) {
+                continue;
+            }
+            $candidates[] = $l + ['ordered' => $ordered, 'packed' => round($packedQty), 'share' => $share,
+                'packed_last_at' => (int)($packed[$oid]['last_at'] ?? 0), 'multi_product' => $tot['products'] > 1];
+        }
+        if ($candidates === []) {
+            return [];
+        }
+        // Producción por etapa de cada CC (unidades; flexo y seri registran bolsas en evt_amount) y última actividad.
+        $candIn = self::inList(array_column($candidates, 'order_id'));
+        $stageQty = [];
+        $lastProd = [];
+        $commentFilter = $this->has('prod_worker_ot_events', 'evt_comments')
+            ? " AND (e.evt_comments IS NULL OR (e.evt_comments NOT LIKE '%Bobina Semielaborada%' AND e.evt_comments NOT LIKE '%ROLL-SE-%'))" : '';
+        foreach ($this->all($this->erp, "SELECT pa.ag_reqid, pa.ag_equipotype_id, pa.ag_equipo_id, SUM(e.evt_amount) AS qty, MAX(e.evt_crtdat) AS last_at
+                FROM prod_agenda pa
+                JOIN prod_worker_ot w ON w.wok_ag_id = pa.id
+                JOIN prod_worker_ot_events e ON e.evt_prod_worker_otid = w.id
+                WHERE pa.ag_reqid IN ($candIn) AND e.evt_type = 'prod' AND (e.evt_status IS NULL OR e.evt_status > 0)$commentFilter
+                GROUP BY pa.ag_reqid, pa.ag_equipotype_id, pa.ag_equipo_id") as $r) {
+            $oid = (int)$r['ag_reqid'];
+            $stage = self::stageOf((int)$r['ag_equipotype_id'], (int)$r['ag_equipo_id']);
+            $stageQty[$oid][$stage] = ($stageQty[$oid][$stage] ?? 0.0) + (float)$r['qty'];
+            $lastProd[$oid] = max($lastProd[$oid] ?? 0, (int)$r['last_at']);
+        }
+        // Máquinas programadas por etapa (para saber si la CC lleva impresión).
+        $hasStage = [];
+        foreach ($this->all($this->erp, "SELECT pa.ag_reqid, pa.ag_equipotype_id, pa.ag_equipo_id FROM prod_agenda pa
+                WHERE pa.ag_reqid IN ($candIn) AND pa.ag_status > 0 GROUP BY pa.ag_reqid, pa.ag_equipotype_id, pa.ag_equipo_id") as $r) {
+            $hasStage[(int)$r['ag_reqid']][self::stageOf((int)$r['ag_equipotype_id'], (int)$r['ag_equipo_id'])] = true;
+        }
+        $today = strtotime(date('Y-m-d'));
+        $out = [];
+        foreach ($candidates as $c) {
+            $oid = (int)$c['order_id'];
+            $share = (float)$c['share'];
+            $ordered = (float)$c['ordered'];
+            $printed = ($stageQty[$oid]['print'] ?? 0.0) * $share;
+            $sealed = max(($stageQty[$oid]['seal'] ?? 0.0) * $share, (float)$c['packed']);
+            $printType = strtoupper(trim((string)($c['print_type'] ?? '')));
+            $needsPrint = isset($hasStage[$oid]['print']) || $printed > 0
+                || (!isset($hasStage[$oid]['seal']) && $sealed <= 0 && !in_array($printType, ['', 'SIN', 'SIN IMPRESION', 'SIN IMPRESIÓN', 'NO'], true));
+            $toPrint = $needsPrint ? max(0.0, $ordered - $printed) : 0.0;
+            $toSeal = max(0.0, ($needsPrint ? min($printed, $ordered) : $ordered) - $sealed);
+            $pending = $toPrint + $toSeal;
+            if ($pending < 0.5) {
+                continue;
+            }
+            $last = max((int)$c['packed_last_at'], $lastProd[$oid] ?? 0);
+            $reason = '';
+            if ($sealed >= self::PRODUCTION_DONE_RATIO * $ordered) {
+                $reason = 'Sellado/embalado ≥ ' . (int)round(self::PRODUCTION_DONE_RATIO * 100) . ' % (saldo de merma)';
+            } elseif ($last > 0 && $last < $today - self::PRODUCTION_IDLE_DAYS * 86400) {
+                $reason = 'Sin producción ni embalaje hace más de ' . self::PRODUCTION_IDLE_DAYS . ' días';
+            } elseif ($last === 0 && (int)$c['req_crtdat'] < $today - self::PRODUCTION_NEW_DAYS * 86400) {
+                $reason = 'Nunca empezó (creada hace más de ' . self::PRODUCTION_NEW_DAYS . ' días)';
+            }
+            $out[] = $c + ['printed' => round($printed), 'sealed' => round($sealed), 'needs_print' => $needsPrint,
+                'to_print' => round($toPrint), 'to_seal' => round($toSeal), 'pending' => round($pending),
+                'last_activity_at' => $last, 'alive' => $reason === '', 'excluded_reason' => $reason];
+        }
+        return $out;
+    }
+
+    /** Etapa del proceso: impresión (flexo, serigrafía plana), corte y sellado, embalaje u otra. */
+    private static function stageOf(int $type, int $equipoId): string
+    {
+        if ($equipoId === 36 || $type === 22) {
+            return 'other'; // el pulpo imprime bolsas ya hechas, después del corte y sellado
+        }
+        return match ($type) {
+            7, 11 => 'print',
+            8 => 'seal',
+            15 => 'pack',
+            default => 'other',
+        };
+    }
+
+    /** @return array{reserved:array<int,array{qty:float,orders:int,due:int}>,production:array<int,array{qty:float,orders:int}>} */
+    private function flowSummary(array $itemIds): array
+    {
+        sort($itemIds);
+        $cacheFile = null;
+        if ($this->erp->getAttribute(PDO::ATTR_DRIVER_NAME) !== 'sqlite') {
+            $cacheFile = dirname(__DIR__) . '/storage/cache/expected-stock-flow-v3-' . substr(hash('sha256', implode(',', $itemIds)), 0, 16) . '.json';
+            $cached = is_file($cacheFile) && filemtime($cacheFile) > time() - self::FLOW_CACHE_TTL ? json_decode((string)@file_get_contents($cacheFile), true) : null;
+            if (is_array($cached) && isset($cached['reserved'], $cached['production'])) {
+                return ['reserved' => self::intKeys($cached['reserved']), 'production' => self::intKeys($cached['production'])];
+            }
+        }
+        $reserved = [];
+        foreach ($this->pendingSales($itemIds) as $l) {
+            $iid = (int)$l['item_id'];
+            $reserved[$iid] ??= ['qty' => 0.0, 'orders' => [], 'due' => 0];
+            $reserved[$iid]['qty'] += (float)$l['pending'];
+            $reserved[$iid]['orders'][(int)$l['order_id']] = true;
+            $due = (int)$l['due_at'];
+            if ($due > 0 && ($reserved[$iid]['due'] === 0 || $due < $reserved[$iid]['due'])) {
+                $reserved[$iid]['due'] = $due;
+            }
+        }
+        foreach ($reserved as $iid => $r) {
+            $reserved[$iid]['orders'] = count($r['orders']);
+        }
+        $production = [];
+        foreach ($this->productionLines($itemIds) as $l) {
+            $iid = (int)$l['item_id'];
+            $production[$iid] ??= ['qty' => 0.0, 'orders' => 0, 'print' => 0.0, 'seal' => 0.0];
+            $production[$iid]['qty'] += (float)$l['pending'];
+            $production[$iid]['print'] += (float)$l['to_print'];
+            $production[$iid]['seal'] += (float)$l['to_seal'];
+            $production[$iid]['orders']++;
+        }
+        $data = ['reserved' => $reserved, 'production' => $production];
+        if ($cacheFile !== null) {
+            @file_put_contents($cacheFile, json_encode($data), LOCK_EX);
+        }
+        return $data;
+    }
+
+    private static function intKeys(array $a): array
+    {
+        $out = [];
+        foreach ($a as $k => $v) {
+            $out[(int)$k] = $v;
+        }
+        return $out;
+    }
+
+    /** @return array{id:int,code:string,title:string} */
+    private function itemByCode(string $code): array
+    {
+        if ($this->erp === null) {
+            throw new RuntimeException('Sin conexión con el ERP.');
+        }
+        $norm = self::normalizeCode($code);
+        $r = $this->all($this->erp, 'SELECT id, item_number_prod, item_title FROM item WHERE item_number_prod = ? LIMIT 1', [$norm]);
+        if ($r === []) {
+            throw new RuntimeException('El código ' . $norm . ' no existe en el ERP.');
+        }
+        return ['id' => (int)$r[0]['id'], 'code' => $norm, 'title' => trim((string)$r[0]['item_title'])];
+    }
+
+    /** @return array<int,string> */
+    private function customerNames(array $ids): array
+    {
+        $out = [];
+        if (self::inList($ids) === '0') {
+            return $out;
+        }
+        foreach ($this->all($this->erp, 'SELECT id, cust_name FROM customer WHERE id IN (' . self::inList($ids) . ')') as $r) {
+            $out[(int)$r['id']] = trim((string)$r['cust_name']);
+        }
+        return $out;
+    }
+
+    /** @return array<int,string> */
+    private function userNames(array $ids): array
+    {
+        $out = [];
+        if (self::inList($ids) === '0') {
+            return $out;
+        }
+        try {
+            foreach ($this->all($this->erp, 'SELECT id, user_firstname, user_lastname FROM user WHERE id IN (' . self::inList($ids) . ')') as $r) {
+                $out[(int)$r['id']] = trim((string)$r['user_firstname'] . ' ' . (string)$r['user_lastname']);
+            }
+        } catch (Throwable) {
+            // sin nombres de vendedor
+        }
+        return $out;
+    }
+
+    /**
+     * Stock de cada NV/CC en las bodegas (filas iss_order_id = NV).
+     *
+     * @return array<int,array{qty:int,places:string}>
+     */
+    private function stockByOrder(int $itemId, array $orderIds): array
+    {
+        $out = [];
+        if (self::inList($orderIds) === '0') {
+            return $out;
+        }
+        $names = [];
+        foreach ($this->all($this->erp, 'SELECT id, st_name FROM company_shops_storehouses') as $w) {
+            $names[(int)$w['id']] = trim((string)$w['st_name']);
+        }
+        foreach ($this->all($this->erp, 'SELECT iss.iss_order_id, iss.st_id, SUM(iss.iss_inventory) AS qty FROM item_shops_storehouses iss
+                WHERE iss.item_id = ? AND iss.iss_order_id IN (' . self::inList($orderIds) . ') GROUP BY iss.iss_order_id, iss.st_id', [$itemId]) as $r) {
+            $q = (int)floor((float)$r['qty'] + 1e-9);
+            if ($q === 0) {
+                continue;
+            }
+            $oid = (int)$r['iss_order_id'];
+            $out[$oid] ??= ['qty' => 0, 'places' => []];
+            $out[$oid]['qty'] += $q;
+            $label = $names[(int)$r['st_id']] ?? ('Bodega ' . (int)$r['st_id']);
+            $out[$oid]['places'][] = (preg_match('/^\s*(\d{3,4})/', $label, $mm) ? $mm[1] : $label) . ': ' . number_format($q, 0, ',', '.');
+        }
+        foreach ($out as $oid => $v) {
+            $out[$oid]['places'] = implode(' · ', $v['places']);
+        }
+        return $out;
+    }
+
+    private static function day(int $ts): string
+    {
+        return $ts > 0 ? date('Y-m-d', $ts) : '';
+    }
+
+    /** Resumen del SKU para la cabecera de la ventana (misma fila del informe). */
+    private function summaryFor(string $code): ?array
+    {
+        foreach ($this->report()['rows'] as $r) {
+            if (self::normalizeCode((string)$r['code']) === self::normalizeCode($code)) {
+                return $r;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * NV pendientes de despacho de un SKU, con cliente, vendedor, fechas, guías y stock ya asignado.
+     *
+     * @return array{item:array,summary:?array,rows:array<int,array<string,mixed>>,totals:array<string,int>}
+     */
+    public function reservedDetail(string $code): array
+    {
+        $item = $this->itemByCode($code);
+        $lines = $this->pendingSales([$item['id']]);
+        $byOrder = [];
+        foreach ($lines as $l) {
+            $byOrder[(int)$l['order_id']] = $l;
+        }
+        $orderIds = array_keys($byOrder);
+        $old = $this->pendingSales([$item['id']], true);
+        $customers = $this->customerNames(array_merge(array_column($lines, 'req_cust_id'), array_column($old, 'req_cust_id')));
+        $sellers = $this->userNames(array_column($lines, 'seller_id'));
+        $stock = $this->stockByOrder($item['id'], $orderIds);
+        $ots = [];
+        if ($orderIds !== []) {
+            foreach ($this->all($this->erp, 'SELECT ph.prd_reqid, ph.prd_number FROM prod_header ph WHERE ph.prd_status > 0 AND ph.prd_reqid IN (' . self::inList($orderIds) . ')') as $p) {
+                $ots[(int)$p['prd_reqid']][] = (string)$p['prd_number'];
+            }
+        }
+        $today = strtotime(date('Y-m-d'));
+        $age = static fn(int $ts): ?int => $ts > 0 ? (int)floor(($today - strtotime(date('Y-m-d', $ts))) / 86400) : null;
+        $rows = [];
+        $tot = ['ordered' => 0, 'shipped' => 0, 'pending' => 0, 'stock' => 0, 'orders' => 0];
+        foreach ($byOrder as $oid => $o) {
+            $pending = (int)round((float)$o['pending']);
+            $due = (int)$o['due_at'];
+            $created = (int)$o['req_crtdat'];
+            $rows[] = [
+                'order_id' => $oid, 'nv' => (string)$o['req_number'], 'customer' => $customers[(int)$o['req_cust_id']] ?? '',
+                'seller' => $sellers[(int)$o['seller_id']] ?? '', 'oc' => trim((string)$o['oc_number']),
+                'created' => self::day($created), 'age_days' => $age($created),
+                'due' => self::day($due), 'overdue' => $due > 0 && $due < $today,
+                'status' => (int)$o['req_status'] === 3 ? 'Despacho parcial' : 'Aprobada', 'is_reserva' => (int)$o['is_reserva'] === 1,
+                'ordered' => (int)round((float)$o['ordered']), 'shipped' => (int)round((float)$o['shipped']), 'pending' => $pending,
+                'guides' => (int)$o['guides'], 'last_guide' => self::day((int)$o['last_guide_at']),
+                'stock' => $stock[$oid]['qty'] ?? 0, 'stock_places' => $stock[$oid]['places'] ?? '',
+                'ots' => implode(', ', $ots[$oid] ?? []),
+            ];
+            $tot['ordered'] += (int)round((float)$o['ordered']);
+            $tot['shipped'] += (int)round((float)$o['shipped']);
+            $tot['pending'] += $pending;
+            $tot['stock'] += $stock[$oid]['qty'] ?? 0;
+            $tot['orders']++;
+        }
+        usort($rows, static fn($a, $b) => [$a['due'] === '' ? '9' : $a['due'], $a['order_id']] <=> [$b['due'] === '' ? '9' : $b['due'], $b['order_id']]);
+        // NV de venta antiguas que siguen abiertas en el ERP: no se cuentan (se informan para cerrarlas en el ERP).
+        $oldRows = [];
+        $oldTot = ['orders' => 0, 'pending' => 0];
+        foreach ($old as $o) {
+            $oldRows[] = ['order_id' => (int)$o['order_id'], 'nv' => (string)$o['req_number'], 'customer' => $customers[(int)$o['req_cust_id']] ?? '',
+                'created' => self::day((int)$o['req_crtdat']), 'age_days' => $age((int)$o['req_crtdat']), 'ordered' => (int)round((float)$o['ordered']),
+                'shipped' => (int)round((float)$o['shipped']), 'pending' => (int)round((float)$o['pending']), 'guides' => (int)$o['guides']];
+            $oldTot['orders']++;
+            $oldTot['pending'] += (int)round((float)$o['pending']);
+        }
+        usort($oldRows, static fn($a, $b) => $b['order_id'] <=> $a['order_id']);
+        return ['item' => $item, 'summary' => $this->summaryFor($item['code']), 'rows' => $rows, 'totals' => $tot,
+            'excluded' => $oldRows, 'excluded_totals' => $oldTot, 'max_age_days' => self::SALES_MAX_AGE_DAYS];
+    }
+
+    /**
+     * CC y OT con unidades por fabricar de un SKU: pedido, embalado, pendiente, etapa actual y agendas por máquina.
+     *
+     * @return array{item:array,summary:?array,rows:array<int,array<string,mixed>>,totals:array<string,int>}
+     */
+    public function productionDetail(string $code): array
+    {
+        $item = $this->itemByCode($code);
+        $lines = $this->productionLines([$item['id']]);
+        $orderIds = array_map(static fn($l) => (int)$l['order_id'], $lines);
+        $in = self::inList($orderIds);
+        $customers = $this->customerNames(array_column($lines, 'req_cust_id'));
+        $sellers = $this->userNames(array_column($lines, 'seller_id'));
+        $stock = $this->stockByOrder($item['id'], $orderIds);
+        $headers = [];
+        $plans = [];
+        $agendas = [];
+        if ($orderIds !== []) {
+            foreach ($this->all($this->erp, "SELECT ph.id, ph.prd_reqid, ph.prd_number, ph.prd_status FROM prod_header ph WHERE ph.prd_status > 0 AND ph.prd_reqid IN ($in) ORDER BY ph.id") as $h) {
+                $headers[(int)$h['prd_reqid']][] = $h;
+            }
+            $headerIds = [];
+            foreach ($headers as $list) {
+                foreach ($list as $h) {
+                    $headerIds[] = (int)$h['id'];
+                }
+            }
+            if ($headerIds !== []) {
+                try {
+                    foreach ($this->all($this->erp, 'SELECT prodplan_prdid, prodplan_amt, prodplan_date FROM prod_amtplan WHERE prodplan_prdid IN (' . self::inList($headerIds) . ') ORDER BY prodplan_date, id') as $p) {
+                        $plans[(int)$p['prodplan_prdid']][] = ['date' => self::day((int)$p['prodplan_date']), 'qty' => (int)round((float)$p['prodplan_amt'])];
+                    }
+                } catch (Throwable) {
+                    $plans = [];
+                }
+            }
+            $agRows = $this->all($this->erp, "SELECT pa.id, pa.ag_reqid, pa.ag_prdid, pa.ag_equipo_id, pa.ag_equipotype_id, pa.ag_date, pa.ag_amount, pa.ag_status,
+                    e.equipo_name, e.equipo_type_id
+                FROM prod_agenda pa LEFT JOIN equipo e ON e.id = pa.ag_equipo_id
+                WHERE pa.ag_reqid IN ($in) AND pa.ag_status > 0 ORDER BY pa.id");
+            $agIds = array_map(static fn($a) => (int)$a['id'], $agRows);
+            $woks = [];
+            $produced = [];
+            if ($agIds !== []) {
+                $wokRows = $this->all($this->erp, 'SELECT w.id, w.wok_ag_id, w.wok_status, w.wok_init_id, ' . $this->col('prod_worker_ot', 'w', 'wok_crtdat') . ' AS wok_crtdat, ' . $this->col('prod_worker_init', 'wi', 'win_status', '1') . ' AS win_status
+                    FROM prod_worker_ot w LEFT JOIN prod_worker_init wi ON wi.id = w.wok_init_id WHERE w.wok_ag_id IN (' . self::inList($agIds) . ')');
+                $initIds = array_map(static fn($w) => (int)$w['wok_init_id'], $wokRows);
+                $operators = [];
+                if (self::inList($initIds) !== '0') {
+                    try {
+                        foreach ($this->all($this->erp, 'SELECT wi.id, wk.wrk_firstname, wk.wrk_lastname FROM prod_worker_init wi LEFT JOIN workers wk ON wk.id = wi.win_wrkid WHERE wi.id IN (' . self::inList($initIds) . ')') as $o) {
+                            $operators[(int)$o['id']] = trim((string)$o['wrk_firstname'] . ' ' . (string)$o['wrk_lastname']);
+                        }
+                    } catch (Throwable) {
+                        $operators = [];
+                    }
+                }
+                $wokToAg = [];
+                foreach ($wokRows as $w) {
+                    $ag = (int)$w['wok_ag_id'];
+                    $wokToAg[(int)$w['id']] = $ag;
+                    $woks[$ag] ??= ['open' => false, 'operator' => '', 'runs' => 0];
+                    $woks[$ag]['runs']++;
+                    // En curso solo si la OT sigue abierta, su turno también (1 activo, 3 en pausa) y se abrió hace menos de 2 días:
+                    // hay OT que quedaron abiertas con el turno ya cerrado y no están en máquina.
+                    if ((int)$w['wok_status'] === 1 && in_array((int)$w['win_status'], [1, 3], true)
+                        && ((int)$w['wok_crtdat'] === 0 || (int)$w['wok_crtdat'] >= time() - 2 * 86400)) {
+                        $woks[$ag]['open'] = true;
+                        $woks[$ag]['operator'] = $operators[(int)$w['wok_init_id']] ?? '';
+                    }
+                }
+                if ($wokToAg !== []) {
+                    $commentFilter = $this->has('prod_worker_ot_events', 'evt_comments')
+                        ? " AND (e.evt_comments IS NULL OR (e.evt_comments NOT LIKE '%Bobina Semielaborada%' AND e.evt_comments NOT LIKE '%ROLL-SE-%'))" : '';
+                    foreach ($this->all($this->erp, "SELECT e.evt_prod_worker_otid, SUM(e.evt_amount) AS qty, MAX(e.evt_crtdat) AS last_at FROM prod_worker_ot_events e
+                            WHERE e.evt_prod_worker_otid IN (" . self::inList(array_keys($wokToAg)) . ") AND e.evt_type = 'prod' AND (e.evt_status IS NULL OR e.evt_status > 0)$commentFilter
+                            GROUP BY e.evt_prod_worker_otid") as $ev) {
+                        $ag = $wokToAg[(int)$ev['evt_prod_worker_otid']] ?? 0;
+                        $produced[$ag] ??= ['qty' => 0.0, 'last_at' => 0];
+                        $produced[$ag]['qty'] += (float)$ev['qty'];
+                        $produced[$ag]['last_at'] = max($produced[$ag]['last_at'], (int)$ev['last_at']);
+                    }
+                }
+            }
+            foreach ($agRows as $a) {
+                $agId = (int)$a['id'];
+                $type = (int)($a['equipo_type_id'] ?: $a['ag_equipotype_id']);
+                if ((int)$a['ag_equipo_id'] === 36) {
+                    $type = 22;
+                }
+                $isOpen = $woks[$agId]['open'] ?? false;
+                $prodQty = (int)round($produced[$agId]['qty'] ?? 0);
+                $agendas[(int)$a['ag_reqid']][] = [
+                    'machine' => trim((string)($a['equipo_name'] ?? '')) ?: ('Equipo ' . (int)$a['ag_equipo_id']),
+                    'process' => self::PROCESS_NAMES[$type] ?? 'Otro', 'type' => $type,
+                    'unit' => in_array($type, self::UNIT_PROCESSES, true) ? 'u' : '',
+                    'date' => trim((string)$a['ag_date']), 'planned' => (int)round((float)$a['ag_amount']), 'produced' => $prodQty,
+                    'last_at' => (int)($produced[$agId]['last_at'] ?? 0),
+                    'state' => $isOpen ? 'En curso' : ($prodQty > 0 ? 'Con producción' : 'Programada'),
+                    'operator' => $woks[$agId]['operator'] ?? '',
+                ];
+            }
+        }
+        $today = strtotime(date('Y-m-d'));
+        $rows = [];
+        $tot = ['ordered' => 0, 'packed' => 0, 'printed' => 0, 'sealed' => 0, 'to_print' => 0, 'to_seal' => 0, 'pending' => 0, 'stock' => 0, 'orders' => 0];
+        foreach ($lines as $l) {
+            $oid = (int)$l['order_id'];
+            $ag = $agendas[$oid] ?? [];
+            $stage = ($headers[$oid] ?? []) !== [] ? 'OT creada, sin máquina programada' : 'Sin programar';
+            $lastActivity = (int)$l['packed_last_at'];
+            $open = array_values(array_filter($ag, static fn($a) => $a['state'] === 'En curso'));
+            if ($open !== []) {
+                $stage = implode(' · ', array_map(static fn($a) => $a['process'] . ' — ' . $a['machine'] . ($a['operator'] !== '' ? ' (' . $a['operator'] . ')' : ''), $open));
+            } elseif ($ag !== []) {
+                $withProd = array_values(array_filter($ag, static fn($a) => $a['produced'] > 0));
+                if ($withProd !== []) {
+                    usort($withProd, static fn($a, $b) => $b['last_at'] <=> $a['last_at']);
+                    $stage = 'Último: ' . $withProd[0]['process'] . ' — ' . $withProd[0]['machine'];
+                } else {
+                    $stage = 'Programada: ' . implode(', ', array_unique(array_map(static fn($a) => $a['process'], $ag)));
+                }
+            }
+            foreach ($ag as $a) {
+                $lastActivity = max($lastActivity, $a['last_at']);
+            }
+            $hdrs = $headers[$oid] ?? [];
+            $planList = [];
+            foreach ($hdrs as $h) {
+                foreach ($plans[(int)$h['id']] ?? [] as $p) {
+                    $planList[] = $p;
+                }
+            }
+            $due = (int)$l['due_at'];
+            $nextPlan = '';
+            foreach ($planList as $p) {
+                if ($p['date'] !== '' && ($nextPlan === '' || $p['date'] < $nextPlan) && strtotime($p['date']) >= $today) {
+                    $nextPlan = $p['date'];
+                }
+            }
+            $ordered = (int)round((float)$l['ordered']);
+            $packed = (int)$l['packed'];
+            foreach ($ag as $i => $a) {
+                unset($ag[$i]['last_at']);
+                $ag[$i]['last'] = self::day($a['last_at']);
+            }
+            $rows[] = [
+                'order_id' => $oid, 'cc' => (string)$l['req_number'], 'ot' => implode(', ', array_map(static fn($h) => (string)$h['prd_number'], $hdrs)),
+                'customer' => $customers[(int)$l['req_cust_id']] ?? '', 'seller' => $sellers[(int)$l['seller_id']] ?? '',
+                'created' => self::day((int)$l['req_crtdat']), 'due' => self::day($due), 'overdue' => $due > 0 && $due < $today,
+                'next_plan' => $nextPlan, 'plans' => $planList,
+                'ordered' => $ordered, 'packed' => $packed, 'pending' => (int)$l['pending'],
+                'printed' => (int)$l['printed'], 'sealed' => (int)$l['sealed'], 'needs_print' => (bool)$l['needs_print'],
+                'to_print' => (int)$l['to_print'], 'to_seal' => (int)$l['to_seal'],
+                'progress' => $ordered > 0 ? min(100, (int)round((int)$l['sealed'] * 100 / $ordered)) : 0,
+                'stage' => $stage, 'agendas' => $ag, 'multi_product' => (bool)$l['multi_product'],
+                'last_activity' => self::day($lastActivity),
+                'idle_days' => $lastActivity > 0 ? (int)floor(($today - strtotime(date('Y-m-d', $lastActivity))) / 86400) : null,
+                'stock' => $stock[$oid]['qty'] ?? 0, 'stock_places' => $stock[$oid]['places'] ?? '',
+                'status' => (int)$l['req_status'] === 3 ? 'Despacho parcial' : 'Aprobada',
+            ];
+            $tot['ordered'] += $ordered;
+            $tot['packed'] += $packed;
+            $tot['pending'] += (int)$l['pending'];
+            foreach (['printed', 'sealed', 'to_print', 'to_seal'] as $k) {
+                $tot[$k] += (int)$l[$k];
+            }
+            $tot['stock'] += $stock[$oid]['qty'] ?? 0;
+            $tot['orders']++;
+        }
+        usort($rows, static fn($a, $b) => [$a['due'] === '' ? '9' : $a['due'], $a['order_id']] <=> [$b['due'] === '' ? '9' : $b['due'], $b['order_id']]);
+        // CC con saldo pero sin movimiento: no se cuentan (merma de cierre o pedido que se dejó de hacer).
+        $staleRows = [];
+        $staleTot = ['orders' => 0, 'pending' => 0];
+        $stale = $this->productionLines([$item['id']], true);
+        $staleCustomers = $this->customerNames(array_column($stale, 'req_cust_id'));
+        foreach ($stale as $l) {
+            $staleRows[] = ['order_id' => (int)$l['order_id'], 'cc' => (string)$l['req_number'], 'customer' => $staleCustomers[(int)$l['req_cust_id']] ?? '',
+                'created' => self::day((int)$l['req_crtdat']), 'ordered' => (int)round((float)$l['ordered']), 'packed' => (int)$l['packed'],
+                'to_print' => (int)$l['to_print'], 'to_seal' => (int)$l['to_seal'],
+                'pending' => (int)$l['pending'], 'last_activity' => self::day((int)$l['last_activity_at']), 'reason' => (string)$l['excluded_reason']];
+            $staleTot['orders']++;
+            $staleTot['pending'] += (int)$l['pending'];
+        }
+        usort($staleRows, static fn($a, $b) => $b['order_id'] <=> $a['order_id']);
+        return ['item' => $item, 'summary' => $this->summaryFor($item['code']), 'rows' => $rows, 'totals' => $tot,
+            'excluded' => $staleRows, 'excluded_totals' => $staleTot, 'idle_days' => self::PRODUCTION_IDLE_DAYS, 'new_days' => self::PRODUCTION_NEW_DAYS];
     }
 
     // ------------------------------------------------------------------ escritura

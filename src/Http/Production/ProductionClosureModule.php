@@ -37,13 +37,14 @@ function handleProductionClosureRoutes(
         $supPass = (string)($_REQUEST['sup_pass'] ?? ($_REQUEST['askprdclose_axx_pass'] ?? ''));
 
         if ($workerOtId <= 0 && $agId > 0) {
-            $openOt = $prodService->getOpenWorkerOtByAgId($agId);
+            $openOt = $prodService->getOpenWorkerOtByAgId(0, 0, $agId); // antes faltaban argumentos y fallaba
             if ($openOt && !empty($openOt['id'])) {
                 $workerOtId = (int)$openOt['id'];
             }
         }
 
-        $res = $prodService->closeWorkOrder($workerOtId, $supUser, $supPass);
+        $res = $prodService->closeWorkOrder($workerOtId, $supUser, $supPass,
+            !empty($_REQUEST['confirm_bag_difference']), (string)($_REQUEST['bag_difference_reason'] ?? ''));
         if ($res['ok']) {
             $prodService->syncPulpoAgendaStats($agId);
             $closedParam = !empty($res['without_supervisor']) ? 'closed=1&noprod=1' : 'closed=1';

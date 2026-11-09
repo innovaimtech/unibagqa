@@ -217,5 +217,84 @@ foreach (['epl', 'zpl', 'tspl'] as $lang) {
 }
 $check('la cantidad parcial no escribió en el ERP', (int)$erp->query('SELECT COUNT(*) FROM orders_delivery')->fetchColumn() === 8);
 
+// ---- despacho con factura (el ERP descuenta stock con la factura tipo 2/3 y crea su propio registro de despacho)
+$erp->exec("ALTER TABLE orders_delivery ADD COLUMN dlv_invoice_generated INTEGER DEFAULT 0;
+CREATE TABLE orders (id INTEGER PRIMARY KEY, req_number TEXT);
+CREATE TABLE invoices_sell (id INTEGER PRIMARY KEY, invc_number TEXT, invc_docnumber TEXT, invc_status INTEGER, invc_type INTEGER, invc_stockchange INTEGER,
+  invc_date INTEGER, invc_cust_id INTEGER, invc_oc_number TEXT, invc_bultos INTEGER, invc_dlv_docnum TEXT);
+CREATE TABLE invoices_sell_parts (id INTEGER PRIMARY KEY, part_invc_id INTEGER, part_req_id INTEGER);
+CREATE TABLE invoices_sell_parts_items (invc_id INTEGER, part_id INTEGER, item_id INTEGER, item_pos INTEGER, item_amount REAL, item_type TEXT,
+  item_override_stockdsc_amt REAL DEFAULT 0, item_desc TEXT);
+INSERT INTO orders VALUES (500,'NV0002600');
+INSERT INTO invoices_sell VALUES
+ (1,'FV0011701','15318',2,2,1,1700000000,1,'OC-9',3,''),
+ (2,'FV0011704','FV0011704',1,2,1,1700000000,1,'',0,''),
+ (3,'FV0011690','15300',9,2,1,1700000000,1,'',0,''),
+ (4,'FV0011688','15290',2,1,0,1700000000,1,'',0,'5001'),
+ (5,'FV0011650','15250',3,3,1,1700000000,1,'',0,''),
+ (6,'FV0011600','FV0011600',0,2,1,1700000000,1,'',0,'');
+INSERT INTO invoices_sell_parts VALUES (1,1,500);
+INSERT INTO invoices_sell_parts_items VALUES (1,1,3,1,25,'item',0,''),(1,1,0,2,1,'manual',0,'Flete'),(2,1,3,1,25,'item',0,''),(3,1,3,1,25,'item',0,''),
+ (4,0,3,1,25,'item',0,''),(5,0,3,1,1,'item',25,''),(6,0,3,1,25,'item',0,'');
+INSERT INTO orders_delivery (id,dlv_num,dlv_docnum,dlv_status,dlv_mode,dlv_delivery_date,dlv_cust_id,dlv_invoice_generated) VALUES
+ (18,'FV0011701','',4,0,1700000000,1,1),(19,109,'5009',3,0,1700000000,1,0);
+INSERT INTO orders_delivery_items (dlv_id,item_id,item_pos,item_amount_shipped) VALUES (18,3,1,25),(19,3,1,25);");
+// Al pickear no se sabe con qué documento sale: se elige en el paso 2 (cuando retiran) y se guarda al confirmar.
+$k8 = bin2hex(random_bytes(16));
+$svc->createPicking($k8, 'SALE', '', $actor);
+$svc->scan($k8, 'TRZ5C4687', $actor);
+$svc->setQuantity($itemId($k8, 'TRZ5C4687'), '25', $actor);
+$svc->close($k8, $actor);
+$check('cerrado queda esperando documento, sin guía ni factura definida', DispatchService::statusLabel('AWAITING_GUIDE') === 'Esperando documento'
+    && $svc->counts()['AWAITING_GUIDE'] === 2 && count($svc->list('AWAITING_GUIDE')) === 2);
+$inv = $svc->lookupInvoice('FV0011701');
+$check('factura por número FV', $inv !== null && $inv['id'] === 1 && $inv['docnum'] === '15318' && $inv['customer'] === 'Cliente SA');
+$check('factura por número corto y por folio SII', ($svc->lookupInvoice('11701')['id'] ?? 0) === 1 && ($svc->lookupInvoice('15318')['id'] ?? 0) === 1);
+$check('factura trae solo artículos (sin líneas manuales) y su NV', count($inv['items']) === 1 && $inv['items'][0]['sku'] === 'SKU-P' && $inv['orders'] === ['NV0002600']);
+$vi = fn(string $n) => $svc->validation($k8, $n, 'INVOICE')['compare'];
+$check('paso 2 factura: inexistente da error', str_contains(implode(' ', $vi('99999')['errors']), 'factura no existe'));
+$check('paso 2 factura: abierta (sin emitir) da error', str_contains(implode(' ', $vi('FV0011704')['errors']), 'no está emitida'));
+$check('paso 2 factura: anulada da error', str_contains(implode(' ', $vi('15300')['errors']), 'anulada'));
+$check('paso 2 factura: eliminada da error', str_contains(implode(' ', $vi('FV0011600')['errors']), 'eliminada'));
+$fromGuide = $vi('15290');
+$check('paso 2 factura: hecha desde guías avisa que no descuenta stock', $fromGuide['errors'] === [] && str_contains(implode(' ', $fromGuide['warnings']), 'guías de despacho'));
+$paid = $vi('15250');
+$check('paso 2 factura: pagada vale y usa la cantidad de stock de reemplazo', $paid['errors'] === [] && $paid['warnings'] === []);
+$okInv = $vi('FV0011701');
+$check('paso 2 factura: correcta sin errores ni diferencias', $okInv['errors'] === [] && $okInv['warnings'] === [] && $okInv['rows'][0]['guide'] === 25.0);
+$check('paso 2 guía: un número FV indica elegir factura', str_contains(implode(' ', $svc->validation($k8, 'FV0011701', 'GUIDE')['compare']['errors']), 'Cambia el documento'));
+$check('paso 2 guía: guía ya facturada (estado 3) es válida', $svc->validation($k8, '5009', 'GUIDE')['compare']['errors'] === []);
+$check('paso 2: la maquila no se puede buscar como factura', $throws(fn() => $svc->validation($k2, '15318', 'INVOICE'), 'guía'));
+$check('paso 2: documento inválido se rechaza', $throws(fn() => $svc->confirmGuide($k8, '15318', false, $actor, 'XX'), 'guía de despacho o con factura'));
+$check('paso 2: confirmar con factura anulada falla y no despacha', $throws(fn() => $svc->confirmGuide($k8, '15300', true, $actor, 'INVOICE'), 'anulada')
+    && $svc->detail($k8)['status'] === 'AWAITING_GUIDE');
+$svc->confirmGuide($k8, 'FV0011701', false, $actor, 'INVOICE');
+$row8 = $trz->query('SELECT * FROM dispatch_pickings WHERE picking_key=' . $trz->quote($k8))->fetch();
+$check('confirmado con factura: guarda documento, folio SII y copia', $row8['status'] === 'DISPATCHED' && $row8['document_type'] === 'INVOICE' && (int)$row8['guide_id'] === 1
+    && $row8['guide_number'] === '15318' && str_contains((string)$row8['guide_snapshot'], 'NV0002600'));
+$check('el historial dice que se confirmó con factura', count(array_filter($svc->detail($k8)['audit'], fn($a) => $a['action'] === 'CONFIRM' && str_contains((string)$a['detail'], '"doc":"INVOICE"'))) === 1);
+$check('la factura descuenta del código', (float)$trz->query("SELECT quantity FROM traceability_warehouse_entries WHERE traceability_code='TRZ5C4687'")->fetchColumn() === 35.0);
+$check('el movimiento indica que salió con factura', str_contains((string)$trz->query("SELECT payload FROM movements WHERE entity_type='PRODUCT' ORDER BY id DESC LIMIT 1")->fetchColumn(), '"document_type":"INVOICE"'));
+$entryId = (int)$trz->query("SELECT id FROM traceability_warehouse_entries WHERE traceability_code='TRZ5C4687'")->fetchColumn();
+$check('trazabilidad sabe que salió con factura', ($svc->dispatchOf('PRODUCT', $entryId)['document_type'] ?? '') === 'INVOICE');
+$mov = (int)$trz->query('SELECT COUNT(*) FROM movements')->fetchColumn();
+$svc->confirmGuide($k8, 'FV0011701', false, $actor, 'INVOICE');
+$check('reintento con factura es idempotente', (int)$trz->query('SELECT COUNT(*) FROM movements')->fetchColumn() === $mov);
+$check('filtro «despachado con» factura y guía', count($svc->list('', '', '', 100, 'INVOICE')) === 1 && count($svc->list('', '', '', 100, 'GUIDE')) === 4);
+$check('los despachos antiguos quedan como guía', $svc->detail($k1)['document_type'] === 'GUIDE');
+$k9 = bin2hex(random_bytes(16));
+$svc->createPicking($k9, 'SALE', '', $actor);
+$svc->scan($k9, 'TRZ5C4687', $actor);
+$svc->close($k9, $actor);
+$check('factura ya usada se rechaza', str_contains(implode(' ', $svc->validation($k9, '15318', 'INVOICE')['compare']['errors']), 'ya fue asociada'));
+$erp->exec("INSERT INTO invoices_sell VALUES (7,'FV0011710','15400',2,2,1,1700000000,1,'',0,'');
+INSERT INTO invoices_sell_parts_items VALUES (7,0,3,1,35,'item',0,'');");
+$svc->confirmGuide($k9, '15400', false, $actor, 'INVOICE');
+$d9 = $svc->detail($k9);
+$check('segundo despacho con otra factura', $d9['status'] === 'DISPATCHED' && $d9['document_type'] === 'INVOICE' && $d9['guide_number'] === '15400');
+$check('la factura no escribió en el ERP', (int)$erp->query('SELECT COUNT(*) FROM orders_delivery')->fetchColumn() === 10
+    && (int)$erp->query('SELECT COUNT(*) FROM invoices_sell')->fetchColumn() === 7);
+
+
 echo $fail === 0 ? "\nDESPACHO OK\n" : "\nDESPACHO: $fail fallas\n";
 exit($fail === 0 ? 0 : 1);

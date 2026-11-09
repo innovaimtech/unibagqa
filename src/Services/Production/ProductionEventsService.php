@@ -867,6 +867,10 @@ trait ProductionEventsServiceTrait
             }
 
             $ownsTransaction = false;
+
+            // Sin esto, la producción desaparece y el stock de ese embalaje queda en bodega. Si falla, no se elimina.
+            $this->reversePackagingEventStock($eventId);
+
             if (!$this->erpPdo->inTransaction()) {
                 $this->erpPdo->beginTransaction();
                 $ownsTransaction = true;
@@ -883,21 +887,8 @@ trait ProductionEventsServiceTrait
             $prevSupplyEvents = $stPrev->fetchAll(PDO::FETCH_ASSOC);
             if (!empty($prevSupplyEvents)) {
                 foreach ($prevSupplyEvents as $pe) {
-                    $prevAmt = (float)($pe['evt_amount'] ?? 0);
-                    $comm = (string)($pe['evt_comments'] ?? '');
-                    if ($prevAmt > 0) {
-                        if (str_contains($comm, 'pallet')) {
-                            $this->adjustWarehouseStock(118, 16, +$prevAmt);
-                        } elseif (str_contains($comm, 'cajas')) {
-                            if (preg_match('/\[ITEM_ID:(\d+)\]/', $comm, $mId)) {
-                                $this->adjustWarehouseStock((int)$mId[1], 16, +$prevAmt);
-                            }
-                        } elseif (str_contains($comm, 'cinta')) {
-                            if (preg_match('/\[ITEM_ID:(\d+)\]/', $comm, $mId)) {
-                                $this->adjustWarehouseStock((int)$mId[1], 16, +$prevAmt);
-                            }
-                        }
-                    }
+                    // Con kardex: se revierte su documento; antes del kardex: se devuelve como se descontó.
+                    $this->revertPackagingSupplyEvent($pe);
                 }
                 $this->erpPdo->prepare("
                     DELETE FROM prod_worker_ot_events
@@ -1229,8 +1220,39 @@ trait ProductionEventsServiceTrait
         ];
     }
 
+    /**
+     * Kg de tinta registrados (y descontados del inventario) por color de la OT, desde Consumo de tinta.
+     * La etiqueta del color es «Color N: descripción»; se suma por N.
+     *
+     * @return array<int,float>
+     */
+    public function pulpoInkByColor(int $agId): array
+    {
+        if ($agId <= 0 || $this->trzPdo === null) {
+            return [];
+        }
+        try {
+            $stmt = $this->trzPdo->prepare("SELECT color_label, SUM(consumed_qty) AS kg FROM work_order_machine_ink_loads
+                WHERE ag_id = ? AND machine_process = 'SERIGRAFIA' GROUP BY color_label");
+            $stmt->execute([$agId]);
+            $byColor = [];
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                if (preg_match('/^Color\s+(\d+)\s*:/i', (string)$row['color_label'], $m) === 1) {
+                    $byColor[(int)$m[1]] = ($byColor[(int)$m[1]] ?? 0.0) + (float)$row['kg'];
+                }
+            }
+            return $byColor;
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
     public function savePulpoV2Data(int $agId, string $colorMode, array $header, array $units): bool
     {
+        // La tinta de cada color sale de Consumo de tinta (lo que se descontó del inventario), no de lo que se escribe aquí:
+        // antes se sumaba «carga − sobrante» al total en cada guardado y un reenvío la contaba dos veces.
+        $inkByColor = $this->pulpoInkByColor($agId);
+        $inkAssigned = [];
         $colorMode = ($colorMode === 'Dorso') ? 'Dorso' : 'Frente';
         $pidx = strtolower($colorMode);
 
@@ -1269,10 +1291,12 @@ trait ProductionEventsServiceTrait
                 $tempSec = (float)($u['val_temp_secador'] ?? 0);
                 $bastidor = trim((string)($u['val_num_bastidor'] ?? ''));
                 $mesh = (float)($u['val_mesh'] ?? 0);
-                $totalTinta = (float)($u['val_total_tinta'] ?? 0);
-                $cargaTinta = (float)($u['val_carga_tinta'] ?? 0);
-                $sobranteTinta = (float)($u['val_sobrante_tinta'] ?? 0);
-                $totalTinta = $totalTinta + $cargaTinta - $sobranteTinta;
+                $colorIdx = (int)$colorId;
+                $totalTinta = 0.0;
+                if ($colorIdx > 0 && !isset($inkAssigned[$colorIdx])) {
+                    $totalTinta = round((float)($inkByColor[$colorIdx] ?? 0), 3);
+                    $inkAssigned[$colorIdx] = true; // un color en dos unidades no se cuenta dos veces
+                }
 
                 if ($colorId === '-1') {
                     $bastidor = '';

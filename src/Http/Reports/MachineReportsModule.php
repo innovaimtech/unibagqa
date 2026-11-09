@@ -638,6 +638,13 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
             // Manilla / Colores
             $manillaColor = trim((string)($row['manilla_color'] ?? ''));
             $colorsFront = trim((string)($row['colors_front'] ?? ''));
+            $colorsBackTxt = trim((string)($row['colors_back'] ?? ''));
+            if ($colorsBackTxt !== '') {
+                $colorsFront = ($colorsFront !== '' ? 'Frente: ' . $colorsFront . ' · ' : '') . 'Dorso: ' . $colorsBackTxt;
+            }
+            if ((string)($row['process_code'] ?? '') === 'pulpo' && ((float)($row['pasadas_frente'] ?? 0) > 0 || (float)($row['pasadas_dorso'] ?? 0) > 0)) {
+                $colorsFront .= ' · Pasadas F/D: ' . number_format((float)$row['pasadas_frente'], 0, ',', '.') . ' / ' . number_format((float)$row['pasadas_dorso'], 0, ',', '.');
+            }
 
             // Personal
             $operator = trim((string)($row['operator_name'] ?? ''));
@@ -2088,6 +2095,13 @@ function unibagOutputMachineProductionExcel(ReceptionService $service): void
     echo '<th>Colores Frente</th>';                    /* 58 */
     echo '<th>Colores Dorso</th>';                     /* 59 */
     echo '<th>Estado de Producción</th>';              /* 60 */
+    echo '<th>% Merma Programado</th>';
+    echo '<th>Impresiones al Desarrollo</th>';
+    echo '<th>Imágenes por Bastidor</th>';
+    echo '<th>Pasadas Frente</th>';
+    echo '<th>Pasadas Dorso</th>';
+    echo '<th>Kgs Tinta Utilizada</th>';
+    echo '<th>Bolsas Usadas de Cajas (Pulpo)</th>';
     echo '</tr>';
 
     foreach ($rows as $row) {
@@ -2152,6 +2166,13 @@ function unibagOutputMachineProductionExcel(ReceptionService $service): void
         echo '<td>' . h((string)($row['colors_front'] ?? '')) . '</td>';
         echo '<td>' . h((string)($row['colors_back'] ?? '')) . '</td>';
         echo '<td align="center">' . h((string)($row['status_label'] ?? '')) . '</td>';
+        echo '<td class="num-dec">' . round((float)($row['waste_planned_percent'] ?? 0), 2) . '</td>';
+        echo '<td class="num-int">' . (int)($row['devprints'] ?? 0) . '</td>';
+        echo '<td class="num-int">' . (int)($row['bastidor_images'] ?? 0) . '</td>';
+        echo '<td class="num-int">' . (int)round((float)($row['pasadas_frente'] ?? 0)) . '</td>';
+        echo '<td class="num-int">' . (int)round((float)($row['pasadas_dorso'] ?? 0)) . '</td>';
+        echo '<td class="num-dec">' . round((float)($row['ink_kg'] ?? 0), 3) . '</td>';
+        echo '<td class="num-int">' . (int)round((float)($row['bags_used'] ?? 0)) . '</td>';
         echo '</tr>';
     }
 

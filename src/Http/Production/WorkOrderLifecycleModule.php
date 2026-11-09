@@ -33,7 +33,7 @@ function productionWorkOrderTableProcess(array $machine): string
     $typeId = (int)($machine['equipo_type_id'] ?? 0);
     $name = (string)($machine['equipo_name'] ?? '');
     $typeName = (string)($machine['type_ant_title'] ?? '');
-    if (stripos($name, 'pulpo') !== false || (int)($machine['win_equipoid'] ?? 0) === 36) return 'pulpo';
+    if (MachineKind::isPulpo((int)($machine['win_equipoid'] ?? 0), $name, $typeId, true)) return 'pulpo';
     if ($typeId === 15 || stripos($name, 'embalaje') !== false || stripos($typeName, 'embalaje') !== false) return 'embalaje';
     if ($typeId === 8 || stripos($name, 'sellad') !== false || stripos($typeName, 'corte') !== false) return 'cys';
     return '';

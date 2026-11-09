@@ -371,28 +371,11 @@ function handleProductionEventsRoutes(
             $fCum = $prevFrente + $amountFrente;
             $dCum = $prevDorso + $amountDorso;
 
-            // Verificar si la OT lleva dorso
-            $hasDorsoColor = false;
-            try {
-                $stmtColors = Db::erpPdo()->prepare("SELECT fab_print_colors_back_1, fab_print_colors_back_2, fab_print_colors_back_3, fab_print_colors_back_4, fab_print_colors_back_5 FROM orders_items WHERE req_id = (SELECT ag_reqid FROM prod_agenda WHERE id = :agid LIMIT 1)");
-                $stmtColors->execute([':agid' => $agId]);
-                $cRow = $stmtColors->fetch();
-                if (is_array($cRow)) {
-                    for ($ci = 1; $ci <= 5; $ci++) {
-                        if (!empty($cRow["fab_print_colors_back_{$ci}"])) {
-                            $hasDorsoColor = true;
-                            break;
-                        }
-                    }
-                }
-            } catch (Throwable) {}
-
-            if ($hasDorsoColor || $amountDorso > 0 || $prevDorso > 0) {
-                $finishedCum = min($fCum, $dCum);
-                $calcPulpoAmount = max(0.0, $finishedCum - $prevFinished);
-            } else {
-                $calcPulpoAmount = $amountFrente;
-            }
+            // Caras que imprime la OT (10 colores): con frente y dorso cuentan las bolsas con ambas caras; con una sola cara,
+            // las pasadas de esa cara (antes una OT de solo dorso daba 0 bolsas terminadas).
+            $pulpoSides = PulpoBagService::printSides(Db::erpPdo(), $agId);
+            $finishedCum = PulpoBagService::finishedBags($fCum, $dCum, $pulpoSides['front'], $pulpoSides['back'] || $amountDorso > 0 || $prevDorso > 0);
+            $calcPulpoAmount = max(0.0, $finishedCum - $prevFinished);
 
             if ($amount <= 0 || isset($_REQUEST['amount_pulpo_frente']) || isset($_REQUEST['amount_pulpo_dorso'])) {
                 $amount = $calcPulpoAmount;
@@ -402,7 +385,9 @@ function handleProductionEventsRoutes(
         $packagingDetail = null;
         $packagingPdo = null;
         // Solo un embalaje que se cierra ahora carga stock: corregir uno ya cerrado no debe sumarlo de nuevo.
-        $packagingClosingNow = $isEnd && $eventId > 0 && (int)($event['evt_enddat'] ?? 0) === 0;
+        // Uno cerrado sin detalle y sin mover nunca terminó su cierre: el reintento también cuenta como cierre.
+        $packagingClosingNow = $isEnd && $eventId > 0 && ((int)($event['evt_enddat'] ?? 0) === 0
+            || ((int)($event['overrideembalaje_selladora_evtrefid'] ?? 0) === 0 && $prodService->getPackagingEventDetail($eventId, $workerOtId) === []));
         try {
             if ($overrideEmbalaje === 1 && $isEnd && !empty($_REQUEST['close_without_production'])) {
                 // Cierre de embalaje sin producción: no se registra detalle de cajas, no hay descuento de insumos ni correo.
@@ -418,6 +403,8 @@ function handleProductionEventsRoutes(
                 $comments = 'Cierre de embalaje sin producción. Motivo: ' . $noProdReason;
             } elseif ($overrideEmbalaje === 1) {
                 $packagingDetail = ProductionService::normalizePackagingDetail($_REQUEST);
+                // Antes de tocar el evento: el ERP no puede deshacer un cierre si esto falla después.
+                $prodService->assertPackagingCloseAllowed($packagingDetail, (string)($_REQUEST['pack_supervisor_user'] ?? ''), (string)($_REQUEST['pack_supervisor_pass'] ?? ''));
                 $amount = (float)$packagingDetail['total_units'];
                 $amount2 = $bobinaKg = $amountFrente = $amountDorso = 0;
                 $mmaq = $mlin = 0;
@@ -474,6 +461,11 @@ function handleProductionEventsRoutes(
         $supplyWarning = ($packagingDetail !== null && method_exists($prodService, 'getLastSupplyConsumptionWarning'))
             ? $prodService->getLastSupplyConsumptionWarning() : '';
         $supplyWarningQuery = $supplyWarning !== '' ? '&supply_warning=' . rawurlencode($supplyWarning) : '';
+        // Cajas con código recién creadas: el aviso ofrece imprimir sus etiquetas.
+        $createdBoxIds = $packagingDetail !== null ? $prodService->getLastCreatedBoxIds() : [];
+        if ($createdBoxIds !== []) {
+            $supplyWarningQuery .= '&box_labels=' . implode('-', array_map('intval', $createdBoxIds));
+        }
 
         if ($isEnd) {
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&prod_ended=1' . $supplyWarningQuery);
@@ -713,6 +705,24 @@ function handleProductionOperateRoutes(
                 || stripos((string)($activeInit['equipo_name'] ?? ''), 'selladora') !== false
                 || stripos((string)($activeInit['type_ant_title'] ?? ''), 'confecc') !== false);
             $isHandleCode = (preg_match('/^ROLL-(MAN|HDL)-/i', $scanMachineInput) === 1 || !empty($_POST['is_handle_scan']));
+
+            // Pulpo Serigráfico: imprime sobre bolsas; un código escaneado es una caja de bolsas, no una bobina.
+            if ($activeInit !== null && MachineKind::isPulpo((int)($activeInit['win_equipoid'] ?? 0), (string)($activeInit['equipo_name'] ?? ''),
+                    $eqTypeId, (int)($activeInit['equipo_prod_isprinter_seri'] ?? 0) === 1)) {
+                $activeOt = $prodService->getOpenWorkerOtForInit((int)$activeInit['id'], $agId);
+                $back = '/production/work-orders/operate?agid=' . $agId . '&mode=materiales';
+                try {
+                    if ($activeOt === null || Db::trzPdo() === null) {
+                        throw new RuntimeException('Abre la OT en la máquina antes de poner una caja de bolsas.');
+                    }
+                    $box = (new PulpoBagService(Db::erpPdo(), Db::trzPdo()))->mount((int)$activeOt['id'], $scanMachineInput, $currentOperatorName);
+                    redirectResponse($back . '&bag_ok=' . rawurlencode('Caja ' . $box['box_code'] . ' en máquina: '
+                        . number_format((float)$box['units_qty'], 0, ',', '.') . ' bolsas.') . '#pulpo-bags');
+                } catch (Throwable $e) {
+                    redirectResponse($back . '&error=' . rawurlencode($e->getMessage()) . '#pulpo-bags');
+                }
+                return true;
+            }
 
             if ($isSelladora && $isHandleCode) {
                 // Escaneo de manillas en Corte y Sellado
@@ -1029,6 +1039,7 @@ function renderProductionOperatorConsole(
     $pulpoV2 = $ctx['pulpo_v2'] ?? [];
     $pulpoAgendaData = $pulpoV2['agenda'] ?? $agenda;
     $pulpoUnits = $pulpoV2['units'] ?? [];
+    $pulpoInkByColor = !empty($ctx['pulpo_v2']) ? $prodService->pulpoInkByColor($agId) : [];
     $bastidoresList = $ctx['bastidores'] ?? [];
     $colorMode = $ctx['colormode'] ?? 'Frente';
 
@@ -1053,8 +1064,8 @@ function renderProductionOperatorConsole(
         || ($equipoTypeId === 22)
         || stripos((string)($machineInit['type_ant_title'] ?? ''), 'seri') !== false
         || stripos((string)($machineInit['equipo_name'] ?? ''), 'seri') !== false;
-    $isSeriPulpo = ($isSeri || $equipoTypeId === 22 || (int)($machineInit['win_equipoid'] ?? 0) === 36)
-        && (stripos((string)($machineInit['equipo_name'] ?? ''), 'pulpo') !== false || (int)($machineInit['win_equipoid'] ?? 0) === 36);
+    $isSeriPulpo = MachineKind::isPulpo((int)($machineInit['win_equipoid'] ?? 0), (string)($machineInit['equipo_name'] ?? ''), $equipoTypeId, $isSeri);
+    $isSeri = $isSeri || $isSeriPulpo;
     $isSeriPlana = $isSeri && !$isSeriPulpo;
     $isPrinter = $isFlexo || $isSeri;
     $isSelladora = $equipoTypeId === 8 || stripos((string)($machineInit['type_ant_title'] ?? ''), 'selladora') !== false;

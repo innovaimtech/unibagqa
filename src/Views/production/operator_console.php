@@ -763,12 +763,16 @@ echo renderView('production/partials/operator_flash_banners', ['agenda' => $agen
                                     </div>
                                 </td>
                             </tr>
+                            <?php if ($amtColorsFrente <= 0): // OT de solo dorso: no hay pasadas de frente ?>
+                                <input type="hidden" name="amount_pulpo_frente" id="idx_pulpo_frente" value="0">
+                            <?php else: ?>
                             <tr>
                                 <td class="tdleft">Pasadas Frente (este tiraje)</td>
                                 <td class="tdnrm">
                                     <input type="number" step="1" min="0" name="amount_pulpo_frente" id="idx_pulpo_frente" class="inptxt" style="width:200px" value="<?=(float)($currentRefEvt['evt_amount_pulpo_frente'] ?? 0) > 0 ? (int)$currentRefEvt['evt_amount_pulpo_frente'] : ''?>" placeholder="0" oninput="calcPulpoUnits()"> pasadas
                                 </td>
                             </tr>
+                            <?php endif; ?>
                             <tr>
                                 <td class="tdleft">Pasadas Dorso (este tiraje)</td>
                                 <td class="tdnrm">
@@ -1897,7 +1901,9 @@ echo renderView('production/partials/operator_flash_banners', ['agenda' => $agen
 
         var fCum = prevF + fNew;
         var dCum = prevD + dNew;
-        var finishedCum = Math.min(fCum, dCum);
+        // Con frente y dorso cuentan las bolsas con ambas caras; con una sola cara, las pasadas de esa cara.
+        var hasFront = <?= (int)($amtColorsFrente ?? 0) > 0 ? 'true' : 'false' ?>;
+        var finishedCum = hasFront ? Math.min(fCum, dCum) : dCum;
         var finishedThisEvent = Math.max(0, finishedCum - prevFinished);
 
         var amtInp = document.getElementById('idx_pulpo_amount');

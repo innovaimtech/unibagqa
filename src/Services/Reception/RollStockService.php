@@ -6,6 +6,8 @@ declare(strict_types=1);
 // Servicio de Datos · Movimientos de Stock y Trazabilidad de Bobinas (src/Services/Reception/RollStockService.php)
 // =============================================================================
 
+require_once dirname(__DIR__, 2) . '/StockLedgerService.php';
+require_once dirname(__DIR__, 2) . '/BagBoxService.php';
 trait RollStockServiceTrait
 {
     public function listRollsByWarehouseCode(int $warehouseCode, int $limit = 200): array
@@ -2113,6 +2115,36 @@ trait RollStockServiceTrait
         // para garantizar que las FKs no violen fk_rolls_warehouse_id ni fk_movements_to_wh
         $localWarehouseId = $this->resolveLocalWarehouseId($warehouseId, $warehouseName);
 
+        // Cajas de bolsas: quedan ligadas al artículo, la bodega y el CC del ERP, para pedirlas, usarlas en el Pulpo y
+        // despacharlas. Solo etiquetan stock que ya existe: el total de cajas no puede superar el stock del ERP.
+        $boxErpOrderId = null;
+        if ($entityType === 'BOX' && $itemId !== null && $warehouseId > 0) {
+            if ($orderRef !== '') {
+                $stmtOrd = $this->erpPdo->prepare('SELECT id FROM orders WHERE req_number = ? LIMIT 1');
+                $stmtOrd->execute([$orderRef]);
+                $boxErpOrderId = (int)$stmtOrd->fetchColumn() ?: null;
+            }
+            $stmtStock = $this->erpPdo->prepare('SELECT COALESCE(SUM(iss_inventory),0) FROM item_shops_storehouses WHERE item_id = ? AND st_id = ?'
+                . ($boxErpOrderId !== null ? ' AND iss_order_id = ?' : ''));
+            $stmtStock->execute($boxErpOrderId !== null ? [$itemId, $warehouseId, $boxErpOrderId] : [$itemId, $warehouseId]);
+            $erpStock = (float)$stmtStock->fetchColumn();
+            try {
+                (new BagBoxService($this->pdo, $this->erpPdo))->ensureSchema();
+                $stmtLabeled = $this->pdo->prepare("SELECT COALESCE(SUM(units_qty),0) FROM boxes WHERE erp_item_id = ? AND erp_st_id = ? AND status IN ('IN_WAREHOUSE','IN_MACHINE')"
+                    . ($boxErpOrderId !== null ? ' AND erp_order_id = ?' : ''));
+                $stmtLabeled->execute($boxErpOrderId !== null ? [$itemId, $warehouseId, $boxErpOrderId] : [$itemId, $warehouseId]);
+                $labeled = (float)$stmtLabeled->fetchColumn();
+            } catch (Throwable) {
+                $labeled = 0.0;
+            }
+            $wanted = $packageCount * $qty;
+            if ($labeled + $wanted > $erpStock + 0.0005) {
+                return ['ok' => false, 'error' => 'El ERP tiene ' . number_format($erpStock, 0, ',', '.') . ' unidades de ' . $itemCode
+                    . ($boxErpOrderId !== null ? ' (CC ' . $orderRef . ')' : '') . ' en esta bodega y ya hay ' . number_format($labeled, 0, ',', '.')
+                    . ' en cajas con código: no alcanza para ' . number_format($wanted, 0, ',', '.') . ' más. Revisa el stock antes de etiquetar.'];
+            }
+        }
+
         // Para rollo, resolver o insertar sku_id en tabla skus una sola vez
         $skuId = null;
         if ($entityType === 'ROLL') {
@@ -2166,20 +2198,35 @@ trait RollStockServiceTrait
                     ]);
                     $entityId = (int)$this->pdo->lastInsertId();
                 } elseif ($entityType === 'BOX') {
-                    $stmtBox = $this->pdo->prepare('
-                        INSERT INTO boxes (box_code, final_sku, units_qty, warehouse_id, customer_order_ref, operator_name, destination_mode, status, created_at)
-                        VALUES (:code, :sku, :qty, :wh, :ord, :op, :dest, :st, NOW())
-                    ');
-                    $stmtBox->execute([
-                        ':code' => $entryCode,
-                        ':sku' => $itemCode,
-                        ':qty' => $qty,
-                        ':wh' => $localWarehouseId,
-                        ':ord' => $orderRef !== '' ? $orderRef : null,
-                        ':op' => $operatorName,
-                        ':dest' => 'BODEGA',
-                        ':st' => 'RECEIVED',
-                    ]);
+                    $linkedBox = $itemId !== null && $warehouseId > 0;
+                    if ($linkedBox) {
+                        (new BagBoxService($this->pdo, $this->erpPdo))->ensureSchema();
+                        $stmtBox = $this->pdo->prepare('
+                            INSERT INTO boxes (box_code, final_sku, units_qty, units_initial, warehouse_id, customer_order_ref, operator_name, destination_mode, status,
+                                erp_item_id, erp_st_id, erp_order_id, source_kind, source_ref, created_at)
+                            VALUES (:code, :sku, :qty, :qty2, :wh, :ord, :op, :dest, :st, :item, :erpst, :erpord, :kind, :ref, NOW())
+                        ');
+                        $stmtBox->execute([
+                            ':code' => $entryCode, ':sku' => $itemCode, ':qty' => $qty, ':qty2' => $qty, ':wh' => $localWarehouseId,
+                            ':ord' => $orderRef !== '' ? $orderRef : null, ':op' => $operatorName, ':dest' => 'BODEGA', ':st' => 'IN_WAREHOUSE',
+                            ':item' => $itemId, ':erpst' => $warehouseId, ':erpord' => $boxErpOrderId, ':kind' => BagBoxService::SOURCE_LABEL, ':ref' => $batchId,
+                        ]);
+                    } else {
+                        $stmtBox = $this->pdo->prepare('
+                            INSERT INTO boxes (box_code, final_sku, units_qty, warehouse_id, customer_order_ref, operator_name, destination_mode, status, created_at)
+                            VALUES (:code, :sku, :qty, :wh, :ord, :op, :dest, :st, NOW())
+                        ');
+                        $stmtBox->execute([
+                            ':code' => $entryCode,
+                            ':sku' => $itemCode,
+                            ':qty' => $qty,
+                            ':wh' => $localWarehouseId,
+                            ':ord' => $orderRef !== '' ? $orderRef : null,
+                            ':op' => $operatorName,
+                            ':dest' => 'BODEGA',
+                            ':st' => 'RECEIVED',
+                        ]);
+                    }
                     $entityId = (int)$this->pdo->lastInsertId();
                 } elseif ($entityType === 'ROLL') {
                     $stmtRoll = $this->pdo->prepare('
@@ -2637,12 +2684,12 @@ trait RollStockServiceTrait
                     continue;
                 }
 
-                $this->adjustErpInventoryRow(
-                    (int)$erpItem['id'],
-                    (int)$erpStorehouse['shop_id'],
-                    (int)$erpStorehouse['id'],
-                    $targetQty - $currentQty
-                );
+                (new StockLedgerService($this->erpPdo))->post([
+                    'key' => 'rolllegacy.' . substr(hash('sha256', $warehouseId . '|' . $skuCode . '|' . $targetQty . '|' . $currentQty), 0, 24),
+                    'item_id' => (int)$erpItem['id'], 'shop_id' => (int)$erpStorehouse['shop_id'], 'st_id' => (int)$erpStorehouse['id'],
+                    'delta' => $targetQty - $currentQty, 'allow_negative' => true,
+                    'text' => 'Bobinas recibidas antes en trazabilidad que faltaban en el ERP: ' . $skuCode . '.',
+                ]);
             }
         } catch (Throwable) {
             return;
@@ -2856,14 +2903,13 @@ trait RollStockServiceTrait
             return;
         }
 
+        // Si el registro principal falló, el respaldo también deja documento y kardex (antes solo tocaba el stock).
         foreach ($this->getErpSyncTargets() as $targetPdo) {
-            $this->adjustErpInventoryRow(
-                (int)$erpItem['id'],
-                (int)$erpStorehouse['shop_id'],
-                (int)$erpStorehouse['id'],
-                $receivedQty * $direction,
-                $targetPdo
-            );
+            (new StockLedgerService($targetPdo))->post([
+                'key' => 'rollsync.' . substr(hash('sha256', $annotationBase . '|' . $rollId . '|' . $direction), 0, 24),
+                'item_id' => (int)$erpItem['id'], 'shop_id' => (int)$erpStorehouse['shop_id'], 'st_id' => (int)$erpStorehouse['id'],
+                'delta' => $receivedQty * $direction, 'allow_negative' => true, 'text' => $annotationBase,
+            ]);
         }
     }
 
@@ -2937,9 +2983,13 @@ trait RollStockServiceTrait
             return;
         }
 
+        // Respaldo con documento de traspaso y kardex (antes solo tocaba el stock).
         foreach ($this->getErpSyncTargets() as $targetPdo) {
-            $this->adjustErpInventoryRow($itemId, (int)$fromStorehouse['shop_id'], (int)$fromStorehouse['id'], -1.0 * $receivedQty, $targetPdo);
-            $this->adjustErpInventoryRow($itemId, (int)$toStorehouse['shop_id'], (int)$toStorehouse['id'], $receivedQty, $targetPdo);
+            (new StockLedgerService($targetPdo))->transfer([
+                'key' => 'rolltr.' . substr(hash('sha256', $annotationBase . '|' . $rollId), 0, 24),
+                'item_id' => $itemId, 'shop_id' => (int)$fromStorehouse['shop_id'], 'from_st' => (int)$fromStorehouse['id'],
+                'to_st' => (int)$toStorehouse['id'], 'qty' => $receivedQty, 'allow_negative' => true, 'text' => $annotationBase,
+            ]);
         }
     }
 

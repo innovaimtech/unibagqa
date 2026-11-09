@@ -310,37 +310,88 @@ function handleProductionMaterialsRoutes(
     }
 
     // Generar cajas de producto terminado y pallet (Selladora / Confección / Embalaje)
+    // Etiquetas de las cajas con código (las crea el cierre de embalaje): un trabajo de impresión térmica con todas.
+    if ($path === '/production/boxes/print-job' && $method === 'POST') {
+        requireCsrf();
+        header('Content-Type: application/json; charset=utf-8');
+        $ids = array_slice(array_values(array_unique(array_filter(array_map('intval', explode('-', (string)($_POST['ids'] ?? '')))))), 0, 300);
+        try {
+            if ($ids === [] || Db::trzPdo() === null) {
+                throw new RuntimeException('No hay cajas para imprimir.');
+            }
+            $inventory = new WarehouseInventoryService(Db::trzPdo(), Db::erpPdo());
+            $printer = new PrintService($_ENV);
+            $parts = [];
+            foreach ($ids as $id) {
+                $box = $inventory->getBox($id);
+                if ($box !== null) {
+                    $parts[] = $printer->buildBoxCommand($box);
+                }
+            }
+            if ($parts === []) {
+                throw new RuntimeException('No se encontraron las cajas.');
+            }
+            echo json_encode(['ok' => true, 'print_job' => $printer->buildClientJob(implode("
+
+", $parts), 1, count($parts) . ' etiqueta(s) de caja')], JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $e) {
+            echo json_encode(['ok' => false, 'error' => $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        }
+        return true;
+    }
+
+    // Pulpo Serigráfico: cajas de bolsas en la máquina (poner, registrar bolsas usadas, anular, bajar, reintentar).
+    if ($path === '/production/work-orders/pulpo-bags' && $method === 'POST') {
+        requireCsrf();
+        $agId = (int)($_POST['agid'] ?? 0);
+        $back = '/production/work-orders/operate?agid=' . $agId . '&mode=materiales';
+        try {
+            if (isErpProductionReadOnlyMode($path)) {
+                throw new RuntimeException('Esta vista de producción es de solo lectura.');
+            }
+            $openOt = $prodService->getOpenWorkerOtByAgId($workerId, $plantaId, $agId);
+            $workerOtId = (int)($openOt['id'] ?? 0);
+            if ($workerOtId <= 0 || Db::trzPdo() === null) {
+                throw new RuntimeException('Abre la OT en la máquina antes de usar cajas de bolsas.');
+            }
+            $bags = new PulpoBagService(Db::erpPdo(), Db::trzPdo());
+            $action = (string)($_POST['bag_action'] ?? '');
+            $msg = '';
+            $warning = '';
+            if ($action === 'mount') {
+                $box = $bags->mount($workerOtId, (string)($_POST['code'] ?? ''), $currentOperatorName);
+                $msg = !empty($box['already']) ? 'La caja ' . $box['box_code'] . ' ya estaba en la máquina.'
+                    : 'Caja ' . $box['box_code'] . ' en máquina: ' . number_format((float)$box['units_qty'], 0, ',', '.') . ' bolsas.';
+            } elseif ($action === 'consume') {
+                $res = $bags->consume($workerOtId, (int)($_POST['box_id'] ?? 0), (float)($_POST['qty'] ?? 0), $currentOperatorName, (string)($_POST['op_key'] ?? ''));
+                $msg = 'Bolsas usadas registradas y descontadas del inventario. Quedan ' . number_format($res['units_after'], 0, ',', '.') . ' en la caja.';
+                $warning = $res['warning'];
+            } elseif ($action === 'reverse') {
+                $res = $bags->reverse($workerOtId, (int)($_POST['move_id'] ?? 0), $currentOperatorName, (string)($_POST['reason'] ?? ''));
+                $msg = 'Consumo anulado: las bolsas volvieron a la caja y al inventario.';
+                $warning = $res['warning'];
+            } elseif ($action === 'unmount') {
+                $bags->unmount($workerOtId, (int)($_POST['box_id'] ?? 0), $currentOperatorName);
+                $msg = 'Caja bajada de la máquina; queda en Bodega 3000 con su saldo.';
+            } elseif ($action === 'resume') {
+                $msg = $bags->resumePending($workerOtId) . ' movimiento(s) pendiente(s) completado(s).';
+            } else {
+                throw new RuntimeException('Acción no válida.');
+            }
+            redirectResponse($back . '&bag_ok=' . rawurlencode($msg) . ($warning !== '' ? '&supply_warning=' . rawurlencode($warning) : '') . '#pulpo-bags');
+        } catch (Throwable $e) {
+            redirectResponse($back . '&error=' . rawurlencode($e->getMessage()) . '#pulpo-bags');
+        }
+        return true;
+    }
+
     if ($path === '/production/work-orders/boxes/generate' && $method === 'POST') {
         requireCsrf();
         $agId = (int)($_POST['agid'] ?? 0);
-        $workerOtId = (int)($_POST['worker_ot_id'] ?? 0);
-        $skuFinal = trim((string)($_POST['sku_final'] ?? ''));
-        $boxQty = (int)($_POST['box_qty'] ?? 0);
-        $unitsPerBox = (int)($_POST['units_per_box'] ?? 0);
-        $sourceRollId = !empty($_POST['source_roll_id']) ? (int)$_POST['source_roll_id'] : null;
-        $boxesPerPallet = (int)($_POST['boxes_per_pallet'] ?? 0);
-        $destMode = trim((string)($_POST['destination_mode'] ?? 'STOCK'));
-        $custRef = trim((string)($_POST['customer_order_ref'] ?? ''));
-
-        $res = $prodService->createOutputBoxesFromWorkOrder(
-            $workerOtId,
-            $skuFinal,
-            $boxQty,
-            $unitsPerBox,
-            $currentOperatorName,
-            $sourceRollId,
-            $custRef !== '' ? $custRef : null,
-            $boxesPerPallet,
-            $destMode
-        );
-
-        if ($res['ok']) {
-            $firstBoxId = !empty($res['box_ids']) ? (int)$res['box_ids'][0] : 0;
-            $palletId = !empty($res['pallet_id']) ? (int)$res['pallet_id'] : 0;
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=embalaje&boxes_done=' . $boxQty . '&first_box=' . $firstBoxId . '&pallet_id=' . $palletId);
-        } else {
-            redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=embalaje&error=' . rawurlencode((string)($res['error'] ?? 'Error al generar cajas.')));
-        }
+        // Las cajas con código se crean solas al cerrar el embalaje, ligadas al CC y al stock del ERP.
+        // Generarlas a mano dejaba cajas sin stock y con otro formato de código.
+        redirectResponse('/production/work-orders/operate?agid=' . $agId . '&error='
+            . rawurlencode('Las cajas con código se crean al finalizar el embalaje. Finaliza el embalaje e imprime sus etiquetas.'));
         return true;
     }
 
@@ -522,7 +573,8 @@ function handleProductionMaterialsRoutes(
                 $comments,
                 16
             );
-            $param = $res['ok'] ? '&ink_consumed=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar consumo de tinta de serigrafía.'));
+            $param = $res['ok'] ? '&ink_consumed=1' . (($res['warning'] ?? '') !== '' ? '&supply_warning=' . rawurlencode((string)$res['warning']) : '')
+                : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar consumo de tinta de serigrafía.'));
         } elseif ($inkAction === 'delete_load') {
             $loadId = (int)($_POST['load_id'] ?? 0);
             $res = $prodService->deleteMachineInkLoad($loadId, $workerOtId, $currentOperatorName);
@@ -536,7 +588,8 @@ function handleProductionMaterialsRoutes(
             $loadId = (int)($_POST['load_id'] ?? 0);
             $qty = (float)str_replace(',', '.', (string)($_POST['qty_kg'] ?? 0));
             $res = $prodService->consumeMachineInkLoad($loadId, $workerOtId, $qty, $currentOperatorName, $comments);
-            $param = $res['ok'] ? '&ink_consumed=1' : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar consumo de tinta.'));
+            $param = $res['ok'] ? '&ink_consumed=1' . (($res['warning'] ?? '') !== '' ? '&supply_warning=' . rawurlencode((string)$res['warning']) : '')
+                : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar consumo de tinta.'));
         } elseif ($inkAction === 'return') {
             $loadId = (int)($_POST['load_id'] ?? 0);
             $qty = (float)str_replace(',', '.', (string)($_POST['qty_kg'] ?? 0));

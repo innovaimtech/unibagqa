@@ -35,6 +35,9 @@
 .dsp-kpi span{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-top:2px}
 .tone-PICKING{background:#fef3c7;color:#b45309}
 .tone-AWAITING_GUIDE{background:#dbeafe;color:#1d4ed8}
+.dsp-doc{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:700;white-space:nowrap}
+.dsp-doc.GUIDE{background:#eff6ff;color:#1d4ed8}
+.dsp-doc.INVOICE{background:#f5f3ff;color:#6d28d9}
 .tone-DISPATCHED{background:#dcfce7;color:#15803d}
 .tone-CANCELLED{background:#f1f5f9;color:#64748b}
 
@@ -71,7 +74,7 @@
 .dsp-type input:checked+.dsp-type-box{border-color:var(--brand-2);background:var(--brand-soft);color:var(--brand);box-shadow:0 0 0 1px var(--brand-2) inset}
 .dsp-type input:checked+.dsp-type-box i{color:var(--brand)}
 .dsp-type input:focus-visible+.dsp-type-box{box-shadow:0 0 0 3px rgba(0,169,166,.25)}
-.dsp-filters{display:grid;grid-template-columns:170px 170px minmax(180px,1fr) auto auto;gap:10px;align-items:end;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--soft)}
+.dsp-filters{display:grid;grid-template-columns:170px 150px 150px minmax(180px,1fr) auto auto;gap:10px;align-items:end;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--soft)}
 
 /* Tablas */
 .dsp-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
@@ -114,6 +117,12 @@
 /* Escaneo */
 .dsp-scan{display:flex;gap:10px;padding:16px}
 .dsp-scan-input{position:relative;flex:1;min-width:0}
+.dsp-seg{display:inline-flex;flex:none;gap:2px;padding:3px;border:1px solid #cbd5e1;border-radius:12px;background:#f1f5f9}
+.dsp-seg label{display:flex;margin:0;cursor:pointer}
+.dsp-seg input{position:absolute;opacity:0;pointer-events:none}
+.dsp-seg span{display:flex;align-items:center;justify-content:center;gap:7px;height:40px;padding:0 16px;border-radius:9px;font-weight:700;font-size:13.5px;color:#64748b;white-space:nowrap}
+.dsp-seg input:checked+span{background:#fff;color:var(--brand);box-shadow:0 1px 3px rgba(15,23,42,.18)}
+.dsp-seg input:focus-visible+span{box-shadow:0 0 0 3px rgba(0,169,166,.3)}
 .dsp-scan-input i{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#94a3b8;font-size:17px}
 .dsp .dsp-scan-input input[type=text]{height:48px;padding-left:42px;font-size:17px;font-weight:600}
 
@@ -170,7 +179,7 @@
 @media (max-width:1080px){
   .dsp-layout,.dsp-layout.form-left{grid-template-columns:minmax(0,1fr)}
   .dsp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .dsp-filters{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .dsp-filters{grid-template-columns:repeat(3,minmax(0,1fr))}
   .dsp-filters>.wide{grid-column:1/-1}
 }
 @media (max-width:640px){
@@ -180,6 +189,9 @@
   .dsp-kpi-icon{width:34px;height:34px;font-size:14px}
   .dsp-kpi b{font-size:19px}
   .dsp-scan{flex-direction:column}
+  .dsp-seg{display:flex}
+  .dsp-seg label{flex:1}
+  .dsp-seg span{width:100%}
   .dsp-filters{grid-template-columns:minmax(0,1fr)}
   .dsp-step-line{margin:0 8px;min-width:14px}
   .dsp-step{font-size:12px}

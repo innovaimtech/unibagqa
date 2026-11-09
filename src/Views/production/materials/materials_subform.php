@@ -385,6 +385,10 @@
                 </div>
             <?php endif; ?>
         <?php endif; ?>
+        <?php if ($isSeriPulpo): ?>
+            <?php // El Pulpo imprime sobre bolsas, no sobre bobinas: aquí se usan las cajas de bolsas con código. ?>
+            <?=renderView('production/materials/pulpo_bags', ['agId' => (int)$agId, 'workerOtId' => (int)$workerOtId])?>
+        <?php else: ?>
         <?php
         $printerOutputDefaultSku = trim((string)($agenda['item_number_prod'] ?? $agenda['item_title'] ?? $agenda['fab_type'] ?? 'BOBINA-IMPRESA'));
         $printerOutputSuggestedMeters = (float)($metros_a_imprimir ?? ($stats['total_meters'] ?? 0));
@@ -1468,6 +1472,8 @@
             }
         });
         </script>
+
+        <?php endif; /* fin: bobinas (no Pulpo) */ ?>
 
     <?php elseif ($mode === 'consumo'): ?>
         <!-- Redirigir a modo materiales para gestionar montaje y salida de bobinas con trazabilidad -->

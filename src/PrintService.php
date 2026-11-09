@@ -1275,6 +1275,8 @@ final class PrintService
             ? ('OC cliente: ' . ($customerOrderRef !== '' ? $customerOrderRef : '-'))
             : ('Stock bodega: ' . ($warehouseCode !== '' ? $warehouseCode : '-'));
         $destinationLabel = $this->z($destinationLabel);
+        // Cajas de bolsas: no tienen OT, sí CC.
+        $otOrCc = $otCode === '' && $customerOrderRef !== '' ? 'CC: ' . $customerOrderRef : 'OT: ' . $otCode;
 
         return "^XA
 ^CI28
@@ -1292,7 +1294,7 @@ final class PrintService
 
 ^CF0,24
 ^FO20,166^FDCAJA: {$boxCode}^FS
-^FO20,194^FDOT: {$otCode}^FS
+^FO20,194^FD{$otOrCc}^FS
 ^FO20,222^FDBOBINA ORIGEN: {$sourceRoll}^FS
 ^FO20,250^FDUNIDADES: {$units}^FS
 ^FO20,278^FDPALLET: {$palletCode}^FS

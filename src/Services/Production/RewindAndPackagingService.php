@@ -13,6 +13,9 @@ const UNIBAG_PACKAGING_EQUIPO_ID = 25;
 const UNIBAG_PACKAGING_EQUIPO_TYPE_ID = 15;
 const UNIBAG_MIXED_ORIGIN_AT_DESTINATION = -1;
 
+require_once dirname(__DIR__, 2) . '/StockLedgerService.php';
+require_once dirname(__DIR__, 2) . '/BagBoxService.php';
+
 trait RewindAndPackagingServiceTrait
 {
     /** Aviso (si lo hubo) del último descuento de stock de embalaje; la pantalla lo muestra al operador. */
@@ -21,6 +24,15 @@ trait RewindAndPackagingServiceTrait
     public function getLastSupplyConsumptionWarning(): string
     {
         return $this->lastSupplyConsumptionWarning;
+    }
+
+    /** @var int[] Cajas con código creadas por el último cierre de embalaje (para imprimir sus etiquetas). */
+    private array $lastCreatedBoxIds = [];
+
+    /** @return int[] */
+    public function getLastCreatedBoxIds(): array
+    {
+        return $this->lastCreatedBoxIds;
     }
 
     /** @var array<int,mixed>|null Datos del correo de facturación pendiente de enviar tras el commit. */
@@ -557,12 +569,24 @@ trait RewindAndPackagingServiceTrait
         return $detail;
     }
 
-    public function savePackagingEventDetail(int $eventId, int $workerOtId, array $detail, string $supervisor, string $password): int
+    /** Lo que puede rechazar un cierre de embalaje por datos del formulario. */
+    public function assertPackagingCloseAllowed(array $detail, string $supervisor, string $password): void
     {
-        $detail = self::normalizePackagingDetail($detail);
         if (!$this->validateSupervisor($supervisor, $password)) {
             throw new RuntimeException('Las credenciales del supervisor no son validas.');
         }
+        $warehouse = $this->erpPdo->prepare('SELECT st_name FROM company_shops_storehouses WHERE id = :id AND st_status = 1');
+        $warehouse->execute([':id' => (int)($detail['req_id_bodega'] ?? 0)]);
+        $destName = $warehouse->fetchColumn();
+        if ($destName === false || !WarehouseVisibility::isPackagingDestination((string)$destName)) {
+            throw new RuntimeException('Bodega de destino no valida: solo se permiten las bodegas 400, 500, 700 y 1000.');
+        }
+    }
+
+    public function savePackagingEventDetail(int $eventId, int $workerOtId, array $detail, string $supervisor, string $password): int
+    {
+        $detail = self::normalizePackagingDetail($detail);
+        $this->assertPackagingCloseAllowed($detail, $supervisor, $password);
         // Un embalaje de selladora ya cerrado vive en la OT de Embalaje, enlazado con la OT de la selladora.
         $stmt = $this->erpPdo->prepare('SELECT a.ag_reqid, a.ag_equipotype_id, e.overrideembalaje_selladora_evtrefid AS linked_ot, o.req_number FROM prod_worker_ot_events e JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid JOIN prod_agenda a ON a.id = ot.wok_ag_id LEFT JOIN orders o ON o.id = a.ag_reqid WHERE e.id = :event AND (ot.id = :ot OR (e.overrideembalaje_act = 1 AND e.overrideembalaje_selladora_evtrefid = :linked_ot))');
         $stmt->execute([':event' => $eventId, ':ot' => $workerOtId, ':linked_ot' => $workerOtId]);
@@ -574,12 +598,6 @@ trait RewindAndPackagingServiceTrait
         // En selladora, el CC del cierre entra por el stock automático: si además se traspasa, queda doble en destino.
         $mainStockIsAutomatic = (int)($eventOrder['ag_equipotype_id'] ?? 0) === UNIBAG_CYS_EQUIPO_TYPE_ID || (int)($eventOrder['linked_ot'] ?? 0) > 0;
         $mainReqNumber = trim((string)($eventOrder['req_number'] ?? ''));
-        $warehouse = $this->erpPdo->prepare('SELECT st_name FROM company_shops_storehouses WHERE id = :id AND st_status = 1');
-        $warehouse->execute([':id' => $detail['req_id_bodega']]);
-        $destName = $warehouse->fetchColumn();
-        if ($destName === false || !WarehouseVisibility::isPackagingDestination((string)$destName)) {
-            throw new RuntimeException('Bodega de destino no valida: solo se permiten las bodegas 400, 500, 700 y 1000.');
-        }
         $user = $this->erpPdo->prepare('SELECT id FROM user WHERE user_login = :login AND user_status = 1 LIMIT 1');
         $user->execute([':login' => trim($supervisor)]);
         $supervisorId = (int)$user->fetchColumn();
@@ -714,11 +732,31 @@ trait RewindAndPackagingServiceTrait
                 . ' El embalaje se guardó, pero NO quedó en la producción de Embalaje. Avisa a sistemas (evento ' . $eventId . ').');
         }
         try {
-            $this->syncCysPackagingStock($eventId, $closingNow);
+            $stockLoaded = $this->syncCysPackagingStock($eventId, $closingNow);
         } catch (Throwable $e) {
+            $stockLoaded = false;
             error_log('Stock de embalaje CyS, evento ' . $eventId . ': ' . $e->getMessage());
             $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning
                 . ' El embalaje se guardó, pero NO se pudo cargar el stock a bodega: avisa a bodega para ajustarlo.');
+        }
+        // Cada caja recibe su código con CC, SKU, bodega y unidades, solo si su stock quedó en la bodega por este sistema.
+        $this->lastCreatedBoxIds = [];
+        if ($stockLoaded && $this->trzPdo !== null) {
+            try {
+                $detail = $this->erpPdo->prepare('SELECT req_id_bodega FROM prod_worker_embalajes WHERE req_v2refid = ? ORDER BY id DESC LIMIT 1');
+                $detail->execute([$eventId]);
+                $warehouse = (int)$detail->fetchColumn();
+                $operator = (string)($_SESSION['operator_name'] ?? $_SESSION['user_name'] ?? $_SESSION['username'] ?? 'Embalaje');
+                $sync = (new BagBoxService($this->trzPdo, $this->erpPdo))->syncPackagingBoxes($eventId, $warehouse, $operator);
+                $this->lastCreatedBoxIds = $sync['created'];
+                if ($sync['warning'] !== '') {
+                    $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning . ' ' . $sync['warning']);
+                }
+            } catch (Throwable $e) {
+                error_log('Cajas con código del embalaje ' . $eventId . ': ' . $e->getMessage());
+                $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning
+                    . ' El embalaje se guardó, pero NO se crearon los códigos de sus cajas: ' . $e->getMessage());
+            }
         }
     }
 
@@ -797,35 +835,28 @@ trait RewindAndPackagingServiceTrait
      * Deja en bodega lo embalado desde una selladora. Cada documento lleva la marca [TRZ-EMB-STOCK:evento:bodega:cantidad],
      * y solo se registra la diferencia con lo ya cargado: repetir no duplica y una corrección ajusta lo justo.
      */
-    private function syncCysPackagingStock(int $eventId, bool $closingNow): void
+    /** @return bool true si el stock de este embalaje está cargado por este sistema (con su marca). */
+    private function syncCysPackagingStock(int $eventId, bool $closingNow): bool
     {
         $event = $this->closedPackagingEventRow($eventId);
         if ($event === null) {
-            return;
+            return false;
         }
+        // Máquina Embalaje propia: su stock lo carga hoy el sistema antiguo al terminar la OT; cargarlo aquí lo duplicaría.
         if ((int)$event['linked_ot'] <= 0 && (int)$event['ag_equipotype_id'] !== UNIBAG_CYS_EQUIPO_TYPE_ID) {
-            return; // Máquina Embalaje propia: no es parte de este flujo.
+            return false;
         }
         $stmt = $this->erpPdo->prepare('SELECT * FROM prod_worker_embalajes WHERE req_v2refid = ? ORDER BY id DESC LIMIT 1');
         $stmt->execute([$eventId]);
         $detail = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$detail) {
-            return;
+            return false;
         }
 
-        $docs = $this->erpPdo->prepare('SELECT stk_annotation FROM stockchanges WHERE stk_annotation LIKE ?');
-        $docs->execute(['%[TRZ-EMB-STOCK:' . $eventId . ':%']);
-        $loaded = [];
-        $hasDocuments = false;
-        foreach ($docs->fetchAll(PDO::FETCH_COLUMN) as $annotation) {
-            if (preg_match('/\[TRZ-EMB-STOCK:' . $eventId . ':(\d+):(-?\d+)\]/', (string)$annotation, $m) === 1) {
-                $loaded[(int)$m[1]] = ($loaded[(int)$m[1]] ?? 0) + (int)$m[2];
-                $hasDocuments = true;
-            }
-        }
+        $loaded = $this->loadedPackagingStock($eventId);
         // Sin cierre nuevo ni carga previa: es un embalaje que ya ajustó bodega.
-        if (!$closingNow && !$hasDocuments) {
-            return;
+        if (!$closingNow && $loaded === []) {
+            return false;
         }
 
         // En un cierre mixto entra lo del CC principal; los demás CC llegan por su traspaso de bodega.
@@ -843,6 +874,45 @@ trait RewindAndPackagingServiceTrait
                 $this->postPackagingStockChange($eventId, (int)$event['ag_reqid'], (int)$st, $delta);
             }
         }
+        return true;
+    }
+
+    /** Unidades ya cargadas por este embalaje, por bodega, según las marcas de sus documentos. */
+    private function loadedPackagingStock(int $eventId): array
+    {
+        $docs = $this->erpPdo->prepare('SELECT stk_annotation FROM stockchanges WHERE stk_annotation LIKE ?');
+        $docs->execute(['%[TRZ-EMB-STOCK:' . $eventId . ':%']);
+        $loaded = [];
+        foreach ($docs->fetchAll(PDO::FETCH_COLUMN) as $annotation) {
+            if (preg_match('/\[TRZ-EMB-STOCK:' . $eventId . ':(\d+):(-?\d+)\]/', (string)$annotation, $m) === 1) {
+                $loaded[(int)$m[1]] = ($loaded[(int)$m[1]] ?? 0) + (int)$m[2];
+            }
+        }
+        return $loaded;
+    }
+
+    /**
+     * Devuelve el stock que movió este embalaje, antes de eliminarlo o anularlo. Revierte solo sus ingresos y traspasos
+     * con marca, con documento y kardex; lo cargado a mano o por el sistema antiguo no se toca. Repetir no revierte dos veces.
+     */
+    public function reversePackagingEventStock(int $eventId): void
+    {
+        // Sus cajas con código se anulan primero; si alguna ya se usó o despachó, no se puede eliminar el embalaje.
+        if ($this->trzPdo !== null) {
+            (new BagBoxService($this->trzPdo, $this->erpPdo))->voidPackagingBoxes($eventId);
+        }
+        $stmt = $this->erpPdo->prepare('SELECT id, evt_reqid, req_id_bodega FROM prod_worker_embalajes WHERE req_v2refid = ? ORDER BY id DESC LIMIT 1');
+        $stmt->execute([$eventId]);
+        $detail = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$detail) {
+            return;
+        }
+        foreach ($this->loadedPackagingStock($eventId) as $warehouse => $units) {
+            if ($units !== 0) {
+                $this->postPackagingStockChange($eventId, (int)$detail['evt_reqid'], (int)$warehouse, -$units);
+            }
+        }
+        $this->revertRemovedMixedTransfers((int)$detail['id'], [], (int)$detail['req_id_bodega']);
     }
 
     /** Documento de ajuste de stock, igual al del sistema antiguo: entra (o sale) del stock del pedido en la bodega. */
@@ -1130,6 +1200,50 @@ trait RewindAndPackagingServiceTrait
     }
 
     /**
+     * Descuenta un insumo de embalaje de la Bodega 3000 con documento y kardex. Devuelve la marca que se guarda en el
+     * comentario del evento de materiales, para poder revertir exactamente ese documento.
+     */
+    private function postPackagingSupply(int $eventId, int $itemId, float $qty, string $label): string
+    {
+        $key = 'embsup.' . $eventId . '.' . $itemId . '.' . substr(bin2hex(random_bytes(4)), 0, 8);
+        $posted = (new StockLedgerService($this->erpPdo))->post([
+            'key' => $key, 'item_id' => $itemId, 'st_id' => 16, 'delta' => -$qty, 'allow_negative' => true,
+            'text' => 'Consumo automático de embalaje: ' . $label . ' (evento ' . $eventId . ').',
+        ]);
+        if ($posted['stock_after'] < -0.0005) {
+            $this->lastSupplyConsumptionWarning = trim($this->lastSupplyConsumptionWarning . ' ' . $label
+                . ' quedó con stock negativo en Bodega 3000 (' . StockLedgerService::fmt($posted['stock_after']) . '): avisa a bodega.');
+        }
+        return '[TRZ-LED-KEY:' . $key . ']';
+    }
+
+    /**
+     * Devuelve a la Bodega 3000 un insumo de embalaje ya descontado (al corregir o borrar el embalaje). Lo descontado con
+     * kardex se revierte con su documento; lo de antes del kardex (descuento directo) se devuelve igual que se descontó.
+     */
+    public function revertPackagingSupplyEvent(array $supplyEvent, int $fallbackBoxItemId = 0): void
+    {
+        $comm = (string)($supplyEvent['evt_comments'] ?? '');
+        if (preg_match('/\[TRZ-LED-KEY:([A-Za-z0-9_.:\-]+)\]/', $comm, $mKey) === 1) {
+            (new StockLedgerService($this->erpPdo))->reverse($mKey[1], 'embalaje corregido o eliminado');
+            return;
+        }
+        $prevAmt = (float)($supplyEvent['evt_amount'] ?? 0);
+        if ($prevAmt <= 0) {
+            return;
+        }
+        $itemId = preg_match('/\[ITEM_ID:(\d+)\]/', $comm, $mId) === 1 ? (int)$mId[1] : 0;
+        if ($itemId <= 0 && str_contains($comm, 'pallet')) {
+            $itemId = 118;
+        } elseif ($itemId <= 0 && str_contains($comm, 'cajas')) {
+            $itemId = $fallbackBoxItemId;
+        }
+        if ($itemId > 0) {
+            $this->adjustWarehouseStock($itemId, 16, +$prevAmt, true);
+        }
+    }
+
+    /**
      * Realiza el consumo automatizado de pallets, cajas y cinta de papel en Bodega 3000
      * al finalizar/cerrar el embalaje de producción o embalaje de corte y sellado.
      */
@@ -1249,21 +1363,7 @@ trait RewindAndPackagingServiceTrait
 
             if (!empty($prevEvents)) {
                 foreach ($prevEvents as $pe) {
-                    $prevAmt = (float)($pe['evt_amount'] ?? 0);
-                    $comm = (string)($pe['evt_comments'] ?? '');
-                    if ($prevAmt > 0) {
-                        if (str_contains($comm, 'pallet')) {
-                            $this->adjustWarehouseStock($palletItemId, $stId, +$prevAmt, true);
-                        } elseif (str_contains($comm, 'cajas')) {
-                            if (preg_match('/\[ITEM_ID:(\d+)\]/', $comm, $mId)) {
-                                $this->adjustWarehouseStock((int)$mId[1], $stId, +$prevAmt, true);
-                            } else {
-                                $this->adjustWarehouseStock($boxItemId, $stId, +$prevAmt, true);
-                            }
-                        } elseif (str_contains($comm, 'cinta')) {
-                            $this->adjustWarehouseStock($tapeItemId, $stId, +$prevAmt, true);
-                        }
-                    }
+                    $this->revertPackagingSupplyEvent($pe, $boxItemId);
                 }
                 $this->erpPdo->prepare("
                     DELETE FROM prod_worker_ot_events
@@ -1277,13 +1377,13 @@ trait RewindAndPackagingServiceTrait
 
         // Registrar Pallet
         if ($palletsConsumed > 0) {
-            $this->adjustWarehouseStock($palletItemId, $stId, -$palletsConsumed, true);
+            $palletLedgerTag = $this->postPackagingSupply($eventId, $palletItemId, (float)$palletsConsumed, $palletsConsumed . ' pallet(s) ' . $palletSku);
             $remDesc = ($leftoverBoxes <= 5 && $leftoverBoxes > 0)
                 ? "Sobran {$leftoverBoxes} cajas (<=5) -> agrupadas en el mismo pallet"
                 : ($leftoverBoxes > 5 ? "Sobran {$leftoverBoxes} cajas (>5) -> requiere 1 pallet adicional" : "Pallet(s) completos");
             $commPallet = "Consumo automático embalaje: {$palletsConsumed} pallet(s) [{$palletSku} - {$palletTitle}]. "
                 . "Detalle: {$totalBoxes} cajas total, capacidad {$cajasPorPallet}/pallet ({$remDesc}). "
-                . "[ITEM_ID:{$palletItemId}] {$refTag}";
+                . "[ITEM_ID:{$palletItemId}] {$refTag} {$palletLedgerTag}";
 
             $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events (
@@ -1301,10 +1401,10 @@ trait RewindAndPackagingServiceTrait
 
         // Registrar Cajas
         if ($totalBoxes > 0) {
-            $this->adjustWarehouseStock($boxItemId, $stId, -$totalBoxes, true);
+            $boxLedgerTag = $this->postPackagingSupply($eventId, $boxItemId, (float)$totalBoxes, $totalBoxes . ' cajas ' . $boxSku);
             $commBox = "Consumo automático embalaje: {$totalBoxes} cajas [{$boxSku} - {$boxTitle}]. "
                 . "Medida solicitada: '{$medidasCaja}'. "
-                . "[ITEM_ID:{$boxItemId}] {$refTag}";
+                . "[ITEM_ID:{$boxItemId}] {$refTag} {$boxLedgerTag}";
 
             $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events (
@@ -1322,12 +1422,12 @@ trait RewindAndPackagingServiceTrait
 
         // Registrar Cinta de papel
         if ($totalTapeMeters > 0) {
-            $this->adjustWarehouseStock($tapeItemId, $stId, -$tapeRollsConsumed, true);
+            $tapeLedgerTag = $this->postPackagingSupply($eventId, $tapeItemId, (float)$tapeRollsConsumed, $tapeRollsConsumed . ' rollos de cinta ' . $tapeSku);
             $commTape = "Consumo automático embalaje: {$totalTapeMeters} m de cinta ({$tapeRollsConsumed} rollos de {$tapeRollLengthM}m) [{$tapeSku} - {$tapeTitle}]. "
                 . "Conversión por pasada: ancho caja {$boxWidthCm}cm + 10cm (5cm por lado) = " . number_format($passLengthM, 2) . "m por pasada. "
                 . "Consumo unitario: " . number_format($tapePerPassRoll, 5) . " rollos por pasada (rinde {$passesPerRoll} pasadas/cajas por rollo de {$tapeRollLengthM}m). "
                 . "Total lote: {$totalBoxes} cajas (pasadas) x " . number_format($passLengthM, 2) . "m = {$totalTapeMeters}m ({$tapeRollsConsumed} rollos). "
-                . "[ITEM_ID:{$tapeItemId}] {$refTag}";
+                . "[ITEM_ID:{$tapeItemId}] {$refTag} {$tapeLedgerTag}";
 
             $this->erpPdo->prepare("
                 INSERT INTO prod_worker_ot_events (
@@ -1914,11 +2014,22 @@ trait RewindAndPackagingServiceTrait
                 $stmtItems->execute([':stk_id' => $id]);
                 $items = $stmtItems->fetchAll(PDO::FETCH_ASSOC) ?: [];
 
+                // Documento con kardex: se revierte con un documento contrario (stock + kardex). Sin kardex (anterior):
+                // se revierte el stock como se movió.
+                $hasKardex = $this->erpPdo->prepare('SELECT 1 FROM tran_data WHERE tran_id = ? AND tran_type IN (\'stockchangeup\',\'stockchangedown\') LIMIT 1');
+                $hasKardex->execute([$id]);
+                $ledgerReverse = $hasKardex->fetchColumn() !== false;
                 foreach ($items as $it) {
                     $itemId = (int)($it['item_id'] ?? 0);
                     $stId = (int)($it['item_st_id'] ?? 0);
                     $amt = (float)($it['item_amount'] ?? 0);
-                    if ($itemId > 0 && $stId > 0 && $amt > 0) {
+                    if ($ledgerReverse && $itemId > 0 && $stId > 0 && $amt > 0) {
+                        (new StockLedgerService($this->erpPdo))->post([
+                            'key' => 'rebodel.' . $id . '.' . (int)($it['item_pos'] ?? 0), 'item_id' => $itemId, 'st_id' => $stId,
+                            'shop_id' => (int)($head['stk_shopid'] ?? 0), 'delta' => $isNegative ? $amt : -$amt, 'allow_negative' => true,
+                            'user_id' => $userId, 'text' => 'Anulación de ' . (string)($head['stk_num'] ?? $id) . ' (rebobinado/corte).',
+                        ]);
+                    } elseif ($itemId > 0 && $stId > 0 && $amt > 0) {
                         if ($isNegative) {
                             // Era salida (consumo) -> revertir sumando stock
                             $this->erpPdo->prepare("
@@ -2139,12 +2250,10 @@ trait RewindAndPackagingServiceTrait
             ]);
 
             try {
-                $this->erpPdo->prepare("
-                    UPDATE item_shops_storehouses
-                    SET iss_inventory = GREATEST(0, iss_inventory - 1)
-                    WHERE item_id = :itid AND st_id = :stid
-                ")->execute([':itid' => $rData['item_id'], ':stid' => $stkFixedSthId]);
-            } catch (Throwable) {}
+                $this->applyStockChangeLine($stkIdOut);
+            } catch (Throwable $e) {
+                error_log('Kardex del empalme (documento ' . $stkIdOut . '): ' . $e->getMessage());
+            }
 
             if ($this->trzPdo !== null) {
                 try {
@@ -2212,19 +2321,10 @@ trait RewindAndPackagingServiceTrait
         ]);
 
         try {
-            $upd = $this->erpPdo->prepare("
-                UPDATE item_shops_storehouses
-                SET iss_inventory = iss_inventory + :amt
-                WHERE item_id = :itid AND st_id = 16
-            ");
-            $upd->execute([':amt' => $destUnits, ':itid' => $primaryItem['id']]);
-            if ($upd->rowCount() === 0) {
-                $this->erpPdo->prepare("
-                    INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_inventory)
-                    VALUES (:itid, :shopid, 16, :amt)
-                ")->execute([':itid' => $primaryItem['id'], ':shopid' => $reqShopId, ':amt' => $destUnits]);
-            }
-        } catch (Throwable) {}
+            $this->applyStockChangeLine($stkIdIn);
+        } catch (Throwable $e) {
+            error_log('Kardex del empalme (documento ' . $stkIdIn . '): ' . $e->getMessage());
+        }
 
         if ($workerOtId > 0) {
             try {
@@ -2634,14 +2734,12 @@ trait RewindAndPackagingServiceTrait
                     ':unitkg' => $useKgAmt,
                 ]);
 
-                // Descontar inventario de la bobina madre virgen TEL en Bodega 3000 (1 bobina)
+                // Descontar la bobina madre virgen TEL en Bodega 3000 (1 bobina), con kardex
                 try {
-                    $this->erpPdo->prepare("
-                        UPDATE item_shops_storehouses
-                        SET iss_inventory = GREATEST(0, iss_inventory - 1)
-                        WHERE item_id = :itid AND st_id = :stid
-                    ")->execute([':itid' => $selItemId, ':stid' => $stkFixedSthId]);
-                } catch (Throwable) {}
+                    $this->applyStockChangeLine($stkIdOut);
+                } catch (Throwable $e) {
+                    error_log('Kardex del corte (documento ' . $stkIdOut . '): ' . $e->getMessage());
+                }
             }
 
             // 2. Dar de alta los rollos de subproductos cortados
@@ -2880,22 +2978,12 @@ trait RewindAndPackagingServiceTrait
                         ':unitkg' => $pRow['item_reboprod_unitkg'],
                     ]);
 
-                    // Incrementar inventario del subproducto en Bodega 3000 (st_id = 16)
+                    // Incrementar el subproducto en Bodega 3000 (st_id = 16), con kardex
                     try {
-                        $upd = $this->erpPdo->prepare("
-                            UPDATE item_shops_storehouses
-                            SET iss_inventory = iss_inventory + :amt
-                            WHERE item_id = :itid AND st_id = 16
-                        ");
-                        $upd->execute([':amt' => $pRow['dest_units'], ':itid' => $pRow['dest_itemid']]);
-                        if ($upd->rowCount() === 0) {
-                            $this->erpPdo->prepare("
-                                INSERT INTO item_shops_storehouses
-                                (item_id, shop_id, st_id, iss_inventory)
-                                VALUES (:itid, :shopid, 16, :amt)
-                            ")->execute([':itid' => $pRow['dest_itemid'], ':shopid' => $reqShopId, ':amt' => $pRow['dest_units']]);
-                        }
-                    } catch (Throwable) {}
+                        $this->applyStockChangeLine($stkIdIn, $pos - 1);
+                    } catch (Throwable $e) {
+                        error_log('Kardex del corte (documento ' . $stkIdIn . '): ' . $e->getMessage());
+                    }
                 }
             }
 
@@ -3278,22 +3366,23 @@ trait RewindAndPackagingServiceTrait
         $upd = $this->trzPdo->prepare("UPDATE rolls SET status = 'CONSUMED' WHERE id = :id");
         $upd->execute([':id' => $rollId]);
 
-        // 2. Si la bobina estaba en Bodega 3000 (almacén de producción), descontar en ERP si corresponde
-        $erpStorehouseId = 16; // 3000 INSUMOS EN PRODUCCION
-        if ($this->erpPdo && !empty($roll['sku_code']) && $weightKg > 0) {
+        // 2. Si la bobina seguía en stock de la Bodega 3000 (sin montar), sale con documento y kardex. Una bobina montada
+        //    ya se descontó al montarla. Antes buscaba en una tabla inexistente (items) y restaba kilos en vez de unidades.
+        if ($this->erpPdo && !empty($roll['sku_code']) && (string)$roll['status'] === 'RECEIVED' && empty($roll['current_work_order_id'])) {
             try {
-                $stItem = $this->erpPdo->prepare("SELECT item_id FROM items WHERE item_code = :code LIMIT 1");
+                $stItem = $this->erpPdo->prepare("SELECT id FROM item WHERE item_number_prod = :code LIMIT 1");
                 $stItem->execute([':code' => $roll['sku_code']]);
                 $erpItemId = (int)$stItem->fetchColumn();
+                $units = (float)($roll['received_qty'] ?? 0) > 0 ? (float)$roll['received_qty'] : 1.0;
                 if ($erpItemId > 0) {
-                    $stDeduct = $this->erpPdo->prepare("UPDATE item_shops_storehouses SET iss_inventory = GREATEST(0, iss_inventory - :amt) WHERE item_id = :item_id AND st_id = :st_id");
-                    $stDeduct->execute([
-                        ':amt' => $weightKg,
-                        ':item_id' => $erpItemId,
-                        ':st_id' => $erpStorehouseId,
+                    (new StockLedgerService($this->erpPdo))->post([
+                        'key' => 'scrap.roll.' . $rollId, 'item_id' => $erpItemId, 'st_id' => 16, 'delta' => -$units, 'allow_negative' => true,
+                        'user_id' => $userId, 'text' => 'Bobina ' . $rollCode . ' descartada como merma (' . $reason . ').',
                     ]);
                 }
-            } catch (Throwable) {}
+            } catch (Throwable $e) {
+                error_log('Descarte de bobina ' . $rollCode . ' en el ERP: ' . $e->getMessage());
+            }
         }
 
         // 3. Registrar evento en TRZ
@@ -3318,11 +3407,14 @@ trait RewindAndPackagingServiceTrait
             try {
                 $reasonText = ($reason === 'BOBINA_SUCIA' || str_contains($reason, 'sucia')) ? 'Bobina sucia / descarte' : 'Merma de corte / defecto';
                 $comment = "Merma de corte: Se descartó bobina {$rollCode} (" . number_format($weightKg, 2, ',', '.') . " Kg) por {$reasonText}. No se emitió etiqueta.";
-                $stEvt = $this->erpPdo->prepare("INSERT INTO prod_worker_ot_events (ot_id, worker_id, event_type, event_date, event_comment) VALUES (:ot_id, :worker_id, 'materiales', :dt, :comment)");
+                // Columnas reales de la bitácora (antes usaba columnas inexistentes y el evento nunca se guardaba).
+                $stEvt = $this->erpPdo->prepare("INSERT INTO prod_worker_ot_events (evt_prod_worker_otid, evt_amount, prod_bobina_kg, evt_crtdat, evt_enddat, evt_status, evt_type, evt_comments)
+                    VALUES (:ot_id, 0, :kg, :dt, :dt2, 2, 'materiales', :comment)");
                 $stEvt->execute([
                     ':ot_id' => $workOrderId,
-                    ':worker_id' => $userId,
-                    ':dt' => $now,
+                    ':kg' => $weightKg,
+                    ':dt' => time(),
+                    ':dt2' => time(),
                     ':comment' => $comment,
                 ]);
             } catch (Throwable) {}
@@ -3531,22 +3623,69 @@ trait RewindAndPackagingServiceTrait
                 // 6. Descontar inventario en item_shops_storehouses sólo si se solicita explícitamente
                 if ($deductInventory) {
                     try {
-                        $this->erpPdo->prepare("
-                            UPDATE item_shops_storehouses
-                            SET iss_inventory = GREATEST(0, iss_inventory - :amt)
-                            WHERE item_id = :itid AND st_id = :stid
-                        ")->execute([
-                            ':amt' => $amountUnits,
-                            ':itid' => $itemId,
-                            ':stid' => $stkFixedSthId,
-                        ]);
-                    } catch (Throwable) {}
+                        $this->applyStockChangeLine($stkId);
+                    } catch (Throwable $e) {
+                        error_log('Kardex del consumo de bobina (documento ' . $stkId . '): ' . $e->getMessage());
+                    }
                 }
             }
 
             return $stkId;
         } catch (Throwable) {
             return null;
+        }
+    }
+
+    /**
+     * Aplica al stock y al kardex una línea de un documento de ajuste ya creado (rebobinado, empalme, corte, consumo).
+     * Reemplaza los UPDATE directos: mueve la fila de stock general de esa bodega y deja su registro en tran_data con el
+     * saldo previo. Si la línea ya tiene su kardex, no hace nada (repetir no mueve stock dos veces).
+     */
+    private function applyStockChangeLine(int $docId, int $pos = 0): void
+    {
+        $doc = $this->erpPdo->prepare('SELECT stk_num, stk_negative, stk_companyid, stk_shopid, stk_issueid, stk_crtdat, stk_crtusr, sth_order_id
+            FROM stockchanges WHERE id = ?');
+        $doc->execute([$docId]);
+        $d = $doc->fetch(PDO::FETCH_ASSOC);
+        $line = $this->erpPdo->prepare('SELECT item_id, item_amount, item_st_id FROM stockchanges_items WHERE stk_id = ? AND item_pos = ?');
+        $line->execute([$docId, $pos]);
+        $l = $line->fetch(PDO::FETCH_ASSOC);
+        if (!$d || !$l || (float)$l['item_amount'] <= 0) {
+            return;
+        }
+        $negative = (int)$d['stk_negative'] === 1;
+        $type = $negative ? 'stockchangedown' : 'stockchangeup';
+        $has = $this->erpPdo->prepare('SELECT 1 FROM tran_data WHERE tran_id = ? AND tran_pos = ? AND tran_type = ?');
+        $has->execute([$docId, $pos, $type]);
+        if ($has->fetchColumn() !== false) {
+            return;
+        }
+        $itemId = (int)$l['item_id'];
+        $stId = (int)$l['item_st_id'];
+        $qty = (float)$l['item_amount'];
+        $shopId = (int)$d['stk_shopid'];
+        $row = $this->erpPdo->prepare('SELECT shop_id, iss_inventory FROM item_shops_storehouses WHERE item_id = ? AND st_id = ? AND iss_order_id = 0
+            ORDER BY CASE WHEN shop_id = ? THEN 0 ELSE 1 END LIMIT 1');
+        $row->execute([$itemId, $stId, $shopId]);
+        $r = $row->fetch(PDO::FETCH_ASSOC);
+        $before = $r ? (float)$r['iss_inventory'] : 0.0;
+        $shopId = $r ? (int)$r['shop_id'] : ($shopId > 0 ? $shopId : StockLedgerService::DEFAULT_SHOP_ID);
+        $title = $this->erpPdo->prepare('SELECT item_title FROM item WHERE id = ?');
+        $title->execute([$itemId]);
+        $created = (int)$d['stk_crtdat'] ?: time();
+        $this->erpPdo->prepare("INSERT INTO tran_data
+                (tran_id, tran_pos, tran_type, tran_number, tran_currstock, tran_amount, tran_company_id, tran_shop_id, tran_st_id, tran_issueid,
+                 item_id, item_title, item_type, tran_day, tran_month, tran_year, tran_crtusr, tran_crtdat, tran_order_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'item', ?, ?, ?, ?, ?, ?)")
+            ->execute([$docId, $pos, $type, (string)$d['stk_num'], $before, $qty, (int)$d['stk_companyid'], $shopId, $stId, (int)$d['stk_issueid'],
+                $itemId, (string)($title->fetchColumn() ?: ''), (int)date('j', $created), (int)date('n', $created), (int)date('Y', $created),
+                (int)$d['stk_crtusr'], $created, (int)$d['sth_order_id']]);
+        if ($r) {
+            $this->erpPdo->prepare('UPDATE item_shops_storehouses SET iss_inventory = iss_inventory + ? WHERE item_id = ? AND shop_id = ? AND st_id = ? AND iss_order_id = 0')
+                ->execute([$negative ? -$qty : $qty, $itemId, $shopId, $stId]);
+        } else {
+            $this->erpPdo->prepare('INSERT INTO item_shops_storehouses (item_id, shop_id, st_id, iss_order_amount, iss_inventory_min, iss_inventory, iss_inventory_reserved, iss_order_id)
+                VALUES (?, ?, ?, 0, 0, ?, 0, 0)')->execute([$itemId, $shopId, $stId, $negative ? -$qty : $qty]);
         }
     }
 

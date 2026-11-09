@@ -7,6 +7,10 @@ declare(strict_types=1);
 // (src/Services/Production/ProductionClosureService.php)
 // =============================================================================
 
+require_once dirname(__DIR__, 2) . '/MachineKind.php';
+require_once dirname(__DIR__, 2) . '/StockLedgerService.php';
+require_once dirname(__DIR__, 2) . '/BagBoxService.php';
+require_once dirname(__DIR__, 2) . '/PulpoBagService.php';
 trait ProductionClosureServiceTrait
 {
     /**
@@ -92,27 +96,15 @@ trait ProductionClosureServiceTrait
             $totDorso = (float)($row['tot_dorso'] ?? 0);
             $totAmt = (float)($row['tot_amt'] ?? 0);
 
-            // Verificar si lleva dorso
-            $hasDorso = false;
-            $stmtColors = $this->erpPdo->prepare("SELECT fab_print_colors_back_1, fab_print_colors_back_2, fab_print_colors_back_3, fab_print_colors_back_4, fab_print_colors_back_5 FROM orders_items WHERE req_id = (SELECT ag_reqid FROM prod_agenda WHERE id = :agid LIMIT 1)");
-            $stmtColors->execute([':agid' => $agId]);
-            $cRow = $stmtColors->fetch(PDO::FETCH_ASSOC);
-            if (is_array($cRow)) {
-                for ($ci = 1; $ci <= 5; $ci++) {
-                    if (!empty($cRow["fab_print_colors_back_{$ci}"])) {
-                        $hasDorso = true;
-                        break;
-                    }
-                }
-            }
-
-            if ($hasDorso || $totDorso > 0) {
-                $finished = min($totFrente, $totDorso);
-                $surplusFrente = max(0.0, $totFrente - $totDorso);
-                $surplusDorso = max(0.0, $totDorso - $totFrente);
-            } else {
-                $finished = $totFrente;
+            // Caras que imprime la OT (10 colores). Antes se miraban solo 5 colores de dorso y una OT de solo dorso daba 0 terminadas.
+            $sides = PulpoBagService::printSides($this->erpPdo, $agId);
+            $finished = PulpoBagService::finishedBags($totFrente, $totDorso, $sides['front'], $sides['back'] || $totDorso > 0);
+            $surplusFrente = max(0.0, $totFrente - $finished);
+            $surplusDorso = max(0.0, $totDorso - $finished);
+            if (!$sides['front']) {
                 $surplusFrente = 0.0;
+            }
+            if (!$sides['back'] && $totDorso <= 0) {
                 $surplusDorso = 0.0;
             }
 
@@ -163,18 +155,18 @@ trait ProductionClosureServiceTrait
             $stmtProd = $this->erpPdo->prepare("
                 SELECT COUNT(*)
                 FROM prod_worker_ot_events
-                WHERE evt_prod_worker_otid = :ot_id
+                WHERE (evt_prod_worker_otid = :ot_id OR (overrideembalaje_act = 1 AND overrideembalaje_selladora_evtrefid = :linked_ot))
                   AND evt_type IN ('prod', 'prodsericolor')
                   AND evt_status > 0
                   AND (
                       evt_status = 2
-                      OR evt_amount > 0 
-                      OR prod_bobina_kg > 0 
-                      OR evt_amount_metros_lineales > 0 
+                      OR evt_amount > 0
+                      OR prod_bobina_kg > 0
+                      OR evt_amount_metros_lineales > 0
                       OR evt_amount_metros_maquina > 0
                   )
             ");
-            $stmtProd->execute([':ot_id' => $workerOtId]);
+            $stmtProd->execute([':ot_id' => $workerOtId, ':linked_ot' => $workerOtId]);
             if ((int)$stmtProd->fetchColumn() > 0) {
                 return true;
             }
@@ -222,7 +214,8 @@ trait ProductionClosureServiceTrait
      * Finaliza la OT. Si ya se inició producción, requiere validación positiva de supervisor (`wok_status = 2`, `wok_enddat = time()`).
      * Si no se ha iniciado producción (p. ej. apertura por error), permite el término directo sin supervisor.
      */
-    public function closeWorkOrder(int $workerOtId, string $supervisorUser = '', string $supervisorPass = ''): array
+    public function closeWorkOrder(int $workerOtId, string $supervisorUser = '', string $supervisorPass = '',
+        bool $confirmBagDifference = false, string $bagDifferenceReason = ''): array
     {
         if ($workerOtId <= 0) {
             return ['ok' => false, 'error' => 'ID de OT inválido.'];
@@ -247,6 +240,15 @@ trait ProductionClosureServiceTrait
                     (new HandleConsumptionService($this->erpPdo, $this->trzPdo))->assertNoPendingForWorkOrder($workerOtId);
                     require_once dirname(__DIR__, 2) . '/MaterialSupplyService.php';
                     (new MaterialSupplyService($this->erpPdo, $this->trzPdo))->assertNoOutstandingReceipts($workerOtId);
+                    // Pulpo: las bolsas usadas de las cajas deben cuadrar con las impresas más la merma.
+                    $machine = $this->erpPdo->prepare('SELECT wi.win_equipoid, eq.equipo_name, eq.equipo_type_id, eq.equipo_prod_isprinter_seri
+                        FROM prod_worker_ot ot JOIN prod_worker_init wi ON wi.id = ot.wok_init_id LEFT JOIN equipo eq ON eq.id = wi.win_equipoid WHERE ot.id = ?');
+                    $machine->execute([$workerOtId]);
+                    $m = $machine->fetch(PDO::FETCH_ASSOC) ?: [];
+                    if (MachineKind::isPulpo((int)($m['win_equipoid'] ?? 0), (string)($m['equipo_name'] ?? ''), (int)($m['equipo_type_id'] ?? 0), (int)($m['equipo_prod_isprinter_seri'] ?? 0) === 1)) {
+                        (new PulpoBagService($this->erpPdo, $this->trzPdo))->assertReadyToClose($workerOtId, $confirmBagDifference, $bagDifferenceReason,
+                            trim($supervisorUser) !== '' ? 'supervisor ' . trim($supervisorUser) : 'operador');
+                    }
                 } catch (Throwable $e) {
                     return ['ok' => false, 'error' => $e->getMessage()];
                 }

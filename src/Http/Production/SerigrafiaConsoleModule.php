@@ -42,9 +42,6 @@ function handleSerigrafiaConsoleRoutes(
                 'val_temp_secador' => (float)str_replace(',', '.', (string)($_POST["unit_temp_sec_{$px}"] ?? 0)),
                 'val_num_bastidor' => trim((string)($_POST["unit_bastidor_{$px}"] ?? '')),
                 'val_mesh' => (float)str_replace(',', '.', (string)($_POST["unit_mesh_{$px}"] ?? 0)),
-                'val_total_tinta' => (float)str_replace(',', '.', (string)($_POST["unit_tinta_{$px}"] ?? 0)),
-                'val_carga_tinta' => (float)str_replace(',', '.', (string)($_POST["unit_carga_tinta_{$px}"] ?? 0)),
-                'val_sobrante_tinta' => (float)str_replace(',', '.', (string)($_POST["unit_sobrante_tinta_{$px}"] ?? 0)),
             ];
         }
         $ok = $prodService->savePulpoV2Data($agId, $colorMode, $header, $units);

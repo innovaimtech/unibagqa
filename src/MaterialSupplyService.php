@@ -62,7 +62,7 @@ final class MaterialSupplyService
     }
 
     /** Cambiar este texto cada vez que se agregue una tabla o columna al esquema de solicitudes. */
-    private const SCHEMA_VERSION = 'supply-2026-11-03-b';
+    private const SCHEMA_VERSION = 'supply-2026-11-08-boxes';
 
     public function ensureSchema(): void
     {
@@ -131,7 +131,11 @@ final class MaterialSupplyService
         // Bobina de reemplazo / más unidades: motivo del bodeguero (despacho) y comentario del operador (recepción).
         $newColumns = [
             'production_supply_dispatches' => ['change_reason' => 'TEXT NULL', 'change_flags' => 'VARCHAR(64) NULL', 'receive_comment' => 'TEXT NULL'],
-            'production_supply_scans' => ['sku' => 'VARCHAR(100) NULL', 'meters' => 'DECIMAL(12,2) NULL', 'substitute' => 'TINYINT NOT NULL DEFAULT 0'],
+            'production_supply_scans' => ['sku' => 'VARCHAR(100) NULL', 'meters' => 'DECIMAL(12,2) NULL', 'substitute' => 'TINYINT NOT NULL DEFAULT 0',
+                // BOX = caja de bolsas con código (roll_id guarda el id de la caja); vacío = bobina.
+                'entity_type' => 'VARCHAR(10) NULL'],
+            // BOXES = se piden bolsas que llegan en cajas con código (se escanean y se traspasa el saldo de cada caja con su CC).
+            'production_supply_requests' => ['material_kind' => 'VARCHAR(16) NULL'],
         ];
         foreach ($newColumns as $table => $columns) {
             foreach ($columns as $column => $definition) {
@@ -293,7 +297,40 @@ final class MaterialSupplyService
                 $items[] = $row;
             }
         }
+        foreach ($this->boxCatalog($shopId) as $row) {
+            $items[] = $row;
+        }
         return $items;
+    }
+
+    private function bagBoxes(): BagBoxService
+    {
+        require_once __DIR__ . '/BagBoxService.php';
+        return new BagBoxService($this->trz, $this->erp);
+    }
+
+    /** Bolsas en cajas con código (en blanco de Corte y Sellado o compradas), por artículo y bodega, fuera de la 3000. */
+    public function boxCatalog(int $shopId): array
+    {
+        $items = [];
+        try {
+            $groups = $this->bagBoxes()->availableGroups();
+        } catch (Throwable) {
+            return [];
+        }
+        foreach ($groups as $g) {
+            $row = $this->one($this->erp, "SELECT i.id AS item_id, i.item_number_prod AS sku, i.item_title AS description, css.st_name AS warehouse_name
+                FROM item i JOIN company_shops_storehouses css ON css.id=? WHERE i.id=? AND css.st_shop_id=?", [$g['st_id'], $g['item_id'], $shopId]);
+            if (!$row) continue;
+            $items[] = $row + ['source_storehouse_id' => $g['st_id'], 'unit' => 'bolsas', 'available_qty' => $g['units'],
+                'box_count' => $g['boxes'], 'width_cm' => 0, 'item_desc' => '', 'kind' => 'boxes'];
+        }
+        return $items;
+    }
+
+    private function isBoxRequest(array $r): bool
+    {
+        return strtoupper((string)($r['material_kind'] ?? '')) === 'BOXES';
     }
 
     private function item(int $itemId, int $source, int $shopId): array
@@ -349,8 +386,9 @@ final class MaterialSupplyService
         return $ctx;
     }
 
-    public function request(string $key, int $otId, array $actor, int $itemId, int $source, float $qty, string $notes, int $agendaId = 0): void
+    public function request(string $key, int $otId, array $actor, int $itemId, int $source, float $qty, string $notes, int $agendaId = 0, string $kind = ''): void
     {
+        $boxes = $kind === 'boxes';
         $this->key($key);
         $who = $this->actor($actor);
         $ctx = $otId > 0
@@ -374,15 +412,24 @@ final class MaterialSupplyService
                     throw new RuntimeException('Confirmacion ya utilizada por otra solicitud.');
                 }
             } else {
-                $item = $this->item($itemId, $source, (int)$ctx['req_shop_id']);
-                self::quantity($qty,str_starts_with(strtoupper($item['sku']), 'TEL'));
+                if ($boxes) {
+                    $item = null;
+                    foreach ($this->boxCatalog((int)$ctx['req_shop_id']) as $row) {
+                        if ((int)$row['item_id'] === $itemId && (int)$row['source_storehouse_id'] === $source) $item = $row;
+                    }
+                    if ($item === null) throw new RuntimeException('No hay cajas de ese producto disponibles en esa bodega.');
+                    self::quantity($qty, true);
+                } else {
+                    $item = $this->item($itemId, $source, (int)$ctx['req_shop_id']);
+                    self::quantity($qty,str_starts_with(strtoupper($item['sku']), 'TEL'));
+                }
                 if ($qty > (float)$item['available_qty']) throw new RuntimeException('La cantidad supera el stock disponible.');
                 $this->trz->prepare('INSERT INTO production_supply_requests
                     (request_key,erp_target,worker_ot_id,agenda_id,context,item_id,sku,description,
-                     source_storehouse_id,requested_qty,unit,requested_by,notes,created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')->execute([
+                     source_storehouse_id,requested_qty,unit,requested_by,notes,created_at,material_kind)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')->execute([
                         $key,$this->target(),$otId,$ctx['agenda_id'],json_encode($ctx,JSON_THROW_ON_ERROR),
-                        $itemId,$item['sku'],$item['description'],$source,$qty,$item['unit'],$who,trim($notes),time(),
+                        $itemId,$item['sku'],$item['description'],$source,$qty,$item['unit'],$who,trim($notes),time(),$boxes ? 'BOXES' : null,
                     ]);
                 $this->event('SUPPLY_REQUESTED', ['request_key'=>$key,'context'=>$ctx,'quantity'=>$qty,'actor'=>$actor]);
             }
@@ -504,7 +551,8 @@ final class MaterialSupplyService
             if ($r['status'] !== 'ACCEPTED') {
                 throw new RuntimeException('La solicitud debe estar aceptada por bodega antes de despachar (estado actual: ' . $this->statusLabel((string)$r['status']) . ').');
             }
-            $isRoll = str_starts_with(strtoupper($r['sku']),'TEL');
+            $isBoxes = $this->isBoxRequest($r);
+            $isRoll = !$isBoxes && str_starts_with(strtoupper($r['sku']),'TEL');
             if (str_starts_with(strtoupper($r['sku']),'TIN') && trim($codes) !== '') {
                 throw new RuntimeException('La entrega de tintas usa la cantidad del articulo, no codigos de bobina.');
             }
@@ -519,7 +567,27 @@ final class MaterialSupplyService
             $groups = [];
             $total = 0.0;
             $meterDiff = false;
-            if ($isRoll) {
+            if ($isBoxes) {
+                // Cada caja escaneada se traspasa completa (su saldo), con su CC.
+                $scanStmt = $this->trz->prepare("SELECT code FROM production_supply_scans WHERE request_key=? AND state='SCANNED' ORDER BY scanned_at,scan_key");
+                $scanStmt->execute([$requestKey]);
+                $codeList = array_column($scanStmt->fetchAll(PDO::FETCH_ASSOC), 'code');
+                if (!$codeList) throw new RuntimeException('Escanea al menos una caja antes de despachar.');
+                $list = [];
+                foreach ($codeList as $code) {
+                    $box = $this->bagBoxes()->find((string)$code);
+                    if (!$box || (string)$box['status'] !== 'IN_WAREHOUSE' || (int)$box['erp_st_id'] !== (int)$r['source_storehouse_id']) {
+                        throw new RuntimeException('La caja ' . $code . ' ya no está disponible en la bodega de origen.');
+                    }
+                    $list[] = ['id' => (int)$box['id'], 'code' => (string)$box['box_code'], 'qty' => (float)$box['units_qty'],
+                        'order_id' => (int)($box['erp_order_id'] ?? 0), 'from_st' => (int)$box['erp_st_id']];
+                    $total += (float)$box['units_qty'];
+                }
+                if ($total + 0.000001 < (float)$r['requested_qty']) {
+                    throw new RuntimeException('Faltan cajas por escanear: se pidieron ' . (float)$r['requested_qty'] . ' bolsas y las cajas escaneadas suman ' . $total . '.');
+                }
+                $groups[(string)$r['sku']] = ['rolls' => [], 'boxes' => $list, 'qty' => $total];
+            } elseif ($isRoll) {
                 // Las bobinas a despachar son las ESCANEADAS (registradas) para esta solicitud.
                 $scanStmt = $this->trz->prepare("SELECT code FROM production_supply_scans WHERE request_key=? AND state='SCANNED' ORDER BY scanned_at,scan_key");
                 $scanStmt->execute([$requestKey]);
@@ -560,6 +628,7 @@ final class MaterialSupplyService
             }
             if (abs($total - $requested) > 0.000001) $flags[] = 'UNITS';
             if ($meterDiff) $flags[] = 'METERS';
+            if ($isBoxes) $flags = array_values(array_diff($flags, ['UNITS'])); // las cajas se traspasan completas
             if ($flags && mb_strlen($changeReason) < 10) {
                 throw new RuntimeException('Estas enviando algo distinto a lo solicitado (' . implode(', ', array_map(
                     static fn($f) => ['SKU' => 'otro código', 'UNITS' => 'otra cantidad', 'METERS' => 'otros metros'][$f], $flags))
@@ -581,7 +650,7 @@ final class MaterialSupplyService
                     $itemId = (int)$item['item_id'];
                 }
                 $dKey = $i === 0 ? $key : substr(hash('sha256', $key . '|' . $sku), 0, 32);
-                $payload = ['rolls'=>$group['rolls'],'destination_id'=>(int)$destination['id'],'context'=>$ctx,
+                $payload = ['rolls'=>$group['rolls'],'boxes'=>$group['boxes'] ?? [],'destination_id'=>(int)$destination['id'],'context'=>$ctx,
                     'prepared_by'=>$actor,'requested_by'=>json_decode($r['requested_by'],true),'sku'=>$sku,
                     'item_id'=>$itemId,'requested_sku'=>$r['sku']];
                 $this->trz->prepare('INSERT INTO production_supply_dispatches
@@ -643,7 +712,7 @@ final class MaterialSupplyService
             if (!empty($payload['item_id'])) $rr['item_id'] = (int)$payload['item_id'];
             if (!empty($payload['sku'])) $rr['sku'] = (string)$payload['sku'];
             $changeNote = !empty($d['change_flags']) ? ' | Cambio (' . $d['change_flags'] . '): ' . (string)$d['change_reason'] : '';
-            $transferId = $this->bookTransfer($rr,$d,$payload);
+            $transferId = !empty($payload['boxes']) ? $this->transferBoxes($rr, $d, $payload, $actor) : $this->bookTransfer($rr,$d,$payload);
             foreach ($payload['rolls'] as $roll) {
                 $this->trz->prepare('UPDATE rolls SET warehouse_id=? WHERE id=?')
                     ->execute([$payload['destination_id'],$roll['id']]);
@@ -658,7 +727,10 @@ final class MaterialSupplyService
                         $payload['destination_id'],json_encode($movement,JSON_THROW_ON_ERROR)]);
                 $this->audit($rr,'DISPATCH',$actor,'ACCEPTED','DISPATCHED',$key,$roll['code'],(float)$roll['quantity'],'Traspaso ERP ' . $transferId . $changeNote);
             }
-            if (!$payload['rolls']) {
+            foreach ($payload['boxes'] ?? [] as $box) {
+                $this->audit($rr,'DISPATCH',$actor,'ACCEPTED','DISPATCHED',$key,$box['code'],(float)$box['qty'],'Traspaso ERP con CC' . $changeNote);
+            }
+            if (!$payload['rolls'] && empty($payload['boxes'])) {
                 $this->audit($rr,'DISPATCH',$actor,'ACCEPTED','DISPATCHED',$key,null,(float)$d['quantity'],'Traspaso ERP ' . $transferId . $changeNote);
             }
             $this->trz->prepare("UPDATE production_supply_scans SET state='DISPATCHED' WHERE dispatch_key=? AND state='SCANNED'")->execute([$key]);
@@ -887,6 +959,11 @@ final class MaterialSupplyService
             if ($r['status'] !== 'ACCEPTED') {
                 throw new RuntimeException('La solicitud debe estar aceptada para escanear (estado actual: ' . $this->statusLabel((string)$r['status']) . ').');
             }
+            if ($this->isBoxRequest($r)) {
+                $this->scanBox($r, $code, $actor, $who);
+                $this->trz->commit();
+                return;
+            }
             if (!str_starts_with(strtoupper((string)$r['sku']), 'TEL')) {
                 throw new RuntimeException('Este material (' . $r['sku'] . ') se entrega por cantidad; no requiere escanear códigos.');
             }
@@ -927,6 +1004,35 @@ final class MaterialSupplyService
             if ($this->trz->inTransaction()) $this->trz->rollBack();
             throw $e;
         }
+    }
+
+    /** Escaneo de una caja de bolsas: debe estar disponible en la bodega de origen y ser del producto pedido. */
+    private function scanBox(array $r, string $code, array $actor, string $who): void
+    {
+        $box = $this->bagBoxes()->find($code, true);
+        if (!$box) throw new RuntimeException('El código ' . $code . ' no es una caja registrada. Etiquétala con el ingreso trazable antes de despachar.');
+        if (!BagBoxService::isErpLinked($box)) {
+            throw new RuntimeException('La caja ' . $code . ' no tiene artículo o bodega del ERP: no se puede traspasar con kardex. Etiquétala de nuevo con el ingreso trazable.');
+        }
+        $already = $this->one($this->trz, 'SELECT request_key FROM production_supply_scans WHERE active_code=?', [(string)$box['box_code']]);
+        if ($already) {
+            throw new RuntimeException('La caja ' . $box['box_code'] . ' ya fue escaneada' . ($already['request_key'] === $r['request_key'] ? ' en esta solicitud.' : ' en otra solicitud.'));
+        }
+        if ((string)$box['status'] !== 'IN_WAREHOUSE' || (float)$box['units_qty'] <= 0) {
+            throw new RuntimeException('La caja ' . $box['box_code'] . ' no está disponible (estado ' . $box['status'] . ').');
+        }
+        if ((int)$box['erp_st_id'] !== (int)$r['source_storehouse_id']) {
+            throw new RuntimeException('La caja ' . $box['box_code'] . ' no está en la bodega de origen (' . $this->warehouseLabel((int)$r['source_storehouse_id']) . ').');
+        }
+        if ((int)$box['erp_item_id'] !== (int)$r['item_id']) {
+            throw new RuntimeException('La caja ' . $box['box_code'] . ' es de ' . $box['final_sku'] . ', no de ' . $r['sku'] . '.');
+        }
+        $this->trz->prepare("INSERT INTO production_supply_scans
+            (scan_key,request_key,roll_id,code,quantity,state,active_code,scanned_by,scanned_at,sku,meters,substitute,entity_type)
+            VALUES (?,?,?,?,?,'SCANNED',?,?,?,?,NULL,0,'BOX')")
+            ->execute([bin2hex(random_bytes(16)), $r['request_key'], (int)$box['id'], (string)$box['box_code'], (float)$box['units_qty'],
+                (string)$box['box_code'], $who, time(), (string)$box['final_sku']]);
+        $this->audit($r, 'SCAN', $actor, null, 'SCANNED', null, (string)$box['box_code'], (float)$box['units_qty']);
     }
 
     /** Artículo ERP activo por código (SKU) para evaluar o despachar una bobina de reemplazo. */
@@ -1122,7 +1228,7 @@ final class MaterialSupplyService
                 $this->erp->exec('LOCK TABLES storehousechanges READ');
                 $locked=true;
             }
-            if ($this->one($this->erp,'SELECT id FROM storehousechanges WHERE strc_desc LIKE ?',['%[TRZ-SUPPLY:'.$key.']%'])) {
+            if ($this->one($this->erp,'SELECT id FROM storehousechanges WHERE strc_desc LIKE ? OR strc_desc LIKE ?',['%[TRZ-SUPPLY:'.$key.']%','%[TRZ-LED:supply.'.$key.'.%'])) {
                 throw new RuntimeException('Existe un traspaso ERP. Reintenta o concilia; no se puede cancelar.');
             }
             $payload=json_decode($d['payload'],true,512,JSON_THROW_ON_ERROR);
@@ -1141,6 +1247,40 @@ final class MaterialSupplyService
         } finally {
             if ($locked) $this->erp->exec('UNLOCK TABLES');
         }
+    }
+
+    /**
+     * Traspasa cada caja a la Bodega 3000: su saldo y su CC, con documento y kardex (StockLedgerService, idempotente por caja).
+     * Al reintentar, una caja ya traspasada por este despacho no se mueve otra vez.
+     */
+    private function transferBoxes(array $r, array $d, array $payload, array $actor): int
+    {
+        require_once __DIR__ . '/StockLedgerService.php';
+        $ledger = new StockLedgerService($this->erp);
+        $bags = $this->bagBoxes();
+        $firstId = 0;
+        foreach ($payload['boxes'] as $expected) {
+            $box = $bags->byId((int)$expected['id'], true);
+            $key = 'supply.' . $d['dispatch_key'] . '.' . (int)$expected['id'];
+            $done = $box && (int)$box['erp_st_id'] === 16;
+            if (!$box || (!$done && ((string)$box['status'] !== 'IN_WAREHOUSE' || (int)$box['erp_st_id'] !== (int)$expected['from_st']
+                || abs((float)$box['units_qty'] - (float)$expected['qty']) > 0.0005))) {
+                throw new RuntimeException('La caja ' . $expected['code'] . ' cambió durante el despacho; requiere revisión.');
+            }
+            $res = $ledger->transfer(['key' => $key, 'item_id' => (int)$r['item_id'], 'from_st' => (int)$expected['from_st'], 'to_st' => 16,
+                'qty' => (float)$expected['qty'], 'order_id' => (int)$expected['order_id'], 'user_id' => (int)($actor['user_id'] ?? 0),
+                'allow_negative' => true,
+                'text' => 'Caja ' . $expected['code'] . ' a 3000 Insumos en Producción. Solicitud ' . substr((string)$r['request_key'], 0, 8)
+                    . ', máquina ' . ($payload['context']['machine_name'] ?? '') . '.']);
+            $firstId = $firstId ?: (int)$res['id'];
+            if (!$done) {
+                $fromWh = $box['warehouse_id'] !== null ? (int)$box['warehouse_id'] : null;
+                $toWh = $bags->localWarehouseId(16);
+                $bags->update((int)$box['id'], ['erp_st_id' => 16, 'warehouse_id' => $toWh]);
+                $bags->movement((int)$box['id'], 'TRANSFER', $fromWh, $toWh, ['dispatch_key' => $d['dispatch_key'], 'erp_transfer' => $res['number'], 'units' => (float)$expected['qty']]);
+            }
+        }
+        return $firstId;
     }
 
     private function fingerprint(int $itemId, int $shopId, int $storehouseId): string

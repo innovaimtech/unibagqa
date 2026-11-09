@@ -6,9 +6,11 @@ declare(strict_types=1);
  * Servicio de Despacho (Bodega): picking de pallets y cajas, validación de la guía de despacho del ERP y
  * salida trazable de los códigos.
  *
- * Flujo: 1) crear picking (venta directa o maquila) y escanear códigos; 2) cerrarlo (queda esperando guía);
- * 3) ingresar el número de guía: se traen sus datos del ERP y se comparan; 4) al confirmar, los códigos salen
- * de la bodega (TRZ) y quedan asociados a la guía con movimientos, evento y copia de la guía.
+ * Flujo: 1) crear picking (venta directa o maquila) y escanear códigos; 2) cerrarlo (queda esperando documento);
+ * 3) cuando retiran, elegir si sale con guía de despacho o con factura e ingresar su número: se traen sus datos del
+ * ERP y se comparan; 4) al confirmar, los códigos salen de la bodega (TRZ) y quedan asociados al documento con
+ * movimientos, evento y copia. document_type solo tiene sentido en los despachados; las columnas guide_* guardan
+ * el documento, sea guía o factura.
  *
  * La bodega de cada línea sale del código escaneado, así un picking puede juntar varias bodegas. De una caja o
  * producto se puede despachar una parte: el saldo queda en el mismo código (la etiqueta no cambia).
@@ -19,7 +21,10 @@ final class DispatchService
 {
     public const TYPE_SALE = 'SALE';
     public const TYPE_MAQUILA = 'MAQUILA';
-    private const SCHEMA_VERSION = 'dispatch-2026-11-05-a';
+    /** Documento con el que sale el despacho: guía de despacho o factura (que en el ERP también descuenta stock). */
+    public const DOC_GUIDE = 'GUIDE';
+    public const DOC_INVOICE = 'INVOICE';
+    private const SCHEMA_VERSION = 'dispatch-2026-11-09-a';
 
     private bool $ready = false;
 
@@ -32,11 +37,17 @@ final class DispatchService
         return $type === self::TYPE_MAQUILA ? 'Envío a procesar (maquila)' : 'Venta directa';
     }
 
+    public static function documentLabel(string $doc): string
+    {
+        return $doc === self::DOC_INVOICE ? 'Factura' : 'Guía de despacho';
+    }
+
     public static function statusLabel(string $status): string
     {
         return [
             'PICKING' => 'Pickeando',
-            'AWAITING_GUIDE' => 'Esperando guía',
+            // Cerrado: espera la guía o la factura; cuál de las dos se elige recién al despachar (paso 2).
+            'AWAITING_GUIDE' => 'Esperando documento',
             'DISPATCHED' => 'Despachado',
             'CANCELLED' => 'Cancelado',
         ][$status] ?? $status;
@@ -83,6 +94,7 @@ final class DispatchService
             picking_key VARCHAR(32) NOT NULL UNIQUE,
             code VARCHAR(40) NOT NULL UNIQUE,
             dispatch_type VARCHAR(10) NOT NULL,
+            document_type VARCHAR(10) NOT NULL DEFAULT 'GUIDE',
             warehouse_id INT NOT NULL,
             note TEXT NULL,
             status VARCHAR(20) NOT NULL DEFAULT 'PICKING',
@@ -124,6 +136,7 @@ final class DispatchService
         foreach ([
             'ALTER TABLE dispatch_picking_items ADD COLUMN from_warehouse_name VARCHAR(120) NULL',
             'ALTER TABLE dispatch_picking_items ADD COLUMN full_qty DECIMAL(12,3) NULL',
+            "ALTER TABLE dispatch_pickings ADD COLUMN document_type VARCHAR(10) NOT NULL DEFAULT 'GUIDE'",
             'ALTER TABLE boxes ADD COLUMN units_initial DECIMAL(12,3) NULL',
             'ALTER TABLE traceability_warehouse_entries ADD COLUMN quantity_initial DECIMAL(12,3) NULL',
             'UPDATE dispatch_picking_items SET from_warehouse_name = (SELECT w.name FROM warehouses w WHERE w.id = from_warehouse_id) WHERE from_warehouse_name IS NULL',
@@ -172,6 +185,18 @@ final class DispatchService
 
     // ------------------------------------------------------------------ picking
 
+    /** Valida el documento elegido: la maquila (envío a otra empresa) sale siempre con guía. */
+    private function checkDocument(string $type, string $doc): void
+    {
+        if (!in_array($doc, [self::DOC_GUIDE, self::DOC_INVOICE], true)) {
+            throw new RuntimeException('Indica si el despacho sale con guía de despacho o con factura.');
+        }
+        if ($type === self::TYPE_MAQUILA && $doc === self::DOC_INVOICE) {
+            throw new RuntimeException('Un envío a procesar (maquila) sale con guía de despacho, no con factura.');
+        }
+    }
+
+    /** El documento (guía o factura) no se elige al pickear: se elige en el paso 2 y se guarda al confirmar. */
     public function createPicking(string $key, string $type, string $note, array $actor): string
     {
         $this->ensureSchema();
@@ -302,6 +327,13 @@ final class DispatchService
             $label = $this->codeOf($type, $row);
             if (in_array($status, ['DISPATCHED', 'IN_MAQUILA'], true)) {
                 throw new RuntimeException('El código ' . $label . ' ya salió de la bodega (' . $status . ').');
+            }
+            // Cajas de bolsas: una caja en máquina, sin saldo o anulada no se puede despachar.
+            if ($type === 'BOX' && in_array($status, ['IN_MACHINE', 'CONSUMED', 'VOID'], true)) {
+                throw new RuntimeException('La caja ' . $label . ' no está disponible para despacho (' . ['IN_MACHINE' => 'en una máquina', 'CONSUMED' => 'sin bolsas', 'VOID' => 'anulada'][$status] . ').');
+            }
+            if ($type === 'BOX' && (int)($row['erp_st_id'] ?? 0) === 16) {
+                throw new RuntimeException('La caja ' . $label . ' está en 3000 Insumos en Producción; no es producto para despachar.');
             }
             if ($type === 'PRODUCT' && $status !== 'IN_WAREHOUSE') {
                 throw new RuntimeException('El código ' . $label . ' no está disponible en bodega (' . $status . ').');
@@ -498,6 +530,9 @@ final class DispatchService
             ];
         }
         return [
+            'doc' => self::DOC_GUIDE,
+            // Registro de despacho que el ERP crea solo al emitir una factura que descuenta stock.
+            'invoice_generated' => (int)($g['dlv_invoice_generated'] ?? 0),
             'id' => (int)$g['id'],
             'number' => (string)($g['dlv_num'] ?? ''),
             'docnum' => trim((string)($g['dlv_docnum'] ?? '')),
@@ -516,6 +551,83 @@ final class DispatchService
         ];
     }
 
+    /**
+     * Lee la factura de venta del ERP por número interno (FV0011701, o 11701) o por folio SII. Solo lectura.
+     * Estados del ERP: 0 eliminada, 1 abierta (sin emitir), 2 emitida, 3 emitida y pagada, 4 o más anulada/otros.
+     * Tipos: 1 hecha desde guías (no mueve stock), 2 desde la NV, 3 directa; con invc_stockchange=1 descuenta stock.
+     */
+    public function lookupInvoice(string $number): ?array
+    {
+        $number = strtoupper((string)preg_replace('/\s+/', '', $number));
+        if ($number === '') {
+            return null;
+        }
+        $digits = ltrim((string)preg_replace('/^FV/', '', $number), '0');
+        $fv = $digits !== '' && ctype_digit($digits) ? 'FV' . str_pad($digits, 7, '0', STR_PAD_LEFT) : $number;
+        // Con prefijo FV es el número interno; sin prefijo primero se busca como folio SII.
+        $folio = str_starts_with($number, 'FV') ? '' : $number;
+        $st = $this->erp->prepare("SELECT iv.*, c.cust_name, c.cust_rut, c.cust_street
+            FROM invoices_sell iv LEFT JOIN customer c ON iv.invc_cust_id = c.id
+            WHERE iv.invc_number = :a OR iv.invc_number = :b OR iv.invc_docnumber = :c
+            ORDER BY CASE WHEN iv.invc_docnumber = :c2 THEN 0 ELSE 1 END, iv.id DESC LIMIT 1");
+        $st->execute([':a' => $number, ':b' => $fv, ':c' => $folio !== '' ? $folio : '-', ':c2' => $folio !== '' ? $folio : '-']);
+        $v = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$v) {
+            return null;
+        }
+        $it = $this->erp->prepare("SELECT p.item_id, p.item_amount, p.item_override_stockdsc_amt, p.item_desc,
+                COALESCE(NULLIF(i.item_title, ''), p.item_desc, '') AS item_title, i.item_number_prod
+            FROM invoices_sell_parts_items p LEFT JOIN item i ON p.item_id = i.id
+            WHERE p.invc_id = :id AND p.item_type = 'item' ORDER BY p.part_id, p.item_pos");
+        $it->execute([':id' => (int)$v['id']]);
+        $items = [];
+        foreach ($it->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            // El ERP descuenta la cantidad de reemplazo cuando la hay (misma regla que al emitir la factura).
+            $qty = (float)($r['item_override_stockdsc_amt'] ?? 0) > 0 ? (float)$r['item_override_stockdsc_amt'] : (float)($r['item_amount'] ?? 0);
+            $items[] = [
+                'sku' => strtoupper(trim((string)($r['item_number_prod'] ?? ''))),
+                'title' => (string)($r['item_title'] ?? ''),
+                'qty' => $qty,
+            ];
+        }
+        $orders = [];
+        try {
+            $o = $this->erp->prepare('SELECT DISTINCT o.req_number FROM invoices_sell_parts sp JOIN orders o ON o.id = sp.part_req_id WHERE sp.part_invc_id = :id');
+            $o->execute([':id' => (int)$v['id']]);
+            $orders = array_values(array_filter(array_map('strval', $o->fetchAll(PDO::FETCH_COLUMN) ?: [])));
+        } catch (Throwable) {
+            // Sin partes (factura directa) o tabla no disponible.
+        }
+        $docnum = trim((string)($v['invc_docnumber'] ?? ''));
+        return [
+            'doc' => self::DOC_INVOICE,
+            'id' => (int)$v['id'],
+            'number' => (string)($v['invc_number'] ?? ''),
+            'docnum' => ctype_digit($docnum) ? $docnum : '',
+            'status' => (int)($v['invc_status'] ?? 0),
+            'invoice_type' => (int)($v['invc_type'] ?? 0),
+            'stockchange' => !empty($v['invc_stockchange']),
+            'mode' => null,
+            'extern' => false,
+            'date' => (int)($v['invc_date'] ?? 0) > 0 ? date('d/m/Y', (int)$v['invc_date']) : '',
+            'customer' => (string)($v['cust_name'] ?? ''),
+            'rut' => (string)($v['cust_rut'] ?? ''),
+            'address' => (string)($v['cust_street'] ?? ''),
+            'oc' => (string)($v['invc_oc_number'] ?? ''),
+            'bultos' => (string)($v['invc_bultos'] ?? ''),
+            'ref_guide' => trim((string)($v['invc_dlv_docnum'] ?? '')),
+            'orders' => $orders,
+            'annotation' => '',
+            'items' => $items,
+        ];
+    }
+
+    /** Lee el documento del picking (guía o factura) en el ERP. */
+    public function lookupDocument(string $doc, string $number): ?array
+    {
+        return $doc === self::DOC_INVOICE ? $this->lookupInvoice($number) : $this->lookupGuide($number);
+    }
+
     /** Cantidades pickeadas por SKU de un picking. */
     private function pickedBySku(int $pickingId): array
     {
@@ -527,7 +639,7 @@ final class DispatchService
     }
 
     /**
-     * Compara el picking con la guía. errors: impiden confirmar; warnings: requieren aceptación explícita.
+     * Compara el picking con su documento (guía o factura). errors: impiden confirmar; warnings: requieren aceptación explícita.
      *
      * @return array{errors:array<int,string>,warnings:array<int,string>,rows:array<int,array<string,mixed>>}
      */
@@ -536,21 +648,44 @@ final class DispatchService
         $errors = [];
         $warnings = [];
         $rows = [];
+        $doc = (string)($picking['document_type'] ?? self::DOC_GUIDE) === self::DOC_INVOICE ? self::DOC_INVOICE : self::DOC_GUIDE;
+        $name = $doc === self::DOC_INVOICE ? 'factura' : 'guía';
         if ($guide === null) {
-            return ['errors' => ['La guía no existe en el ERP. Revisa el número.'], 'warnings' => [], 'rows' => []];
+            return ['errors' => ['La ' . $name . ' no existe en el ERP. Revisa el número.'], 'warnings' => [], 'rows' => []];
         }
-        if ($guide['status'] === 5) {
-            $errors[] = 'La guía está anulada en el ERP.';
-        } elseif ($guide['status'] !== 2) {
-            $errors[] = 'La guía aún no está finalizada en el ERP (estado ' . $guide['status'] . ').';
+        if ($doc === self::DOC_INVOICE) {
+            if ($guide['status'] === 0) {
+                $errors[] = 'La factura está eliminada en el ERP.';
+            } elseif ($guide['status'] === 1) {
+                $errors[] = 'La factura aún no está emitida en el ERP (sigue abierta).';
+            } elseif (!in_array($guide['status'], [2, 3], true)) {
+                $errors[] = 'La factura está anulada o no es válida en el ERP (estado ' . $guide['status'] . ').';
+            }
+            if ($guide['docnum'] === '') {
+                $errors[] = 'La factura todavía no tiene folio SII emitido.';
+            }
+            if (empty($guide['stockchange'])) {
+                $warnings[] = (int)($guide['invoice_type'] ?? 0) === 1
+                    ? 'Esta factura se hizo a partir de guías de despacho y no descuenta stock en el ERP: la mercadería salió con la guía. Revisa si el documento correcto es la guía.'
+                    : 'Esta factura no descuenta stock en el ERP.';
+            }
+        } else {
+            if (!empty($guide['invoice_generated'])) {
+                $errors[] = 'Ese número es el despacho que el ERP genera al emitir la factura ' . $guide['number'] . '. Cambia el documento del picking a «Factura» y busca la factura.';
+            } elseif ($guide['status'] === 5) {
+                $errors[] = 'La guía está anulada en el ERP.';
+            } elseif (!in_array($guide['status'], [2, 3], true)) {
+                // 2 = finalizada; 3 = finalizada y ya facturada.
+                $errors[] = 'La guía aún no está finalizada en el ERP (estado ' . $guide['status'] . ').';
+            }
+            if (empty($guide['invoice_generated']) && ($guide['docnum'] === '' || stripos($guide['docnum'], 'PENDIENTE') !== false)) {
+                $errors[] = 'La guía todavía no tiene folio SII emitido.';
+            }
         }
-        if ($guide['docnum'] === '' || stripos($guide['docnum'], 'PENDIENTE') !== false) {
-            $errors[] = 'La guía todavía no tiene folio SII emitido.';
-        }
-        $used = $this->one("SELECT picking_key, code FROM dispatch_pickings WHERE guide_id = ? AND status = 'DISPATCHED' AND picking_key <> ?",
-            [$guide['id'], (string)$picking['picking_key']]);
+        $used = $this->one("SELECT picking_key, code FROM dispatch_pickings WHERE guide_id = ? AND COALESCE(document_type, 'GUIDE') = ? AND status = 'DISPATCHED' AND picking_key <> ?",
+            [$guide['id'], $doc, (string)$picking['picking_key']]);
         if ($used) {
-            $errors[] = 'La guía ya fue asociada al picking ' . $used['code'] . '.';
+            $errors[] = 'La ' . $name . ' ya fue asociada al picking ' . $used['code'] . '.';
         }
 
         $picked = $this->pickedBySku((int)$picking['id']);
@@ -565,40 +700,48 @@ final class DispatchService
             if (abs($p - $g) >= 0.001) {
                 $label = $sku !== '' ? $sku : '(sin código)';
                 if ($g == 0.0) {
-                    $warnings[] = "El artículo $label está pickeado pero no aparece en la guía.";
+                    $warnings[] = "El artículo $label está pickeado pero no aparece en la $name.";
                 } elseif ($p == 0.0) {
-                    $warnings[] = "El artículo $label está en la guía pero no fue pickeado.";
+                    $warnings[] = "El artículo $label está en la $name pero no fue pickeado.";
                 } else {
-                    $warnings[] = "Artículo $label: pickeado " . rtrim(rtrim(number_format($p, 3, '.', ''), '0'), '.') . " y la guía indica " . rtrim(rtrim(number_format($g, 3, '.', ''), '0'), '.') . '.';
+                    $warnings[] = "Artículo $label: pickeado " . rtrim(rtrim(number_format($p, 3, '.', ''), '0'), '.') . " y la $name indica " . rtrim(rtrim(number_format($g, 3, '.', ''), '0'), '.') . '.';
                 }
             }
         }
-        $guideSaysProcess = in_array($guide['mode'], [3, 4], true) || $guide['extern'];
-        if ($picking['dispatch_type'] === self::TYPE_SALE && $guideSaysProcess) {
-            $warnings[] = 'El picking es venta directa, pero la guía está marcada como envío a proveedor / producción externa.';
-        }
-        if ($picking['dispatch_type'] === self::TYPE_MAQUILA && !$guideSaysProcess) {
-            $warnings[] = 'El picking es envío a procesar (maquila), pero la guía no está marcada como envío a proveedor / producción externa.';
+        if ($doc === self::DOC_GUIDE) {
+            $guideSaysProcess = in_array($guide['mode'], [3, 4], true) || $guide['extern'];
+            if ($picking['dispatch_type'] === self::TYPE_SALE && $guideSaysProcess) {
+                $warnings[] = 'El picking es venta directa, pero la guía está marcada como envío a proveedor / producción externa.';
+            }
+            if ($picking['dispatch_type'] === self::TYPE_MAQUILA && !$guideSaysProcess) {
+                $warnings[] = 'El picking es envío a procesar (maquila), pero la guía no está marcada como envío a proveedor / producción externa.';
+            }
         }
         return ['errors' => $errors, 'warnings' => $warnings, 'rows' => $rows];
     }
 
     /** Datos para la pantalla de validación (picking + guía + comparación). */
-    public function validation(string $key, string $number): array
+    /** @param string $doc documento elegido en el paso 2 (GUIDE/INVOICE); vacío = el guardado en el picking. Solo consulta. */
+    public function validation(string $key, string $number, string $doc = ''): array
     {
         $this->ensureSchema();
         $p = $this->picking($key);
-        $guide = $this->lookupGuide($number);
+        if ($doc !== '') {
+            $this->checkDocument((string)$p['dispatch_type'], $doc);
+            $p['document_type'] = $doc;
+        }
+        $guide = $this->lookupDocument((string)($p['document_type'] ?? self::DOC_GUIDE), $number);
         return ['picking' => $p, 'guide' => $guide, 'compare' => $this->compare($p, $guide)];
     }
 
     // ------------------------------------------------------------------ confirmación
 
-    public function confirmGuide(string $key, string $number, bool $acceptWarnings, array $actor): void
+    /** @param string $doc documento elegido en el paso 2 (GUIDE/INVOICE); queda guardado en el picking al confirmar. */
+    public function confirmGuide(string $key, string $number, bool $acceptWarnings, array $actor, string $doc = self::DOC_GUIDE): void
     {
         $this->ensureSchema();
         $who = $this->actorName($actor);
-        $guide = $this->lookupGuide($number);
+        $guide = $this->lookupDocument($doc, $number);
         $hasEntries = true;
         try {
             $this->trz->query('SELECT 1 FROM traceability_warehouse_entries LIMIT 0');
@@ -608,13 +751,16 @@ final class DispatchService
         $this->trz->beginTransaction();
         try {
             $p = $this->picking($key, true);
-            if ($p['status'] === 'DISPATCHED' && $guide && (int)$p['guide_id'] === $guide['id']) {
+            if ($p['status'] === 'DISPATCHED' && $guide && (int)$p['guide_id'] === $guide['id'] && (string)($p['document_type'] ?? self::DOC_GUIDE) === $doc) {
                 $this->trz->commit();
                 return; // Reintento idempotente
             }
             if ($p['status'] !== 'AWAITING_GUIDE') {
-                throw new RuntimeException('El picking debe estar cerrado y esperando guía para confirmarlo.');
+                throw new RuntimeException('El picking debe estar cerrado y esperando su documento para confirmarlo.');
             }
+            // El documento elegido en el paso 2 se compara y queda guardado junto con la confirmación.
+            $this->checkDocument((string)$p['dispatch_type'], $doc);
+            $p['document_type'] = $doc;
             $cmp = $this->compare($p, $guide);
             if ($cmp['errors'] !== []) {
                 throw new RuntimeException(implode(' ', $cmp['errors']));
@@ -631,6 +777,7 @@ final class DispatchService
                 'movement_context' => 'DISPATCH_OUT',
                 'dispatch_picking' => $p['code'],
                 'dispatch_type' => $p['dispatch_type'],
+                'document_type' => $doc,
                 'guide_number' => $guide['number'],
                 'guide_docnum' => $guide['docnum'],
                 'customer' => $guide['customer'],
@@ -654,13 +801,13 @@ final class DispatchService
                 }
                 $this->trz->prepare("UPDATE dispatch_picking_items SET status = 'DISPATCHED', active_code = NULL WHERE id = ?")->execute([(int)$it['id']]);
             }
-            $this->trz->prepare("UPDATE dispatch_pickings SET status = 'DISPATCHED', guide_id = ?, guide_number = ?, guide_snapshot = ?,
+            $this->trz->prepare("UPDATE dispatch_pickings SET status = 'DISPATCHED', document_type = ?, guide_id = ?, guide_number = ?, guide_snapshot = ?,
                 confirmed_by = ?, confirmed_at = CURRENT_TIMESTAMP WHERE id = ?")
-                ->execute([$guide['id'], $guide['docnum'] !== '' ? $guide['docnum'] : $guide['number'],
+                ->execute([$doc, $guide['id'], $guide['docnum'] !== '' ? $guide['docnum'] : $guide['number'],
                     json_encode($guide, JSON_UNESCAPED_UNICODE), $who, (int)$p['id']]);
             $this->trz->prepare('INSERT INTO events (type, payload) VALUES (?, ?)')
                 ->execute(['DISPATCH_CONFIRMED', json_encode($ctx + ['items' => count($items), 'warnings' => $cmp['warnings']], JSON_UNESCAPED_UNICODE)]);
-            $this->audit((int)$p['id'], 'CONFIRM', $who, ['guide_id' => $guide['id'], 'guide' => $guide['docnum'], 'warnings' => $cmp['warnings']]);
+            $this->audit((int)$p['id'], 'CONFIRM', $who, ['doc' => $doc, 'guide_id' => $guide['id'], 'guide' => $guide['docnum'] !== '' ? $guide['docnum'] : $guide['number'], 'warnings' => $cmp['warnings']]);
             $this->trz->commit();
         } catch (Throwable $e) {
             if ($this->trz->inTransaction()) {
@@ -718,7 +865,10 @@ final class DispatchService
 
     // ------------------------------------------------------------------ consultas
 
-    public function list(string $status = '', string $type = '', string $q = '', int $limit = 100): array
+    /**
+     * @param string $doc GUIDE o INVOICE: solo los despachados con ese documento (antes de despachar no hay documento).
+     */
+    public function list(string $status = '', string $type = '', string $q = '', int $limit = 100, string $doc = ''): array
     {
         $this->ensureSchema();
         $where = ['1=1'];
@@ -726,6 +876,10 @@ final class DispatchService
         if (in_array($status, ['PICKING', 'AWAITING_GUIDE', 'DISPATCHED', 'CANCELLED'], true)) {
             $where[] = 'p.status = ?';
             $params[] = $status;
+        }
+        if (in_array($doc, [self::DOC_GUIDE, self::DOC_INVOICE], true)) {
+            $where[] = "p.status = 'DISPATCHED' AND p.document_type = ?";
+            $params[] = $doc;
         }
         if (in_array($type, [self::TYPE_SALE, self::TYPE_MAQUILA], true)) {
             $where[] = 'p.dispatch_type = ?';
@@ -774,7 +928,7 @@ final class DispatchService
     {
         try {
             $this->ensureSchema();
-            return $this->one("SELECT p.code, p.dispatch_type, p.guide_number, p.guide_snapshot, p.confirmed_by, p.confirmed_at, i.qty, i.full_qty
+            return $this->one("SELECT p.code, p.dispatch_type, p.document_type, p.guide_number, p.guide_snapshot, p.confirmed_by, p.confirmed_at, i.qty, i.full_qty
                 FROM dispatch_picking_items i JOIN dispatch_pickings p ON p.id = i.picking_id
                 WHERE i.entity_type = ? AND i.entity_id = ? AND i.status = 'DISPATCHED' AND p.status = 'DISPATCHED'
                 ORDER BY p.id DESC LIMIT 1", [$entityType, $entityId]);

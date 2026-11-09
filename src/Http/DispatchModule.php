@@ -8,7 +8,10 @@ declare(strict_types=1);
  * Rutas:
  *  - /stock/dispatch ............ Nuevo picking y listado de pickeados.
  *  - /stock/dispatch/view ....... Detalle de un picking: escaneo, cierre, validación de guía y confirmación.
- *  - /stock/dispatch/create|scan|qty|void|close|cancel|confirm (POST).
+ *  - /stock/dispatch/create|scan|qty|void|close|cancel|confirm|document (POST).
+ *
+ * Al pickear no se sabe con qué documento sale: en el paso 2, cuando retiran, se elige guía de despacho o factura,
+ * se valida en el ERP y queda guardado al confirmar.
  */
 
 require_once __DIR__ . '/../DispatchService.php';
@@ -71,12 +74,16 @@ function handleDispatchRoutes(string $path, string $method, string $name): bool
                 redirectResponse('/stock/dispatch?tab=list&saved=1');
                 return true;
             }
-            // Confirmar con la guía validada
+            // Confirmar con el documento validado (guía o factura)
             $guide = (string)($_POST['guide'] ?? '');
+            $doc = dispatchDocParam((string)($_POST['document_type'] ?? ''));
             try {
-                $service->confirmGuide($key, $guide, !empty($_POST['accept_differences']), $actor);
+                if ($doc === '') {
+                    throw new RuntimeException('Elige si el despacho sale con guía o con factura.');
+                }
+                $service->confirmGuide($key, $guide, !empty($_POST['accept_differences']), $actor, $doc);
             } catch (Throwable $e) {
-                redirectResponse($back . $sep . 'guide=' . rawurlencode($guide) . '&error=' . rawurlencode($e->getMessage()));
+                redirectResponse($back . $sep . 'guide=' . rawurlencode($guide) . ($doc !== '' ? '&doc=' . $doc : '') . '&error=' . rawurlencode($e->getMessage()));
                 return true;
             }
             redirectResponse($back . $sep . 'saved=' . rawurlencode('Despacho confirmado'));
@@ -89,7 +96,7 @@ function handleDispatchRoutes(string $path, string $method, string $name): bool
             if (!$validKey) {
                 throw new RuntimeException('Picking no válido.');
             }
-            render('Despacho', dispatchViewPage($service, $key, trim((string)($_GET['guide'] ?? ''))));
+            render('Despacho', dispatchViewPage($service, $key, trim((string)($_GET['guide'] ?? '')), dispatchDocParam((string)($_GET['doc'] ?? ''))));
             return true;
         }
         render('Despacho', dispatchHomePage($service, (string)($_GET['tab'] ?? 'new')));
@@ -106,7 +113,7 @@ function handleDispatchRoutes(string $path, string $method, string $name): bool
 
 function dispatchStyles(): string
 {
-    return '<link rel="stylesheet" href="/assets/css/unibag-dispatch.css?v=20261105b">';
+    return '<link rel="stylesheet" href="/assets/css/unibag-dispatch.css?v=20261109c">';
 }
 
 function dispatchIcon(string $name): string
@@ -122,6 +129,25 @@ function dispatchStatusIcon(string $status): string
 function dispatchPill(string $status): string
 {
     return '<span class="dsp-pill tone-' . h($status) . '">' . h(DispatchService::statusLabel($status)) . '</span>';
+}
+
+function dispatchDocChip(string $doc): string
+{
+    $doc = $doc === DispatchService::DOC_INVOICE ? DispatchService::DOC_INVOICE : DispatchService::DOC_GUIDE;
+    return '<span class="dsp-doc ' . $doc . '">' . dispatchIcon($doc === DispatchService::DOC_INVOICE ? 'file-invoice-dollar' : 'file-alt')
+        . h($doc === DispatchService::DOC_INVOICE ? 'Factura' : 'Guía') . '</span>';
+}
+
+/** Documento recibido por GET/POST: GUIDE, INVOICE o vacío si no viene o no es válido. */
+function dispatchDocParam(string $value): string
+{
+    return in_array($value, [DispatchService::DOC_GUIDE, DispatchService::DOC_INVOICE], true) ? $value : '';
+}
+
+/** «guía» o «factura», en minúscula, para armar textos. */
+function dispatchDocWord(string $doc): string
+{
+    return $doc === DispatchService::DOC_INVOICE ? 'factura' : 'guía';
 }
 
 function dispatchNum(float $n): string
@@ -188,7 +214,7 @@ function dispatchNewTab(DispatchService $service): string
         . '<label class="dsp-type"><input type="radio" name="dispatch_type" value="MAQUILA" required><span class="dsp-type-box">' . dispatchIcon('industry') . 'Envío a procesar a otra empresa</span></label>'
         . '</div><div class="dsp-field"><label class="dsp-lbl" for="dsp-note">Nota</label><input id="dsp-note" type="text" name="note" maxlength="200"></div>'
         . '<button class="dsp-btn block" type="submit">' . dispatchIcon('plus') . 'Crear picking</button></div></form><div>';
-    foreach (['PICKING' => 'Pickings en curso', 'AWAITING_GUIDE' => 'Esperando guía'] as $status => $title) {
+    foreach (['PICKING' => 'Pickings en curso', 'AWAITING_GUIDE' => 'Esperando documento'] as $status => $title) {
         $rows = $service->list($status);
         $html .= '<div class="dsp-card"><div class="dsp-card-head"><h2>' . h($title) . '<span class="dsp-count">' . count($rows) . '</span></h2></div>'
             . ($rows === [] ? '<div class="dsp-empty">Sin pickings</div>' : dispatchTable($rows, false)) . '</div>';
@@ -199,6 +225,7 @@ function dispatchNewTab(DispatchService $service): string
 function dispatchListTab(DispatchService $service, string $status): string
 {
     $type = (string)($_GET['type'] ?? '');
+    $doc = (string)($_GET['doc'] ?? '');
     $q = (string)($_GET['q'] ?? '');
     $html = '<div class="dsp-card"><form class="dsp-filters" method="get" action="/stock/dispatch"><input type="hidden" name="tab" value="list">'
         . '<div><label class="dsp-lbl" for="dsp-f-st">Estado</label><select id="dsp-f-st" name="status"><option value="">Todos</option>';
@@ -208,19 +235,25 @@ function dispatchListTab(DispatchService $service, string $status): string
     $html .= '</select></div><div><label class="dsp-lbl" for="dsp-f-ty">Tipo</label><select id="dsp-f-ty" name="type"><option value="">Todos</option>'
         . '<option value="SALE"' . ($type === 'SALE' ? ' selected' : '') . '>Venta directa</option>'
         . '<option value="MAQUILA"' . ($type === 'MAQUILA' ? ' selected' : '') . '>Maquila</option></select></div>'
-        . '<div class="wide"><label class="dsp-lbl" for="dsp-f-q">Código o guía</label><input id="dsp-f-q" type="text" name="q" value="' . h($q) . '"></div>'
+        . '<div><label class="dsp-lbl" for="dsp-f-doc">Despachado con</label><select id="dsp-f-doc" name="doc"><option value="">Todos</option>'
+        . '<option value="GUIDE"' . ($doc === 'GUIDE' ? ' selected' : '') . '>Guía de despacho</option>'
+        . '<option value="INVOICE"' . ($doc === 'INVOICE' ? ' selected' : '') . '>Factura</option></select></div>'
+        . '<div class="wide"><label class="dsp-lbl" for="dsp-f-q">Código, guía o factura</label><input id="dsp-f-q" type="text" name="q" value="' . h($q) . '"></div>'
         . '<button class="dsp-btn" type="submit">' . dispatchIcon('search') . 'Filtrar</button>'
         . '<a class="dsp-btn sec" href="/stock/dispatch?tab=list">Limpiar</a></form>';
-    $rows = $service->list($status, $type, $q);
+    $rows = $service->list($status, $type, $q, 100, $doc);
     return $html . ($rows === [] ? '<div class="dsp-empty">' . dispatchIcon('box-open') . 'Sin pickings</div>' : dispatchTable($rows, true)) . '</div>';
 }
 
 function dispatchTable(array $rows, bool $withGuide): string
 {
     $html = '<div class="dsp-wrap"><table class="dsp-table"><thead><tr><th>Picking</th><th>Tipo</th><th>Bodega</th><th>Estado</th><th class="num">Códigos</th><th class="num">Unidades</th>'
-        . ($withGuide ? '<th>Guía</th>' : '') . '<th>Creado</th></tr></thead><tbody>';
+        . ($withGuide ? '<th>Documento</th>' : '') . '<th>Creado</th></tr></thead><tbody>';
     foreach ($rows as $r) {
         $url = '/stock/dispatch/view?key=' . h($r['picking_key']);
+        // El documento existe recién al despachar (se elige en el paso 2).
+        $docCell = (string)$r['status'] === 'DISPATCHED' && !empty($r['guide_number'])
+            ? dispatchDocChip((string)($r['document_type'] ?? DispatchService::DOC_GUIDE)) . ' ' . h($r['guide_number']) : '';
         $html .= '<tr class="link" onclick="location.href=\'' . $url . '\'">'
             . '<td class="dsp-code"><a href="' . $url . '">' . h($r['code']) . '</a></td>'
             . '<td class="dsp-nowrap">' . h(DispatchService::typeLabel((string)$r['dispatch_type'])) . '</td>'
@@ -228,17 +261,18 @@ function dispatchTable(array $rows, bool $withGuide): string
             . '<td>' . dispatchPill((string)$r['status']) . '</td>'
             . '<td class="num">' . (int)$r['item_count'] . '</td>'
             . '<td class="num">' . h(dispatchNum((float)$r['qty_total'])) . '</td>'
-            . ($withGuide ? '<td class="dsp-nowrap">' . h($r['guide_number'] ?? '') . '</td>' : '')
+            . ($withGuide ? '<td class="dsp-nowrap">' . $docCell . '</td>' : '')
             . '<td class="dsp-nowrap">' . h(dispatchDate((string)$r['created_at'])) . '<span class="dsp-sub">' . h($r['created_by'] ?? '') . '</span></td></tr>';
     }
     return $html . '</tbody></table></div>';
 }
 
-function dispatchSteps(string $status): string
+function dispatchSteps(string $status, string $doc): string
 {
     $current = ['PICKING' => 0, 'AWAITING_GUIDE' => 1, 'DISPATCHED' => 3][$status] ?? -1;
     $html = '<div class="dsp-steps">';
-    foreach (['Picking', 'Guía de despacho', 'Despachado'] as $i => $label) {
+    // Antes de despachar el paso 2 es «Guía o factura»; ya despachado, muestra el documento usado.
+    foreach (['Picking', $doc !== '' ? DispatchService::documentLabel($doc) : 'Guía o factura', 'Despachado'] as $i => $label) {
         $state = $i < $current ? 'done' : ($i === $current ? 'now' : '');
         if ($i > 0) {
             $html .= '<div class="dsp-step-line' . ($i <= $current ? ' done' : '') . '"></div>';
@@ -248,22 +282,33 @@ function dispatchSteps(string $status): string
     return $html . '</div>';
 }
 
-function dispatchViewPage(DispatchService $service, string $key, string $guideNumber): string
+function dispatchViewPage(DispatchService $service, string $key, string $guideNumber, string $chosenDoc = ''): string
 {
     $p = $service->detail($key);
     $status = (string)$p['status'];
+    // El documento (guía o factura) se elige solo en el paso 2, cuando retiran; queda guardado al confirmar.
+    // La maquila sale siempre con guía. Antes de despachar no hay documento definido.
+    $isMaquila = $p['dispatch_type'] === DispatchService::TYPE_MAQUILA;
+    if ($status === 'DISPATCHED') {
+        $doc = (string)($p['document_type'] ?? '') === DispatchService::DOC_INVOICE ? DispatchService::DOC_INVOICE : DispatchService::DOC_GUIDE;
+    } elseif ($status === 'AWAITING_GUIDE') {
+        $doc = $isMaquila ? DispatchService::DOC_GUIDE : $chosenDoc;
+    } else {
+        $doc = '';
+    }
     $csrf = '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '"><input type="hidden" name="picking_key" value="' . h($key) . '">';
 
     $html = dispatchStyles() . '<div class="dsp"><div class="dsp-head"><div class="dsp-head-left">'
         . '<a class="dsp-back" href="/stock/dispatch?tab=list" aria-label="Volver a pickeados">' . dispatchIcon('arrow-left') . '</a>'
         . '<h1>' . h($p['code']) . '</h1>' . dispatchPill($status)
         . '<div class="dsp-meta"><span>' . dispatchIcon($p['dispatch_type'] === 'SALE' ? 'shopping-cart' : 'industry') . h(DispatchService::typeLabel((string)$p['dispatch_type'])) . '</span>'
+        . ($status === 'DISPATCHED' ? '<span>' . dispatchIcon($doc === DispatchService::DOC_INVOICE ? 'file-invoice-dollar' : 'file-alt') . 'Salió con ' . h(mb_strtolower(DispatchService::documentLabel($doc))) . '</span>' : '')
         . (!empty($p['warehouse_name']) ? '<span>' . dispatchIcon('warehouse') . h(dispatchWarehouses($p['warehouse_name'])) . '</span>' : '') . '</div></div></div>' . dispatchFlash();
 
     if ($status === 'CANCELLED') {
         $html .= '<div class="dsp-alert warn">' . dispatchIcon('ban') . '<div>Picking cancelado: ' . h($p['cancel_reason']) . '</div></div>';
     } else {
-        $html .= dispatchSteps($status);
+        $html .= dispatchSteps($status, $status === 'DISPATCHED' ? $doc : '');
     }
 
     $html .= '<div class="dsp-layout"><div>';
@@ -272,14 +317,34 @@ function dispatchViewPage(DispatchService $service, string $key, string $guideNu
             . '<div class="dsp-scan-input">' . dispatchIcon('barcode') . '<input type="text" name="code" placeholder="Escanear pallet, caja o producto" aria-label="Código de pallet, caja o producto" autocomplete="off" autofocus required></div>'
             . '<button class="dsp-btn" type="submit">' . dispatchIcon('plus') . 'Agregar</button></form>';
     } elseif ($status === 'AWAITING_GUIDE') {
-        $html .= '<form class="dsp-card dsp-scan" method="get" action="/stock/dispatch/view"><input type="hidden" name="key" value="' . h($key) . '">'
-            . '<div class="dsp-scan-input">' . dispatchIcon('file-alt') . '<input type="text" name="guide" value="' . h($guideNumber) . '" placeholder="Número o folio de la guía de despacho" aria-label="Número o folio de la guía" autocomplete="off" autofocus required></div>'
-            . '<button class="dsp-btn" type="submit">' . dispatchIcon('search') . 'Buscar guía</button></form>';
-        if ($guideNumber !== '') {
-            $html .= dispatchGuidePanel($service, $key, $guideNumber, $csrf);
+        $placeholders = [DispatchService::DOC_GUIDE => 'Número o folio de la guía de despacho', DispatchService::DOC_INVOICE => 'Folio SII de la factura (15318) o número con FV (FV0011701)',
+            '' => 'Elige guía o factura y escribe el número'];
+        $html .= '<form class="dsp-card dsp-scan" id="dsp-docsearch" method="get" action="/stock/dispatch/view"><input type="hidden" name="key" value="' . h($key) . '">';
+        if (!$isMaquila) {
+            // Sin opción marcada por defecto: se elige a conciencia con qué documento sale.
+            $html .= '<div class="dsp-seg" role="radiogroup" aria-label="Documento con que sale el despacho">';
+            foreach ([DispatchService::DOC_GUIDE => ['file-alt', 'Guía'], DispatchService::DOC_INVOICE => ['file-invoice-dollar', 'Factura']] as $value => [$icon, $label]) {
+                $html .= '<label><input type="radio" name="doc" value="' . $value . '"' . ($doc === $value ? ' checked' : '') . ' required data-ph="' . h($placeholders[$value]) . '">'
+                    . '<span>' . dispatchIcon($icon) . h($label) . '</span></label>';
+            }
+            $html .= '</div>';
+        } else {
+            $html .= '<input type="hidden" name="doc" value="GUIDE">';
+        }
+        $html .= '<div class="dsp-scan-input">' . dispatchIcon($doc === DispatchService::DOC_INVOICE ? 'file-invoice-dollar' : 'file-alt') . '<input type="text" name="guide" value="' . h($guideNumber) . '" placeholder="' . h($placeholders[$doc]) . '" aria-label="Número del documento" autocomplete="off" autofocus required></div>'
+            . '<button class="dsp-btn" type="submit">' . dispatchIcon('search') . '<span class="dsp-docsearch-btn">Buscar ' . h($doc !== '' ? dispatchDocWord($doc) : 'documento') . '</span></button></form>';
+        if (!$isMaquila) {
+            // Al cambiar Guía/Factura: si ya hay número escrito se vuelve a buscar; si no, solo cambian los textos.
+            $html .= '<script>(function(){var f=document.getElementById("dsp-docsearch");if(!f)return;var t=f.querySelector(\'input[name="guide"]\'),b=f.querySelector(".dsp-docsearch-btn"),'
+                . 'ic=f.querySelector(".dsp-scan-input i");f.querySelectorAll(\'input[name="doc"]\').forEach(function(r){r.addEventListener("change",function(){'
+                . 'var inv=r.value==="INVOICE";t.placeholder=r.getAttribute("data-ph");b.textContent=inv?"Buscar factura":"Buscar guía";'
+                . 'ic.className="fas fa-"+(inv?"file-invoice-dollar":"file-alt");if(t.value.trim()!==""){f.submit();}else{t.focus();}});});})();</script>';
+        }
+        if ($guideNumber !== '' && $doc !== '') {
+            $html .= dispatchGuidePanel($service, $key, $guideNumber, $csrf, $doc);
         }
     } elseif ($status === 'DISPATCHED' && is_array($p['guide'])) {
-        $html .= '<div class="dsp-card"><div class="dsp-card-head"><h2>Guía asociada</h2></div>' . dispatchGuideSummary($p['guide']) . '</div>';
+        $html .= '<div class="dsp-card"><div class="dsp-card-head"><h2>' . ($doc === DispatchService::DOC_INVOICE ? 'Factura asociada' : 'Guía asociada') . '</h2></div>' . dispatchGuideSummary($p['guide']) . '</div>';
     }
 
     // Códigos del picking
@@ -327,14 +392,15 @@ function dispatchViewPage(DispatchService $service, string $key, string $guideNu
         . '<dl class="dsp-kv">'
         . '<div><dt>Creado por</dt><dd>' . h($p['created_by']) . '</dd></div>'
         . '<div><dt>Fecha</dt><dd>' . h(dispatchDate((string)$p['created_at'])) . '</dd></div>'
-        . ($p['guide_number'] ? '<div><dt>Guía</dt><dd>' . h($p['guide_number']) . '</dd></div>' : '')
+        . ($status === 'DISPATCHED' ? '<div><dt>Salió con</dt><dd>' . dispatchDocChip($doc) . '</dd></div>' : '')
+        . ($status === 'DISPATCHED' && $p['guide_number'] ? '<div><dt>' . ($doc === DispatchService::DOC_INVOICE ? 'Factura' : 'Guía') . '</dt><dd>' . h($p['guide_number']) . '</dd></div>' : '')
         . ($p['confirmed_by'] ? '<div><dt>Confirmado por</dt><dd>' . h($p['confirmed_by']) . '</dd></div><div><dt>Confirmado el</dt><dd>' . h(dispatchDate((string)$p['confirmed_at'])) . '</dd></div>' : '')
         . ($p['note'] ? '<div><dt>Nota</dt><dd>' . h($p['note']) . '</dd></div>' : '')
         . '</dl>';
     if ($status === 'PICKING' || $status === 'AWAITING_GUIDE') {
         $html .= '<div class="dsp-actions">';
         if ($status === 'PICKING') {
-            $html .= '<form method="post" action="/stock/dispatch/close">' . $csrf . '<button class="dsp-btn block" type="submit">' . dispatchIcon('lock') . 'Cerrar picking y esperar guía</button></form>';
+            $html .= '<form method="post" action="/stock/dispatch/close">' . $csrf . '<button class="dsp-btn block" type="submit">' . dispatchIcon('lock') . 'Cerrar picking y esperar documento</button></form>';
         }
         $html .= '<details class="dsp-fold"><summary class="dsp-btn danger block">Cancelar picking</summary>'
             . '<form class="dsp-fold-form" method="post" action="/stock/dispatch/cancel" onsubmit="return confirm(\'¿Cancelar este picking?\')">' . $csrf
@@ -377,15 +443,20 @@ function dispatchAuditLabel(string $action, string $detailJson): string
         'VOID' => 'Quitado ' . ($detail['code'] ?? ''),
         'CLOSE' => 'Picking cerrado',
         'CANCEL' => 'Picking cancelado',
-        'CONFIRM' => 'Despacho confirmado' . (!empty($detail['guide']) ? ' con guía ' . $detail['guide'] : ''),
+        'CONFIRM' => 'Despacho confirmado' . (!empty($detail['guide']) ? ' con ' . dispatchDocWord((string)($detail['doc'] ?? '')) . ' ' . $detail['guide'] : ''),
         default => $action,
     };
 }
 
 function dispatchGuideSummary(array $g): string
 {
-    $fields = ['Guía' => $g['number'] ?? '', 'Folio SII' => $g['docnum'] ?? '', 'Fecha' => $g['date'] ?? '', 'Cliente' => $g['customer'] ?? '',
+    $invoice = ($g['doc'] ?? '') === DispatchService::DOC_INVOICE;
+    $fields = [($invoice ? 'Factura' : 'Guía') => $g['number'] ?? '', 'Folio SII' => $g['docnum'] ?? '', 'Fecha' => $g['date'] ?? '', 'Cliente' => $g['customer'] ?? '',
         'RUT' => $g['rut'] ?? '', 'Dirección' => $g['address'] ?? '', 'OC' => $g['oc'] ?? '', 'Bultos' => $g['bultos'] ?? ''];
+    if ($invoice) {
+        $fields['NV'] = implode(', ', $g['orders'] ?? []);
+        $fields['Guía de referencia'] = $g['ref_guide'] ?? '';
+    }
     $html = '<div class="dsp-guide-grid">';
     foreach ($fields as $label => $value) {
         if ((string)$value !== '' && (string)$value !== '0') {
@@ -399,10 +470,11 @@ function dispatchGuideSummary(array $g): string
     return $html . '</tbody></table></div>';
 }
 
-function dispatchGuidePanel(DispatchService $service, string $key, string $number, string $csrf): string
+function dispatchGuidePanel(DispatchService $service, string $key, string $number, string $csrf, string $doc): string
 {
-    $v = $service->validation($key, $number);
+    $v = $service->validation($key, $number, $doc);
     $cmp = $v['compare'];
+    $word = dispatchDocWord($doc);
     $html = '';
     foreach ($cmp['errors'] as $e) {
         $html .= '<div class="dsp-alert err">' . dispatchIcon('exclamation-circle') . '<div>' . h($e) . '</div></div>';
@@ -410,9 +482,9 @@ function dispatchGuidePanel(DispatchService $service, string $key, string $numbe
     if ($v['guide'] === null) {
         return $html;
     }
-    $html .= '<div class="dsp-card"><div class="dsp-card-head"><h2>Guía de despacho</h2></div>' . dispatchGuideSummary($v['guide'])
-        . '<div class="dsp-section-title" style="border-top:1px solid var(--line)">Pickeado contra guía</div>'
-        . '<div class="dsp-wrap"><table class="dsp-table"><thead><tr><th>Artículo</th><th class="num">Pickeado</th><th class="num">Guía</th><th>Resultado</th></tr></thead><tbody>';
+    $html .= '<div class="dsp-card"><div class="dsp-card-head"><h2>' . h(DispatchService::documentLabel($doc)) . '</h2></div>' . dispatchGuideSummary($v['guide'])
+        . '<div class="dsp-section-title" style="border-top:1px solid var(--line)">Pickeado contra ' . h($word) . '</div>'
+        . '<div class="dsp-wrap"><table class="dsp-table"><thead><tr><th>Artículo</th><th class="num">Pickeado</th><th class="num">' . h(ucfirst($word)) . '</th><th>Resultado</th></tr></thead><tbody>';
     foreach ($cmp['rows'] as $r) {
         $html .= '<tr><td class="dsp-code">' . h($r['sku'] !== '' ? $r['sku'] : '(sin código)') . '</td>'
             . '<td class="num">' . h(dispatchNum((float)$r['picked'])) . '</td><td class="num">' . h(dispatchNum((float)$r['guide'])) . '</td><td>'
@@ -429,11 +501,11 @@ function dispatchGuidePanel(DispatchService $service, string $key, string $numbe
     }
     if ($cmp['errors'] === []) {
         $html .= '<form class="dsp-confirm" method="post" action="/stock/dispatch/confirm">' . $csrf
-            . '<input type="hidden" name="guide" value="' . h($number) . '">';
+            . '<input type="hidden" name="guide" value="' . h($number) . '"><input type="hidden" name="document_type" value="' . h($doc) . '">';
         if ($cmp['warnings'] !== []) {
-            $html .= '<label><input type="checkbox" name="accept_differences" value="1" required> Acepto las diferencias y confirmo que esta es la guía correcta</label>';
+            $html .= '<label><input type="checkbox" name="accept_differences" value="1" required> Acepto las diferencias y confirmo que esta es la ' . h($word) . ' correcta</label>';
         }
-        $html .= '<button class="dsp-btn" type="submit" onclick="return confirm(\'Se descontarán de cada bodega las unidades indicadas y quedarán asociadas a la guía. ¿Confirmar?\')">' . dispatchIcon('truck') . 'Confirmar guía y despachar</button></form>';
+        $html .= '<button class="dsp-btn" type="submit" onclick="return confirm(\'Se descontarán de cada bodega las unidades indicadas y quedarán asociadas a la ' . h($word) . '. ¿Confirmar?\')">' . dispatchIcon('truck') . 'Confirmar ' . h($word) . ' y despachar</button></form>';
     }
     return $html . '</div>';
 }

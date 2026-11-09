@@ -92,7 +92,7 @@ $rep = $svc->report();
 $by = array_column($rep['rows'], null, 'code');
 $check('informe trae los 42 activos', count($rep['rows']) === 42 && $rep['erp_ok']);
 $check('stock = suma de las filas de la bodega 1000 (activa) y excluye 3000 y bodegas inactivas', $by['BOL0250']['stock'] === 3000);
-$check('reservado y disponible', $by['BOL0250']['reserved'] === 100 && $by['BOL0250']['available'] === 2900);
+$check('sin tablas de NV el stock se muestra igual y avisa', $rep['flow_ok'] === false && $rep['flow_error'] !== '' && $by['BOL0250']['reserved'] === null && $by['BOL0250']['stock'] === 3000);
 $check('pallets y saldo con el stock real', $by['BOL0250']['pallets'] === 3 && $by['BOL0250']['boxes'] === 0 && $by['BOL0250']['loose'] === 0);
 $check('otra bodega muestra lo de la 400', $by['BOL0250']['other_stock'] === 50);
 $check('estado contra objetivo', $by['BOL0250']['status'] === 'Bajo' && $by['BOL0250']['diff'] === -2000);
@@ -116,6 +116,138 @@ $check('pegar lista informa lo no agregado', count($imp['skipped']) === 2);
 // ---- desactivar
 $svc->saveRows([$id251 => ['active' => '0']], $actor);
 $check('inactivos salen del informe', !isset(array_column($svc->report()['rows'], null, 'code')['BOL0251']));
+
+// ---- NV sin despachar (reservado) y en producción
+$erp->exec("CREATE TABLE customer (id INTEGER PRIMARY KEY, cust_name TEXT);
+CREATE TABLE user (id INTEGER PRIMARY KEY, user_firstname TEXT, user_lastname TEXT);
+CREATE TABLE orders (id INTEGER PRIMARY KEY, req_number TEXT, req_status INT, req_order_shipped INT DEFAULT 0, req_crtdat INT, req_cust_id INT,
+  req_fec_despacho INT DEFAULT 0, req_oc_number TEXT DEFAULT '', req_userid_seller INT DEFAULT 0, req_isreserva INT DEFAULT 0, req_isfabricate INT DEFAULT 0);
+CREATE TABLE orders_items (id INTEGER PRIMARY KEY, req_id INT, item_id INT, item_type TEXT DEFAULT 'item', item_amount REAL, item_amount_shipped REAL DEFAULT 0, item_amount_shipped_stop INT DEFAULT 0, fab_printtype VARCHAR(10) DEFAULT 'FLEX');
+CREATE TABLE orders_delivery (id INTEGER PRIMARY KEY, dlv_order_id INT, dlv_status INT, dlv_delivery_date INT);
+CREATE TABLE orders_delivery_items (id INTEGER PRIMARY KEY, dlv_id INT, item_id INT, item_amount_shipped REAL);
+CREATE TABLE prod_header (id INTEGER PRIMARY KEY, prd_reqid INT, prd_number TEXT, prd_status INT);
+CREATE TABLE prod_amtplan (id INTEGER PRIMARY KEY, prodplan_prdid INT, prodplan_amt REAL, prodplan_date INT);
+CREATE TABLE equipo (id INTEGER PRIMARY KEY, equipo_name TEXT, equipo_type_id INT);
+CREATE TABLE prod_agenda (id INTEGER PRIMARY KEY, ag_reqid INT, ag_prdid INT, ag_equipo_id INT, ag_equipotype_id INT, ag_date TEXT, ag_amount REAL, ag_status INT);
+CREATE TABLE prod_worker_init (id INTEGER PRIMARY KEY, win_wrkid INT, win_status INT DEFAULT 1);
+CREATE TABLE workers (id INTEGER PRIMARY KEY, wrk_firstname TEXT, wrk_lastname TEXT);
+CREATE TABLE prod_worker_ot (id INTEGER PRIMARY KEY, wok_ag_id INT, wok_status INT, wok_init_id INT, wok_crtdat INT DEFAULT 0);
+CREATE TABLE prod_worker_ot_events (id INTEGER PRIMARY KEY, evt_prod_worker_otid INT, evt_type TEXT, evt_status INT, evt_amount REAL, evt_crtdat INT, evt_comments TEXT);
+CREATE TABLE prod_worker_embalajes (id INTEGER PRIMARY KEY, evt_reqid INT, evt_crtdat INT, req_embalaje_cajas_completas_amt INT, req_embalaje_bolsas_por_caja_amt INT,
+  req_embalaje_caja_final INT, req_embalaje_bolsas_sobrantes_amt INT DEFAULT 0, req_embalaje_showroom INT DEFAULT 0);");
+$day = 86400;
+$now = time();
+$past = $now - 5 * $day;
+$future = $now + 10 * $day;
+$old = $now - 200 * $day;
+$erp->exec("INSERT INTO customer VALUES (1,'CRUZ VERDE SA'),(2,'EASY SA');
+INSERT INTO user VALUES (7,'Ana','Ventas');
+INSERT INTO workers VALUES (9,'Juan','Operador');
+INSERT INTO equipo VALUES (25,'EMBALAJE',15),(30,'SELLADORA 2',8),(40,'FLEXO III',7);
+-- NV 1: aprobada, 1000 pedido, 300 despachado -> pendiente 700, vencida; con OT y embalado 400 -> por fabricar 600
+INSERT INTO orders VALUES (101,'26-00101-1',3,0,$past,1,$past,'OC-55',7,0,0);
+INSERT INTO orders_items (req_id,item_id,item_amount,item_amount_shipped) VALUES (101,1,1000,300);
+INSERT INTO orders_delivery VALUES (1,101,2,$past),(2,101,5,$now);
+INSERT INTO orders_delivery_items (dlv_id,item_id,item_amount_shipped) VALUES (1,1,300),(2,1,999);
+INSERT INTO prod_header VALUES (501,101,'001234',2);
+INSERT INTO prod_amtplan VALUES (1,501,500,$future);
+INSERT INTO prod_agenda VALUES (601,101,501,40,7,'01.11.2026',5000,1),(602,101,501,30,8,'03.11.2026',1000,1),(603,101,501,25,15,'05.11.2026',1000,1);
+INSERT INTO prod_worker_init (id,win_wrkid,win_status) VALUES (1,9,1),(2,9,2);
+-- 704: OT que quedó abierta con el turno ya cerrado -> NO está en curso
+INSERT INTO prod_worker_ot (id,wok_ag_id,wok_status,wok_init_id,wok_crtdat) VALUES (701,601,2,1,$past),(702,602,1,1,$now),(703,603,2,1,$now),(704,601,1,2,$past);
+INSERT INTO prod_worker_ot_events (evt_prod_worker_otid,evt_type,evt_status,evt_amount,evt_crtdat,evt_comments) VALUES
+ (701,'prod',2,4800,$past,''),(702,'prod',2,450,$now,''),(702,'prod',0,999,$now,''),(703,'prod',2,400,$now,''),(701,'prod',2,77,$now,'Bobina Semielaborada X');
+INSERT INTO prod_worker_embalajes (evt_reqid,evt_crtdat,req_embalaje_cajas_completas_amt,req_embalaje_bolsas_por_caja_amt,req_embalaje_caja_final,req_embalaje_bolsas_sobrantes_amt,req_embalaje_showroom) VALUES
+ (101,$now,3,100,50,30,20);
+INSERT INTO item_shops_storehouses (item_id,st_id,iss_order_id,iss_inventory,iss_inventory_reserved) VALUES (1,10,101,120,0);
+-- CC 2 de fabricación, sin OT: todo el pedido por fabricar (nueva), NO es venta (no reservado)
+INSERT INTO orders VALUES (102,'26-00102-1',2,0,$now,2,$future,'',0,1,1);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (102,1,200);
+-- NV 3: despachada (estado 4) -> no cuenta
+INSERT INTO orders VALUES (103,'26-00103-1',4,1,$past,1,0,'',0,0,0);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (103,1,9999);
+-- NV 4: borrador (estado 1) -> no cuenta
+INSERT INTO orders VALUES (104,'26-00104-1',1,0,$past,1,0,'',0,0,1);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (104,1,8888);
+-- NV 5: línea cerrada sin despachar -> no cuenta
+INSERT INTO orders VALUES (105,'26-00105-1',2,0,$past,1,0,'',0,0,0);
+INSERT INTO orders_items (req_id,item_id,item_amount,item_amount_shipped_stop) VALUES (105,1,7777,1);
+-- NV 6: de stock (sin OT ni marcada): reservado sí, producción no
+INSERT INTO orders VALUES (106,'26-00106-1',2,0,$now,2,0,'',0,0,0);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (106,1,50);
+-- NV 7: con OT pero embalada de más -> producción 0 (no negativa)
+INSERT INTO orders VALUES (107,'26-00107-1',3,0,$past,1,0,'',0,0,0);
+INSERT INTO orders_items (req_id,item_id,item_amount,item_amount_shipped) VALUES (107,1,100,100);
+INSERT INTO prod_header VALUES (502,107,'001235',2);
+INSERT INTO prod_worker_embalajes (evt_reqid,evt_crtdat,req_embalaje_cajas_completas_amt,req_embalaje_bolsas_por_caja_amt,req_embalaje_caja_final) VALUES (107,$now,2,100,0);
+-- NV 8: dos productos (BOL0250 y BOL0251) en la misma CC, embalado repartido por lo pedido
+INSERT INTO orders VALUES (108,'26-00108-1',2,0,$now,2,0,'',0,0,0);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (108,1,300),(108,2,100);
+INSERT INTO prod_header VALUES (503,108,'001236',2);
+INSERT INTO prod_worker_embalajes (evt_reqid,evt_crtdat,req_embalaje_cajas_completas_amt,req_embalaje_bolsas_por_caja_amt,req_embalaje_caja_final) VALUES (108,$now,2,100,0);
+-- NV 9: venta sin marcar despachado en la NV, pero con guía de 200 -> pendiente 300
+INSERT INTO orders VALUES (109,'NV0000109',2,0,$now,2,0,'',0,0,0);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (109,1,500);
+INSERT INTO orders_delivery VALUES (3,109,2,$now);
+INSERT INTO orders_delivery_items (dlv_id,item_id,item_amount_shipped) VALUES (3,1,200);
+-- NV 10: venta de hace 200 días abierta en el ERP -> no se cuenta, se informa aparte
+INSERT INTO orders VALUES (110,'NV0000110',2,0,$old,1,0,'',0,0,0);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (110,1,999);
+-- CC 11 de fabricación con OT, saldo 60 y sin movimiento hace 100 días -> no se cuenta, se informa aparte
+INSERT INTO orders VALUES (111,'25-00111-1',2,0,$old,1,0,'',0,0,1);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (111,1,100);
+INSERT INTO prod_header VALUES (504,111,'000999',2);
+INSERT INTO prod_worker_embalajes (evt_reqid,evt_crtdat,req_embalaje_cajas_completas_amt,req_embalaje_bolsas_por_caja_amt,req_embalaje_caja_final) VALUES (111,$now-100*$day,0,0,40);
+-- CC 12 de fabricación con 96 % embalado hoy -> terminada (saldo de merma), se informa aparte
+INSERT INTO orders VALUES (112,'26-00112-1',2,0,$now,1,0,'',0,0,1);
+INSERT INTO orders_items (req_id,item_id,item_amount) VALUES (112,1,1000);
+INSERT INTO prod_worker_embalajes (evt_reqid,evt_crtdat,req_embalaje_cajas_completas_amt,req_embalaje_bolsas_por_caja_amt,req_embalaje_caja_final) VALUES (112,$now,0,0,960);");
+$svc->saveRows([$id251 => ['active' => '1']], $actor);
+$rep = $svc->report();
+$by = array_column($rep['rows'], null, 'code');
+$b = $by['BOL0250'];
+// vendido sin despachar: 700 (NV1) + 50 (NV6) + 300 (NV8) + 300 (NV9) = 1350; NO la CC 2 de fabricación ni la NV 10 antigua
+$check('vendido sin despachar = solo NV de venta recientes (excluye CC de fabricación, despachadas, borrador, líneas cerradas y antiguas)', $rep['flow_ok'] === true && $b['reserved'] === 1350 && $b['reserved_orders'] === 4);
+$check('libre = stock − reservado', $b['free'] === $b['stock'] - 1350);
+// NV1: impreso 4.800 (≥ pedido) → por imprimir 0; sellado máx(450, embalado 400) → por cortar y sellar 1000−450 = 550
+// CC2: sin máquinas, tipo FLEX → por imprimir 200 · NV8: ya embalado sin impresión → por cortar y sellar 300−150 = 150
+$check('por imprimir y por cortar y sellar de CC vivas (excluye la CC sin movimiento y la de merma)', $b['to_print'] === 200 && $b['to_seal'] === 700
+    && $b['in_production'] === 900 && $b['production_orders'] === 3);
+$check('la CC con dos productos reparte lo embalado', $by['BOL0251']['in_production'] === 50);
+$check('proyectado = stock + producción − reservado', $b['projected'] === $b['stock'] + 900 - 1350 && $b['projected_diff'] === $b['projected'] - 5000);
+$check('estado proyectado calculado', $b['projected_status'] !== '');
+$check('la fecha de entrega más próxima se informa', $b['oldest_due'] === date('Y-m-d', $past));
+
+$rd = $svc->reservedDetail('bol0250');
+$rbyNv = array_column($rd['rows'], null, 'nv');
+$check('detalle de vendido: 4 NV con totales', count($rd['rows']) === 4 && $rd['totals']['pending'] === 1350 && $rd['totals']['orders'] === 4);
+$check('lo despachado por guía descuenta aunque la NV no lo marque', ($rbyNv['NV0000109']['shipped'] ?? 0) === 200 && ($rbyNv['NV0000109']['pending'] ?? 0) === 300 && ($rbyNv['NV0000109']['guides'] ?? 0) === 1);
+$check('las NV antiguas abiertas se informan aparte sin contarse', count($rd['excluded']) === 1 && ($rd['excluded'][0]['nv'] ?? '') === 'NV0000110' && $rd['excluded_totals']['pending'] === 999);
+$nv1 = $rbyNv['26-00101-1'] ?? [];
+$check('detalle NV: cliente, vendedor, OC, vencida y despacho parcial', ($nv1['customer'] ?? '') === 'CRUZ VERDE SA' && ($nv1['seller'] ?? '') === 'Ana Ventas'
+    && ($nv1['oc'] ?? '') === 'OC-55' && ($nv1['overdue'] ?? false) === true && ($nv1['status'] ?? '') === 'Despacho parcial');
+$check('detalle NV: guías sin anuladas, stock asignado y OT', ($nv1['guides'] ?? 0) === 1 && ($nv1['stock'] ?? 0) === 120 && ($nv1['ots'] ?? '') === '001234'
+    && ($nv1['pending'] ?? 0) === 700 && ($nv1['shipped'] ?? 0) === 300);
+$check('detalle NV: la más atrasada primero', ($rd['rows'][0]['nv'] ?? '') === '26-00101-1');
+$check('detalle trae el resumen del SKU', ($rd['summary']['reserved'] ?? null) === 1350);
+
+$pd = $svc->productionDetail('BOL0250');
+$pbyCc = array_column($pd['rows'], null, 'cc');
+$check('detalle de producción: 3 CC con pendiente y totales', count($pd['rows']) === 3 && $pd['totals']['pending'] === 900 && $pd['totals']['to_print'] === 200 && $pd['totals']['to_seal'] === 700 && !isset($pbyCc['26-00107-1']));
+$cc1 = $pbyCc['26-00101-1'] ?? [];
+$check('detalle CC: OT, embalado, avance y entrega planificada', ($cc1['ot'] ?? '') === '001234' && ($cc1['packed'] ?? 0) === 400 && ($cc1['printed'] ?? 0) === 4800 && ($cc1['sealed'] ?? 0) === 450 && ($cc1['to_seal'] ?? 0) === 550 && ($cc1['progress'] ?? 0) === 45
+    && ($cc1['next_plan'] ?? '') === date('Y-m-d', $future) && count($cc1['plans'] ?? []) === 1);
+$check('detalle CC: etapa actual = máquina con OT abierta y su operador', str_contains($cc1['stage'] ?? '', 'Corte y Sellado') && str_contains($cc1['stage'] ?? '', 'Juan Operador'));
+$ags = array_column($cc1['agendas'] ?? [], null, 'machine');
+$check('detalle CC: agendas por máquina con producido (sin anulados ni semielaborada) y unidad', ($ags['SELLADORA 2']['produced'] ?? 0) === 450 && ($ags['FLEXO III']['produced'] ?? 0) === 4800
+    && ($ags['FLEXO III']['unit'] ?? '') === 'u' && ($ags['FLEXO III']['state'] ?? '') === 'Con producción' && ($ags['SELLADORA 2']['state'] ?? '') === 'En curso' && ($ags['EMBALAJE']['process'] ?? '') === 'Embalaje');
+$cc2 = $pbyCc['26-00102-1'] ?? [];
+$check('detalle CC sin OT: «Sin programar» con todo el pedido', ($cc2['stage'] ?? '') === 'Sin programar' && ($cc2['to_print'] ?? 0) === 200 && ($cc2['to_seal'] ?? 1) === 0 && ($cc2['ot'] ?? 'x') === '');
+$check('detalle CC con varios productos lo marca', ($pbyCc['26-00108-1']['multi_product'] ?? false) === true && ($pbyCc['26-00108-1']['pending'] ?? 0) === 150);
+$check('las CC con saldo sin movimiento se informan aparte sin contarse', count($pd['excluded']) === 2 && $pd['excluded_totals']['pending'] === 100
+    && str_contains((string)(array_column($pd['excluded'], 'reason', 'cc')['25-00111-1'] ?? ''), 'Sin producción')
+    && str_contains((string)(array_column($pd['excluded'], 'reason', 'cc')['26-00112-1'] ?? ''), 'merma'));
+$check('detalle de código inexistente avisa', $throws(fn() => $svc->productionDetail('NOP9999'), 'no existe'));
 
 // ---- ERP caído
 $bad = new PDO('sqlite::memory:');

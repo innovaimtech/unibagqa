@@ -59,7 +59,7 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
     $service = new MaterialSupplyService(Db::erpPdo(),Db::trzPdo());
     $agId = max(0,(int)($_POST['agid'] ?? $_GET['agid'] ?? 0));
     $kindRaw = (string)($_POST['material_kind'] ?? $_GET['material_kind'] ?? '');
-    $kind = in_array($kindRaw, ['inks', 'products'], true) ? $kindRaw : 'rolls';
+    $kind = in_array($kindRaw, ['inks', 'products', 'boxes'], true) ? $kindRaw : 'rolls';
     $back = $isWarehouse ? '/stock/material-supply' : '/production/materials/request';
     if (!$isWarehouse) $back .= '?agid='.$agId.'&material_kind='.$kind;
     try {
@@ -102,7 +102,7 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
                     }
                     $service->request((string)($_POST['request_key']??''),0,$actor,
                         (int)($_POST['item_id']??0),(int)($_POST['source_storehouse_id']??0),
-                        supplyPostedQuantity(),(string)($_POST['notes']??''),$agId);
+                        supplyPostedQuantity(),(string)($_POST['notes']??''),$agId,$kind);
                 }
             }
             $reopen = '';
@@ -376,7 +376,7 @@ function supplyAssets(): void
         supplyApply('rolls');
     }
     function supplyTab(kind){
-        ['rolls','inks','products'].forEach(function(k){
+        ['rolls','inks','products','boxes'].forEach(function(k){
             var s=document.getElementById('supply_'+k);if(s)s.hidden=kind!==k;
             var t=document.getElementById('sp_tab_'+k);if(t)t.classList.toggle('active',kind===k);
         });
@@ -408,7 +408,7 @@ function supplyAssets(): void
         setTimeout(function(){q.focus();},50);
     }
     document.addEventListener('DOMContentLoaded',function(){
-        ['rolls','inks','products'].forEach(function(s){supplyApply(s);});
+        ['rolls','inks','products','boxes'].forEach(function(s){supplyApply(s);});
     });
     </script>
     <?php
@@ -424,8 +424,12 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
     $rolls = [];
     $inks = [];
     $products = [];
+    $boxes = [];
     foreach ($catalog as $item) {
-        if (($item['kind'] ?? '') === 'products') {
+        if (($item['kind'] ?? '') === 'boxes') {
+            $item['recommended'] = false;
+            $boxes[] = $item;
+        } elseif (($item['kind'] ?? '') === 'products') {
             $item['recommended'] = false;
             $products[] = $item;
         } elseif (str_starts_with(strtoupper($item['sku']),'TIN')) {
@@ -440,19 +444,22 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
     usort($inks,static fn($a,$b)=>($b['recommended']<=>$a['recommended']) ?: strcmp($a['sku'],$b['sku']));
     $compatible = array_values(array_filter($rolls,static fn($item)=>$item['recommended']));
     $compatibleOnly = $agenda !== null && count($compatible) > 0;
-    $catalog = array_merge($rolls,$inks,$products);
+    $catalog = array_merge($rolls,$inks,$products,$boxes);
     ob_start();
     supplyAssets();
     $pendingReceipts = 0;
     foreach ($service->requests(null,(int)$context['win_equipoid']) as $mine) {
         if (($mine['status'] ?? '') === 'DISPATCHED') $pendingReceipts++;
     }
-    $tabs = ['rolls'=>['📜','Bobinas',count($rolls)],'inks'=>['🎨','Tintas',count($inks)],'products'=>['📦','Productos Bodega 400',count($products)]];
-    $sections = ['rolls'=>'Bobinas e insumos','inks'=>'Tintas','products'=>'Productos de Bodega 400'];
-    $routes = ['rolls'=>'Bodegas 100 / 200 → 3000 Insumos en Producción','inks'=>'Bodegas 900 / 910 / 920 → 3000 Insumos en Producción','products'=>'Bodega 400 → 3000 Insumos en Producción'];
+    $tabs = ['rolls'=>['📜','Bobinas',count($rolls)],'inks'=>['🎨','Tintas',count($inks)],'products'=>['📦','Productos Bodega 400',count($products)],
+        'boxes'=>['🧺','Cajas de bolsas',count($boxes)]];
+    $sections = ['rolls'=>'Bobinas e insumos','inks'=>'Tintas','products'=>'Productos de Bodega 400','boxes'=>'Bolsas en cajas con código'];
+    $routes = ['rolls'=>'Bodegas 100 / 200 → 3000 Insumos en Producción','inks'=>'Bodegas 900 / 910 / 920 → 3000 Insumos en Producción','products'=>'Bodega 400 → 3000 Insumos en Producción',
+        'boxes'=>'Bodega de la caja → 3000 Insumos en Producción'];
     $helps = ['rolls'=>'Pedir bobinas no mueve stock: Bodega prepara el despacho y tú confirmas la recepción.',
         'inks'=>'Indica la cantidad de tinta. Bodega registra el traspaso a 3000 Insumos en Producción; recibir no descuenta consumo.',
-        'products'=>'Bolsas de algodón y otros productos de la bodega 400. Bodega registra el traspaso y tú confirmas la recepción.'];
+        'products'=>'Bolsas de algodón y otros productos de la bodega 400. Bodega registra el traspaso y tú confirmas la recepción.',
+        'boxes'=>'Bolsas en blanco o de algodón que están en cajas con código (Pulpo Serigráfico). Pide las bolsas; bodega escanea las cajas y traspasa cada una completa, con su CC.'];
     ?>
     <div class="sp">
     <div class="sp-hero">
@@ -525,7 +532,7 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
         ksort($families);
         ?>
         <div class="sp-tools">
-            <input id="supply_<?=['rolls'=>'roll','inks'=>'ink','products'=>'product'][$section]?>_search" class="sp-search" type="search" placeholder="🔎 Buscar por código o descripción (varias palabras)" oninput="supplyApply('<?=$section?>')">
+            <input id="supply_<?=['rolls'=>'roll','inks'=>'ink','products'=>'product','boxes'=>'box'][$section]?>_search" class="sp-search" type="search" placeholder="🔎 Buscar por código o descripción (varias palabras)" oninput="supplyApply('<?=$section?>')">
             <?php if (count($families)>1): ?>
             <select id="sp_fam_<?=$section?>" class="sp-select sp-sm" onchange="supplyApply('<?=$section?>')" aria-label="Filtrar por familia de código">
                 <option value="">Todas las familias (<?=count($families)?>)</option>
@@ -556,7 +563,7 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
                 if($itemKind!==$section)continue;$count++;
                 $isRec=!empty($item['recommended']);
                 $famItem=preg_match('/^[A-Za-z]+/',trim((string)$item['sku']),$fm2)===1?strtoupper($fm2[0]):'OTROS';
-                $isWhole=str_starts_with(strtoupper($item['sku']),'TEL'); ?>
+                $isWhole=str_starts_with(strtoupper($item['sku']),'TEL') || $itemKind==='boxes'; ?>
                 <div class="sp-card<?=$isRec?' rec':''?>" hidden
                     data-compatible="<?=$isRec?'1':'0'?>" data-fam="<?=supplyEscape($famItem)?>"
                     data-sku="<?=supplyEscape(strtolower($item['sku']))?>" data-desc="<?=supplyEscape(mb_strtolower((string)$item['description'],'UTF-8'))?>"
@@ -581,6 +588,7 @@ function renderSupplyOperatorScreen(MaterialSupplyService $service, array $conte
                     <div><?php if ($failed): ?><span class="sp-badge review">No coincide: <?=supplyEscape(implode(', ',$failed))?></span><?php endif; ?>
                     <?php if ($unknown): ?><span class="sp-badge" style="background:#e2e8f0;color:#475569">Sin dato: <?=supplyEscape(implode(', ',$unknown))?></span><?php endif; ?></div>
                     <?php endif; ?>
+                    <?php if ($itemKind==='boxes'): ?><div class="sp-specs"><span><?=(int)($item['box_count']??0)?> caja<?=(int)($item['box_count']??0)===1?'':'s'?> con código</span></div><?php endif; ?>
                     <div class="sp-foot">
                         <div class="sp-avail"><b><?=supplyNum((float)$item['available_qty'])?></b><?=supplyEscape($item['unit'])?> disponibles</div>
                         <button type="button" class="sp-btn" onclick="supplyAsk(this)">Solicitar</button>
@@ -761,10 +769,11 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
     </dialog>
     <?php endif; ?>
     <?php if ($warehouse && (int)$r['source_storehouse_id']!==16 && $r['status']==='ACCEPTED' && $remaining>0):
-        $isRoll=str_starts_with(strtoupper($r['sku']),'TEL'); $reqQty=(float)$r['requested_qty']; $scans=$isRoll?$service->scans($r['request_key']):[];
+        $isBoxReq=strtoupper((string)($r['material_kind']??''))==='BOXES';
+        $isRoll=$isBoxReq || str_starts_with(strtoupper($r['sku']),'TEL'); $reqQty=(float)$r['requested_qty']; $scans=$isRoll?$service->scans($r['request_key']):[];
         $scanTotal=0.0; $hasSubstitute=false;
         foreach ($scans as $sc) { if ($sc['state']==='SCANNED') { $scanTotal+=(float)$sc['quantity']; if (!empty($sc['substitute'])) $hasSubstitute=true; } }
-        $needReason=$hasSubstitute || ($isRoll && $scanTotal>0 && abs($scanTotal-$reqQty)>0.000001); ?>
+        $needReason=$hasSubstitute || (!$isBoxReq && $isRoll && $scanTotal>0 && abs($scanTotal-$reqQty)>0.000001); ?>
     <dialog id="supply_dispatch_<?=$i?>" class="supply-dialog">
         <h2>Preparar y despachar</h2>
         <b><?=supplyEscape($r['sku'])?></b> <?=supplyEscape($r['description'])?>
@@ -773,7 +782,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
         <form method="post" action="/stock/material-supply/scan" autocomplete="off">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
-            <label>Escanea el código de trazabilidad de la bobina (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se solicitaron <?=supplyEscape(supplyNum($reqQty))?>)</label>
+            <label><?php if ($isBoxReq): ?>Escanea el código de cada caja (<?=supplyEscape(supplyNum($scanTotal))?> bolsas en cajas escaneadas · se pidieron <?=supplyEscape(supplyNum($reqQty))?>). Cada caja se traspasa completa, con su CC.<?php else: ?>Escanea el código de trazabilidad de la bobina (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se solicitaron <?=supplyEscape(supplyNum($reqQty))?>)<?php endif; ?></label>
             <input name="code" required maxlength="60" autofocus placeholder="Escanea aquí; el lector envía Enter">
             <div class="supply-actions"><button class="btnblue">Registrar escaneo</button></div>
         </form>
@@ -807,7 +816,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
             <?php endif; ?>
             <label style="margin-top:8px">Motivo del cambio <?=$needReason?'(obligatorio: envías algo distinto a lo solicitado)':'(solo si envías otro código, otros metros o más unidades)'?></label>
             <textarea name="change_reason" rows="2" maxlength="500" style="width:100%" <?=$needReason?'required minlength="10"':''?> placeholder="Ej.: la bobina pedida no tiene stock físico; se envía una de otros metros"></textarea>
-            <div class="supply-actions"><button class="btngreen" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="Faltan bobinas por escanear"':''?>>Despachar a 3000 Insumos en Producción</button></div>
+            <div class="supply-actions"><button class="btngreen" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="'.($isBoxReq?'Faltan cajas por escanear':'Faltan bobinas por escanear').'"':''?>>Despachar a 3000 Insumos en Producción</button></div>
         </form>
         <form method="post" action="/stock/material-supply/cancel-request" style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">

@@ -433,6 +433,7 @@
                             <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
                             <input type="hidden" name="agid" value="<?=$agId?>">
                             <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                            <?php if ($isSeriPulpo && $prodStarted) echo renderView('production/closure/pulpo_bag_balance', ['workerOtId' => (int)$workerOtId, 'agId' => (int)$agId]); ?>
 
                             <div style="padding:14px 20px 20px;border-top:1px solid #E2E8F0">
                                 <?php if ($prodStarted): ?>
@@ -513,6 +514,7 @@
                     <input type="hidden" name="_csrf" value="<?=csrfToken()?>">
                     <input type="hidden" name="agid" value="<?=$agId?>">
                     <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
+                            <?php if ($isSeriPulpo && $prodStarted) echo renderView('production/closure/pulpo_bag_balance', ['workerOtId' => (int)$workerOtId, 'agId' => (int)$agId]); ?>
 
                     <table border="0" width="100%" cellpadding="8" cellspacing="0">
                     <?php if ($prodStarted): ?>
