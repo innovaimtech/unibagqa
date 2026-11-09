@@ -3,7 +3,7 @@
   'use strict';
   var state = window.__ES || { rows: [] };
   var STORE = 'unibag_es_filters_v2';
-  var RANK = { 'Crítico': 0, 'No existe en ERP': 1, 'Sin conexión ERP': 1, 'Bajo': 2, 'Falta configurar': 3, 'Sin objetivo': 4, 'OK': 5, '': 6 };
+  var RANK = { 'Crítico': 0, 'Sin conexión ERP': 1, 'Bajo': 2, 'Falta configurar': 3, 'Sin objetivo': 4, 'OK': 5, '': 6, 'No existe en ERP': 7 };
   var CLS = { 'OK': 'ok', 'Bajo': 'low', 'Crítico': 'crit', 'Falta configurar': 'cfg', 'Sin objetivo': 'na', 'No existe en ERP': 'crit', 'Sin conexión ERP': 'crit' };
   var f = { q: '', wh: '', grp: '', status: '', kpi: '', onlyRes: false, onlyProd: false, sort: 'status_rank', dir: 1 };
   try { var saved = JSON.parse(localStorage.getItem(STORE) || 'null'); if (saved && typeof saved === 'object') { for (var k in f) { if (k in saved) { f[k] = saved[k]; } } } } catch (e) { /* sin almacenamiento */ }
@@ -70,26 +70,28 @@
     });
     var flow = state.flow_ok !== false;
     var cards = [
-      ['', 'k-all', n(s.all), 'Productos', 'en el maestro'],
-      ['crit', 'k-crit', n(s.crit), 'Críticos', 'bajo el mínimo'],
-      ['low', 'k-low', n(s.low), 'Bajo objetivo', 'sobre el mínimo'],
-      ['stock', 'k-stock', n(s.stock), 'Stock', n(s.pal) + ' pallets'],
-      ['res', 'k-res', flow ? n(s.res) : '—', 'Sin despachar', flow ? n(s.resNv) + ' NV' : 'sin datos'],
-      ['print', 'k-print', flow ? n(s.pr) : '—', 'Por imprimir', flow ? 'unidades en CC' : 'sin datos'],
-      ['seal', 'k-prod', flow ? n(s.sl) : '—', 'Por cortar y sellar', flow ? 'unidades en CC' : 'sin datos'],
-      ['proj', 'k-proj', flow ? n(s.proj) : '—', 'Proyectado bajo', 'productos']
+      ['', 'k-all', n(s.all), 'Productos', 'en el maestro', 'boxes'],
+      ['crit', 'k-crit', n(s.crit), 'Críticos', 'bajo el mínimo', 'exclamation-circle'],
+      ['low', 'k-low', n(s.low), 'Bajo objetivo', 'sobre el mínimo', 'arrow-down'],
+      ['stock', 'k-stock', n(s.stock), 'Stock', n(s.pal) + ' pallets', 'warehouse'],
+      ['res', 'k-res', flow ? n(s.res) : '—', 'Sin despachar', flow ? n(s.resNv) + ' NV de venta' : 'sin datos', 'file-invoice'],
+      ['print', 'k-print', flow ? n(s.pr) : '—', 'Por imprimir', flow ? 'unidades en CC' : 'sin datos', 'print'],
+      ['seal', 'k-prod', flow ? n(s.sl) : '—', 'Por cortar y sellar', flow ? 'unidades en CC' : 'sin datos', 'cut'],
+      ['proj', 'k-proj', flow ? n(s.proj) : '—', 'Proyectado bajo', 'productos', 'chart-line']
     ];
     $('es_kpis').innerHTML = cards.map(function (c) {
-      return '<button type="button" class="es-kpi ' + c[1] + (f.kpi === c[0] && c[0] !== '' ? ' on' : '') + '" data-kpi="' + c[0] + '"><span>' + c[3] + '</span><b>' + c[2] + '</b><small>' + esc(c[4]) + '</small></button>';
+      var on = f.kpi === c[0] && c[0] !== '';
+      return '<button type="button" class="es-kpi ' + c[1] + (on ? ' on' : '') + '" data-kpi="' + c[0] + '" aria-pressed="' + on + '">' +
+        '<i class="es-kpi-ic fas fa-' + c[5] + '" aria-hidden="true"></i><div><span>' + c[3] + '</span><b>' + c[2] + '</b><small>' + esc(c[4]) + '</small></div></button>';
     }).join('');
   }
 
   function renderChips() {
     var counts = {};
     state.rows.forEach(function (r) { counts[r.status] = (counts[r.status] || 0) + 1; });
-    var html = '<button type="button" class="es-chip' + (f.status === '' ? ' on' : '') + '" data-s="">Todos ' + state.rows.length + '</button>';
+    var html = '<button type="button" role="tab" class="es-chip' + (f.status === '' ? ' on' : '') + '" data-s="" aria-selected="' + (f.status === '') + '">Todos<em>' + state.rows.length + '</em></button>';
     Object.keys(counts).sort(function (a, b) { return (RANK[a] || 0) - (RANK[b] || 0); }).forEach(function (s) {
-      html += '<button type="button" class="es-chip' + (f.status === s ? ' on' : '') + '" data-s="' + esc(s) + '">' + esc(s) + ' ' + counts[s] + '</button>';
+      html += '<button type="button" role="tab" class="es-chip ' + (CLS[s] || '') + (f.status === s ? ' on' : '') + '" data-s="' + esc(s) + '" aria-selected="' + (f.status === s) + '"><i></i>' + esc(s) + '<em>' + counts[s] + '</em></button>';
     });
     $('es_chips').innerHTML = html;
   }
@@ -112,22 +114,22 @@
     rows.forEach(function (r) {
       // Pallets y cajas completos en una línea corta bajo el stock.
       var pal = r.pallets === null || r.pallets === undefined || !r.stock ? '' : '<span class="es-sub">' + n(r.pallets) + ' pallets · ' + n(r.boxes) + ' cajas</span>';
-      body += '<tr>' +
+      body += '<tr' + (r.status === 'No existe en ERP' ? ' class="es-off"' : '') + '>' +
         '<td class="sticky" data-l=""><div class="es-prod-code">' + esc(r.code) +
         (r.warehouse_code ? '<span class="es-tag wh" title="Bodega' + (r.other_stock ? ' · en la otra bodega hay ' + n(r.other_stock) + ' u' : '') + '">' + esc(r.warehouse_code) + '</span>' : '') +
         (r.group_label ? '<span class="es-tag">' + esc(r.group_label) + '</span>' : '') + '</div>' +
         '<div class="es-prod-desc" title="' + esc(r.erp_title || r.description) + '">' + esc(r.description) + '</div></td>' +
-        '<td class="n" data-l="Stock"><b>' + num(r.stock) + '</b>' + pal + '</td>' +
-        '<td class="n" data-l="Sin despachar">' + linkCell(r, 'reserved') + '</td>' +
+        '<td class="n gs" data-l="Stock"><b>' + num(r.stock) + '</b>' + pal + '</td>' +
+        '<td class="n gs" data-l="Sin despachar">' + linkCell(r, 'reserved') + '</td>' +
         '<td class="n" data-l="Libre">' + num(r.free, r.free < 0 ? 'es-neg' : '') + '</td>' +
-        '<td class="n" data-l="Por imprimir">' + linkCell(r, 'production', 'to_print') + '</td>' +
+        '<td class="n gs" data-l="Por imprimir">' + linkCell(r, 'production', 'to_print') + '</td>' +
         '<td class="n" data-l="Por cortar y sellar">' + linkCell(r, 'production', 'to_seal') + '</td>' +
-        '<td class="n es-strong" data-l="Proyectado">' + num(r.projected, r.projected < 0 ? 'es-neg' : '') + '</td>' +
+        '<td class="n gs es-strong" data-l="Proyectado">' + num(r.projected, r.projected < 0 ? 'es-neg' : '') + '</td>' +
         '<td class="n" data-l="vs objetivo">' + (r.projected_diff === null || r.projected_diff === undefined ? '<span class="es-zero">—</span>'
           : '<span class="' + (r.projected_diff < 0 ? 'es-neg' : 'es-pos') + '">' + signed(r.projected_diff) + '</span>') + '</td>' +
-        '<td class="n es-dim" data-l="Objetivo">' + n(r.target_units) + '</td>' +
+        '<td class="n gs es-dim" data-l="Objetivo">' + n(r.target_units) + '</td>' +
         '<td class="n es-dim" data-l="Mínimo">' + n(r.min_units) + '</td>' +
-        '<td data-l="Estado hoy">' + pill(r.status) + '</td>' +
+        '<td class="gs" data-l="Estado hoy">' + pill(r.status) + '</td>' +
         '<td data-l="Estado proyectado">' + pill(r.projected_status) + '</td>' +
         '</tr>';
       var w = r.warehouse_code || 0;
@@ -135,11 +137,13 @@
       tot[w].n++; tot[w].s += r.stock || 0; tot[w].r += r.reserved || 0; tot[w].f += r.free || 0; tot[w].pr += r.to_print || 0; tot[w].sl += r.to_seal || 0; tot[w].j += r.projected || 0;
     });
     $('es_body').innerHTML = body || '<tr><td colspan="12" class="es-empty">Ningún producto coincide con los filtros.</td></tr>';
+    $('es_count').textContent = rows.length === state.rows.length ? state.rows.length + ' productos' : 'Mostrando ' + rows.length + ' de ' + state.rows.length + ' productos';
     $('es_foot').innerHTML = Object.keys(tot).sort().reverse().map(function (w) {
       var t = tot[w];
       return '<tr class="es-foot"><td class="sticky" data-l="">' + (w === '0' ? 'Sin bodega' : 'Bodega ' + w) + ' <span class="es-sub">' + t.n + ' productos</span></td>' +
-        '<td class="n" data-l="Stock">' + n(t.s) + '</td><td class="n" data-l="Sin despachar">' + n(t.r) + '</td><td class="n" data-l="Libre">' + n(t.f) + '</td>' +
-        '<td class="n" data-l="Por imprimir">' + n(t.pr) + '</td><td class="n" data-l="Por cortar y sellar">' + n(t.sl) + '</td><td class="n" data-l="Proyectado">' + n(t.j) + '</td><td colspan="5"></td></tr>';
+        '<td class="n gs" data-l="Stock">' + n(t.s) + '</td><td class="n gs" data-l="Sin despachar">' + n(t.r) + '</td><td class="n" data-l="Libre">' + n(t.f) + '</td>' +
+        '<td class="n gs" data-l="Por imprimir">' + n(t.pr) + '</td><td class="n" data-l="Por cortar y sellar">' + n(t.sl) + '</td><td class="n gs" data-l="Proyectado">' + n(t.j) + '</td>' +
+        '<td></td><td class="gs"></td><td></td><td class="gs"></td><td></td></tr>';
     }).join('');
     Array.prototype.forEach.call(document.querySelectorAll('#es_table .es-cols th'), function (th) {
       var on = th.getAttribute('data-sort') === f.sort;

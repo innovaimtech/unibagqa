@@ -1039,7 +1039,15 @@ function renderProductionOperatorConsole(
     $pulpoV2 = $ctx['pulpo_v2'] ?? [];
     $pulpoAgendaData = $pulpoV2['agenda'] ?? $agenda;
     $pulpoUnits = $pulpoV2['units'] ?? [];
-    $pulpoInkByColor = !empty($ctx['pulpo_v2']) ? $prodService->pulpoInkByColor($agId) : [];
+    // Tinta por color del Pulpo. El servicio viene en $ctx (aquí no existe $prodService); si falla, la consola igual abre.
+    $pulpoInkByColor = [];
+    if (!empty($ctx['pulpo_v2']) && isset($ctx['prod_service']) && is_object($ctx['prod_service']) && method_exists($ctx['prod_service'], 'pulpoInkByColor')) {
+        try {
+            $pulpoInkByColor = $ctx['prod_service']->pulpoInkByColor((int)($ctx['agenda']['id'] ?? 0));
+        } catch (Throwable) {
+            $pulpoInkByColor = [];
+        }
+    }
     $bastidoresList = $ctx['bastidores'] ?? [];
     $colorMode = $ctx['colormode'] ?? 'Frente';
 

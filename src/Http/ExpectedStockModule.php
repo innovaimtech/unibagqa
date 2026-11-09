@@ -15,7 +15,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../ExpectedStockService.php';
 
-const EXPECTED_STOCK_ASSET_VERSION = '20261109e';
+const EXPECTED_STOCK_ASSET_VERSION = '20261109f';
 
 function expectedStockRoute(string $path): bool
 {
@@ -191,33 +191,37 @@ function expectedStockReport(ExpectedStockService $service): string
     foreach ($groups as $g) {
         $groupOpts .= '<option value="' . h($g) . '">' . h($g) . '</option>';
     }
+    // Un solo panel: barra de filtros, pestañas de estado y la tabla, que se desplaza con la página (sin barra de desplazamiento propia).
     $html = '<div class="es-kpis" id="es_kpis"></div>'
-        . '<div class="es-card es-filters"><div class="es-bar">'
-        . '<div><label for="es_q">Buscar</label><input type="search" id="es_q" placeholder="Código o descripción" autocomplete="off"></div>'
-        . '<div><label for="es_wh">Bodega</label><select id="es_wh"><option value="">Todas</option><option value="1000">1000</option><option value="400">400</option></select></div>'
-        . ($groupOpts !== '' ? '<div><label for="es_grp">Grupo</label><select id="es_grp"><option value="">Todos</option>' . $groupOpts . '</select></div>' : '')
-        . '<div class="es-checks"><label class="es-check"><input type="checkbox" id="es_only_res"> Con ventas sin despachar</label>'
-        . '<label class="es-check"><input type="checkbox" id="es_only_prod"> En producción</label></div>'
-        . '<div class="es-bar-end"><button type="button" class="es-btn ghost" id="es_reset">Limpiar filtros</button>'
-        . '<a class="es-btn sec" href="/reports/stock-esperado/excel"><i class="fas fa-file-excel"></i> Excel</a></div>'
-        . '</div><div class="es-chips" id="es_chips"></div></div>'
+        . '<section class="es-panel">'
+        . '<div class="es-toolbar">'
+        . '<div class="es-search"><i class="fas fa-search" aria-hidden="true"></i><input type="search" id="es_q" placeholder="Buscar código o descripción" aria-label="Buscar código o descripción" autocomplete="off"></div>'
+        . '<select id="es_wh" aria-label="Bodega"><option value="">Todas las bodegas</option><option value="1000">Bodega 1000</option><option value="400">Bodega 400</option></select>'
+        . ($groupOpts !== '' ? '<select id="es_grp" aria-label="Grupo"><option value="">Todos los grupos</option>' . $groupOpts . '</select>' : '')
+        . '<span class="es-sep" aria-hidden="true"></span>'
+        . '<label class="es-switch"><input type="checkbox" id="es_only_res"><span class="es-switch-ui" aria-hidden="true"></span>Con ventas sin despachar</label>'
+        . '<label class="es-switch"><input type="checkbox" id="es_only_prod"><span class="es-switch-ui" aria-hidden="true"></span>En producción</label>'
+        . '<div class="es-toolbar-end"><button type="button" class="es-btn ghost" id="es_reset"><i class="fas fa-undo" aria-hidden="true"></i> Limpiar</button>'
+        . '<a class="es-btn sec" href="/reports/stock-esperado/excel"><i class="fas fa-file-excel" aria-hidden="true"></i> Excel</a></div>'
+        . '</div>'
+        . '<div class="es-statusbar"><div class="es-chips" id="es_chips" role="tablist" aria-label="Estado"></div><div class="es-count" id="es_count"></div></div>'
         . '<div id="es_err"></div>'
-        . '<div class="es-card es-table-card"><div class="es-wrap"><table class="es-table" id="es_table"><thead>'
-        . '<tr class="es-groups"><th class="g-prod sticky">Producto</th><th class="g-stock">Stock</th>'
-        . '<th colspan="2" class="g-res">Ventas</th><th colspan="2" class="g-mfg">En producción</th><th colspan="2" class="g-proj">Proyección</th>'
-        . '<th colspan="2" class="g-goal">Meta</th><th colspan="2" class="g-state">Estado</th></tr>'
+        . '<div class="es-wrap"><table class="es-table" id="es_table"><thead>'
+        . '<tr class="es-groups"><th class="g-prod sticky">Producto</th><th class="g-stock gs">Bodega</th>'
+        . '<th colspan="2" class="g-res gs">Ventas</th><th colspan="2" class="g-mfg gs">En producción</th><th colspan="2" class="g-proj gs">Proyección</th>'
+        . '<th colspan="2" class="g-goal gs">Meta</th><th colspan="2" class="g-state gs">Estado</th></tr>'
         . '<tr class="es-cols">'
         . '<th data-sort="code" class="sticky">Código</th>'
-        . '<th data-sort="stock" class="n" title="Unidades en la bodega del producto (pallets y cajas debajo)">Stock</th>'
-        . '<th data-sort="reserved" class="n" title="Vendido en NV de venta de los últimos ' . ExpectedStockService::SALES_MAX_AGE_DAYS . ' días que aún no se despacha. Clic para ver las NV.">Sin despachar</th>'
+        . '<th data-sort="stock" class="n gs" title="Unidades en la bodega del producto (pallets y cajas debajo)">Stock</th>'
+        . '<th data-sort="reserved" class="n gs" title="Vendido en NV de venta de los últimos ' . ExpectedStockService::SALES_MAX_AGE_DAYS . ' días que aún no se despacha. Clic para ver las NV.">Sin despachar</th>'
         . '<th data-sort="free" class="n" title="Stock − sin despachar">Libre</th>'
-        . '<th data-sort="to_print" class="n" title="CC en curso: pedido − ya impreso en flexografía o serigrafía. Clic para ver las CC y OT.">Por imprimir</th>'
+        . '<th data-sort="to_print" class="n gs" title="CC en curso: pedido − ya impreso en flexografía o serigrafía. Clic para ver las CC y OT.">Por imprimir</th>'
         . '<th data-sort="to_seal" class="n" title="CC en curso: impreso (o pedido si no lleva impresión) − ya sellado o embalado. Clic para ver las CC y OT.">Por cortar y sellar</th>'
-        . '<th data-sort="projected" class="n" title="Stock + por imprimir + por cortar y sellar − sin despachar">Proyectado</th>'
+        . '<th data-sort="projected" class="n gs" title="Stock + por imprimir + por cortar y sellar − sin despachar">Proyectado</th>'
         . '<th data-sort="projected_diff" class="n" title="Proyectado − objetivo">vs objetivo</th>'
-        . '<th data-sort="target_units" class="n">Objetivo</th><th data-sort="min_units" class="n">Mínimo</th>'
-        . '<th data-sort="status_rank">Hoy</th><th data-sort="projected_rank">Proyectado</th>'
-        . '</tr></thead><tbody id="es_body"></tbody><tfoot id="es_foot"></tfoot></table></div></div>'
+        . '<th data-sort="target_units" class="n gs">Objetivo</th><th data-sort="min_units" class="n">Mínimo</th>'
+        . '<th data-sort="status_rank" class="gs">Hoy</th><th data-sort="projected_rank">Proyectado</th>'
+        . '</tr></thead><tbody id="es_body"></tbody><tfoot id="es_foot"></tfoot></table></div></section>'
         . '<div class="es-modal" id="es_modal" hidden><div class="es-modal-box" role="dialog" aria-modal="true" aria-labelledby="es_modal_title">'
         . '<div class="es-modal-head"><div><div class="es-modal-kicker" id="es_modal_kicker"></div><div class="es-modal-title" id="es_modal_title"></div></div>'
         . '<button type="button" class="es-modal-x" id="es_modal_close" aria-label="Cerrar">&times;</button></div>'
