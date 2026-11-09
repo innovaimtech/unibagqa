@@ -1220,7 +1220,10 @@
   function usbErrorMessage(err) {
     var msg = err && err.message ? err.message : "No se pudo abrir la impresora WebUSB.";
     if (/Access denied|claimInterface|SecurityError/i.test(msg)) {
-      msg = "Windows tiene reservado el driver USB estándar de esta impresora. Usa el Servicio Local Silencioso (1 clic en instalar_servicio_impresora_silencioso.bat) para imprimir por el spooler de Windows.";
+      // Windows bloquea el USB directo mientras la impresora tenga su driver de impresora de Windows.
+      msg = "Windows está usando esta impresora con su propio driver y no deja que el navegador la tome por USB. " +
+        "Cierra otras pestañas o programas que la usen y vuelve a intentar. Si sigue igual, en esta PC hay que cambiar " +
+        "una sola vez el driver USB de la impresora a «WinUSB» (programa Zadig), o usar «Impresora Serial (COM)» si la impresora tiene puerto COM.";
     }
     return msg;
   }
@@ -1521,15 +1524,18 @@
       if (result.ambiguous) return stopAmbiguous(result);
     }
 
-    // 2. Intentar Servicio Local Windows Spooler (127.0.0.1:8767) — compatible con todos los drivers Windows USB
-    var bridgeRes = await printViaLocalBridge(job);
-    if (bridgeRes.ok) {
-      notifyPrintSuccess(job, bridgeRes, opts);
-      return bridgeRes;
-    }
-    if (bridgeRes.ambiguous) return stopAmbiguous(bridgeRes);
-    if (bridgeRes.bridgeResponded && bridgeRes.error) {
-      bridgeErrorMsg = bridgeRes.error;
+    // 2. Servicio local de Windows (127.0.0.1:8767): ya no se exige. Solo se usa en una PC donde ya está funcionando;
+    //    si no, se imprime por la impresora USB o COM vinculada en el navegador.
+    if (printerState.bridgeOnline === true || preferred === "bridge") {
+      var bridgeRes = await printViaLocalBridge(job);
+      if (bridgeRes.ok) {
+        notifyPrintSuccess(job, bridgeRes, opts);
+        return bridgeRes;
+      }
+      if (bridgeRes.ambiguous) return stopAmbiguous(bridgeRes);
+      if (bridgeRes.bridgeResponded && bridgeRes.error) {
+        bridgeErrorMsg = bridgeRes.error;
+      }
     }
 
     // 3. Intentar WebUSB directo si ya hay dispositivo autorizado
@@ -1553,7 +1559,8 @@
     }
 
     // 5. Ningún transporte local pudo emitir aún: actualizar banner si existe y mostrar aviso interactivo limpio
-    var errDetail = bridgeErrorMsg || (result && result.error) || "No se detectó impresora térmica activa en esta PC.";
+    var errDetail = bridgeErrorMsg || (result && result.error) || printerState.lastError ||
+      "No hay impresora vinculada en esta PC. Abre Hardware y pulsa «Vincular USB Directo» o «Impresora Serial (COM)».";
     updatePagePrintBanner(false, errDetail);
     if (!opts.silentFallback) {
       showInteractivePrintFallbackToast(job, opts.fallbackUrl || "", errDetail);
@@ -1960,7 +1967,9 @@
 
     if (uiRefs.modalBackdrop) {
       uiRefs.modalBackdrop.style.display = "flex";
-      probeLocalPrintBridge(true);
+      if (printerState.bridgeOnline === true) {
+        probeLocalPrintBridge(true);
+      }
       refreshModalContents();
     }
   }
@@ -2094,7 +2103,7 @@
           "  </select>" +
           "</div>"
         : '<div style="margin-top:8px;padding:8px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;font-size:11.5px;color:#334155">' +
-          "💡 Para imprimir sin instalar nada: pulsa <b>Impresora Serial (COM)</b> y elige el puerto de la impresora (una sola vez; el navegador lo recuerda). Alternativa: el servicio <code>instalar_servicio_impresora_silencioso.bat</code> en esta PC." +
+          "💡 Para imprimir sin instalar nada: pulsa <b>Vincular USB Directo</b> (impresora por cable USB) o <b>Impresora Serial (COM)</b> y elige la impresora. Se hace una sola vez por PC; el navegador la recuerda en todas las pantallas." +
           "</div>") +
       tuningHtml +
       '  <div class="unibag-hw-row">' +
@@ -2253,7 +2262,8 @@
     setupGlobalPrintLinkInterceptor();
     reconnectRememberedDevices();
 
-    if (pageHasHardwareControls() || printerState.bridgeOnline === true) {
+    // El servicio local solo se consulta en una PC donde ya funcionó (no se pide instalarlo).
+    if (printerState.bridgeOnline === true) {
       probeLocalPrintBridge(true);
     }
 

@@ -1321,7 +1321,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
         echo '<div style="font-weight:800">Aviso de impresión térmica:</div>';
         echo '<div style="font-size:12.5px;margin-top:2px">' . h($printErr) . '</div>';
         if ($isConnErr) {
-            echo '<div style="font-size:12px;margin-top:6px;color:#991b1b">💡 <strong>Solución:</strong> Para imprimir directo en térmica sin ventana de diálogo, asegúrate de haber ejecutado <code>iniciar_proyecto.bat</code> y que la ventana de <em>Unibag Print Bridge (Puerto 8767)</em> permanezca abierta.</div>';
+            echo '<div style="font-size:12px;margin-top:6px;color:#991b1b">💡 <strong>Solución:</strong> vincula la impresora en esta PC desde <em>Hardware</em> → «Vincular USB Directo» o «Impresora Serial (COM)» (una sola vez) y vuelve a imprimir, o usa «Imprimir en Navegador».</div>';
         }
         echo '</div>';
         echo '</div>';
@@ -1598,22 +1598,7 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
     }
 
     echo '</div>'; // .container-layout
-    echo '<script>
-    (function() {
-      const badge = document.getElementById("bridge-status-badge");
-      if (!badge) return;
-      fetch("http://127.0.0.1:8767/health", { method: "GET", mode: "cors", cache: "no-store" })
-        .then(r => r.json())
-        .then(data => {
-          if (data && (data.ok || data.status === "running")) {
-            badge.style.background = "#059669";
-            badge.innerHTML = "🟢 Puente Térmico Activo (PC Local)";
-            badge.title = "Puente local conectado en puerto 8767. Listo para imprimir en impresora térmica.";
-          }
-        })
-        .catch(() => {});
-    })();
-    </script>';
+    // El estado de la impresora lo pone unibag-hardware.js (USB o COM vinculados); ya no se consulta el servicio local 8767.
     echo '</body></html>';
     exit;
 }
