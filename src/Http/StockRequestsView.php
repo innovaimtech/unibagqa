@@ -245,6 +245,10 @@ function mrScanCards(int $requestId, bool $mobile): string
         . '<div class="mr-form-row"><div class="mr-field"><label for="request_scan_code">Código de barras / ID de bobina</label>'
         . '<input id="request_scan_code" name="scan_code" type="text" value="" autofocus autocomplete="off" placeholder="Escanea la etiqueta o escribe el código"></div>'
         . '<button class="mr-btn big" type="submit">Ingresar bobina</button></div></form>'
+        // La pistola en teclado español escribe «'» en lugar de «-»: se corrige al escribir y antes de enviar.
+        . '<script>(function(){var i=document.getElementById("request_scan_code");if(!i)return;'
+        . 'function fix(){var v=i.value,n=v.replace(/[\'`´’‘‛]/g,"-");if(n!==v){var p=i.selectionStart;i.value=n;try{i.setSelectionRange(p,p);}catch(e){}}}'
+        . 'i.addEventListener("input",fix);if(i.form)i.form.addEventListener("submit",function(){fix();i.value=i.value.trim();},true);})();</script>'
         . ($mobile ? '' : '<div class="mr-hint">Al registrar la bobina, el sistema mueve automáticamente el inventario y la trazabilidad a la <b>3000 Insumos en Producción</b> y la asigna a la OT.</div>');
     $cam = '<div class="mr-cam-status" id="camera_scan_status">'
         . ($mobile ? 'Abre la cámara trasera o toma una foto del código de barras.' : 'Pulsa «Abrir cámara» para usar la cámara del dispositivo. Si el navegador la bloquea en esta red, usa «Tomar foto».')
