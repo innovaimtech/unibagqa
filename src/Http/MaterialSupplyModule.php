@@ -783,7 +783,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
             <label><?php if ($isBoxReq): ?>Escanea el código de cada caja (<?=supplyEscape(supplyNum($scanTotal))?> bolsas en cajas escaneadas · se pidieron <?=supplyEscape(supplyNum($reqQty))?>). Cada caja se traspasa completa, con su CC.<?php else: ?>Escanea el código de trazabilidad de la bobina (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se solicitaron <?=supplyEscape(supplyNum($reqQty))?>)<?php endif; ?></label>
-            <input name="code" required maxlength="60" autofocus placeholder="Escanea aquí; el lector envía Enter">
+            <input name="code" required maxlength="60" autofocus placeholder="Escanea aquí; el lector envía Enter" oninput="var v=this.value.replace(/['`´’‘‛]/g,'-');if(v!==this.value)this.value=v;">
             <div class="supply-actions"><button class="btnblue">Registrar escaneo</button></div>
         </form>
         <?php if ($scans): ?>

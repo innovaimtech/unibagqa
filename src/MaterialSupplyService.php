@@ -943,10 +943,20 @@ final class MaterialSupplyService
      * Registra el ESCANEO de una bobina para una solicitud en preparación. Si cualquier validación
      * falla se lanza un mensaje claro y NO se registra nada.
      */
+    /**
+     * La pistola lectora configurada en teclado inglés, en un equipo con teclado español, escribe «'» donde la
+     * etiqueta tiene «-» (RB'20261007'901438). Se corrige aquí para cualquier bobina o caja escaneada.
+     */
+    public static function normalizeScannedCode(string $code): string
+    {
+        $code = str_replace(["\r", "\n", "\t", ' '], '', trim($code));
+        return str_replace(["'", '`', '´', '’', '‘', '‛'], '-', $code);
+    }
+
     public function scan(string $requestKey, string $code, array $actor): void
     {
         $who = $this->actor($actor);
-        $code = trim($code);
+        $code = self::normalizeScannedCode($code);
         if ($code === '') throw new RuntimeException('Escanea o escribe un código de trazabilidad.');
         if (!preg_match('/^[A-Za-z0-9._\-\/]{3,60}$/D', $code)) {
             throw new RuntimeException('El código contiene caracteres no válidos: ' . mb_substr($code, 0, 40));
