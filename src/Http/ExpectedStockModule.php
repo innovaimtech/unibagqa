@@ -15,7 +15,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../ExpectedStockService.php';
 
-const EXPECTED_STOCK_ASSET_VERSION = '20261109c';
+const EXPECTED_STOCK_ASSET_VERSION = '20261109e';
 
 function expectedStockRoute(string $path): bool
 {
@@ -196,30 +196,28 @@ function expectedStockReport(ExpectedStockService $service): string
         . '<div><label for="es_q">Buscar</label><input type="search" id="es_q" placeholder="Código o descripción" autocomplete="off"></div>'
         . '<div><label for="es_wh">Bodega</label><select id="es_wh"><option value="">Todas</option><option value="1000">1000</option><option value="400">400</option></select></div>'
         . ($groupOpts !== '' ? '<div><label for="es_grp">Grupo</label><select id="es_grp"><option value="">Todos</option>' . $groupOpts . '</select></div>' : '')
-        . '<div class="es-checks"><label class="es-check"><input type="checkbox" id="es_only_res"> Con reservas</label>'
+        . '<div class="es-checks"><label class="es-check"><input type="checkbox" id="es_only_res"> Con ventas sin despachar</label>'
         . '<label class="es-check"><input type="checkbox" id="es_only_prod"> En producción</label></div>'
         . '<div class="es-bar-end"><button type="button" class="es-btn ghost" id="es_reset">Limpiar filtros</button>'
         . '<a class="es-btn sec" href="/reports/stock-esperado/excel"><i class="fas fa-file-excel"></i> Excel</a></div>'
         . '</div><div class="es-chips" id="es_chips"></div></div>'
         . '<div id="es_err"></div>'
         . '<div class="es-card es-table-card"><div class="es-wrap"><table class="es-table" id="es_table"><thead>'
-        . '<tr class="es-groups"><th colspan="2" class="g-prod">Producto</th><th colspan="2" class="g-stock">Stock en bodega</th>'
-        . '<th colspan="2" class="g-res">Comprometido</th><th colspan="2" class="g-mfg">Producción (CC en curso)</th><th colspan="2" class="g-proj">Proyección</th>'
+        . '<tr class="es-groups"><th class="g-prod sticky">Producto</th><th class="g-stock">Stock</th>'
+        . '<th colspan="2" class="g-res">Ventas</th><th colspan="2" class="g-mfg">En producción</th><th colspan="2" class="g-proj">Proyección</th>'
         . '<th colspan="2" class="g-goal">Meta</th><th colspan="2" class="g-state">Estado</th></tr>'
         . '<tr class="es-cols">'
-        . '<th data-sort="code" class="sticky">Producto</th><th data-sort="warehouse_code">Bodega</th>'
-        . '<th data-sort="stock" class="n">Stock</th><th data-sort="pallets" class="n">Pallets · cajas</th>'
-        . '<th data-sort="reserved" class="n" title="Vendido en NV de venta de los últimos 90 días que aún no se despacha">Vendido sin despachar</th><th data-sort="free" class="n" title="Stock − reservado">Libre</th>'
-        . '<th data-sort="to_print" class="n" title="Unidades de CC en curso que aún no pasan por flexografía o serigrafía">Esperando impresión</th>'
-        . '<th data-sort="to_seal" class="n" title="Unidades ya impresas (o sin impresión) que aún no pasan por corte y sellado">Esperando corte y sellado</th>'
-        . '<th data-sort="projected" class="n" title="Stock + en producción − reservado">Proyectado</th><th data-sort="projected_diff" class="n">vs objetivo</th>'
+        . '<th data-sort="code" class="sticky">Código</th>'
+        . '<th data-sort="stock" class="n" title="Unidades en la bodega del producto (pallets y cajas debajo)">Stock</th>'
+        . '<th data-sort="reserved" class="n" title="Vendido en NV de venta de los últimos ' . ExpectedStockService::SALES_MAX_AGE_DAYS . ' días que aún no se despacha. Clic para ver las NV.">Sin despachar</th>'
+        . '<th data-sort="free" class="n" title="Stock − sin despachar">Libre</th>'
+        . '<th data-sort="to_print" class="n" title="CC en curso: pedido − ya impreso en flexografía o serigrafía. Clic para ver las CC y OT.">Por imprimir</th>'
+        . '<th data-sort="to_seal" class="n" title="CC en curso: impreso (o pedido si no lleva impresión) − ya sellado o embalado. Clic para ver las CC y OT.">Por cortar y sellar</th>'
+        . '<th data-sort="projected" class="n" title="Stock + por imprimir + por cortar y sellar − sin despachar">Proyectado</th>'
+        . '<th data-sort="projected_diff" class="n" title="Proyectado − objetivo">vs objetivo</th>'
         . '<th data-sort="target_units" class="n">Objetivo</th><th data-sort="min_units" class="n">Mínimo</th>'
         . '<th data-sort="status_rank">Hoy</th><th data-sort="projected_rank">Proyectado</th>'
         . '</tr></thead><tbody id="es_body"></tbody><tfoot id="es_foot"></tfoot></table></div></div>'
-        . '<div class="es-legend">Vendido sin despachar = NV de venta (no las CC de fabricación) de los últimos ' . ExpectedStockService::SALES_MAX_AGE_DAYS . ' días, menos lo despachado en la NV o en sus guías · '
-        . 'CC en curso = CC de fabricación con producción o embalaje en los últimos ' . ExpectedStockService::PRODUCTION_IDLE_DAYS . ' días (o nuevas aún sin empezar) · '
-        . 'Esperando impresión = pedido − impreso · Esperando corte y sellado = impreso (o pedido si no lleva impresión) − sellado · '
-        . 'Proyectado = stock + esperando impresión + esperando corte y sellado − vendido sin despachar. Haz clic en esas cifras para ver el detalle.</div>'
         . '<div class="es-modal" id="es_modal" hidden><div class="es-modal-box" role="dialog" aria-modal="true" aria-labelledby="es_modal_title">'
         . '<div class="es-modal-head"><div><div class="es-modal-kicker" id="es_modal_kicker"></div><div class="es-modal-title" id="es_modal_title"></div></div>'
         . '<button type="button" class="es-modal-x" id="es_modal_close" aria-label="Cerrar">&times;</button></div>'

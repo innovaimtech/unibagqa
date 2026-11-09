@@ -73,11 +73,11 @@
       ['', 'k-all', n(s.all), 'Productos', 'en el maestro'],
       ['crit', 'k-crit', n(s.crit), 'Críticos', 'bajo el mínimo'],
       ['low', 'k-low', n(s.low), 'Bajo objetivo', 'sobre el mínimo'],
-      ['stock', 'k-stock', n(s.stock), 'Stock en bodega', n(s.pal) + ' pallets completos'],
-      ['res', 'k-res', flow ? n(s.res) : '—', 'Vendido sin despachar', flow ? n(s.resNv) + ' NV pendientes' : 'sin datos'],
-      ['print', 'k-print', flow ? n(s.pr) : '—', 'Esperando impresión', flow ? 'por imprimir en flexo o serigrafía' : 'sin datos'],
-      ['seal', 'k-prod', flow ? n(s.sl) : '—', 'Esperando corte y sellado', flow ? 'impresas y sin impresión' : 'sin datos'],
-      ['proj', 'k-proj', flow ? n(s.proj) : '—', 'Proyectado bajo', 'objetivo o mínimo']
+      ['stock', 'k-stock', n(s.stock), 'Stock', n(s.pal) + ' pallets'],
+      ['res', 'k-res', flow ? n(s.res) : '—', 'Sin despachar', flow ? n(s.resNv) + ' NV' : 'sin datos'],
+      ['print', 'k-print', flow ? n(s.pr) : '—', 'Por imprimir', flow ? 'unidades en CC' : 'sin datos'],
+      ['seal', 'k-prod', flow ? n(s.sl) : '—', 'Por cortar y sellar', flow ? 'unidades en CC' : 'sin datos'],
+      ['proj', 'k-proj', flow ? n(s.proj) : '—', 'Proyectado bajo', 'productos']
     ];
     $('es_kpis').innerHTML = cards.map(function (c) {
       return '<button type="button" class="es-kpi ' + c[1] + (f.kpi === c[0] && c[0] !== '' ? ' on' : '') + '" data-kpi="' + c[0] + '"><span>' + c[3] + '</span><b>' + c[2] + '</b><small>' + esc(c[4]) + '</small></button>';
@@ -99,49 +99,47 @@
     var cnt = type === 'reserved' ? r.reserved_orders : r.production_orders;
     if (qty === null || qty === undefined) { return '<span class="es-zero">—</span>'; }
     if (!qty) { return '<span class="es-zero">0</span>'; }
-    var extra = '';
-    if (type === 'reserved' && r.oldest_due) {
-      extra = r.oldest_due < today() ? ' · <span class="es-neg">vencida</span>' : ' · ' + dmy(r.oldest_due);
-    }
-    return '<button type="button" class="es-link ' + (type === 'reserved' ? 'res' : 'prod') + '" data-code="' + esc(r.code) + '" data-type="' + type + '" title="Ver detalle">' +
-      '<b>' + n(qty) + '</b>' + (type === 'reserved' ? '<span class="es-sub">' + n(cnt) + ' NV' + extra + '</span>' : '') + '</button>';
+    var late = type === 'reserved' && r.oldest_due && r.oldest_due < today();
+    return '<button type="button" class="es-link ' + (type === 'reserved' ? 'res' : 'prod') + '" data-code="' + esc(r.code) + '" data-type="' + type + '" title="Ver detalle (' +
+      n(cnt) + (type === 'reserved' ? ' NV' : ' CC') + ')"><b>' + n(qty) + '</b>' + (late ? '<i class="es-late" title="Hay NV con entrega vencida"></i>' : '') + '</button>';
   }
+
+  function num(v, cls) { return v === null || v === undefined ? '<span class="es-zero">—</span>' : (v === 0 ? '<span class="es-zero">0</span>' : '<span class="' + (cls || '') + '">' + n(v) + '</span>'); }
 
   function renderTable() {
     var rows = visible(), body = '';
     var tot = {};
     rows.forEach(function (r) {
-      var palCell = r.pallets === null || r.pallets === undefined ? '<span class="es-zero">—</span>'
-        : n(r.pallets) + ' p · ' + n(r.boxes) + ' c<span class="es-sub">+ ' + n(r.loose) + ' u · ' + n(r.per_pallet) + ' u/pallet</span>';
-      var projCls = r.projected === null ? '' : (r.projected < 0 ? 'es-neg' : '');
+      // Pallets y cajas completos en una línea corta bajo el stock.
+      var pal = r.pallets === null || r.pallets === undefined || !r.stock ? '' : '<span class="es-sub">' + n(r.pallets) + ' pallets · ' + n(r.boxes) + ' cajas</span>';
       body += '<tr>' +
-        '<td class="sticky" data-l=""><div class="es-prod-code">' + esc(r.code) + (r.group_label ? ' <span class="es-tag">' + esc(r.group_label) + '</span>' : '') + '</div>' +
+        '<td class="sticky" data-l=""><div class="es-prod-code">' + esc(r.code) +
+        (r.warehouse_code ? '<span class="es-tag wh" title="Bodega' + (r.other_stock ? ' · en la otra bodega hay ' + n(r.other_stock) + ' u' : '') + '">' + esc(r.warehouse_code) + '</span>' : '') +
+        (r.group_label ? '<span class="es-tag">' + esc(r.group_label) + '</span>' : '') + '</div>' +
         '<div class="es-prod-desc" title="' + esc(r.erp_title || r.description) + '">' + esc(r.description) + '</div></td>' +
-        '<td data-l="Bodega">' + esc(r.warehouse_code || '—') + (r.other_stock ? '<span class="es-sub" title="Stock en la otra bodega">otra: ' + n(r.other_stock) + '</span>' : '') + '</td>' +
-        '<td class="n" data-l="Stock"><b>' + n(r.stock) + '</b></td>' +
-        '<td class="n" data-l="Pallets · cajas">' + palCell + '</td>' +
-        '<td class="n" data-l="Vendido sin despachar">' + linkCell(r, 'reserved') + '</td>' +
-        '<td class="n' + (r.free !== null && r.free < 0 ? ' es-neg' : '') + '" data-l="Libre">' + (r.free === null ? '—' : n(r.free)) + '</td>' +
-        '<td class="n" data-l="Esperando impresión">' + linkCell(r, 'production', 'to_print') + '</td>' +
-        '<td class="n" data-l="Esperando corte y sellado">' + linkCell(r, 'production', 'to_seal') + (r.production_orders ? '<span class="es-sub">' + n(r.production_orders) + ' CC</span>' : '') + '</td>' +
-        '<td class="n ' + projCls + '" data-l="Proyectado"><b>' + (r.projected === null ? '—' : n(r.projected)) + '</b></td>' +
-        '<td class="n ' + (r.projected_diff === null ? '' : (r.projected_diff < 0 ? 'es-neg' : 'es-pos')) + '" data-l="Proyectado vs objetivo">' + signed(r.projected_diff) +
-        (r.diff !== null && r.diff !== undefined ? '<span class="es-sub">hoy ' + signed(r.diff) + '</span>' : '') + '</td>' +
-        '<td class="n" data-l="Objetivo">' + n(r.target_units) + '</td>' +
-        '<td class="n" data-l="Mínimo">' + n(r.min_units) + '</td>' +
+        '<td class="n" data-l="Stock"><b>' + num(r.stock) + '</b>' + pal + '</td>' +
+        '<td class="n" data-l="Sin despachar">' + linkCell(r, 'reserved') + '</td>' +
+        '<td class="n" data-l="Libre">' + num(r.free, r.free < 0 ? 'es-neg' : '') + '</td>' +
+        '<td class="n" data-l="Por imprimir">' + linkCell(r, 'production', 'to_print') + '</td>' +
+        '<td class="n" data-l="Por cortar y sellar">' + linkCell(r, 'production', 'to_seal') + '</td>' +
+        '<td class="n es-strong" data-l="Proyectado">' + num(r.projected, r.projected < 0 ? 'es-neg' : '') + '</td>' +
+        '<td class="n" data-l="vs objetivo">' + (r.projected_diff === null || r.projected_diff === undefined ? '<span class="es-zero">—</span>'
+          : '<span class="' + (r.projected_diff < 0 ? 'es-neg' : 'es-pos') + '">' + signed(r.projected_diff) + '</span>') + '</td>' +
+        '<td class="n es-dim" data-l="Objetivo">' + n(r.target_units) + '</td>' +
+        '<td class="n es-dim" data-l="Mínimo">' + n(r.min_units) + '</td>' +
         '<td data-l="Estado hoy">' + pill(r.status) + '</td>' +
         '<td data-l="Estado proyectado">' + pill(r.projected_status) + '</td>' +
         '</tr>';
       var w = r.warehouse_code || 0;
-      if (!tot[w]) { tot[w] = { n: 0, s: 0, p: 0, r: 0, pr: 0, sl: 0, j: 0 }; }
-      tot[w].n++; tot[w].s += r.stock || 0; tot[w].p += r.pallets || 0; tot[w].r += r.reserved || 0; tot[w].pr += r.to_print || 0; tot[w].sl += r.to_seal || 0; tot[w].j += r.projected || 0;
+      if (!tot[w]) { tot[w] = { n: 0, s: 0, r: 0, f: 0, pr: 0, sl: 0, j: 0 }; }
+      tot[w].n++; tot[w].s += r.stock || 0; tot[w].r += r.reserved || 0; tot[w].f += r.free || 0; tot[w].pr += r.to_print || 0; tot[w].sl += r.to_seal || 0; tot[w].j += r.projected || 0;
     });
-    $('es_body').innerHTML = body || '<tr><td colspan="14" class="es-empty">Ningún producto coincide con los filtros.</td></tr>';
+    $('es_body').innerHTML = body || '<tr><td colspan="12" class="es-empty">Ningún producto coincide con los filtros.</td></tr>';
     $('es_foot').innerHTML = Object.keys(tot).sort().reverse().map(function (w) {
       var t = tot[w];
-      return '<tr class="es-foot"><td class="sticky" data-l="">' + (w === '0' ? 'Sin bodega' : 'Total bodega ' + w) + ' <span class="es-sub">' + t.n + ' productos</span></td><td></td>' +
-        '<td class="n" data-l="Stock">' + n(t.s) + '</td><td class="n" data-l="Pallets">' + n(t.p) + ' p</td><td class="n" data-l="Vendido sin despachar">' + n(t.r) + '</td><td></td>' +
-        '<td class="n" data-l="Esperando impresión">' + n(t.pr) + '</td><td class="n" data-l="Esperando corte y sellado">' + n(t.sl) + '</td><td class="n" data-l="Proyectado">' + n(t.j) + '</td><td colspan="5"></td></tr>';
+      return '<tr class="es-foot"><td class="sticky" data-l="">' + (w === '0' ? 'Sin bodega' : 'Bodega ' + w) + ' <span class="es-sub">' + t.n + ' productos</span></td>' +
+        '<td class="n" data-l="Stock">' + n(t.s) + '</td><td class="n" data-l="Sin despachar">' + n(t.r) + '</td><td class="n" data-l="Libre">' + n(t.f) + '</td>' +
+        '<td class="n" data-l="Por imprimir">' + n(t.pr) + '</td><td class="n" data-l="Por cortar y sellar">' + n(t.sl) + '</td><td class="n" data-l="Proyectado">' + n(t.j) + '</td><td colspan="5"></td></tr>';
     }).join('');
     Array.prototype.forEach.call(document.querySelectorAll('#es_table .es-cols th'), function (th) {
       var on = th.getAttribute('data-sort') === f.sort;
@@ -154,7 +152,7 @@
     renderKpis();
     renderChips();
     renderTable();
-    $('es_stamp').textContent = state.generated_at ? 'Actualizado ' + state.generated_at.substr(11, 8) + ' · stock cada 30 s, NV y producción cada 2 min' : '';
+    $('es_stamp').textContent = state.generated_at ? 'Actualizado a las ' + state.generated_at.substr(11, 5) : '';
     var err = '';
     if (state.error) { err += '<div class="es-alert err">' + esc(state.error) + '</div>'; }
     if (state.flow_error) { err += '<div class="es-alert warn">' + esc(state.flow_error) + '</div>'; }
@@ -216,7 +214,7 @@
     current = { code: code, type: type };
     var row = null;
     state.rows.forEach(function (r) { if (r.code === code) { row = r; } });
-    $('es_modal_kicker').textContent = type === 'reserved' ? 'Vendido sin despachar · NV de venta pendientes' : 'En producción · CC y OT por fabricar';
+    $('es_modal_kicker').textContent = type === 'reserved' ? 'Sin despachar · NV de venta pendientes' : 'En producción · CC y OT en curso';
     $('es_modal_title').textContent = code + (row ? ' — ' + row.description : '');
     $('es_modal_body').innerHTML = '<div class="es-loading">Cargando detalle…</div>';
     modal.hidden = false; document.body.classList.add('es-noscroll');
@@ -240,8 +238,8 @@
   function summaryHtml(s) {
     if (!s) { return ''; }
     function box(label, v, cls) { return '<div><span>' + label + '</span><b class="' + (cls || '') + '">' + (v === null || v === undefined ? '—' : n(v)) + '</b></div>'; }
-    return '<div class="es-sum">' + box('Stock bodega ' + (s.warehouse_code || ''), s.stock) + box('Vendido sin despachar', s.reserved) +
-      box('Libre (stock − vendido)', s.free, s.free < 0 ? 'es-neg' : '') + box('Esperando impresión', s.to_print) + box('Esperando corte y sellado', s.to_seal) + box('Proyectado', s.projected, s.projected < 0 ? 'es-neg' : '') + '</div>';
+    return '<div class="es-sum">' + box('Stock bodega ' + (s.warehouse_code || ''), s.stock) + box('Sin despachar', s.reserved) +
+      box('Libre', s.free, s.free < 0 ? 'es-neg' : '') + box('Por imprimir', s.to_print) + box('Por cortar y sellar', s.to_seal) + box('Proyectado', s.projected, s.projected < 0 ? 'es-neg' : '') + '</div>';
   }
 
   function toolsHtml(d, count) {
@@ -280,7 +278,7 @@
         '</td><td></td><td class="n">' + n(t.stock) + '</td><td></td></tr></tfoot>';
     } else {
       html += '<thead><tr><th></th><th>CC · OT</th><th>Cliente · vendedor</th><th>Fecha NV</th><th>Entrega</th><th class="n">Pedido</th><th class="n">Impreso</th><th class="n">Sellado</th>' +
-        '<th class="n">Esperando impresión</th><th class="n">Esperando corte y sellado</th><th>Avance</th><th>Etapa actual</th><th class="n">Stock de la CC</th></tr></thead><tbody>';
+        '<th class="n">Por imprimir</th><th class="n">Por cortar y sellar</th><th>Avance</th><th>Etapa actual</th><th class="n">Stock de la CC</th></tr></thead><tbody>';
       d.rows.forEach(function (r, i) {
         var search = [r.cc, r.ot, r.customer, r.seller, r.stage].join(' ').toLowerCase();
         var idle = r.idle_days !== null && r.idle_days > 30 ? '<span class="es-tag amber">sin movimiento ' + r.idle_days + ' d</span>' : '';
@@ -303,11 +301,7 @@
       html += '</tbody><tfoot><tr><td></td><td colspan="4">Total ' + n(t.orders) + ' CC</td><td class="n">' + n(t.ordered) + '</td><td class="n">' + n(t.printed) + '</td><td class="n">' + n(t.sealed) +
         '</td><td class="n">' + n(t.to_print) + '</td><td class="n">' + n(t.to_seal) + '</td><td colspan="2"></td><td class="n">' + n(t.stock) + '</td></tr></tfoot>';
     }
-    html += '</table></div>';
-    if (d.type === 'production') {
-      html += '<div class="es-legend" style="margin:10px 0 0">Esperando impresión = pedido − lo ya impreso (flexografía o serigrafía). Esperando corte y sellado = lo impreso (o el pedido, si la CC no lleva impresión) − lo ya sellado o embalado. Todo en unidades; el avance es lo sellado sobre lo pedido.</div>';
-    }
-    html += excludedHtml(d);
+    html += '</table></div>' + excludedHtml(d);
     $('es_modal_body').innerHTML = html;
     var input = $('es_dsearch');
     input.addEventListener('input', function () {
