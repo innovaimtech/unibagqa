@@ -14,6 +14,11 @@ declare(strict_types=1);
 // - Visualización de la ocupación física (pallets/cajas/bobinas) desde TRZ.
 // =============================================================================
 
+// Subir al cambiar public/assets/css/unibag-stock.css (nginx guarda los estilos un día).
+if (!defined('UNIBAG_STOCK_ASSET_VERSION')) {
+    define('UNIBAG_STOCK_ASSET_VERSION', '20261109a');
+}
+
 /**
  * Genera las opciones HTML (<option>) para el selector de bodegas ERP.
  *
@@ -352,139 +357,86 @@ function unibagRenderStockPage(ReceptionService $service): void
     $stockError = trim((string)($_GET['error'] ?? ''));
     $activeMainTab = (isset($_GET['tab']) && (string)$_GET['tab'] === 'rolls') ? 'rolls' : 'items';
 
-    $body = '<div class="erp-prod-shell" style="width:100%">';
+    $fmt0 = static fn(float $n): string => number_format($n, 0, ',', '.');
+    $fmt2 = static fn(float $n): string => number_format($n, 2, ',', '.');
+    $sumMin = 0.0;
+    foreach ($items as $it) {
+        $sumMin += (float)($it['iss_inventory_min'] ?? 0);
+    }
+    $baseQuery = 'bodega=' . $storehouseId . '&search=' . rawurlencode($search) . '&only_stock=' . ($onlyWithStock ? '1' : '0');
 
-    $body .= '<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:16px">
-        <div>
-          <div style="font-size:22px;font-weight:800;color:#0f172a;letter-spacing:-.02em">Inventario de Bodegas · ERP</div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <a class="btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '" style="background:#00A9A6;display:inline-flex;align-items:center;gap:6px">
-            <span style="font-size:15px">📦</span> Ingresar con Trazabilidad
-          </a>
-          <a class="btn secondary" href="/stock/inventory-counts?bodega=' . $storehouseId . '" style="display:inline-flex;align-items:center;gap:6px">
-            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
-            Toma de inventario
-          </a>
-        </div>
-      </div>';
+    $body = '<link rel="stylesheet" href="/assets/css/unibag-stock.css?v=' . UNIBAG_STOCK_ASSET_VERSION . '">';
+    $body .= '<div class="stk">';
+
+    $body .= '<div class="stk-head">'
+        . '<div><h1>Consulta de stock</h1><p>Existencias del ERP por bodega y bobinas con código de trazabilidad.</p></div>'
+        . '<div class="stk-actions">'
+        . '<a class="stk-btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '"><i class="fas fa-tag"></i> Ingresar con trazabilidad</a>'
+        . '<a class="stk-btn sec" href="/stock/inventory-counts?bodega=' . $storehouseId . '"><i class="fas fa-clipboard-check"></i> Toma de inventario</a>'
+        . '</div></div>';
 
     if ($stockMessage !== '') {
-        $body .= '<div class="ok" style="margin-bottom:14px;padding:12px 16px;font-weight:600;border-radius:10px">' . h($stockMessage) . '</div>';
+        $body .= '<div class="stk-alert ok">' . h($stockMessage) . '</div>';
     }
     if ($stockError !== '') {
-        $body .= '<div class="err" style="margin-bottom:14px;padding:12px 16px;font-weight:600;border-radius:10px">' . h($stockError) . '</div>';
+        $body .= '<div class="stk-alert err">' . h($stockError) . '</div>';
     }
 
-    // Filtro y selección de bodega
-    $body .= '<div class="ub-filter-card" style="margin-bottom:16px">
-        <form method="get" action="/stock" class="row" style="align-items:flex-end;gap:14px;flex-wrap:wrap">
-          <input type="hidden" name="tab" id="hidden_active_tab" value="' . h($activeMainTab) . '">
-          <div style="flex:2;min-width:260px">
-            <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;margin-bottom:6px;display:block">Bodega ERP</label>
-            <select name="bodega" onchange="this.form.submit()" style="height:40px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-weight:600;width:100%">'
-            . unibagInventoryStorehouseOptionsHtml($storehouses, $storehouseId) .
-            '</select>
-          </div>
-          <div style="flex:2;min-width:220px">
-            <label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;margin-bottom:6px;display:block">Buscar por código o descripción</label>
-            <input name="search" type="text" placeholder="Ej: POLIPROPILENO, BOLSA..." value="' . h($search) . '" style="height:40px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;width:100%;padding:0 12px">
-          </div>
-          <div style="display:flex;align-items:center;height:40px;gap:8px">
-            <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#334155;cursor:pointer;margin:0">
-              <input type="checkbox" name="only_stock" value="1" ' . ($onlyWithStock ? 'checked' : '') . ' onchange="this.form.submit()"> Solo con stock
-            </label>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;height:40px">
-            <button class="ub-btn-primary" type="submit">🔍 Buscar</button>
-            <a class="btn secondary" href="/stock?bodega=' . $storehouseId . '&search=' . rawurlencode($search) . '&only_stock=' . ($onlyWithStock ? '1' : '0') . '&download=excel" style="height:40px;display:inline-flex;align-items:center;gap:6px;padding:0 16px" title="Exportar existencias ERP a Excel">
-              <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-              Excel ERP
-            </a>
-            <a class="btn secondary" href="/stock?bodega=' . $storehouseId . '&download=rolls_excel" style="height:40px;display:inline-flex;align-items:center;gap:6px;padding:0 16px;background:#f0fdfa;border-color:#99f6e4;color:#0f766e" title="Exportar bobinas con trazabilidad a Excel">
-              <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-              Excel Bobinas (' . $totalWarehouseRolls . ')
-            </a>
-          </div>
-        </form>
+    // Filtros + indicadores
+    $body .= '<section class="stk-panel">'
+        . '<form method="get" action="/stock" class="stk-toolbar">'
+        . '<input type="hidden" name="tab" id="hidden_active_tab" value="' . h($activeMainTab) . '">'
+        . '<input type="hidden" name="only_stock" value="0">'
+        . '<label class="stk-field" title="Bodega del ERP"><i class="fas fa-warehouse"></i>'
+        . '<select name="bodega" onchange="this.form.submit()" aria-label="Bodega">' . unibagInventoryStorehouseOptionsHtml($storehouses, $storehouseId) . '</select></label>'
+        . '<label class="stk-field"><i class="fas fa-search"></i>'
+        . '<input name="search" type="text" placeholder="Código o descripción (Enter)" value="' . h($search) . '" aria-label="Buscar"></label>'
+        . '<label class="stk-switch"><input type="checkbox" name="only_stock" value="1"' . ($onlyWithStock ? ' checked' : '') . ' onchange="this.form.submit()"><span></span>Solo con stock</label>'
+        . '<div class="stk-toolbar-end">'
+        . '<button class="stk-btn" type="submit"><i class="fas fa-search"></i> Buscar</button>'
+        . '<a class="stk-btn sec" href="/stock?' . $baseQuery . '&download=excel" title="Exportar existencias del ERP a Excel"><i class="fas fa-file-excel"></i> Excel ERP</a>'
+        . '<a class="stk-btn teal" href="/stock?bodega=' . $storehouseId . '&download=rolls_excel" title="Exportar bobinas con trazabilidad a Excel"><i class="fas fa-file-excel"></i> Excel bobinas (' . $fmt0((float)$totalWarehouseRolls) . ')</a>'
+        . '</div></form>';
 
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:16px;padding-top:16px;border-top:1px solid #f1f5f9">
-          <div style="background:#f8fafc;padding:12px 14px;border-radius:10px;border:1px solid #e2e8f0">
-            <div class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase">Bodega activa</div>
-            <div style="font-weight:800;font-size:15px;color:#0f172a;margin-top:2px">' . h($storehouseName) . '</div>
-            <div class="muted" style="font-size:11px">' . h($storehouseClasif !== '' ? $storehouseClasif : 'ID #' . $storehouseId) . '</div>
-          </div>
-          <div style="background:#f8fafc;padding:12px 14px;border-radius:10px;border:1px solid #e2e8f0">
-            <div class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase">Artículos listados</div>
-            <div style="font-weight:800;font-size:18px;color:#0f172a;margin-top:2px">' . number_format($totalItems, 0, ',', '.') . '</div>
-            <div class="muted" style="font-size:11px">' . number_format($itemsWithStock, 0, ',', '.') . ' con stock > 0</div>
-          </div>
-          <div style="background:#f8fafc;padding:12px 14px;border-radius:10px;border:1px solid #e2e8f0">
-            <div class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase">Stock total ERP</div>
-            <div style="font-weight:800;font-size:18px;color:#2563eb;margin-top:2px">' . number_format($sumStock, 2, ',', '.') . '</div>
-            <div class="muted" style="font-size:11px">' . number_format($sumReserved, 2, ',', '.') . ' reservados</div>
-          </div>
-          <div style="background:#f8fafc;padding:12px 14px;border-radius:10px;border:1px solid #e2e8f0">
-            <div class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase">Disponible ERP</div>
-            <div style="font-weight:800;font-size:18px;color:#16a34a;margin-top:2px">' . number_format($sumAvailable, 2, ',', '.') . '</div>
-            <div class="muted" style="font-size:11px">Stock neto para uso/despacho</div>
-          </div>
-          <div style="background:#eff6ff;padding:12px 14px;border-radius:10px;border:1px solid #bfdbfe">
-            <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:#1e40af">Ocupación Trazabilidad</div>
-            <div style="font-weight:800;font-size:18px;color:#1e3a8a;margin-top:2px">'
-              . ($trzOccupancy !== null ? number_format((float)$trzOccupancy, 1, ',', '.') . '%' : 'N/D') . '</div>
-            <div class="muted" style="font-size:11px;color:#3b82f6">'
-              . (int)$trzPallets . ' pallets · <a href="#panel_stock_rolls" onclick="switchStockMainTab(\'rolls\'); return false;" style="color:#1d4ed8;font-weight:800;text-decoration:underline" title="Ver detalle de todas las bobinas físicas con código de trazabilidad">' . (int)$trzRolls . ' bobinas</a> · ' . (int)$trzBoxes . ' cajas</div>
-          </div>
-        </div>
-      </div>';
+    $kpi = static fn(string $tone, string $icon, string $label, string $value, string $sub, bool $isName = false): string =>
+        '<div class="stk-kpi ' . $tone . '"><div class="stk-kpi-ic"><i class="fas ' . $icon . '"></i></div><div class="stk-kpi-tx">'
+        . '<span>' . $label . '</span><b' . ($isName ? ' class="nm"' : '') . ' title="' . h(strip_tags($value)) . '">' . $value . '</b><small>' . $sub . '</small></div></div>';
+    $body .= '<div class="stk-kpis">'
+        . $kpi('', 'fa-warehouse', 'Bodega', h($storehouseName), h($storehouseClasif !== '' ? $storehouseClasif : 'ERP #' . $storehouseId), true)
+        . $kpi('', 'fa-boxes', 'Artículos', $fmt0((float)$totalItems), $fmt0((float)$itemsWithStock) . ' con stock')
+        . $kpi('k-blue', 'fa-cubes', 'Stock total', $fmt2($sumStock), $fmt2($sumReserved) . ' reservado')
+        . $kpi('k-green', 'fa-check-circle', 'Disponible', $fmt2($sumAvailable), 'Para uso o despacho')
+        . $kpi('k-teal', 'fa-barcode', 'Trazabilidad', $trzOccupancy !== null ? number_format((float)$trzOccupancy, 1, ',', '.') . '%' : 'N/D',
+            (int)$trzPallets . ' pallets · <a href="#panel_stock_rolls" onclick="switchStockMainTab(\'rolls\');return false" title="Ver las bobinas con código">'
+            . (int)$trzRolls . ' bobinas</a> · ' . (int)$trzBoxes . ' cajas')
+        . '</div></section>';
 
-    // Pestañas principales de navegación: Artículos ERP vs Bobinas Físicas con Trazabilidad
-    $body .= '<div style="display:flex;gap:10px;margin-bottom:16px;border-bottom:2px solid #e2e8f0;padding-bottom:10px;flex-wrap:wrap">
-        <button type="button" id="tab_btn_items" class="stock-main-tab-btn" onclick="switchStockMainTab(\'items\')" style="padding:9px 18px;border-radius:8px;font-weight:800;font-size:13.5px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;' . ($activeMainTab === 'items' ? 'background:#0f172a;color:#fff;border:1px solid #0f172a;' : 'background:#fff;color:#475569;border:1px solid #cbd5e1;') . '">
-          📦 Existencias ERP (' . count($items) . ' artículos)
-        </button>
-        <button type="button" id="tab_btn_rolls" class="stock-main-tab-btn" onclick="switchStockMainTab(\'rolls\')" style="padding:9px 18px;border-radius:8px;font-weight:800;font-size:13.5px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;' . ($activeMainTab === 'rolls' ? 'background:#0f172a;color:#fff;border:1px solid #0f172a;' : 'background:#fff;color:#475569;border:1px solid #cbd5e1;') . '">
-          🏷️ Bobinas con Trazabilidad (' . $totalWarehouseRolls . ' bobinas · ' . number_format($totalWarehouseRollsWeight, 1, ',', '.') . ' Kg)
-        </button>
-      </div>';
+    // Pestañas principales
+    $body .= '<div class="stk-tabs" role="tablist">'
+        . '<button type="button" id="tab_btn_items" role="tab" class="stk-tab' . ($activeMainTab === 'items' ? ' on' : '') . '" onclick="switchStockMainTab(\'items\')">'
+        . '<i class="fas fa-boxes"></i> Existencias ERP <em>' . $fmt0((float)count($items)) . '</em></button>'
+        . '<button type="button" id="tab_btn_rolls" role="tab" class="stk-tab' . ($activeMainTab === 'rolls' ? ' on' : '') . '" onclick="switchStockMainTab(\'rolls\')">'
+        . '<i class="fas fa-tags"></i> Bobinas con trazabilidad <em>' . $fmt0((float)$totalWarehouseRolls) . ' · ' . number_format($totalWarehouseRollsWeight, 1, ',', '.') . ' kg</em></button>'
+        . '</div>';
 
-    // PANEL 1: Existencias por Artículo (ERP)
-    $body .= '<div id="panel_stock_items" style="' . ($activeMainTab === 'items' ? '' : 'display:none') . '">';
-    $body .= '<div class="card" style="border-radius:14px;padding:0;overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,.03)">
-        <div style="padding:16px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
-          <div>
-            <div style="font-weight:800;font-size:15px;color:#0f172a">Detalle de existencias por artículo</div>
-            <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
-              <button type="button" class="trz-tab active" data-trz-tab="all" onclick="setStockTrzTab(\'all\', this)" style="border:1px solid #cbd5e1;background:#0f172a;color:#fff;border-radius:6px;padding:3px 10px;font-size:11.5px;font-weight:700;cursor:pointer">Todos (' . count($items) . ')</button>
-              <button type="button" class="trz-tab" data-trz-tab="pending" onclick="setStockTrzTab(\'pending\', this)" style="border:1px solid #fde68a;background:#fffbeb;color:#b45309;border-radius:6px;padding:3px 10px;font-size:11.5px;font-weight:700;cursor:pointer">⚠️ Pendientes de Rotular (' . $countTrzPending . ')</button>
-              <button type="button" class="trz-tab" data-trz-tab="tagged" onclick="setStockTrzTab(\'tagged\', this)" style="border:1px solid #bbf7d0;background:#f0fdf4;color:#16a34a;border-radius:6px;padding:3px 10px;font-size:11.5px;font-weight:700;cursor:pointer">✅ Ya Rotulados (' . $countTrzFullyTagged . ')</button>
-            </div>
-          </div>
-          <div style="display:flex;align-items:center;gap:10px">
-            <span class="muted" style="font-size:12px">Mostrando <span id="stock-visible-count">' . count($items) . '</span> de ' . count($items) . ' registros</span>
-            <input id="stock-live-search" type="text" placeholder="Filtrar en tabla..." style="height:34px;padding:0 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;width:220px" oninput="stockFilterTable(this.value)">
-          </div>
-        </div>
-<style>#stock-table .st0{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#f1f5f9;color:#64748b}#stock-table .st1{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#fef2f2;color:#dc2626;border:1px solid #fecaca}#stock-table .st2{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0}#stock-table .st3{display:inline-flex;align-items:center;gap:6px}#stock-table .st4{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;font-size:11.5px;font-weight:700;background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0}#stock-table .st5{font-size:10px;background:#fef3c7;padding:1px 5px;border-radius:4px}#stock-table .st6{font-size:11.5px}#stock-table .st7{border-bottom:1px solid #e2e8f0}#stock-table .st8{padding:10px 14px;font-weight:700;white-space:nowrap;color:#0f172a}#stock-table .st9{padding:10px 14px;font-weight:600;color:#334155}#stock-table .sta{padding:10px 14px;text-align:center;white-space:nowrap;color:#64748b;font-weight:600}#stock-table .stb{padding:10px 14px;text-align:right;font-weight:700}#stock-table .stc{padding:10px 14px;text-align:right;color:#64748b}#stock-table .std{padding:10px 14px;text-align:center}#stock-table .ste{padding:8px 10px;text-align:center;white-space:nowrap}</style><div class="table-wrap" style="max-height:650px;overflow-y:auto">
-          <table id="stock-table" style="width:100%;margin:0;border-collapse:collapse;font-size:13px">
-            <thead>
-              <tr style="background:#f1f5f9;border-bottom:2px solid #cbd5e1;position:sticky;top:0;z-index:2">
-                <th style="padding:10px 14px;text-align:left;font-weight:700">Código</th>
-                <th style="padding:10px 14px;text-align:left;font-weight:700">Artículo / Descripción</th>
-                <th style="padding:10px 14px;text-align:center;font-weight:700">Unidad</th>
-                <th style="padding:10px 14px;text-align:right;font-weight:700">Stock actual</th>
-                <th style="padding:10px 14px;text-align:right;font-weight:700">Reservado</th>
-                <th style="padding:10px 14px;text-align:right;font-weight:700">Disponible</th>
-                <th style="padding:10px 14px;text-align:right;font-weight:700">Mínimo</th>
-                <th style="padding:10px 14px;text-align:center;font-weight:700">Estado</th>
-                <th style="padding:10px 14px;text-align:center;font-weight:700">Trazabilidad</th>
-              </tr>
-            </thead>
-            <tbody id="stock-tbody">';
+    // PANEL 1: existencias por artículo (ERP)
+    $body .= '<div id="panel_stock_items"' . ($activeMainTab === 'items' ? '' : ' style="display:none"') . '>'
+        . '<div class="stk-card"><div class="stk-card-head">'
+        . '<div class="stk-chips">'
+        . '<button type="button" class="stk-chip trz-tab active" data-trz-tab="all" onclick="setStockTrzTab(\'all\', this)"><i></i>Todos <em>' . count($items) . '</em></button>'
+        . '<button type="button" class="stk-chip c-pend trz-tab" data-trz-tab="pending" onclick="setStockTrzTab(\'pending\', this)"><i></i>Pendientes de rotular <em>' . $countTrzPending . '</em></button>'
+        . '<button type="button" class="stk-chip c-ok trz-tab" data-trz-tab="tagged" onclick="setStockTrzTab(\'tagged\', this)"><i></i>Rotulados <em>' . $countTrzFullyTagged . '</em></button>'
+        . '</div>'
+        . '<div class="stk-card-tools"><span class="stk-count"><b id="stock-visible-count">' . count($items) . '</b> de ' . count($items) . '</span>'
+        . '<label class="stk-field"><i class="fas fa-filter"></i><input id="stock-live-search" type="text" placeholder="Filtrar en la tabla" oninput="stockFilterTable(this.value)"></label></div>'
+        . '</div>'
+        . '<div class="stk-wrap"><table id="stock-table" class="stk-table"><thead><tr>'
+        . '<th>Código</th><th>Artículo</th><th class="c">Unidad</th><th class="n">Stock</th><th class="n">Reservado</th>'
+        . '<th class="n">Disponible</th><th class="n">Mínimo</th><th class="c">Estado</th><th class="c">Trazabilidad</th>'
+        . '</tr></thead><tbody id="stock-tbody">';
 
     if ($items === []) {
-        $body .= '<tr><td colspan="9" style="padding:30px;text-align:center;color:#64748b">No se encontraron artículos con los criterios seleccionados.</td></tr>';
+        $body .= '<tr><td colspan="9" class="empty">No se encontraron artículos con los criterios seleccionados.</td></tr>';
     }
 
     foreach ($items as $it) {
@@ -494,232 +446,140 @@ function unibagRenderStockPage(ReceptionService $service): void
         $min = (float)($it['iss_inventory_min'] ?? 0);
         $itemId = (int)$it['item_id'];
         $sku = strtoupper(trim((string)$it['item_number_prod']));
+        $unit = (string)$it['unit_name'];
         $alreadyTagged = (float)($stockTaggedMap['id_' . $itemId] ?? ($stockTaggedMap['code_' . $sku] ?? 0.0));
         $pendingQty = max(0.0, $inv - $alreadyTagged);
-
         $isFullyTagged = ($inv > 0 && $alreadyTagged >= ($inv - 0.0001));
         $isPartiallyTagged = ($alreadyTagged > 0 && $pendingQty > 0.0001);
         $trzCat = ($inv <= 0) ? 'exhausted' : ($isFullyTagged ? 'tagged' : 'pending');
-        $viewCodesUrl = '/stock/traceability-entry?bodega=' . $storehouseId
-            . '&q=' . rawurlencode($sku)
-            . '&sku=' . rawurlencode($sku)
-            . '&desc=' . rawurlencode((string)$it['item_title'])
-            . '&unit=' . rawurlencode((string)$it['unit_name']);
+        $viewCodesUrl = '/stock/traceability-entry?bodega=' . $storehouseId . '&q=' . rawurlencode($sku) . '&sku=' . rawurlencode($sku)
+            . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode($unit);
+        $entryUrl = '/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku)
+            . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode($unit);
+        $codesBtn = '<a class="stk-btn sm blue" href="' . $viewCodesUrl . '" title="Ver los códigos de trazabilidad de ' . h($sku) . ' (desde ahí también se pueden borrar bultos registrados por error)"><i class="fas fa-search"></i> Códigos</a>';
 
         if ($disp <= 0 && $inv <= 0) {
-            $statusBadge = '<span class="st0">Agotado</span>';
+            $statusBadge = '<span class="stk-pill off">Agotado</span>';
         } elseif ($min > 0 && $disp <= $min) {
-            $statusBadge = '<span class="st1">Crítico</span>';
+            $statusBadge = '<span class="stk-pill crit">Crítico</span>';
         } else {
-            $statusBadge = '<span class="st2">Disponible</span>';
+            $statusBadge = '<span class="stk-pill ok">Disponible</span>';
         }
 
-        // Columna de trazabilidad
         if ($isFullyTagged) {
-            $trzButton = '<div class="st3">';
-            $trzButton .= '<span class="st4" title="Todo el stock físico está rotulado con código de trazabilidad (' . number_format($alreadyTagged, 1, ',', '.') . ' / ' . number_format($inv, 1, ',', '.') . ' ' . h((string)$it['unit_name']) . ')">✅ Rotulado</span>';
-            $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:3px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver los códigos de trazabilidad de ' . h($sku) . ' (desde ahí también se pueden borrar bultos registrados por error)">🔎 Códigos</a>';
-            $trzButton .= '</div>';
+            $trzButton = '<span class="stk-acts"><span class="stk-pill ok" title="Todo el stock está rotulado (' . number_format($alreadyTagged, 1, ',', '.') . ' / ' . number_format($inv, 1, ',', '.') . ' ' . h($unit) . ')"><i class="fas fa-check"></i> Rotulado</span>' . $codesBtn . '</span>';
         } elseif ($isPartiallyTagged) {
-            $trzButton = '<div class="st3">';
-            $trzButton .= '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#fffbeb;color:#b45309;border:1px solid #fde68a;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Faltan ' . number_format($pendingQty, 1, ',', '.') . ' por rotular de ' . number_format($inv, 1, ',', '.') . '">📦 +Trazable <span class="st5">(' . number_format($pendingQty, 0, ',', '.') . ' pend)</span></a>';
-            $trzButton .= '<a class="btn secondary" href="' . $viewCodesUrl . '" style="padding:4px 7px;font-size:11px;font-weight:700;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" title="Ver los códigos de trazabilidad ya rotulados de ' . h($sku) . ' (desde ahí también se pueden borrar bultos)">🔎 Códigos</a>';
-            $trzButton .= '</div>';
+            $trzButton = '<span class="stk-acts"><a class="stk-btn sm amber" href="' . $entryUrl . '" title="Faltan ' . number_format($pendingQty, 1, ',', '.') . ' por rotular de ' . number_format($inv, 1, ',', '.') . '"><i class="fas fa-plus"></i> Trazable <span class="stk-pend">' . $fmt0($pendingQty) . ' pend.</span></a>' . $codesBtn . '</span>';
         } elseif ($inv > 0) {
-            $trzButton = '<a class="btn secondary" href="/stock/traceability-entry?bodega=' . $storehouseId . '&item_id=' . $itemId . '&sku=' . rawurlencode($sku) . '&desc=' . rawurlencode((string)$it['item_title']) . '&unit=' . rawurlencode((string)$it['unit_name']) . '" style="padding:4px 8px;font-size:11.5px;font-weight:700;background:#f0fdfa;color:#0f766e;border:1px solid #ccfbf1;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:4px" title="Ingresar bulto a bodega con código de trazabilidad">📦 +Trazable</a>';
+            $trzButton = '<a class="stk-btn sm teal" href="' . $entryUrl . '" title="Ingresar bulto con código de trazabilidad"><i class="fas fa-plus"></i> Trazable</a>';
         } else {
-            $trzButton = '<span class="muted st6">-</span>';
+            $trzButton = '<span class="dim">—</span>';
         }
 
-        $body .= '<tr class="stock-row st7"'
-            . ' data-inv="' . number_format($inv, 4, '.', '') . '"'
-            . ' data-res="' . number_format($res, 4, '.', '') . '"'
-            . ' data-disp="' . number_format($disp, 4, '.', '') . '"'
-            . ' data-min="' . number_format($min, 4, '.', '') . '"'
+        $body .= '<tr class="stock-row"'
+            . ' data-inv="' . number_format($inv, 4, '.', '') . '" data-res="' . number_format($res, 4, '.', '') . '"'
+            . ' data-disp="' . number_format($disp, 4, '.', '') . '" data-min="' . number_format($min, 4, '.', '') . '"'
             . ' data-trz-cat="' . $trzCat . '">'
-            . '<td class="st8">' . h((string)$it['item_number_prod']) . '</td>'
-            . '<td class="st9">' . h((string)$it['item_title']) . '</td>'
-            . '<td class="sta">' . h((string)$it['unit_name']) . '</td>'
-            . '<td class="stb">' . number_format($inv, 2, ',', '.') . '</td>'
-            . '<td class="stc">' . number_format($res, 2, ',', '.') . '</td>'
-            . '<td style="padding:10px 14px;text-align:right;font-weight:800;color:' . ($disp > 0 ? '#16a34a' : '#94a3b8') . '">' . number_format($disp, 2, ',', '.') . '</td>'
-            . '<td class="stc">' . number_format($min, 2, ',', '.') . '</td>'
-            . '<td class="std">' . $statusBadge . '</td>'
-            . '<td class="ste">' . $trzButton . '</td>'
+            . '<td class="code" data-l="Código">' . h((string)$it['item_number_prod']) . '</td>'
+            . '<td class="desc" data-l="Artículo">' . h((string)$it['item_title']) . '</td>'
+            . '<td class="unit" data-l="Unidad">' . h($unit) . '</td>'
+            . '<td class="n strong" data-l="Stock">' . $fmt2($inv) . '</td>'
+            . '<td class="n dim" data-l="Reservado">' . $fmt2($res) . '</td>'
+            . '<td class="n ' . ($disp > 0 ? 'disp-ok' : 'disp-no') . '" data-l="Disponible">' . $fmt2($disp) . '</td>'
+            . '<td class="n dim" data-l="Mínimo">' . $fmt2($min) . '</td>'
+            . '<td class="c" data-l="Estado">' . $statusBadge . '</td>'
+            . '<td class="c" data-l="Trazabilidad">' . $trzButton . '</td>'
             . '</tr>';
     }
 
-    // Calcular suma de mínimos para el tfoot
-    $sumMin = 0.0;
-    foreach ($items as $it) {
-        $sumMin += (float)($it['iss_inventory_min'] ?? 0);
-    }
+    $body .= '</tbody><tfoot id="stock-tfoot"><tr>'
+        . '<td colspan="3">Total · <span id="tfoot-count">' . count($items) . '</span> artículos</td>'
+        . '<td class="n" id="tfoot-inv">' . $fmt2($sumStock) . '</td>'
+        . '<td class="n" id="tfoot-res">' . $fmt2($sumReserved) . '</td>'
+        . '<td class="n tot-disp" id="tfoot-disp">' . $fmt2($sumAvailable) . '</td>'
+        . '<td class="n" id="tfoot-min">' . $fmt2($sumMin) . '</td>'
+        . '<td></td><td></td></tr></tfoot></table></div></div></div>';
 
-    $body .= '</tbody>'
-        . '<tfoot id="stock-tfoot">'
-        . '<tr style="background:#0f172a;color:#fff;border-top:2px solid #334155">'
-        . '<td colspan="3" style="padding:12px 14px;font-weight:800;font-size:13px;color:#e2e8f0">'
-        . 'TOTAL &mdash; <span id="tfoot-count">' . count($items) . '</span> artículos'
-        . '</td>'
-        . '<td style="padding:12px 14px;text-align:right;font-weight:900;font-size:13px;color:#93c5fd" id="tfoot-inv">' . number_format($sumStock, 2, ',', '.') . '</td>'
-        . '<td style="padding:12px 14px;text-align:right;font-weight:700;font-size:13px;color:#94a3b8" id="tfoot-res">' . number_format($sumReserved, 2, ',', '.') . '</td>'
-        . '<td style="padding:12px 14px;text-align:right;font-weight:900;font-size:13px;color:#4ade80" id="tfoot-disp">' . number_format($sumAvailable, 2, ',', '.') . '</td>'
-        . '<td style="padding:12px 14px;text-align:right;font-weight:700;font-size:13px;color:#94a3b8" id="tfoot-min">' . number_format($sumMin, 2, ',', '.') . '</td>'
-        . '<td style="padding:12px 14px"></td>'
-        . '<td style="padding:12px 14px"></td>'
-        . '</tr>'
-        . '</tfoot>'
-        . '</table></div></div>';
-    $body .= '</div>'; // Fin panel_stock_items
-
-    // PANEL 2: Bobinas Físicas en Bodega con Código de Trazabilidad
+    // PANEL 2: bobinas con código de trazabilidad
     if ($rollsPanelLoaded) {
-    $body .= '<div id="panel_stock_rolls" style="' . ($activeMainTab === 'rolls' ? '' : 'display:none') . '">';
-    $body .= '<div class="card" style="border-radius:14px;padding:0;overflow:hidden;box-shadow:0 2px 10px rgba(15,23,42,.03)">
-        <div style="padding:16px 20px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
-          <div>
-            <div style="font-weight:800;font-size:16px;color:#0f172a;display:flex;align-items:center;gap:8px">
-              🏷️ Bobinas Físicas en Bodega con Código de Trazabilidad
-              <span id="rolls-visible-badge" style="font-size:11.5px;font-weight:800;background:#e0f2fe;color:#0369a1;padding:2px 8px;border-radius:12px">' . $totalWarehouseRolls . ' bobinas</span>
-              <span id="rolls-weight-badge" style="font-size:11.5px;font-weight:800;background:#f0fdf4;color:#16a34a;padding:2px 8px;border-radius:12px">' . number_format($totalWarehouseRollsWeight, 2, ',', '.') . ' Kg</span>
-            </div>
-          </div>
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <input id="stock-rolls-live-filter" type="text" placeholder="🔍 Filtrar bobina, trazabilidad, SKU, contenedor..." style="height:36px;padding:0 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:12px;width:260px" oninput="filterStockRollsTable(this.value)">
-            <a class="btn secondary" href="/stock?bodega=' . $storehouseId . '&download=rolls_excel" style="height:36px;display:inline-flex;align-items:center;gap:6px;padding:0 14px;font-size:12px">
-              <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-              Exportar Excel
-            </a>
-            <a class="btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '" style="background:#00A9A6;height:36px;display:inline-flex;align-items:center;gap:6px;padding:0 14px;font-size:12px">
-              📦 + Ingreso Trazable
-            </a>
-          </div>
-        </div>
-<style>#stock-rolls-table .sr0{border-bottom:1px solid #f1f5f9}#stock-rolls-table .sr1{padding:10px 12px;text-align:center;color:#64748b;font-size:11.5px}#stock-rolls-table .sr2{padding:10px 12px;white-space:nowrap;font-family:monospace;font-weight:800;color:#0f172a}#stock-rolls-table .sr3{padding:10px 12px;white-space:nowrap}#stock-rolls-table .sr4{padding:10px 12px}#stock-rolls-table .sr5{font-weight:700;color:#0f172a}#stock-rolls-table .sr6{font-size:11px;color:#64748b;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#stock-rolls-table .sr7{padding:10px 12px;text-align:right;font-weight:800;font-size:13.5px;color:#0f172a;white-space:nowrap}#stock-rolls-table .sr8{font-size:11px;color:#64748b;font-weight:600}#stock-rolls-table .sr9{padding:10px 12px;text-align:center;font-size:11.5px;color:#475569;white-space:nowrap}#stock-rolls-table .sra{padding:10px 12px;font-size:11.5px;color:#475569;white-space:nowrap}#stock-rolls-table .srb{font-weight:700;color:#334155}#stock-rolls-table .src{font-size:10.5px;color:#64748b}#stock-rolls-table .srd{padding:10px 12px;text-align:center;white-space:nowrap}#stock-rolls-table .sre{display:inline-flex;gap:4px;align-items:center}#stock-rolls-table .srf{padding:4px 8px;font-size:11px;border-radius:6px;background:#0284c7;border-color:#0284c7;color:#fff;text-decoration:none;display:inline-flex;align-items:center;gap:3px;font-weight:700}#stock-rolls-table .sr10{padding:4px 7px;font-size:11px;border-radius:6px;text-decoration:none;display:inline-flex;align-items:center;gap:3px}</style><div class="table-wrap" style="max-height:680px;overflow-y:auto">
-          <table id="stock-rolls-table" style="width:100%;margin:0;border-collapse:collapse;font-size:12.5px">
-            <thead>
-              <tr style="background:#0f172a;color:#fff;position:sticky;top:0;z-index:2">
-                <th style="padding:10px 12px;text-align:center;width:40px">N°</th>
-                <th style="padding:10px 12px;text-align:left">Código Bobina</th>
-                <th style="padding:10px 12px;text-align:left">Cód. Trazabilidad</th>
-                <th style="padding:10px 12px;text-align:left">Artículo / SKU</th>
-                <th style="padding:10px 12px;text-align:right">Peso Real (Kg)</th>
-                <th style="padding:10px 12px;text-align:center">Especificación</th>
-                <th style="padding:10px 12px;text-align:left">Origen (Cont./OC)</th>
-                <th style="padding:10px 12px;text-align:left">Fecha / Operador</th>
-                <th style="padding:10px 12px;text-align:center">Estado</th>
-                <th style="padding:10px 12px;text-align:center">Acciones</th>
-              </tr>
-            </thead>
-            <tbody id="stock-rolls-tbody">';
+        $body .= '<div id="panel_stock_rolls"' . ($activeMainTab === 'rolls' ? '' : ' style="display:none"') . '>'
+            . '<div class="stk-card"><div class="stk-card-head">'
+            . '<div class="stk-card-title"><i class="fas fa-tags"></i> Bobinas en bodega'
+            . '<span id="rolls-visible-badge" class="stk-badge">' . $totalWarehouseRolls . ' bobinas</span>'
+            . '<span id="rolls-weight-badge" class="stk-badge g">' . $fmt2((float)$totalWarehouseRollsWeight) . ' Kg</span></div>'
+            . '<div class="stk-card-tools">'
+            . '<label class="stk-field"><i class="fas fa-filter"></i><input id="stock-rolls-live-filter" type="text" placeholder="Bobina, código, SKU, contenedor" oninput="filterStockRollsTable(this.value)"></label>'
+            . '<a class="stk-btn sec" href="/stock?bodega=' . $storehouseId . '&download=rolls_excel"><i class="fas fa-file-excel"></i> Excel</a>'
+            . '<a class="stk-btn" href="/stock/traceability-entry?bodega=' . $storehouseId . '"><i class="fas fa-plus"></i> Ingreso trazable</a>'
+            . '</div></div>'
+            . '<div class="stk-wrap"><table id="stock-rolls-table" class="stk-table"><thead><tr>'
+            . '<th class="c">N°</th><th>Bobina</th><th>Código trazabilidad</th><th>Artículo</th><th class="n">Peso</th>'
+            . '<th class="c">Especificación</th><th>Origen</th><th>Fecha / operador</th><th class="c">Estado</th><th class="c">Acciones</th>'
+            . '</tr></thead><tbody id="stock-rolls-tbody">';
 
-    if ($warehouseRolls === []) {
-        $body .= '<tr><td colspan="10" style="padding:36px;text-align:center;color:#64748b">';
-        $body .= '<div style="font-size:32px;margin-bottom:8px">📦</div>';
-        $body .= 'No hay bobinas físicas registradas en esta bodega actualmente.<br>Las bobinas recepcionadas en cargamentos aparecerán automáticamente aquí.';
-        $body .= '</td></tr>';
-    }
-
-    $rollIdx = 0;
-    foreach ($warehouseRolls as $r) {
-        $rollIdx++;
-        $rId = (int)$r['id'];
-        $rCode = (string)($r['roll_code'] ?? '');
-        $rTrzCode = (string)($r['traceability_code'] ?? $rCode);
-        $rSku = (string)($r['sku_code'] ?? '');
-        $rDesc = (string)($r['sku_description'] ?? '');
-        $rWeight = (float)($r['weight_kg'] ?? 0);
-        $rWidth = (int)($r['width_mm'] ?? 0);
-        $rMicrons = (int)($r['microns'] ?? 0);
-        $rMeters = (float)($r['meters'] ?? 0);
-        $rDate = !empty($r['created_at']) ? date('d/m/Y H:i', strtotime((string)$r['created_at'])) : '-';
-        $rOp = (string)($r['operator_name'] ?? '');
-        $rStatus = (string)($r['status'] ?? 'RECEIVED');
-
-        $originLabel = '';
-        if (!empty($r['container_code'])) {
-            $originLabel = '<a href="/import-containers/' . (int)$r['import_container_id'] . '" style="color:#0284c7;font-weight:700;text-decoration:none" title="Ver contenedor internacional">🚢 Cont. ' . h((string)$r['container_code']) . '</a>';
-        } elseif (!empty($r['import_container_id'])) {
-            $originLabel = '<a href="/import-containers/' . (int)$r['import_container_id'] . '" style="color:#0284c7;font-weight:700;text-decoration:none">🚢 Cont. #' . (int)$r['import_container_id'] . '</a>';
-        } elseif (!empty($r['purchase_order_id'])) {
-            $originLabel = '<a href="/purchase-orders/' . (int)$r['purchase_order_id'] . '" style="color:#0284c7;font-weight:700;text-decoration:none">📄 OC #' . (int)$r['purchase_order_id'] . '</a>';
-        } else {
-            $originLabel = '<span class="muted">-</span>';
+        if ($warehouseRolls === []) {
+            $body .= '<tr><td colspan="10" class="empty">No hay bobinas con código de trazabilidad en esta bodega.</td></tr>';
         }
 
-        $specLabel = '';
-        if ($rWidth > 0 || $rMicrons > 0 || $rMeters > 0) {
-            $specLabel = ($rWidth > 0 ? $rWidth . 'mm' : '')
-                . ($rMicrons > 0 ? ' × ' . $rMicrons . 'µm' : '')
-                . ($rMeters > 0 ? ' × ' . number_format($rMeters, 0, ',', '.') . 'm' : '');
-        } else {
-            $specLabel = '<span class="muted">-</span>';
+        $rollIdx = 0;
+        foreach ($warehouseRolls as $r) {
+            $rollIdx++;
+            $rId = (int)$r['id'];
+            $rCode = (string)($r['roll_code'] ?? '');
+            $rTrzCode = (string)($r['traceability_code'] ?? $rCode);
+            $rSku = (string)($r['sku_code'] ?? '');
+            $rDesc = (string)($r['sku_description'] ?? '');
+            $rWeight = (float)($r['weight_kg'] ?? 0);
+            $rWidth = (int)($r['width_mm'] ?? 0);
+            $rMicrons = (int)($r['microns'] ?? 0);
+            $rMeters = (float)($r['meters'] ?? 0);
+            $rDate = !empty($r['created_at']) ? date('d/m/Y H:i', strtotime((string)$r['created_at'])) : '-';
+            $rOp = (string)($r['operator_name'] ?? '');
+            $rStatus = (string)($r['status'] ?? 'RECEIVED');
+
+            if (!empty($r['import_container_id'])) {
+                $originLabel = '<a class="stk-link" href="/import-containers/' . (int)$r['import_container_id'] . '" title="Ver contenedor"><i class="fas fa-ship"></i> '
+                    . h(!empty($r['container_code']) ? (string)$r['container_code'] : ('#' . (int)$r['import_container_id'])) . '</a>';
+            } elseif (!empty($r['purchase_order_id'])) {
+                $originLabel = '<a class="stk-link" href="/purchase-orders/' . (int)$r['purchase_order_id'] . '"><i class="fas fa-file-alt"></i> OC #' . (int)$r['purchase_order_id'] . '</a>';
+            } else {
+                $originLabel = '<span class="dim">—</span>';
+            }
+            $spec = trim(($rWidth > 0 ? $rWidth . ' mm' : '') . ($rMicrons > 0 ? ' × ' . $rMicrons . ' µm' : '') . ($rMeters > 0 ? ' × ' . $fmt0($rMeters) . ' m' : ''), ' ×');
+            $rowFilterText = mb_strtolower($rCode . ' ' . $rTrzCode . ' ' . $rSku . ' ' . $rDesc . ' ' . $rOp . ' ' . $rDate . ' ' . (string)($r['container_code'] ?? ''));
+
+            $body .= '<tr class="stock-roll-row" data-text="' . h($rowFilterText) . '" data-weight="' . number_format($rWeight, 3, '.', '') . '" data-meters="' . number_format($rMeters, 2, '.', '') . '">'
+                . '<td class="c dim" data-l="N°">' . $rollIdx . '</td>'
+                . '<td class="mono" data-l="Bobina">' . h($rCode) . '</td>'
+                . '<td data-l="Código"><button type="button" class="trz-tag-code" onclick="openTraceabilityTreeModal(' . h(json_encode($rTrzCode)) . ')" title="Ver trazabilidad 360°">' . h($rTrzCode) . '</button></td>'
+                . '<td data-l="Artículo"><span class="code">' . h($rSku) . '</span><span class="sub" title="' . h($rDesc) . '">' . h($rDesc) . '</span></td>'
+                . '<td class="n strong" data-l="Peso">' . number_format($rWeight, 3, ',', '.') . ' <span class="dim">kg</span></td>'
+                . '<td class="c dim" data-l="Especificación">' . ($spec !== '' ? h($spec) : '—') . '</td>'
+                . '<td data-l="Origen">' . $originLabel . '</td>'
+                . '<td data-l="Fecha"><span class="strong">' . h($rDate) . '</span>' . ($rOp !== '' ? '<span class="sub">' . h($rOp) . '</span>' : '') . '</td>'
+                . '<td class="c" data-l="Estado">' . ($rStatus === 'RECEIVED' ? '<span class="stk-pill ok">En bodega</span>' : '<span class="stk-pill warn">' . h($rStatus) . '</span>') . '</td>'
+                . '<td class="c" data-l="Acciones"><span class="stk-acts">'
+                . '<a class="stk-btn sm dark" href="/rolls/' . $rId . '/label?auto_print=1" target="_blank" title="Imprimir etiqueta 10x7 cm"><i class="fas fa-print"></i> 10x7</a>'
+                . '<a class="stk-btn sm sec" href="/rolls/' . $rId . '/label?server_print=1" target="_blank" title="Impresión directa a impresora de red"><i class="fas fa-bolt"></i></a>'
+                . '<button type="button" class="stk-btn sm sec" onclick="openTraceabilityTreeModal(' . h(json_encode($rTrzCode)) . ')" title="Ver trazabilidad 360°"><i class="fas fa-sitemap"></i></button>'
+                . '</span></td></tr>';
         }
 
-        $rowFilterText = mb_strtolower($rCode . ' ' . $rTrzCode . ' ' . $rSku . ' ' . $rDesc . ' ' . $rOp . ' ' . $rDate);
-
-        $body .= '<tr class="stock-roll-row sr0"'
-            . ' data-text="' . h($rowFilterText) . '"'
-            . ' data-weight="' . number_format($rWeight, 3, '.', '') . '"'
-            . ' data-meters="' . number_format($rMeters, 2, '.', '') . '">';
-        $body .= '<td class="sr1">' . $rollIdx . '</td>';
-        $body .= '<td class="sr2">' . h($rCode) . '</td>';
-        $body .= '<td class="sr3">';
-        $body .= '<button type="button" class="trz-tag-code" style="cursor:pointer;border:1px solid #ccfbf1" onclick="openTraceabilityTreeModal(' . h(json_encode($rTrzCode)) . ')" title="Ver árbol de trazabilidad 360° en vivo">' . h($rTrzCode) . ' 🔍</button>';
-        $body .= ' <a href="/stock/traceability?q=' . rawurlencode($rTrzCode) . '" target="_blank" style="font-size:11.5px;color:#0f766e;text-decoration:none;font-weight:700" title="Abrir árbol en pantalla completa">↗</a>';
-        $body .= '</td>';
-        $body .= '<td class="sr4">';
-        $body .= '<div class="sr5">' . h($rSku) . '</div>';
-        $body .= '<div class="sr6">' . h($rDesc) . '</div>';
-        $body .= '</td>';
-        $body .= '<td class="sr7">' . number_format($rWeight, 3, ',', '.') . ' <span class="sr8">Kg</span></td>';
-        $body .= '<td class="sr9">' . $specLabel . '</td>';
-        $body .= '<td class="sr3">' . $originLabel . '</td>';
-        $body .= '<td class="sra">';
-        $body .= '<div class="srb">' . h($rDate) . '</div>';
-        if ($rOp !== '') {
-            $body .= '<div class="src">👤 ' . h($rOp) . '</div>';
-        }
-        $body .= '</td>';
-        $body .= '<td class="srd"><span class="badge-type ' . ($rStatus === 'RECEIVED' ? 'PRODUCT' : 'BOX') . '" style="font-size:10.5px">' . ($rStatus === 'RECEIVED' ? '✅ En Bodega' : h($rStatus)) . '</span></td>';
-        $body .= '<td class="srd">';
-        $body .= '<div class="sre">';
-        $body .= '<a class="btn srf" href="/rolls/' . $rId . '/label?auto_print=1" target="_blank" title="Imprimir etiqueta física 10x7 cm">🖨️ 10x7</a>';
-        $body .= '<a class="btn secondary sr10" href="/rolls/' . $rId . '/label?server_print=1" target="_blank" title="Impresión térmica directa a impresora de red">⚡</a>';
-        $body .= '<button type="button" class="btn secondary" style="padding:4px 7px;font-size:11px;border-radius:6px;cursor:pointer" onclick="openTraceabilityTreeModal(' . h(json_encode($rTrzCode)) . ')" title="Ver árbol de trazabilidad 360°">🌳</button>';
-        $body .= '</div>';
-        $body .= '</td>';
-        $body .= '</tr>';
+        $body .= '</tbody><tfoot id="stock-rolls-tfoot"><tr>'
+            . '<td colspan="4">Total · <span id="tfoot-rolls-count">' . $totalWarehouseRolls . '</span> bobinas</td>'
+            . '<td class="n" id="tfoot-rolls-weight">' . number_format($totalWarehouseRollsWeight, 3, ',', '.') . ' Kg</td>'
+            . '<td class="c" id="tfoot-rolls-meters">' . $fmt0((float)$totalWarehouseRollsMeters) . ' m</td>'
+            . '<td colspan="4"></td></tr></tfoot></table></div></div></div>';
     }
 
-    $body .= '</tbody>'
-        . '<tfoot id="stock-rolls-tfoot">'
-        . '<tr style="background:#0f172a;color:#fff;border-top:2px solid #334155">'
-        . '<td colspan="4" style="padding:12px 14px;font-weight:800;font-size:13px;color:#e2e8f0">'
-        . 'TOTAL &mdash; <span id="tfoot-rolls-count">' . $totalWarehouseRolls . '</span> bobinas registradas'
-        . '</td>'
-        . '<td style="padding:12px 14px;text-align:right;font-weight:900;font-size:13px;color:#4ade80" id="tfoot-rolls-weight">' . number_format($totalWarehouseRollsWeight, 3, ',', '.') . ' Kg</td>'
-        . '<td style="padding:12px 14px;text-align:center;font-weight:700;font-size:12px;color:#93c5fd" id="tfoot-rolls-meters">' . number_format($totalWarehouseRollsMeters, 0, ',', '.') . ' m</td>'
-        . '<td colspan="4" style="padding:12px 14px"></td>'
-        . '</tr>'
-        . '</tfoot>'
-        . '</table></div></div>';
-    $body .= '</div>'; // Fin panel_stock_rolls
-    }
+    // Ventana del árbol de trazabilidad 360°
+    $body .= '<div class="print-modal" id="traceabilityTreeModal" onclick="if(event.target===this)closeTraceabilityTreeModal()">'
+        . '<div class="print-card" role="dialog" aria-modal="true" aria-labelledby="trz_modal_code_title">'
+        . '<div class="stk-modal-head"><b><i class="fas fa-sitemap"></i> Trazabilidad 360° · <code id="trz_modal_code_title"></code></b>'
+        . '<span class="stk-acts"><a id="btn_modal_fullscreen_tree" href="#" target="_blank" class="stk-btn sm sec">Pantalla completa <i class="fas fa-external-link-alt"></i></a>'
+        . '<button type="button" class="stk-x" onclick="closeTraceabilityTreeModal()" aria-label="Cerrar">&times;</button></span></div>'
+        . '<div id="trzTreeModalContent" class="stk-modal-body"></div></div></div>';
 
-    // MODAL ÁRBOL DE TRAZABILIDAD 360°
-    $body .= '<div class="print-modal" id="traceabilityTreeModal" onclick="if(event.target===this)closeTraceabilityTreeModal()">';
-    $body .= '<div class="print-card" style="width:min(920px,96vw);max-height:88vh;padding:22px;border-radius:16px">';
-    $body .= '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;border-bottom:1px solid #e2e8f0;padding-bottom:10px">';
-    $body .= '<div style="font-weight:800;font-size:16px;color:#0f172a">🌳 Árbol de Trazabilidad 360° · <span id="trz_modal_code_title" style="color:#0f766e;font-family:monospace"></span></div>';
-    $body .= '<div style="display:flex;gap:8px;align-items:center">';
-    $body .= '<a id="btn_modal_fullscreen_tree" href="#" target="_blank" class="btn secondary" style="font-size:11.5px;padding:4px 10px;text-decoration:none">Pantalla completa ↗</a>';
-    $body .= '<button type="button" onclick="closeTraceabilityTreeModal()" style="border:none;background:none;font-size:24px;cursor:pointer;color:#64748b">&times;</button>';
-    $body .= '</div></div>';
-    $body .= '<div id="trzTreeModalContent" style="overflow-y:auto;max-height:calc(88vh - 110px)"></div>';
-    $body .= '</div></div>';
-
-    // Scripts de navegación de pestañas y filtrado en vivo
     $body .= '<script>
     var currentTrzTab = "all";
     function switchStockMainTab(tab) {
@@ -731,37 +591,25 @@ function unibagRenderStockPage(ReceptionService $service): void
         }
         var panelItems = document.getElementById("panel_stock_items");
         var panelRolls = document.getElementById("panel_stock_rolls");
-        var btnItems = document.getElementById("tab_btn_items");
-        var btnRolls = document.getElementById("tab_btn_rolls");
         var hiddenTab = document.getElementById("hidden_active_tab");
         if (hiddenTab) hiddenTab.value = tab;
-
-        if (tab === "rolls") {
-            if (panelItems) panelItems.style.display = "none";
-            if (panelRolls) panelRolls.style.display = "";
-            if (btnItems) { btnItems.style.background = "#fff"; btnItems.style.color = "#475569"; btnItems.style.borderColor = "#cbd5e1"; }
-            if (btnRolls) { btnRolls.style.background = "#0f172a"; btnRolls.style.color = "#fff"; btnRolls.style.borderColor = "#0f172a"; }
-        } else {
-            if (panelRolls) panelRolls.style.display = "none";
-            if (panelItems) panelItems.style.display = "";
-            if (btnRolls) { btnRolls.style.background = "#fff"; btnRolls.style.color = "#475569"; btnRolls.style.borderColor = "#cbd5e1"; }
-            if (btnItems) { btnItems.style.background = "#0f172a"; btnItems.style.color = "#fff"; btnItems.style.borderColor = "#0f172a"; }
-        }
-
+        if (panelItems) panelItems.style.display = tab === "rolls" ? "none" : "";
+        if (panelRolls) panelRolls.style.display = tab === "rolls" ? "" : "none";
+        var bi = document.getElementById("tab_btn_items"), br = document.getElementById("tab_btn_rolls");
+        if (bi) bi.classList.toggle("on", tab !== "rolls");
+        if (br) br.classList.toggle("on", tab === "rolls");
         try {
             var url = new URL(window.location.href);
             url.searchParams.set("tab", tab);
             window.history.replaceState({}, "", url.toString());
-        } catch(e) {}
+        } catch (e) {}
     }
 
     function filterStockRollsTable(query) {
         var q = (query || "").trim().toLowerCase();
-        var rows = document.querySelectorAll("#stock-rolls-tbody .stock-roll-row");
         var sumWeight = 0, sumMeters = 0, visible = 0;
-        rows.forEach(function(row) {
-            var text = row.getAttribute("data-text") || "";
-            var show = (q === "" || text.indexOf(q) !== -1);
+        document.querySelectorAll("#stock-rolls-tbody .stock-roll-row").forEach(function (row) {
+            var show = q === "" || (row.getAttribute("data-text") || "").indexOf(q) !== -1;
             row.style.display = show ? "" : "none";
             if (show) {
                 sumWeight += parseFloat(row.getAttribute("data-weight") || "0");
@@ -769,101 +617,67 @@ function unibagRenderStockPage(ReceptionService $service): void
                 visible++;
             }
         });
-        var fmt = function(n, dec) {
-            return n.toLocaleString("es-CL", {minimumFractionDigits: dec, maximumFractionDigits: dec});
-        };
-        var cntElem = document.getElementById("tfoot-rolls-count");
-        var wElem = document.getElementById("tfoot-rolls-weight");
-        var mElem = document.getElementById("tfoot-rolls-meters");
-        var bVis = document.getElementById("rolls-visible-badge");
-        var bW = document.getElementById("rolls-weight-badge");
-
-        if (cntElem) cntElem.textContent = visible;
-        if (wElem) wElem.textContent = fmt(sumWeight, 3) + " Kg";
-        if (mElem) mElem.textContent = fmt(sumMeters, 0) + " m";
-        if (bVis) bVis.textContent = visible + " bobinas";
-        if (bW) bW.textContent = fmt(sumWeight, 2) + " Kg";
+        var fmt = function (n, dec) { return n.toLocaleString("es-CL", {minimumFractionDigits: dec, maximumFractionDigits: dec}); };
+        var set = function (id, t) { var el = document.getElementById(id); if (el) el.textContent = t; };
+        set("tfoot-rolls-count", visible);
+        set("tfoot-rolls-weight", fmt(sumWeight, 3) + " Kg");
+        set("tfoot-rolls-meters", fmt(sumMeters, 0) + " m");
+        set("rolls-visible-badge", visible + " bobinas");
+        set("rolls-weight-badge", fmt(sumWeight, 2) + " Kg");
     }
 
     function openTraceabilityTreeModal(code) {
         var modal = document.getElementById("traceabilityTreeModal");
-        var title = document.getElementById("trz_modal_code_title");
         var content = document.getElementById("trzTreeModalContent");
-        var fsBtn = document.getElementById("btn_modal_fullscreen_tree");
         if (!modal) return;
         modal.classList.add("open");
-        modal.style.display = "flex";
-        if (title) title.textContent = code;
-        if (fsBtn) fsBtn.href = "/stock/traceability?q=" + encodeURIComponent(code);
-        if (content) content.innerHTML = "<div style=\"text-align:center;padding:40px;color:#64748b\"><div style=\"font-size:32px;margin-bottom:10px\">⏳</div>Cargando trazabilidad 360°...</div>";
-
+        document.getElementById("trz_modal_code_title").textContent = code;
+        document.getElementById("btn_modal_fullscreen_tree").href = "/stock/traceability?q=" + encodeURIComponent(code);
+        content.innerHTML = "<div class=\"stk-loading\"><i class=\"fas fa-spinner fa-spin\"></i> Cargando trazabilidad 360°…</div>";
         fetch("/stock/traceability/json?q=" + encodeURIComponent(code))
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.ok && data.html) {
-                    content.innerHTML = data.html;
-                } else {
-                    content.innerHTML = "<div class=\"err\" style=\"padding:16px;border-radius:10px\">⚠️ " + (data.error || "No se encontraron registros de trazabilidad para este código.") + "</div>";
-                }
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                content.innerHTML = data.ok && data.html ? data.html
+                    : "<div class=\"stk-alert err\">" + (data.error || "No se encontraron registros de trazabilidad para este código.") + "</div>";
             })
-            .catch(function() {
-                content.innerHTML = "<div class=\"err\" style=\"padding:16px;border-radius:10px\">⚠️ Error al conectar con el servidor.</div>";
-            });
+            .catch(function () { content.innerHTML = "<div class=\"stk-alert err\">No se pudo conectar con el servidor.</div>"; });
     }
 
     function closeTraceabilityTreeModal() {
         var modal = document.getElementById("traceabilityTreeModal");
-        if (modal) {
-            modal.classList.remove("open");
-            modal.style.display = "none";
-        }
+        if (modal) modal.classList.remove("open");
     }
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeTraceabilityTreeModal(); });
 
     function setStockTrzTab(tab, btn) {
         currentTrzTab = tab;
-        document.querySelectorAll(".trz-tab").forEach(function(b) {
-            b.classList.remove("active");
-            if (b.getAttribute("data-trz-tab") === "all") {
-                b.style.background = "#f1f5f9";
-                b.style.color = "#334155";
-            }
-        });
-        btn.classList.add("active");
-        if (tab === "all") {
-            btn.style.background = "#0f172a";
-            btn.style.color = "#fff";
-        }
+        document.querySelectorAll(".trz-tab").forEach(function (b) { b.classList.toggle("active", b === btn); });
         var searchInput = document.getElementById("stock-live-search");
         stockFilterTable(searchInput ? searchInput.value : "");
     }
 
     function stockFilterTable(query) {
         var q = (query || "").trim().toLowerCase();
-        var rows = document.querySelectorAll("#stock-tbody .stock-row");
         var sumInv = 0, sumRes = 0, sumDisp = 0, sumMin = 0, visible = 0;
-        rows.forEach(function(row) {
-            var text = row.textContent.toLowerCase();
-            var matchesText = (q === "" || text.indexOf(q) !== -1);
+        document.querySelectorAll("#stock-tbody .stock-row").forEach(function (row) {
+            var matchesText = q === "" || row.textContent.toLowerCase().indexOf(q) !== -1;
             var trzCat = row.getAttribute("data-trz-cat") || "pending";
-            var matchesTab = (currentTrzTab === "all") || (currentTrzTab === trzCat);
-            var show = matchesText && matchesTab;
+            var show = matchesText && (currentTrzTab === "all" || currentTrzTab === trzCat);
             row.style.display = show ? "" : "none";
             if (show) {
-                sumInv  += parseFloat(row.getAttribute("data-inv")  || "0");
-                sumRes  += parseFloat(row.getAttribute("data-res")  || "0");
+                sumInv += parseFloat(row.getAttribute("data-inv") || "0");
+                sumRes += parseFloat(row.getAttribute("data-res") || "0");
                 sumDisp += parseFloat(row.getAttribute("data-disp") || "0");
-                sumMin  += parseFloat(row.getAttribute("data-min")  || "0");
+                sumMin += parseFloat(row.getAttribute("data-min") || "0");
                 visible++;
             }
         });
-        var fmt = function(n) {
-            return n.toLocaleString("es-CL", {minimumFractionDigits: 2, maximumFractionDigits: 2});
-        };
+        var fmt = function (n) { return n.toLocaleString("es-CL", {minimumFractionDigits: 2, maximumFractionDigits: 2}); };
         document.getElementById("tfoot-count").textContent = visible;
-        document.getElementById("tfoot-inv").textContent   = fmt(sumInv);
-        document.getElementById("tfoot-res").textContent   = fmt(sumRes);
-        document.getElementById("tfoot-disp").textContent  = fmt(sumDisp);
-        document.getElementById("tfoot-min").textContent   = fmt(sumMin);
+        document.getElementById("tfoot-inv").textContent = fmt(sumInv);
+        document.getElementById("tfoot-res").textContent = fmt(sumRes);
+        document.getElementById("tfoot-disp").textContent = fmt(sumDisp);
+        document.getElementById("tfoot-min").textContent = fmt(sumMin);
         document.getElementById("stock-visible-count").textContent = visible;
     }
     </script>';
@@ -3000,11 +2814,12 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
     uasort($originWhCounts, static fn(array $a, array $b): int => $b['count'] <=> $a['count']);
 
     // Ordenar bodegas destino priorizando las más frecuentes
-    $priorityOrder = [58, 1, 2, 21, 9, 8, 10, 18, 19, 20];
+    // Por id de bodega del ERP (100, 200, 3000, 500, 700, 1000, 4000, 5000): los ids locales cambiaban de una base a otra.
+    $priorityOrder = [5, 11, 16, 8, 10, 14, 19, 18];
     $sortedWarehouses = $warehouses;
     usort($sortedWarehouses, static function (array $a, array $b) use ($priorityOrder): int {
-        $idA = (int)($a['id'] ?? 0);
-        $idB = (int)($b['id'] ?? 0);
+        $idA = (int)($a['erp_storehouse_id'] ?? 0);
+        $idB = (int)($b['erp_storehouse_id'] ?? 0);
         $idxA = array_search($idA, $priorityOrder, true);
         $idxB = array_search($idB, $priorityOrder, true);
         if ($idxA !== false && $idxB !== false) {
@@ -3253,8 +3068,9 @@ function unibagRenderWarehouseTransfersPage(ReceptionService $service, ?Producti
         $wId = (int)$w['id'];
         $wCode = (string)($w['code'] ?? '');
         $wName = (string)($w['name'] ?? '');
-        $isPrio = in_array($wId, [58, 1, 2, 21, 9, 8], true);
-        $optStyle = $wId === 58 ? ' style="font-weight:800;background:#dbeafe"' : '';
+        $wErp = (int)($w['erp_storehouse_id'] ?? 0);
+        $isPrio = in_array($wErp, [5, 11, 16, 8], true);
+        $optStyle = $wErp === 5 ? ' style="font-weight:800;background:#dbeafe"' : '';
         $star = $isPrio ? '⭐ ' : '';
         $disp = $wCode !== '' ? "{$wCode} - {$wName}" : $wName;
         $body .= '              <option value="' . $wId . '"' . $optStyle . '>' . $star . h($disp) . '</option>';
@@ -5407,6 +5223,13 @@ function handleInventoryRoutes(string $path, string $method, ReceptionService $s
                         $toWarehouseName = trim((string)(($warehouse['code'] ?? '') . ' - ' . ($warehouse['name'] ?? '')));
                         break;
                     }
+                }
+                // El 3-nov-2026 un traspaso masivo «solo trazabilidad» dejó 747 bobinas de la 100 en la 3000 sin que
+                // salieran de bodega. A la 3000 solo se entra por Solicitudes MP (queda la OT y el traspaso del ERP).
+                if ($traceabilityOnly && str_starts_with($toWarehouseName, '3000 ')) {
+                    redirectResponse('/stock/transfers?tab=masivo&error=' . rawurlencode(
+                        'No se permite el traspaso masivo «solo trazabilidad» a la 3000. Las bobinas pasan a producción por Solicitudes MP.'));
+                    return true;
                 }
 
                 $successCount = 0;

@@ -1200,8 +1200,8 @@ trait WorkOrderAgendaServiceTrait
         try {
             $this->trzPdo->prepare("
                 INSERT INTO warehouses (code, name, erp_storehouse_id)
-                VALUES (3000, '3000 INSUMOS EN PRODUCCION', 3000)
-                ON DUPLICATE KEY UPDATE name = VALUES(name)
+                VALUES (3000, '3000 INSUMOS EN PRODUCCION', 16)
+                ON DUPLICATE KEY UPDATE name = VALUES(name), erp_storehouse_id = VALUES(erp_storehouse_id)
             ")->execute();
             $stmt = $this->trzPdo->prepare("SELECT id FROM warehouses WHERE code IN (3000, 16, 27) ORDER BY FIELD(code, 3000, 16, 27), id ASC LIMIT 1");
             $stmt->execute();

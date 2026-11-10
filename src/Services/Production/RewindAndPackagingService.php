@@ -2386,9 +2386,12 @@ trait RewindAndPackagingServiceTrait
                 $childRollId = (int)$this->trzPdo->lastInsertId();
 
                 try {
-                    $stmtWhName = $this->trzPdo->prepare("SELECT name FROM warehouses WHERE id = :id LIMIT 1");
+                    $stmtWhName = $this->trzPdo->prepare("SELECT name, erp_storehouse_id FROM warehouses WHERE id = :id LIMIT 1");
                     $stmtWhName->execute([':id' => $wh3000Trz]);
-                    $whNameStr = (string)($stmtWhName->fetchColumn() ?: '3000 INSUMOS EN PRODUCCION');
+                    $whRow = $stmtWhName->fetch(PDO::FETCH_ASSOC) ?: [];
+                    $whNameStr = (string)($whRow['name'] ?? '') ?: '3000 INSUMOS EN PRODUCCION';
+                    // El código usa el id de bodega del ERP; la bobina (rolls) sigue con el id local.
+                    $whEntryId = (int)($whRow['erp_storehouse_id'] ?? 0) ?: $wh3000Trz;
 
                     $stmtInsTwe = $this->trzPdo->prepare("
                         INSERT INTO traceability_warehouse_entries
@@ -2403,7 +2406,7 @@ trait RewindAndPackagingServiceTrait
                     $stmtInsTwe->execute([
                         ':code' => $childRollCode,
                         ':eid' => $childRollId,
-                        ':wh_id' => $wh3000Trz,
+                        ':wh_id' => $whEntryId,
                         ':wh_name' => $whNameStr,
                         ':item_id' => (int)($primaryItem['id'] ?? 0) > 0 ? (int)$primaryItem['id'] : null,
                         ':item_code' => $skuCode,
@@ -3172,9 +3175,12 @@ trait RewindAndPackagingServiceTrait
                                 $childRollId = (int)$this->trzPdo->lastInsertId();
 
                                 try {
-                                    $stmtWhName = $this->trzPdo->prepare("SELECT name FROM warehouses WHERE id = :id LIMIT 1");
+                                    $stmtWhName = $this->trzPdo->prepare("SELECT name, erp_storehouse_id FROM warehouses WHERE id = :id LIMIT 1");
                                     $stmtWhName->execute([':id' => $wh3000Trz]);
-                                    $whNameStr = (string)($stmtWhName->fetchColumn() ?: '3000 INSUMOS EN PRODUCCION');
+                                    $whRow = $stmtWhName->fetch(PDO::FETCH_ASSOC) ?: [];
+                                    $whNameStr = (string)($whRow['name'] ?? '') ?: '3000 INSUMOS EN PRODUCCION';
+                                    // El código usa el id de bodega del ERP; la bobina (rolls) sigue con el id local.
+                                    $whEntryId = (int)($whRow['erp_storehouse_id'] ?? 0) ?: $wh3000Trz;
 
                                     $stmtInsTwe = $this->trzPdo->prepare("
                                         INSERT INTO traceability_warehouse_entries
@@ -3189,7 +3195,7 @@ trait RewindAndPackagingServiceTrait
                                     $stmtInsTwe->execute([
                                         ':code' => $childRollCode,
                                         ':eid' => $childRollId,
-                                        ':wh_id' => $wh3000Trz,
+                                        ':wh_id' => $whEntryId,
                                         ':wh_name' => $whNameStr,
                                         ':item_id' => $destItemId > 0 ? $destItemId : null,
                                         ':item_code' => $skuCode,

@@ -730,7 +730,7 @@ trait WarehouseInventoryServiceTrait
     {
         $this->syncWarehousesFromErp();
         $stmt = $this->pdo->prepare(
-            'SELECT w.id, w.code, w.name
+            'SELECT w.id, w.code, w.name, w.erp_storehouse_id
              FROM warehouses w
              INNER JOIN (
                 SELECT erp_storehouse_id, MIN(id) AS keep_id
@@ -1432,7 +1432,39 @@ trait WarehouseInventoryServiceTrait
              ORDER BY w.code ASC"
         );
         $stmt->execute();
-        return $stmt->fetchAll();
+        return $this->onlyErpWarehouseSummary($stmt->fetchAll());
+    }
+
+    /**
+     * Solo bodegas del ERP, una por bodega ERP y con su nombre del ERP. Las cantidades de las filas TRZ repetidas
+     * (mismo erp_storehouse_id) se suman a la que queda, para no perder bobinas, cajas ni pallets.
+     */
+    private function onlyErpWarehouseSummary(array $rows): array
+    {
+        $asTrz = [];
+        foreach ($rows as $i => $r) {
+            $asTrz[$i] = ['id' => (int)$r['warehouse_id'], 'code' => $r['warehouse_code'], 'name' => $r['warehouse_name'],
+                'erp_storehouse_id' => $r['erp_storehouse_id'], '_i' => $i];
+        }
+        $sums = [];
+        foreach ($rows as $r) {
+            $erpId = (int)($r['erp_storehouse_id'] ?? 0);
+            foreach ($r as $k => $v) {
+                if ($erpId > 0 && is_numeric($v) && preg_match('/(_count|_total|_kg)$/', (string)$k) === 1) {
+                    $sums[$erpId][$k] = ($sums[$erpId][$k] ?? 0) + (float)$v;
+                }
+            }
+        }
+        $out = [];
+        foreach ($this->onlyErpWarehouses(array_values($asTrz)) as $kept) {
+            $row = $rows[$kept['_i']];
+            $row['warehouse_name'] = $kept['name'];
+            foreach ($sums[(int)$row['erp_storehouse_id']] ?? [] as $k => $v) {
+                $row[$k] = $v;
+            }
+            $out[] = $row;
+        }
+        return $out;
     }
 
     public function inventoryAvailableSkuRowsByWarehouseCode(int $warehouseCode): array

@@ -185,7 +185,8 @@ final class BagBoxService
             $this->trz->prepare("INSERT INTO traceability_warehouse_entries (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name,
                     item_id, item_code, item_description, quantity, quantity_initial, unit_name, box_count, order_ref, operator_name, comments, status)
                     VALUES (?, 'BOX', ?, ?, ?, ?, ?, ?, ?, ?, 'Unid.', 1, ?, ?, ?, 'IN_WAREHOUSE')")
-                ->execute([$code, $id, $localWh ?? (int)$d['st_id'], $this->erpStoreName((int)$d['st_id']), (int)$d['item_id'], $sku,
+                // warehouse_id de los códigos = id de bodega del ERP (igual que RollStockService); nunca el id local.
+                ->execute([$code, $id, (int)$d['st_id'], $this->erpStoreName((int)$d['st_id']), (int)$d['item_id'], $sku,
                     mb_substr((string)($d['description'] ?? ''), 0, 250), $units, $units, $orderNum !== '' ? $orderNum : null, $operator,
                     'Caja de bolsas (' . (string)$d['source_kind'] . ')']);
         }
@@ -241,7 +242,7 @@ final class BagBoxService
                 $entry['status'] = in_array($fields['status'], ['IN_WAREHOUSE', 'IN_MACHINE'], true) ? 'IN_WAREHOUSE' : $fields['status'];
             }
             if (array_key_exists('erp_st_id', $fields)) {
-                $entry['warehouse_id'] = $this->localWarehouseId((int)$fields['erp_st_id']) ?? (int)$fields['erp_st_id'];
+                $entry['warehouse_id'] = (int)$fields['erp_st_id'];
                 $entry['warehouse_name'] = $this->erpStoreName((int)$fields['erp_st_id']);
             }
             if ($entry !== []) {

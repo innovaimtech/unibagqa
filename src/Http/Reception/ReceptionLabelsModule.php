@@ -762,7 +762,8 @@ if (preg_match('#^/import-containers/(\\d+)/(?:no-weight-labels|print-labels)$#'
                         $stmtEntry->execute([
                             ':code' => $rollCode,
                             ':eid' => $rollId,
-                            ':whid' => $whId,
+                            // Código con el id de bodega del ERP (la bobina en rolls sí usa el id local $whId).
+                            ':whid' => (int)($selectedWarehouse['erp_storehouse_id'] ?? 0) ?: $whId,
                             ':whname' => (string)$selectedWarehouse['name'],
                             ':sku' => $skuCode,
                             ':desc' => $skuDesc,

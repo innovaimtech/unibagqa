@@ -142,15 +142,24 @@ final class PackagingBillingMail
                 . '<table cellspacing="0" style="border-collapse:collapse;min-width:360px">'
                 . $row('Total embalado por C.C. (acumulado)', number_format($totalCc, 0, ',', '.')) . '</table><br>';
 
-            if ($mixedItems !== []) {
+            $mixedRows = $this->mixedRows($code, (string)$o['req_number'], $detail, $mixedItems);
+            if ($mixedRows !== []) {
+                $fmt = static fn(mixed $n): string => number_format((int)$n, 0, ',', '.');
+                $tdn = 'style="border:1px solid #cbd5e1;padding:6px 10px;text-align:right"';
                 $html .= '<table cellspacing="0" style="border-collapse:collapse"><tr>'
                     . "<td $th>C.C.</td><td $th>Cajas</td><td $th>Unid. por caja</td><td $th>Caja final</td><td $th>Sobrante</td><td $th>Total unidades</td></tr>";
-                foreach ($mixedItems as $m) {
-                    $html .= '<tr><td ' . $td . '>' . $this->h($m['req_number'] ?? '') . "</td><td $td>" . $this->h($m['total_cajas'] ?? 0)
-                        . "</td><td $td>" . $this->h($m['bolsas_por_caja'] ?? 0) . "</td><td $td>" . $this->h($m['bolsas_caja_final'] ?? 0)
-                        . "</td><td $td>" . $this->h($m['bolsas_sobrante'] ?? 0) . "</td><td $td>" . $this->h($m['total_bolsas'] ?? 0) . '</td></tr>';
+                $sumBoxes = 0;
+                $sumUnits = 0;
+                foreach ($mixedRows as $m) {
+                    $sumBoxes += (int)$m['total_cajas'];
+                    $sumUnits += (int)$m['total_bolsas'];
+                    $html .= '<tr><td ' . $td . '>' . $this->h($m['req_number']) . "</td><td $tdn>" . $fmt($m['total_cajas'])
+                        . "</td><td $tdn>" . $fmt($m['bolsas_por_caja']) . "</td><td $tdn>" . $fmt($m['bolsas_caja_final'])
+                        . "</td><td $tdn>" . $fmt($m['bolsas_sobrante']) . "</td><td $tdn>" . $fmt($m['total_bolsas']) . '</td></tr>';
                 }
-                $html .= '</table><br>';
+                $thn = 'style="border:1px solid #cbd5e1;padding:6px 10px;background:#f1f5f9;font-weight:bold;text-align:right"';
+                $html .= "<tr><td $th>Total pallet</td><td $thn>" . $fmt($sumBoxes) . "</td><td $th colspan=\"3\"></td>"
+                    . "<td $thn>" . $fmt($sumUnits) . '</td></tr></table><br>';
             } else {
                 $html .= '<table cellspacing="0" style="border-collapse:collapse;min-width:360px">'
                     . $row('Medida de caja', $detail['req_embalaje_medidas_caja'] ?? '')
@@ -181,6 +190,50 @@ final class PackagingBillingMail
             }
             return ['ok' => false, 'error' => $e->getMessage()];
         }
+    }
+
+    /**
+     * Filas por CC del pallet mixto, o [] si el cierre no es mixto (código 50). El formulario envía siempre la fila del
+     * CC principal, aunque el cierre sea estándar, y esa fila llega en 0: por eso el correo mostraba la tabla en ceros.
+     * En mixto, la fila del CC principal se completa con lo registrado arriba (cajas, unidades por caja, caja final, sobrante).
+     *
+     * @param array<string,mixed> $detail
+     * @param array<int,array<string,mixed>> $mixedItems
+     * @return array<int,array{req_number:string,total_cajas:int,bolsas_por_caja:int,bolsas_caja_final:int,bolsas_sobrante:int,total_bolsas:int}>
+     */
+    public function mixedRows(string $closureCode, string $mainNumber, array $detail, array $mixedItems): array
+    {
+        if ($closureCode !== '50' || $mixedItems === []) {
+            return [];
+        }
+        $rows = [];
+        $hasUnits = false;
+        foreach (array_values($mixedItems) as $i => $m) {
+            $number = trim((string)($m['req_number'] ?? ''));
+            $row = [
+                'req_number' => $number,
+                'total_cajas' => (int)($m['total_cajas'] ?? 0),
+                'bolsas_por_caja' => (int)($m['bolsas_por_caja'] ?? 0),
+                'bolsas_caja_final' => (int)($m['bolsas_caja_final'] ?? 0),
+                'bolsas_sobrante' => (int)($m['bolsas_sobrante'] ?? 0),
+                'total_bolsas' => (int)($m['total_bolsas'] ?? 0),
+            ];
+            $isMain = ($number !== '' && $number === $mainNumber) || ($number === '' && $i === 0);
+            if ($isMain && $row['total_bolsas'] <= 0) {
+                $row['req_number'] = $mainNumber;
+                $row['total_cajas'] = (int)($detail['req_embalaje_cajas_completas_amt'] ?? 0);
+                $row['bolsas_por_caja'] = (int)($detail['req_embalaje_bolsas_por_caja_amt'] ?? 0);
+                $row['bolsas_caja_final'] = (int)($detail['req_embalaje_caja_final'] ?? 0);
+                $row['bolsas_sobrante'] = (int)($detail['req_embalaje_bolsas_sobrantes_amt'] ?? 0);
+                $row['total_bolsas'] = $row['total_cajas'] * $row['bolsas_por_caja'] + $row['bolsas_caja_final'] + $row['bolsas_sobrante'];
+            }
+            if ($row['req_number'] === '' && $row['total_bolsas'] <= 0) {
+                continue;
+            }
+            $hasUnits = $hasUnits || $row['total_bolsas'] > 0;
+            $rows[] = $row;
+        }
+        return $hasUnits ? $rows : [];
     }
 
     private function log(int $eventId, int $embalajeId, int $totalUnits, string $status, string $recipients, string $error): void

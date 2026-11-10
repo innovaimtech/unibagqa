@@ -716,9 +716,13 @@ final class MaterialSupplyService
             foreach ($payload['rolls'] as $roll) {
                 $this->trz->prepare('UPDATE rolls SET warehouse_id=? WHERE id=?')
                     ->execute([$payload['destination_id'],$roll['id']]);
-                $this->trz->prepare("UPDATE traceability_warehouse_entries SET warehouse_id=?
-                    WHERE entity_type='ROLL' AND entity_id=? AND traceability_code=? AND warehouse_id=?")
-                    ->execute([$payload['destination_id'],$roll['id'],$roll['code'],$roll['warehouse_id']]);
+                // El código queda con el id de bodega del ERP y su nombre (misma regla que RollStockService). Antes se
+                // buscaba por el id local y casi nunca coincidía: el código seguía diciendo la bodega de origen.
+                $dest = $this->one($this->trz, 'SELECT erp_storehouse_id, name FROM warehouses WHERE id=?', [(int)$payload['destination_id']]);
+                $this->trz->prepare("UPDATE traceability_warehouse_entries SET warehouse_id=?, warehouse_name=?
+                    WHERE entity_type='ROLL' AND entity_id=?")
+                    ->execute([(int)($dest['erp_storehouse_id'] ?? 0) ?: (int)$payload['destination_id'],
+                        (string)($dest['name'] ?? ''), $roll['id']]);
                 $movement = ['request_key'=>$r['request_key'],'dispatch_key'=>$key,'erp_transfer_id'=>$transferId,
                     'requested_by'=>$payload['requested_by'],'delivered_by'=>$payload['prepared_by'],
                     'roll_code'=>$roll['code'],'quantity'=>$roll['quantity'],'sku'=>$rr['sku']];

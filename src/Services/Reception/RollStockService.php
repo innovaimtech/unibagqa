@@ -456,10 +456,12 @@ trait RollStockServiceTrait
         // 2. Resolver Bodega 3000 en TRZ
         $toWarehouseId = $this->findWarehouseIdByCode(3000);
         if ($toWarehouseId === null || $toWarehouseId <= 0) {
-            $stW = $this->pdo->query("SELECT id FROM warehouses WHERE code IN (3000, 16, 27) OR name LIKE '%3000%' LIMIT 1");
+            // La 3000 es la bodega 16 del ERP. Antes se creaba una «3000 (MP PRODUCCIÓN)» con la bodega 27, que se
+            // mostraba como bodega aparte.
+            $stW = $this->pdo->query("SELECT id FROM warehouses WHERE erp_storehouse_id = 16 OR code = 3000 ORDER BY (erp_storehouse_id = 16) DESC, id LIMIT 1");
             $toWarehouseId = $stW ? (int)$stW->fetchColumn() : 0;
             if ($toWarehouseId <= 0) {
-                $this->pdo->prepare("INSERT INTO warehouses (code, name, erp_storehouse_id) VALUES (3000, '3000 (MP PRODUCCIÓN)', 27)")->execute();
+                $this->pdo->prepare("INSERT INTO warehouses (code, name, erp_storehouse_id) VALUES (3000, '3000 INSUMOS EN PRODUCCION', 16)")->execute();
                 $toWarehouseId = (int)$this->pdo->lastInsertId();
             }
         }
@@ -2564,11 +2566,21 @@ trait RollStockServiceTrait
         $where = [];
 
         if ($warehouseId !== null && $warehouseId > 0) {
+            // warehouse_id guarda el id de bodega del ERP, pero algunos registros quedaron con el id local. El id local de
+            // una bodega puede ser el id ERP de OTRA (local 1 = 100, ERP 1 = 400): por eso el id local solo cuenta si el
+            // nombre guardado también es el de esta bodega; si no, los códigos de la 400 aparecían en la 100.
             $localWhId = $this->resolveLocalWarehouseId($warehouseId);
+            $localName = '';
             if ($localWhId > 0 && $localWhId !== $warehouseId) {
-                $where[] = '(warehouse_id = :wh OR warehouse_id = :local_wh)';
+                $stName = $this->pdo->prepare('SELECT name FROM warehouses WHERE id = :id');
+                $stName->execute([':id' => $localWhId]);
+                $localName = trim((string)($stName->fetchColumn() ?: ''));
+            }
+            if ($localName !== '') {
+                $where[] = '(warehouse_id = :wh OR (warehouse_id = :local_wh AND warehouse_name = :local_name))';
                 $params[':wh'] = $warehouseId;
                 $params[':local_wh'] = $localWhId;
+                $params[':local_name'] = $localName;
             } else {
                 $where[] = 'warehouse_id = :wh';
                 $params[':wh'] = $warehouseId;

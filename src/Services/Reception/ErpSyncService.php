@@ -28,8 +28,14 @@ trait ErpSyncServiceTrait
                  ORDER BY id ASC'
             );
             $rows = $stmt->fetchAll();
+            // Solo bodegas de la sucursal Unibag: las de otras sucursales creaban filas sueltas en TRZ («VENTAS»…).
+            require_once dirname(__DIR__, 2) . '/WarehouseVisibility.php';
+            $unibagIds = WarehouseVisibility::activeErpIds($this->erpPdo);
             foreach ($rows as $row) {
                 $erpId = (int)$row['id'];
+                if ($unibagIds !== null && $unibagIds !== [] && !isset($unibagIds[$erpId])) {
+                    continue;
+                }
                 $name = trim((string)($row['st_name'] ?? ''));
                 if ($name === '') {
                     continue;

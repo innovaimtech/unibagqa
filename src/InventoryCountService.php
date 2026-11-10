@@ -450,9 +450,11 @@ final class InventoryCountService
             return [];
         }
 
+        // Solo bodegas activas de la sucursal Unibag (misma regla en todo el sistema: WarehouseVisibility).
+        require_once __DIR__ . '/WarehouseVisibility.php';
         $sql = 'SELECT id, st_name, st_desc, st_capacidad, st_clasificacion
                 FROM company_shops_storehouses s
-                WHERE st_status = 1';
+                WHERE st_status = 1 AND ' . WarehouseVisibility::shopSql($this->erpPdo, 's');
         if ($onlyWithStock) {
             $sql .= ' AND EXISTS (
                 SELECT 1 FROM item_shops_storehouses iss
