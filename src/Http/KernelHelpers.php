@@ -358,6 +358,12 @@ function unibagServeErpDocument(string $path): bool
         return false;
     }
 
+    // Los adjuntos no usan la sesión: se libera para que las imágenes de una página se carguen en paralelo
+    // (con la sesión abierta, cada <img> esperaba a la anterior, y la primera descarga desde el ERP tarda 1-2 s).
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
+
     $ext = strtolower(pathinfo($hash, PATHINFO_EXTENSION));
     $isImage = in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'], true);
 

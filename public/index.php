@@ -60,7 +60,9 @@ session_set_cookie_params([
     'secure' => isHttpsRequest(),
     'samesite' => 'Lax',
 ]);
-session_start();
+$sessionWaitStarted = microtime(true);
+session_start(); // espera si otra pestaña del mismo usuario tiene la sesión abierta
+RequestProfiler::mark('session_wait', (microtime(true) - $sessionWaitStarted) * 1000.0);
 csrfToken();
 ob_start('unibagInjectDatePickerAssets');
 

@@ -463,18 +463,24 @@ final class InventoryCountService
         }
         $sql .= ' ORDER BY st_name ASC';
 
-        $stmt = $this->erpPdo->query($sql);
-        $rows = [];
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            $rows[] = [
-                'id' => (int)$row['id'],
-                'name' => trim((string)($row['st_name'] ?? '')),
-                'desc' => trim((string)($row['st_desc'] ?? '')),
-                'capacidad' => (int)($row['st_capacidad'] ?? 0),
-                'clasificacion' => trim((string)($row['st_clasificacion'] ?? '')),
-            ];
+        $load = function () use ($sql): array {
+            $rows = [];
+            foreach ($this->erpPdo->query($sql)->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $rows[] = [
+                    'id' => (int)$row['id'],
+                    'name' => trim((string)($row['st_name'] ?? '')),
+                    'desc' => trim((string)($row['st_desc'] ?? '')),
+                    'capacidad' => (int)($row['st_capacidad'] ?? 0),
+                    'clasificacion' => trim((string)($row['st_clasificacion'] ?? '')),
+                ];
+            }
+            return $rows;
+        };
+        // La lista de bodegas casi no cambia y con «solo con stock» recorre todas las existencias (~0,5 s): 10 minutos.
+        if ($this->erpPdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+            return $load();
         }
-        return $rows;
+        return (array)ResultCache::remember('erp-storehouses-' . ($onlyWithStock ? 'stock' : 'all') . '-' . md5($sql), 600, $load);
     }
 
     /**

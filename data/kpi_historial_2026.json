@@ -1,5 +1,5 @@
 {
-    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Cada mes se identifica por el mes de TERMINO del ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses 2026-01 a 2026-09 son las cifras YA PUBLICADAS en la plantilla\/informes (origen 'plantilla'); NO se recalculan porque con los datos actuales del ERP no reproducen lo publicado. Los meses nuevos se agregan solos con origen 'calculado' al generar el informe del mes siguiente. Se puede corregir cualquier valor a mano. El bloque 'procesos' (kg programados\/procesados\/merma por proceso) no tiene fuente automatica en el sistema: si un mes no lo trae, el informe omite las 4 diapositivas de Balance de masa.",
+    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Cada mes se identifica por el mes de TERMINO del ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses con origen 'plantilla' (2026-01 a 2026-09) son las cifras YA PUBLICADAS (septiembre segun Reporte_Operaciones_Septiembre_2026_UNIFICADO) y no se recalculan. Los meses nuevos se agregan solos con origen 'calculado' cuando el mes termina. El bloque 'procesos' (kg programados\/procesados\/merma) de los meses calculados lo arma el sistema: procesados = unidades producidas x peso de la bolsa; programados = cantidad pedida de la CC repartida segun la produccion del mes; merma = kg registrados en maquina. 'bobinas_kg' = kg de bobinas PP (bodega 200) y PLA (bodega 100) al 25 de cada mes, reconstruidos con el kardex. Se puede corregir cualquier valor a mano.",
     "meses": {
         "2026-01": {
             "origen": "plantilla",
@@ -259,33 +259,33 @@
         },
         "2026-09": {
             "origen": "plantilla",
-            "prod_units": 903219,
-            "prod_cap": 1345000,
-            "sl_total_units": 883422,
-            "sl_delayed_units": 708572,
-            "sl_total_cc": 202,
-            "sl_delayed_cc": 162,
-            "waste_pct": 0.68,
+            "prod_units": 872877,
+            "prod_cap": 1412337,
+            "sl_total_units": 893177,
+            "sl_delayed_units": 18953,
+            "sl_total_cc": 98,
+            "sl_delayed_cc": 10,
+            "waste_pct": 1.08,
             "procesos": {
                 "flexo": {
-                    "prog": 45200,
-                    "proc": 44850,
-                    "waste": 412
+                    "prog": 37145,
+                    "proc": 37190,
+                    "waste": 334
                 },
                 "seri": {
-                    "prog": 3200,
-                    "proc": 3150,
-                    "waste": 18.5
+                    "prog": 759,
+                    "proc": 2135,
+                    "waste": 7.4
                 },
                 "cys": {
-                    "prog": 52100,
-                    "proc": 52350,
-                    "waste": 118
+                    "prog": 38738,
+                    "proc": 39490,
+                    "waste": 76
                 },
                 "emb": {
-                    "prog": 52400,
-                    "proc": 52600,
-                    "waste": 6.2
+                    "prog": 49907,
+                    "proc": 50162,
+                    "waste": 6
                 }
             }
         },
@@ -297,7 +297,109 @@
             "sl_delayed_units": 546851,
             "sl_total_cc": 161,
             "sl_delayed_cc": 145,
-            "waste_pct": 0.51
+            "waste_pct": 0.51,
+            "procesos": {
+                "flexo": {
+                    "prog": 25431.3,
+                    "proc": 26109.4,
+                    "waste": 182
+                },
+                "seri": {
+                    "prog": 1240.1,
+                    "proc": 1270.9,
+                    "waste": 40
+                },
+                "cys": {
+                    "prog": 30890.8,
+                    "proc": 30319,
+                    "waste": 254.51
+                },
+                "emb": {
+                    "prog": 31661.4,
+                    "proc": 31118.6,
+                    "waste": 2.81
+                }
+            }
+        }
+    },
+    "bobinas_kg": {
+        "2025-10": {
+            "pp": 252861,
+            "pla": 208612,
+            "pla_beige": 28399,
+            "pla_blanco": 156651
+        },
+        "2025-11": {
+            "pp": 190696,
+            "pla": 222667,
+            "pla_beige": 42754,
+            "pla_blanco": 163329
+        },
+        "2025-12": {
+            "pp": 207645,
+            "pla": 186641,
+            "pla_beige": 30958,
+            "pla_blanco": 143298
+        },
+        "2026-01": {
+            "pp": 206650,
+            "pla": 143577,
+            "pla_beige": 24021,
+            "pla_blanco": 104423
+        },
+        "2026-02": {
+            "pp": 204907,
+            "pla": 69602,
+            "pla_beige": 19772,
+            "pla_blanco": 41054
+        },
+        "2026-03": {
+            "pp": 210407,
+            "pla": 81328,
+            "pla_beige": 14102,
+            "pla_blanco": 49373
+        },
+        "2026-04": {
+            "pp": 206817,
+            "pla": 133944,
+            "pla_beige": 31080,
+            "pla_blanco": 73800
+        },
+        "2026-05": {
+            "pp": 219964,
+            "pla": 161567,
+            "pla_beige": 18206,
+            "pla_blanco": 118896
+        },
+        "2026-06": {
+            "pp": 220862,
+            "pla": 160310,
+            "pla_beige": 16183,
+            "pla_blanco": 119474
+        },
+        "2026-07": {
+            "pp": 218838,
+            "pla": 183132,
+            "pla_beige": 8579,
+            "pla_blanco": 149926
+        },
+        "2026-08": {
+            "pp": 204046,
+            "pla": 138812,
+            "pla_beige": 7757,
+            "pla_blanco": 109817
+        },
+        "2026-09": {
+            "pp": 198334,
+            "pla": 106788,
+            "pla_beige": 4899,
+            "pla_blanco": 85439
+        },
+        "2026-10": {
+            "pp": 163168,
+            "pla": 94274,
+            "pla_beige": 10254,
+            "pla_blanco": 67012
         }
     }
 }

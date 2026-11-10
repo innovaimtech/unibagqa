@@ -1620,8 +1620,8 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
 
     // Advertencias: datos faltantes o que no se pueden automatizar (antes se rellenaban con cifras de septiembre).
     $pptWarnings = (array)($m['warnings'] ?? []);
-    if (empty($m['has_process_balance'])) {
-        $pptWarnings[] = 'Las 4 diapositivas de Balance de masa por proceso (Flexo, Seri, Corte y Sellado, Embalaje) se omiten: este mes no tiene kg programados/procesados cargados en data/kpi_historial_2026.json.';
+    if (($m['origin'] ?? '') !== 'plantilla') {
+        $pptWarnings[] = 'Nivel de servicio: se calcula con las guías de despacho del ERP y no por CC como en el informe publicado de septiembre. Revise esas 3 diapositivas antes de presentar.';
     }
     foreach ($pptWarnings as $pptWarning) {
         $body .= '<div style="margin:10px 0;padding:10px 14px;background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;color:#92400e;font-size:13px">⚠️ ' . h((string)$pptWarning) . '</div>';
@@ -1655,7 +1655,7 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     // KPI 4: Láminas
     $body .= '<div class="kpi-card-premium amber">';
     $body .= '<div class="kpi-header-row"><span class="kpi-tag">Plantilla Oficial</span><span style="font-size:12px;font-weight:700;color:#b45309">100% Integrada</span></div>';
-    $body .= '<div class="kpi-num">41 <span style="font-size:14px;color:#64748b">Láminas</span></div>';
+    $body .= '<div class="kpi-num">18 <span style="font-size:14px;color:#64748b">Láminas</span></div>';
     $body .= '</div>';
 
     $body .= '</div>';
@@ -1670,27 +1670,30 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $body .= '<th>N° Lámina</th><th>Sección</th><th>Contenido Inyectado / Conservado</th><th>Tipo de Dato</th><th>Estado</th>';
     $body .= '</tr></thead><tbody>';
 
+    $proc = (array)($m['procesos'] ?? []);
+    $kg = static fn(string $p, string $f): string => number_format((float)($proc[$p][$f] ?? 0), 0, ',', '.');
+    $fg = (array)($m['finished_goods'] ?? []);
+    $proj = (array)($m['projection'] ?? []);
+    $calc = ($m['origin'] ?? '') === 'plantilla' ? 'Publicado (historial)' : 'Calculado (ERP)';
     $slidesInfo = [
-        [1, 'Portada Principal', 'Título actualizado: OPERACIONES | ' . strtoupper($monthLabel), 'Dinámico (Texto)', 'badge-dynamic', 'Actualizado'],
-        [2, 'Producción Planta', 'Tabla con columna ' . strtolower(substr($monthLabel, 0, 3)) . '-26 (' . number_format($m['prod_units'], 0, ',', '.') . ' Und) y recálculo acumulado Gestión 2026', 'Dinámico (Tabla ERP)', 'badge-dynamic', 'Inyectado'],
-        [3, 'Producción en Curso', 'Unidades fabricadas en el ciclo y bolsas programadas en cola', 'Dinámico (ERP)', 'badge-dynamic', 'Inyectado'],
-        [4, 'Resumen Dotación', 'Dotación de planta y registros de personal (conservado del histórico base)', 'Histórico / Fijo', 'badge-static', 'Conservado'],
-        [5, 'Nivel de Servicio [Und.]', 'Total unidades pedidos (' . number_format($m['sl_total_units'], 0, ',', '.') . ' Und), atrasados y % de cumplimiento', 'Dinámico (Tabla ERP)', 'badge-dynamic', 'Inyectado'],
-        [6, 'Nivel de Servicio [C.C.]', 'Total pedidos CC (' . $m['sl_total_cc'] . ' CC), atrasados (' . $m['sl_delayed_cc'] . ') y % cumplimiento (' . number_format($m['sl_percent_cc'], 1, ',', '.') . '%)', 'Dinámico (Tabla ERP)', 'badge-dynamic', 'Inyectado'],
-        [7, 'Detalle de Pedidos Atrasados', 'Tabla detallada con OTs de ' . $monthLabel . ' con cliente, fecha requerida y días de retraso', 'Dinámico (Tabla ERP)', 'badge-dynamic', 'Inyectado'],
-        [8, 'Mermas Flexografía', 'Kgs programados, procesados, kilos merma y % de merma en Flexos', 'Dinámico (Tabla ERP)', 'badge-dynamic', 'Inyectado'],
-        [9, 'Mermas Serigrafía', 'Kgs programados, procesados, kilos merma y % de merma en Seris', 'Dinámico (Tabla ERP)', 'badge-dynamic', 'Inyectado'],
-        [10, 'Mermas Corte y Sellado', 'Kgs programados, procesados, kilos merma cortadoras y % de merma', 'Dinámico (Tabla ERP)', 'badge-dynamic', 'Inyectado'],
-        [11, 'Mermas Embalaje', 'Kgs programados, procesados, kilos merma embalaje y % de merma', 'Dinámico (Tabla ERP)', 'badge-dynamic', 'Inyectado'],
-        [12, 'Total Merma Consolidada', 'Gráfico y porcentaje global consolidado (' . number_format($m['global_waste_percent'], 2, ',', '.') . '%) vs meta (1,60%)', 'Dinámico (ERP)', 'badge-dynamic', 'Inyectado'],
-        [13, 'Recall Tottus', 'Seguimiento operativo puntual del proceso de recall', 'Histórico / Fijo', 'badge-static', 'Conservado'],
-        ['14-19', 'Aseguramiento de Calidad', 'Certificaciones, pruebas de tracción, test de roce y puntos limpios', 'Histórico / Fotos', 'badge-static', 'Conservado'],
-        ['20-23', 'Mantenimiento y Máquinas', 'Disponibilidad y utilización de Flexo, Seri y Selladoras', 'Histórico / Fijo', 'badge-static', 'Conservado'],
-        ['24-25', 'Centros de Costos', 'Histórico de CCs procesados y rendimientos', 'Histórico / Fijo', 'badge-static', 'Conservado'],
-        ['26-29', 'Seguridad y Salud (SSOO)', 'Días sin accidentes, estadísticas ACHS y prevención', 'Histórico / Fijo', 'badge-static', 'Conservado'],
-        [31, 'Bodega Producto Terminado', 'Stock consolidado por cliente al cierre de ' . $monthLabel, 'Dinámico (ERP)', 'badge-dynamic', 'Inyectado'],
-        ['32-34', 'Bodega Rotación Stock', 'Días de rotación y detalle de artículos sin movimiento', 'Histórico / Fijo', 'badge-static', 'Conservado'],
-        ['35-41', 'Proyectos y Mejoras', 'Fotografías y avances de paneles solares, asfaltado y despeje de planta', 'Histórico / Fotos', 'badge-static', 'Conservado'],
+        [1, 'Portada', 'OPERACIONES · ' . strtoupper($monthLabel), 'Texto', 'badge-dynamic', 'Actualizado'],
+        [2, 'Producción – resumen global', number_format($m['prod_units'], 0, ',', '.') . ' Und y gráfico producción vs. capacidad', $calc, 'badge-dynamic', 'Inyectado'],
+        [3, 'Producción – proyección de cierre', (!empty($proj['closed']) ? 'Cierre real: ' : 'Proyectado: ') . number_format((float)($proj['projected'] ?? 0), 0, ',', '.') . ' Und', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [4, 'Nivel de servicio [unidades]', number_format($m['sl_total_units'], 0, ',', '.') . ' Und, ' . number_format($m['sl_percent_units'], 1, ',', '.') . '%', $calc, 'badge-dynamic', 'Inyectado'],
+        [5, 'Nivel de servicio [C.C.]', $m['sl_total_cc'] . ' pedidos, ' . $m['sl_delayed_cc'] . ' atrasados', $calc, 'badge-dynamic', 'Inyectado'],
+        [6, 'Pedidos atrasados', 'Hasta 10 pedidos con mayor atraso', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [7, 'Mermas – Flexografía', $kg('flexo', 'prog') . ' kg programados · ' . $kg('flexo', 'waste') . ' kg merma', $calc, 'badge-dynamic', 'Inyectado'],
+        [8, 'Mermas – Serigrafía', $kg('seri', 'prog') . ' kg programados · ' . $kg('seri', 'waste') . ' kg merma', $calc, 'badge-dynamic', 'Inyectado'],
+        [9, 'Mermas – Corte y Sellado', $kg('cys', 'prog') . ' kg programados · ' . $kg('cys', 'waste') . ' kg merma', $calc, 'badge-dynamic', 'Inyectado'],
+        [10, 'Mermas – Embalaje', $kg('emb', 'prog') . ' kg programados · ' . $kg('emb', 'waste') . ' kg merma', $calc, 'badge-dynamic', 'Inyectado'],
+        [11, 'Total de merma', number_format($m['global_waste_percent'], 2, ',', '.') . '% vs. meta 1,60%', $calc, 'badge-dynamic', 'Inyectado'],
+        [12, 'Bodega (portada de sección)', 'Bodega de materias primas y producto terminado', 'Texto', 'badge-static', 'Conservado'],
+        [13, 'Bodega – stock por cliente', number_format((float)($fg['total'] ?? 0), 0, ',', '.') . ' Und en bodegas 400, 1000 y 700', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [14, 'Bodega – rotación de stock', number_format((float)($fg['still'] ?? 0), 0, ',', '.') . ' Und sin salidas en 90 días', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [15, 'Bodega – artículos sin rotación', 'Cliente con más stock detenido vs. otros', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [16, 'Bodega – bobinas PP y PLA', 'Kg al 25 de cada mes, 13 meses (kardex)', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [17, 'Bodega – bobinas PLA beige y blanco', 'Kg al 25 de cada mes, 13 meses (kardex)', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [18, 'Cierre', 'Fecha de emisión', 'Texto', 'badge-dynamic', 'Actualizado'],
     ];
 
     foreach ($slidesInfo as $s) {

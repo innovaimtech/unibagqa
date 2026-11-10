@@ -371,11 +371,7 @@ class TraceabilityService
                  JOIN prod_agenda pa ON pwo.wok_ag_id = pa.id
                  LEFT JOIN equipo e ON pa.ag_equipo_id = e.id
                  WHERE pa.ag_prdid = ph.id AND evt.evt_type = 'prod' 
-                   AND (pa.ag_equipotype_id = 15 OR e.equipo_name = 'EMBALAJE' OR pa.ag_equipo_id = 25)) as produced_units,
-                (SELECT COALESCE(SUM(odi.item_amount_shipped), 0)
-                 FROM orders_delivery od
-                 JOIN orders_delivery_items odi ON odi.dlv_id = od.id
-                 WHERE od.dlv_order_id = o.id) as shipped_units
+                   AND (pa.ag_equipotype_id = 15 OR e.equipo_name = 'EMBALAJE' OR pa.ag_equipo_id = 25)) as produced_units
             FROM orders o
             LEFT JOIN customer c ON o.req_cust_id = c.id
             LEFT JOIN prod_header ph ON ph.prd_reqid = o.id
@@ -387,8 +383,23 @@ class TraceabilityService
         $stmt = $this->pdo->query($dataSql);
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+        // Despachado por pedido en UNA consulta: orders_delivery no tiene índice por dlv_order_id, y la subconsulta
+        // por fila recorría la tabla entera 20 veces (13 s medidos el 10 nov; agrupada, 0,3 s).
+        $shipped = [];
+        $shipStmt = $this->pdo->query(
+            "SELECT od.dlv_order_id, COALESCE(SUM(odi.item_amount_shipped), 0) AS shipped
+             FROM orders_delivery od
+             JOIN orders_delivery_items odi ON odi.dlv_id = od.id
+             WHERE od.dlv_order_id IN ({$idIn})
+             GROUP BY od.dlv_order_id"
+        );
+        foreach ($shipStmt->fetchAll(PDO::FETCH_ASSOC) as $s) {
+            $shipped[(int)$s['dlv_order_id']] = $s['shipped'];
+        }
+
         $items = [];
         foreach ($rows as $row) {
+            $row['shipped_units'] = $shipped[(int)$row['id']] ?? 0;
             $analysis = $this->computeStageAndBlocker($row);
             $items[] = array_merge($row, $analysis);
         }

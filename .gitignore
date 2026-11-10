@@ -48,6 +48,7 @@ cookies_*.txt
 # Archivos de datos generados
 data/*.pptx
 !data/KP´S OPERACIONES AGOSTO 2026.pptx
+!data/plantilla_informe_mensual.pptx
 data/*.sqlite
 
 # Python

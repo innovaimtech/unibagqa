@@ -12,6 +12,21 @@ declare(strict_types=1);
 require_once dirname(__DIR__, 2) . '/ChileBusinessCalendar.php';
 
 /**
+ * Caché corto de los cálculos del panel (cada uno tarda 0,3 a 1 s porque recorre los eventos del ERP).
+ * Período que incluye hoy: 2 minutos. Período ya terminado: 6 horas (sus cifras ya no cambian).
+ */
+function unibagDashboardCached(string $name, string $start, string $end, callable $compute): mixed
+{
+    $endTs = strtotime($end);
+    $key = 'dash-' . $name . '-' . $start . '-' . $end;
+    if ($endTs !== false && $endTs < time() - 3600) {
+        return ResultCache::remember($key, 21600, $compute);
+    }
+    // Período en curso: si lo guardado tiene menos de 30 min, se muestra y se actualiza después de enviar la página.
+    return ResultCache::rememberStale($key, 120, 1800, $compute);
+}
+
+/**
  * Proyección de cierre del período (26 al 25) con las unidades de Corte y Sellado.
  *
  * Fórmula: unidades acumuladas / días hábiles cumplidos × días hábiles totales del período.
@@ -55,7 +70,9 @@ function unibagBuildClosingProjection(ReceptionService $service, DateTimeImmutab
 
     $units = 0.0;
     if ($elapsed > 0 && $lastDay >= $start) {
-        $units = $service->getCorteSelladoProducedUnits($start->format('Y-m-d') . ' 00:00:00', $lastDay->format('Y-m-d') . ' 23:59:59');
+        $fromStr = $start->format('Y-m-d') . ' 00:00:00';
+        $toStr = $lastDay->format('Y-m-d') . ' 23:59:59';
+        $units = (float)unibagDashboardCached('cys-units', $fromStr, $toStr, static fn() => $service->getCorteSelladoProducedUnits($fromStr, $toStr));
     }
     $closed = $elapsed >= $total && $total > 0;
     $daily = $elapsed > 0 ? $units / $elapsed : 0.0;
@@ -138,7 +155,9 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
         return $query !== '' ? ($basePath . '?' . $query) : $basePath;
     };
 
-    $kpis = $service->getErpOnlyProductionDashboardKpis($start->format('Y-m-d H:i:s'), $end->format('Y-m-d H:i:s'));
+    $kpiFrom = $start->format('Y-m-d H:i:s');
+    $kpiTo = $end->format('Y-m-d H:i:s');
+    $kpis = (array)unibagDashboardCached('kpis', $kpiFrom, $kpiTo, static fn() => $service->getErpOnlyProductionDashboardKpis($kpiFrom, $kpiTo));
     $producedUnits = (float)($kpis['produced_units'] ?? 0.0);
     $pendingUnits = (float)($kpis['pending_units'] ?? 0.0);
     $waste = is_array($kpis['waste'] ?? null) ? $kpis['waste'] : [];
@@ -167,7 +186,7 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
     }
 
     $userId = (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0);
-    $home = $service->getLegacyErpHomeDashboard($userId);
+    $home = (array)ResultCache::remember('dash-home-' . $userId, 600, static fn() => $service->getLegacyErpHomeDashboard($userId));
     $dashboardUrl = trim((string)($home['dashboard_url'] ?? ''));
 
     $body = '<div class="dashboard-shell">';
@@ -332,7 +351,9 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
     }
 
     // Alerta de Producciones con Merma Crítica (> 5%)
-    $criticalWasteOrders = $service->getCriticalWasteWorkOrders($start->format('Y-m-d H:i:s'), $end->format('Y-m-d H:i:s'), 5.0);
+    $cwFrom = $start->format('Y-m-d H:i:s');
+    $cwTo = $end->format('Y-m-d H:i:s');
+    $criticalWasteOrders = (array)unibagDashboardCached('critical-waste', $cwFrom, $cwTo, static fn() => $service->getCriticalWasteWorkOrders($cwFrom, $cwTo, 5.0));
     $criticalCount = count($criticalWasteOrders);
 
     if ($criticalCount > 0) {
@@ -406,7 +427,9 @@ function unibagRenderErpOnlyProductionDashboardPage(ReceptionService $service, b
         $wasteBaseTotal = array_key_exists('base_units', $waste) && is_numeric($waste['base_units']) ? (float)$waste['base_units'] : null;
         $wasteRequestedTotal = array_key_exists('requested_units', $waste) && is_numeric($waste['requested_units']) ? (float)$waste['requested_units'] : null;
 
-        $details = $service->getErpWasteDashboardDetails($start->format('Y-m-d H:i:s'), $end->format('Y-m-d H:i:s'));
+        $wdFrom = $start->format('Y-m-d H:i:s');
+        $wdTo = $end->format('Y-m-d H:i:s');
+        $details = (array)unibagDashboardCached('waste-details', $wdFrom, $wdTo, static fn() => $service->getErpWasteDashboardDetails($wdFrom, $wdTo));
         $byMachine = is_array($details['by_machine'] ?? null) ? $details['by_machine'] : [];
         $byType = is_array($details['by_type'] ?? null) ? $details['by_type'] : [];
         $top10 = is_array($details['top10'] ?? null) ? $details['top10'] : [];
@@ -660,7 +683,7 @@ function unibagRenderLegacyErpHomePage(ReceptionService $service): void
     }
 
     $userId = (int)($_SESSION['user_id'] ?? $_SESSION['auth_user_id'] ?? 0);
-    $home = $service->getLegacyErpHomeDashboard($userId);
+    $home = (array)ResultCache::remember('dash-home-' . $userId, 600, static fn() => $service->getLegacyErpHomeDashboard($userId));
     $dashboardUrl = trim((string)($home['dashboard_url'] ?? ''));
     $userLabel = trim((string)($_SESSION['auth_display_name'] ?? $_SESSION['auth_username'] ?? $_SESSION['user_name'] ?? ''));
     if ($userLabel === '') {
@@ -1140,9 +1163,9 @@ function unibagOutputDashboardWasteDetailExcel(ReceptionService $service): void
     $endStr = $filters['end']->format('Y-m-d H:i:s');
     $activeFilterLabel = (string)$filters['active_filter_label'];
 
-    $kpis = $service->getErpOnlyProductionDashboardKpis($startStr, $endStr);
+    $kpis = (array)unibagDashboardCached('kpis', $startStr, $endStr, static fn() => $service->getErpOnlyProductionDashboardKpis($startStr, $endStr));
     $waste = is_array($kpis['waste'] ?? null) ? $kpis['waste'] : [];
-    $details = $service->getErpWasteDashboardDetails($startStr, $endStr);
+    $details = (array)unibagDashboardCached('waste-details', $startStr, $endStr, static fn() => $service->getErpWasteDashboardDetails($startStr, $endStr));
 
     $wasteUnitsTotal = array_key_exists('waste_units', $waste) && is_numeric($waste['waste_units']) ? (float)$waste['waste_units'] : 0.0;
     $wasteKgTotal = array_key_exists('waste_kg', $waste) && is_numeric($waste['waste_kg']) ? (float)$waste['waste_kg'] : 0.0;
@@ -1344,7 +1367,7 @@ function unibagOutputCriticalWasteExcel(ReceptionService $service): void
     $endStr = $filters['end']->format('Y-m-d H:i:s');
     $activeFilterLabel = (string)$filters['active_filter_label'];
 
-    $criticalWasteOrders = $service->getCriticalWasteWorkOrders($startStr, $endStr, 5.0);
+    $criticalWasteOrders = (array)unibagDashboardCached('critical-waste', $startStr, $endStr, static fn() => $service->getCriticalWasteWorkOrders($startStr, $endStr, 5.0));
 
     $filename = 'alerta-merma-critica-dashboard-' . date('Ymd-His') . '.xlsx';
     ob_start();

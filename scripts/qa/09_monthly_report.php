@@ -1,0 +1,159 @@
+<?php
+declare(strict_types=1);
+// Informe mensual PPTX: balance de masa, bodega y bobinas con un ERP falso (sqlite), y una generación completa
+// del PPTX con datos ficticios (si hay Python con python-pptx). No toca ninguna base real.
+require_once __DIR__ . '/../../src/bootstrap.php';
+
+$failures = 0;
+function checkMr(string $name, bool $ok): void
+{
+    global $failures;
+    echo ($ok ? 'OK   ' : 'FAIL ') . $name . "\n";
+    if (!$ok) {
+        $failures++;
+    }
+}
+
+$erp = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
+$erp->exec('CREATE TABLE equipo (id INTEGER PRIMARY KEY, equipo_type_id INTEGER)');
+$erp->exec('CREATE TABLE prod_agenda (id INTEGER PRIMARY KEY, ag_equipo_id INTEGER, ag_reqid INTEGER, ag_amount REAL)');
+$erp->exec('CREATE TABLE prod_worker_ot (id INTEGER PRIMARY KEY, wok_ag_id INTEGER)');
+$erp->exec('CREATE TABLE prod_worker_ot_events (id INTEGER PRIMARY KEY, evt_prod_worker_otid INTEGER, evt_type TEXT, evt_amount REAL, evt_crtdat INTEGER, evt_status INTEGER, evt_comments TEXT)');
+$erp->exec('CREATE TABLE prod_worker_ot_defectunits (id INTEGER PRIMARY KEY, evt_refid INTEGER, evt_type TEXT, evt_amount REAL, evt_kgstounits REAL, evt_crtdat INTEGER)');
+$erp->exec('CREATE TABLE item (id INTEGER PRIMARY KEY, item_title TEXT, item_weight REAL, item_reg_kg REAL)');
+$erp->exec('CREATE TABLE orders (id INTEGER PRIMARY KEY, req_cust_id INTEGER)');
+$erp->exec('CREATE TABLE orders_items (req_id INTEGER, item_pos INTEGER, item_id INTEGER, item_amount REAL, fab_med_width REAL, fab_med_height REAL, fab_med_fuelle REAL, fab_mat_gramms REAL, fab_manilla_length REAL)');
+$erp->exec('CREATE TABLE customer (id INTEGER PRIMARY KEY, cust_name TEXT)');
+$erp->exec('CREATE TABLE item_shops_storehouses (item_id INTEGER, shop_id INTEGER, st_id INTEGER, iss_inventory REAL, iss_order_id INTEGER)');
+$erp->exec('CREATE TABLE tran_data (tran_id INTEGER, item_id INTEGER, tran_st_id INTEGER, tran_type TEXT, tran_amount REAL, tran_crtdat INTEGER)');
+
+$t0 = strtotime('2026-09-26 00:00:00');
+$t1 = strtotime('2026-10-25 23:59:59');
+$in = strtotime('2026-10-10 10:00:00');
+$before = strtotime('2026-09-20 10:00:00');
+
+// Máquinas: 1 flexo (7), 2 selladora (8), 3 embalaje (15).
+$erp->exec('INSERT INTO equipo VALUES (1,7),(2,8),(3,15)');
+// CC 100: bolsa con peso de artículo 40 g, pedido 10.000. CC 200: sin peso de artículo, por fórmula.
+$erp->exec("INSERT INTO item VALUES (10,'Bolsa A',40,0),(20,'Bolsa B',0,0)");
+$erp->exec('INSERT INTO orders_items VALUES (100,1,10,10000,0,0,0,0,0),(100,2,10,99999,0,0,0,0,0),(200,1,20,4000,30,40,10,70,0)');
+// CC 100 en selladora: 6.000 antes del período y 4.000 dentro → programado dentro = 10.000 × 4.000/10.000.
+$erp->exec('INSERT INTO prod_agenda VALUES (1,2,100,10000),(2,2,200,4000),(3,1,100,10000),(4,3,100,10000)');
+$erp->exec('INSERT INTO prod_worker_ot VALUES (1,1),(2,2),(3,3),(4,4)');
+$erp->exec("INSERT INTO prod_worker_ot_events VALUES
+    (1,1,'prod',6000,$before,1,NULL),
+    (2,1,'prod',4000,$in,1,NULL),
+    (3,2,'prod',4000,$in,1,NULL),
+    (4,2,'prod',999,$in,1,'ROLL-SE-1 Bobina Semielaborada'),
+    (5,3,'prod',10000,$in,1,NULL),
+    (6,4,'prod',10000,$in,0,NULL),
+    (7,1,'apertura',0,$in,1,NULL)");
+// Merma: selladora 2 kg; embalaje sin kg, 50 unidades (× 40 g = 2 kg).
+$erp->exec("INSERT INTO prod_worker_ot_defectunits VALUES (1,2,'merma',10,2,$in),(2,6,'merma',50,0,$in),(3,2,'repair',5,9,$in)");
+
+$rs = (new ReflectionClass(ReceptionService::class))->newInstanceWithoutConstructor();
+$svc = new MonthlyPresentationService($rs, $erp);
+
+// Peso por fórmula: 2 × (30 + 10) × 40 / 10000 = 0,32 m² × 70 g/m² = 0,0224 kg.
+checkMr('peso por fórmula de la ficha', abs(MonthlyPresentationService::unitWeightKg(['fab_med_width' => 30, 'fab_med_height' => 40, 'fab_med_fuelle' => 10, 'fab_mat_gramms' => 70]) - 0.0224) < 1e-9);
+checkMr('peso del artículo tiene prioridad', abs(MonthlyPresentationService::unitWeightKg(['item_weight' => 40, 'fab_med_width' => 30]) - 0.04) < 1e-9);
+
+$b = $svc->computeProcessBalance($t0, $t1);
+// Selladora: procesados 4.000 × 0,04 + 4.000 × 0,0224 = 160 + 89,6 = 249,6; programados 10.000 × 0,4 × 0,04 + 4.000 × 1 × 0,0224 = 249,6.
+checkMr('CyS procesados = unidades × peso (sin bobina semielaborada) (' . $b['cys']['proc'] . ')', abs($b['cys']['proc'] - 249.6) < 0.01);
+checkMr('CyS programados reparte lo pedido según la producción del mes (' . $b['cys']['prog'] . ')', abs($b['cys']['prog'] - 249.6) < 0.01);
+checkMr('CyS merma solo «merma», no «repair» (' . $b['cys']['waste'] . ')', abs($b['cys']['waste'] - 2.0) < 0.001);
+checkMr('flexo: 10.000 × 0,04 = 400 kg', abs($b['flexo']['proc'] - 400.0) < 0.01 && abs($b['flexo']['prog'] - 400.0) < 0.01);
+checkMr('embalaje: evento anulado no cuenta; merma sin kg = unidades × peso', $b['emb']['proc'] == 0.0 && abs($b['emb']['waste'] - 2.0) < 0.001);
+checkMr('seri sin datos queda en 0', $b['seri'] === ['prog' => 0.0, 'proc' => 0.0, 'waste' => 0.0]);
+
+// Bobinas: PLA en bodega 5, PP en 11. Stock de hoy y kardex posterior al cierre.
+$erp->exec("INSERT INTO item VALUES (30,'PLA/BEIGE/Y26/100X70X1650',0,100),(31,'PLA/BLANCO/W80/100X70X1650',0,120),(32,'PP/ROJO/R01/100X80X1100',0,500),(33,'PRODUCTO GENERICO',0,0)");
+$erp->exec('INSERT INTO item_shops_storehouses VALUES (30,30010,5,3,0),(31,30010,5,2,0),(32,30010,11,4,0),(33,30010,5,-100,0)');
+$cut = strtotime('2026-10-25 23:59:59');
+$after = strtotime('2026-11-02 10:00:00');
+// Después del cierre: salió 1 bobina beige (sthdown) y entraron 2 PP (stockchangeup) → al cierre había 4 beige y 2 PP.
+$erp->exec("INSERT INTO tran_data VALUES (1,30,5,'sthdown',1,$after),(2,32,11,'stockchangeup',2,$after),(3,31,5,'sthdown',5,$before)");
+$rolls = $svc->computeRollStock(['2026-10' => $cut]);
+$r = $rolls['2026-10'];
+checkMr('bobinas al cierre reconstruidas con el kardex (' . json_encode($r) . ')',
+    $r['pla_beige'] == 400.0 && $r['pla_blanco'] == 240.0 && $r['pla'] == 640.0 && $r['pp'] == 1000.0);
+
+// Producto terminado: bodegas 1, 14 y 10; cliente = el que más lo pidió.
+$erp->exec("INSERT INTO item VALUES (40,'Bolsa Walmart',0,0),(41,'Bolsa Tottus',0,0),(42,'Bolsa sin pedidos',0,0)");
+$erp->exec('INSERT INTO item_shops_storehouses VALUES (40,30010,14,1000,0),(40,30010,1,500,0),(41,30010,10,300,0),(42,30010,14,50,0)');
+$erp->exec("INSERT INTO customer VALUES (1,'Walmart Chile S.A.'),(2,'Hipermercados Tottus S.A.'),(3,'Otro')");
+$erp->exec('INSERT INTO orders VALUES (501,1),(502,1),(503,3),(504,2)');
+$erp->exec('INSERT INTO orders_items (req_id,item_pos,item_id,item_amount) VALUES (501,1,40,1),(502,1,40,1),(503,1,40,1),(504,1,41,1)');
+// El artículo 40 tuvo una salida 20 días antes del cierre; el 41 hace 200 días.
+$erp->exec("INSERT INTO tran_data VALUES (10,40,14,'ordersdelivery',10," . ($cut - 20 * 86400) . "),(11,41,10,'ordersdelivery',10," . ($cut - 200 * 86400) . ')');
+$fg = $svc->computeFinishedGoods($cut);
+checkMr('stock por cliente con nombre corto (' . json_encode($fg['by_customer'], JSON_UNESCAPED_UNICODE) . ')',
+    ($fg['by_customer']['Walmart'] ?? 0) == 1500 && ($fg['by_customer']['Tottus'] ?? 0) == 300 && ($fg['by_customer']['Sin cliente'] ?? 0) == 50);
+checkMr('rotación: con salidas en 90 días vs sin rotación', $fg['total'] == 1850 && $fg['moved'] == 1500 && $fg['still'] == 350);
+checkMr('nombre corto sin razón social', MonthlyPresentationService::shortCustomerName('Cadena Comercial OXXO Chile S.A.') === 'OXXO');
+
+// Generación completa con datos ficticios.
+$py = getenv('PYTHON_BIN') ?: (is_file('C:/Users/Axiliarmu/AppData/Local/Programs/Python/Python313/python.exe') ? 'C:/Users/Axiliarmu/AppData/Local/Programs/Python/Python313/python.exe' : 'python3');
+$template = __DIR__ . '/../../data/plantilla_informe_mensual.pptx';
+$hasPptx = is_file($template) && trim((string)@shell_exec('"' . $py . '" -c "import pptx; print(1)" 2>&1')) === '1';
+if (!$hasPptx) {
+    echo "SKIP generación PPTX (sin Python con python-pptx o sin plantilla)\n";
+} else {
+    $hist = [];
+    foreach (range(1, 10) as $m) {
+        $proc = ['prog' => 1000 * $m, 'proc' => 1010 * $m, 'waste' => 9 * $m];
+        $hist[] = ['month_key' => sprintf('2026-%02d', $m), 'origen' => $m < 10 ? 'plantilla' : 'calculado', 'prod_units' => 900000 + $m, 'prod_cap' => 1345000,
+            'sl_total_units' => 1000000, 'sl_delayed_units' => 10000, 'sl_total_cc' => 90, 'sl_delayed_cc' => 5, 'waste_pct' => 1.1,
+            'procesos' => ['flexo' => $proc, 'seri' => $proc, 'cys' => $proc, 'emb' => $proc]];
+    }
+    $rollsData = [];
+    for ($i = 12; $i >= 0; $i--) {
+        $rollsData[] = ['month_key' => date('Y-m', strtotime("2026-10-01 -$i months")), 'pp' => 1000 + $i, 'pla' => 2000 + $i, 'pla_beige' => 500, 'pla_blanco' => 1500];
+    }
+    $data = ['month_key' => '2026-10', 'start_date' => '2026-09-26 00:00:00', 'end_date' => '2026-10-25 23:59:59', 'prod_meta' => 1000000,
+        'issued_at' => '10-11-2026', 'stock_date' => '25-10-2026', 'history' => $hist, 'rolls' => $rollsData,
+        'projection' => ['made' => 900010, 'queue' => 0, 'projected' => 900010, 'closed' => true],
+        'finished_goods' => ['total' => 1850, 'moved' => 1500, 'still' => 350, 'by_customer' => ['Walmart' => 1500, 'Tottus' => 300, 'Sin cliente' => 50], 'still_by_customer' => ['Sin cliente' => 50, 'Tottus' => 300]],
+        'delayed_orders' => [['cc_number' => '26-00001-1', 'customer_name' => 'Cliente X', 'product_type' => 'BOL0001', 'units' => 1234, 'required_date' => '01/10/2026', 'delay_days' => 3]]];
+    $tmp = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'qa_monthly_' . uniqid();
+    file_put_contents($tmp . '.json', json_encode($data, JSON_UNESCAPED_UNICODE));
+    $out = $tmp . '.pptx';
+    $cmd = '"' . $py . '" "' . __DIR__ . '/../generate_monthly_pptx.py" --template="' . $template . '" --month=2026-10 --data="' . $tmp . '.json" --output="' . $out . '" 2>&1';
+    exec($cmd, $lines, $rc);
+    checkMr('el generador termina sin error (' . trim(implode(' ', $lines)) . ')', $rc === 0 && is_file($out));
+    if (is_file($out)) {
+        $check = <<<'PY'
+import sys, json
+from pptx import Presentation
+p = Presentation(sys.argv[1])
+res = {'n': len(p.slides)}
+def txt(s):
+    return ' | '.join(sh.text_frame.text for sh in s.shapes if sh.has_text_frame)
+res['portada'] = txt(p.slides[0])
+res['layout'] = [sh.text_frame.text for l in p.slide_layouts for sh in l.shapes if sh.has_text_frame and 'REPORTE' in sh.text_frame.text.upper()]
+t = [sh for sh in p.slides[1].shapes if sh.has_table][0].table
+res['prod'] = [t.cell(0, 2).text, t.cell(4, 2).text]
+charts = [sh for sh in p.slides[6].shapes if getattr(sh, 'has_chart', False) and sh.has_chart]
+res['merma_series'] = [list(s.values) for s in charts[0].chart.plots[0].series] if charts else []
+res['bad_dash'] = sum(1 for s in p.slides for sh in s.shapes if getattr(sh, 'has_chart', False) and sh.has_chart and ',' in sh.chart._chartSpace.xml.split('prstDash val="')[-1][:30] and 'prstDash val="solid,' in sh.chart._chartSpace.xml)
+res['atrasados_rows'] = len([sh for sh in p.slides[5].shapes if sh.has_table][0].table.rows)
+print(json.dumps(res, ensure_ascii=False))
+PY;
+        file_put_contents($tmp . '_check.py', $check);
+        $json = json_decode((string)shell_exec('"' . $py . '" "' . $tmp . '_check.py" "' . $out . '" 2>&1'), true) ?: [];
+        checkMr('18 diapositivas', ($json['n'] ?? 0) === 18);
+        checkMr('portada con el mes', str_contains((string)($json['portada'] ?? ''), 'OCTUBRE 2026'));
+        checkMr('encabezado del diseño con el mes', in_array('REPORTE DE OPERACIONES OCTUBRE 2026', (array)($json['layout'] ?? []), true));
+        checkMr('tabla de producción con oct-26 y 900.010', ($json['prod'] ?? []) === ['oct-26', '900.010']);
+        $ms = (array)($json['merma_series'] ?? []);
+        checkMr('gráfico de merma flexo: 10 meses + Prom', count($ms) === 2 && count($ms[0]) === 11 && (float)$ms[0][9] === 10000.0);
+        checkMr('sin estilos de línea inválidos', ($json['bad_dash'] ?? 1) === 0);
+        checkMr('atrasados: 1 pedido + encabezado + total', ($json['atrasados_rows'] ?? 0) === 3);
+        @unlink($tmp . '_check.py');
+        @unlink($out);
+    }
+    @unlink($tmp . '.json');
+}
+
+exit($failures > 0 ? 1 : 0);

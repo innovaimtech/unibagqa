@@ -17,6 +17,8 @@ final class RequestProfiler
     private static array $queries = [];
     private static bool $registered = false;
     private static bool $forced = false;
+    /** @var array<string,float> Tiempos que no son consultas: conexión a cada base, espera de la sesión. */
+    private static array $marks = [];
 
     public static function start(): void
     {
@@ -34,6 +36,12 @@ final class RequestProfiler
         if (count(self::$queries) < 5000) {
             self::$queries[] = ['ms' => $ms, 'sql' => $sql, 'conn' => $conn];
         }
+    }
+
+    /** Suma un tiempo con nombre (p. ej. 'connect_erp', 'session_wait'). */
+    public static function mark(string $name, float $ms): void
+    {
+        self::$marks[$name] = (self::$marks[$name] ?? 0.0) + $ms;
     }
 
     public static function finish(): void
@@ -78,7 +86,9 @@ final class RequestProfiler
             'uri' => mb_substr((string)($_SERVER['REQUEST_URI'] ?? ''), 0, 200),
             'total_ms' => (int)round($totalMs),
             'db_ms' => (int)round($dbMs),
-            'php_ms' => (int)round($totalMs - $dbMs),
+            'php_ms' => (int)round($totalMs - $dbMs - array_sum(self::$marks)),
+            // Conexiones y espera de sesión: antes quedaban dentro de php_ms (logins de 15 s «sin consultas»).
+            'wait_ms' => array_map(static fn(float $v): int => (int)round($v), self::$marks),
             'queries' => count(self::$queries),
             'peak_mb' => round(memory_get_peak_usage(true) / 1048576, 1),
             'files_loaded' => count(get_included_files()),

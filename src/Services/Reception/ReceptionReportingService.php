@@ -3878,9 +3878,10 @@ trait ReceptionReportingServiceTrait
             if (!isset($allTables[$dbKey])) {
                 $allTables[$dbKey] = [];
                 try {
-                    $names = $this->erpPdo
+                    // La lista de tablas se recuerda un día entre solicitudes.
+                    $names = (array)ResultCache::remember('erp-tables', 86400, fn(): array => $this->erpPdo
                         ->query('SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()')
-                        ->fetchAll(PDO::FETCH_COLUMN);
+                        ->fetchAll(PDO::FETCH_COLUMN));
                     foreach ($names as $name) {
                         $allTables[$dbKey][strtolower((string)$name)] = true;
                     }
@@ -3913,6 +3914,15 @@ trait ReceptionReportingServiceTrait
         if (isset($this->erpColumnExistsCache[$table]) && array_key_exists($column, $this->erpColumnExistsCache[$table])) {
             return (bool)$this->erpColumnExistsCache[$table][$column];
         }
+        // Rendimiento: lo ya comprobado se recuerda un día entre solicitudes (antes: una consulta a
+        // information_schema por columna y por página; el informe mensual hacía 12).
+        static $known = null;
+        $known ??= (array)(ResultCache::get('erp-columns', 86400) ?? []);
+        $knownKey = strtolower($table . '.' . $column);
+        if (array_key_exists($knownKey, $known)) {
+            $this->erpColumnExistsCache[$table][$column] = (bool)$known[$knownKey];
+            return (bool)$known[$knownKey];
+        }
         try {
             $stmt = $this->erpPdo->prepare(
                 'SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name AND COLUMN_NAME = :column_name'
@@ -3926,6 +3936,8 @@ trait ReceptionReportingServiceTrait
                 $this->erpColumnExistsCache[$table] = [];
             }
             $this->erpColumnExistsCache[$table][$column] = $exists;
+            $known[$knownKey] = $exists;
+            ResultCache::put('erp-columns', $known);
             return $exists;
         } catch (Throwable) {
             if (!isset($this->erpColumnExistsCache[$table])) {
@@ -5254,6 +5266,13 @@ SQL;
     }
 
     public function stockSummaryWithCapacities(?int $onlyErpStorehouseId = null): array
+    {
+        // Ocupación por bodega: recorre todas las existencias del ERP (~0,5 s). Se recuerda 1 minuto.
+        return (array)ResultCache::remember('stock-capacities-' . ($onlyErpStorehouseId ?? 'all'), 60,
+            fn(): array => $this->computeStockSummaryWithCapacities($onlyErpStorehouseId));
+    }
+
+    private function computeStockSummaryWithCapacities(?int $onlyErpStorehouseId = null): array
     {
         $capacities = [];
         $stmt = $this->pdo->prepare('SELECT warehouse_id, capacity_units_total, capacity_pallets FROM warehouse_capacities');

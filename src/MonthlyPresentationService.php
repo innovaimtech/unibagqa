@@ -34,13 +34,33 @@ class MonthlyPresentationService
         return is_array($decoded['meses'] ?? null) ? $decoded['meses'] : [];
     }
 
+    /**
+     * Kg de bobinas guardados por mes (cierre del 25): ['2026-10' => ['pp' => .., 'pla' => .., ...]].
+     *
+     * @return array<string, array<string, float>>
+     */
+    private function loadRollHistory(): array
+    {
+        $path = $this->historyPath();
+        if (!is_file($path)) {
+            return [];
+        }
+        $decoded = json_decode((string)file_get_contents($path), true);
+        return is_array($decoded['bobinas_kg'] ?? null) ? $decoded['bobinas_kg'] : [];
+    }
+
     /** Guarda el historial conservando el comentario y el orden cronológico. */
-    private function saveHistory(array $months): void
+    private function saveHistory(array $months, ?array $rolls = null): void
     {
         ksort($months);
         $path = $this->historyPath();
         $current = is_file($path) ? json_decode((string)file_get_contents($path), true) : [];
         $payload = ['_comentario' => (string)($current['_comentario'] ?? ''), 'meses' => $months];
+        $rolls ??= is_array($current['bobinas_kg'] ?? null) ? $current['bobinas_kg'] : null;
+        if ($rolls !== null) {
+            ksort($rolls);
+            $payload['bobinas_kg'] = $rolls;
+        }
         @file_put_contents($path, json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX);
     }
 
@@ -85,7 +105,7 @@ class MonthlyPresentationService
         $delayedOrders = [];
         foreach (array_slice($lateRows, 0, 12) as $r) {
             $delayedOrders[] = [
-                'cc_number' => (string)($r['cc_number'] ?? '-'),
+                'cc_number' => trim((string)($r['cc_number'] ?? '')) !== '' ? (string)$r['cc_number'] : trim((string)($r['doc_type'] ?? '') . ' ' . (string)($r['doc_number'] ?? '')),
                 'ot_number' => '-', // el informe de nivel de servicio no trae el N° de OT
                 'customer_name' => (string)($r['customer_name'] ?? '-'),
                 'product_type' => (string)($r['product_code'] ?? '-'),
@@ -115,6 +135,337 @@ class MonthlyPresentationService
         ];
     }
 
+    /** Tipo de máquina del ERP (equipo_type_id) → proceso del informe. */
+    private const PROCESS_TYPES = [7 => 'flexo', 11 => 'seri', 22 => 'seri', 8 => 'cys', 14 => 'cys', 15 => 'emb'];
+
+    /** Bodegas ERP de producto terminado (400, 1000, 700) y de bobinas (PLA = 100, PP = 200). */
+    private const FINISHED_GOODS_STOREHOUSES = [1, 14, 10];
+    private const ROLL_STOREHOUSES = ['pla' => 5, 'pp' => 11];
+
+    /** Tipos de movimiento del kardex (tran_data) que suman o restan stock. */
+    private const KARDEX_IN = ['stockchangeup', 'sthup', 'invoicesbuy', 'invoicesnotessell'];
+    private const KARDEX_OUT = ['stockchangedown', 'sthdown', 'ordersdelivery', 'shipment'];
+
+    /** Días sin salidas para considerar un artículo «sin rotación». */
+    private const NO_ROTATION_DAYS = 90;
+
+    /** Filtro de eventos de producción válidos (mismo criterio que getCorteSelladoProducedUnits). */
+    private const PROD_EVENT_FILTER = "(ev.evt_status IS NULL OR ev.evt_status > 0)
+        AND LOWER(ev.evt_type) IN ('production','prod','prodsericolor')
+        AND (ev.evt_comments IS NULL OR (ev.evt_comments NOT LIKE '%Bobina Semielaborada%' AND ev.evt_comments NOT LIKE '%ROLL-SE-%'))";
+
+    /**
+     * Peso de una bolsa en kg: el del artículo o, si no tiene, la fórmula de la ficha
+     * (mismo cálculo que getErpOperatorWasteReport).
+     */
+    public static function unitWeightKg(array $r): float
+    {
+        $itemWeight = (float)($r['item_weight'] ?? 0);
+        if ($itemWeight > 0) {
+            return $itemWeight / 1000.0;
+        }
+        $w = (float)($r['fab_med_width'] ?? 0);
+        $h = (float)($r['fab_med_height'] ?? 0);
+        $f = (float)($r['fab_med_fuelle'] ?? 0);
+        $g = (float)($r['fab_mat_gramms'] ?? 0);
+        $man = (float)($r['fab_manilla_length'] ?? 0);
+        if ($w <= 0 || $h <= 0 || $g <= 0) {
+            return 0.0;
+        }
+        $body = (2.0 * ($w + $f) * $h) / 10000.0 * ($g / 1000.0);
+        $handle = $man > 0 ? 2.0 * ($man / 100.0) * 0.025 * ($g / 1000.0) : 0.0;
+        return $body + $handle;
+    }
+
+    /**
+     * Datos de la primera línea de cada CC (peso de la bolsa y cantidad pedida).
+     *
+     * @param int[] $reqIds
+     * @return array<int, array{weight: float, ordered: float}>
+     */
+    private function orderLines(array $reqIds): array
+    {
+        $out = [];
+        $reqIds = array_values(array_unique(array_filter(array_map('intval', $reqIds))));
+        foreach (array_chunk($reqIds, 500) as $chunk) {
+            $sql = 'SELECT oi.req_id, oi.item_amount, it.item_weight, oi.fab_med_width, oi.fab_med_height, oi.fab_med_fuelle,
+                           oi.fab_mat_gramms, oi.fab_manilla_length
+                    FROM orders_items oi LEFT JOIN item it ON it.id = oi.item_id
+                    WHERE oi.req_id IN (' . implode(',', $chunk) . ')
+                    ORDER BY oi.req_id, oi.item_pos';
+            foreach ($this->erpPdo->query($sql)->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $id = (int)$r['req_id'];
+                if (!isset($out[$id])) {
+                    $out[$id] = ['weight' => self::unitWeightKg($r), 'ordered' => (float)($r['item_amount'] ?? 0)];
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Balance de masa por proceso (Flexo, Seri, Corte y Sellado, Embalaje) del período, en kg.
+     *
+     * - Procesados: unidades producidas en el período × peso de la bolsa.
+     * - Programados: cantidad pedida de la CC repartida según la parte de su producción (en ese proceso)
+     *   que cayó en el período. Así una CC que se hace en dos meses no se cuenta entera dos veces.
+     * - Merma: kg registrados en máquina; si el registro viene solo en unidades, unidades × peso.
+     *
+     * @return array<string, array{prog: float, proc: float, waste: float}>
+     */
+    public function computeProcessBalance(int $startTs, int $endTs): array
+    {
+        $out = [];
+        foreach (array_unique(array_values(self::PROCESS_TYPES)) as $p) {
+            $out[$p] = ['prog' => 0.0, 'proc' => 0.0, 'waste' => 0.0];
+        }
+        $types = implode(',', array_keys(self::PROCESS_TYPES));
+        $filter = self::PROD_EVENT_FILTER;
+
+        // Producción por CC y tipo de máquina: en el período y en total (para repartir lo pedido).
+        $sql = "SELECT eq.equipo_type_id AS tp, a.ag_reqid AS req,
+                       SUM(CASE WHEN ev.evt_crtdat BETWEEN :s1 AND :e1 THEN ev.evt_amount ELSE 0 END) AS pu,
+                       SUM(ev.evt_amount) AS tot
+                FROM prod_agenda a
+                INNER JOIN prod_worker_ot o ON o.wok_ag_id = a.id
+                INNER JOIN prod_worker_ot_events ev ON ev.evt_prod_worker_otid = o.id
+                INNER JOIN equipo eq ON eq.id = a.ag_equipo_id
+                WHERE a.ag_reqid IN (
+                        SELECT a2.ag_reqid FROM prod_worker_ot_events e2
+                        INNER JOIN prod_worker_ot o2 ON o2.id = e2.evt_prod_worker_otid
+                        INNER JOIN prod_agenda a2 ON a2.id = o2.wok_ag_id
+                        WHERE e2.evt_crtdat BETWEEN :s2 AND :e2)
+                  AND eq.equipo_type_id IN ($types)
+                  AND $filter
+                GROUP BY eq.equipo_type_id, a.ag_reqid
+                HAVING pu > 0";
+        $stmt = $this->erpPdo->prepare($sql);
+        $stmt->execute([':s1' => $startTs, ':e1' => $endTs, ':s2' => $startTs, ':e2' => $endTs]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        // Merma por CC y tipo de máquina.
+        $sqlWaste = "SELECT eq.equipo_type_id AS tp, a.ag_reqid AS req, SUM(d.evt_kgstounits) AS kg, SUM(d.evt_amount) AS units,
+                            SUM(CASE WHEN COALESCE(d.evt_kgstounits, 0) > 0 THEN 0 ELSE d.evt_amount END) AS units_without_kg
+                     FROM prod_worker_ot_defectunits d
+                     INNER JOIN prod_worker_ot_events ev ON ev.id = d.evt_refid
+                     INNER JOIN prod_worker_ot o ON o.id = ev.evt_prod_worker_otid
+                     INNER JOIN prod_agenda a ON a.id = o.wok_ag_id
+                     INNER JOIN equipo eq ON eq.id = a.ag_equipo_id
+                     WHERE d.evt_crtdat BETWEEN :s AND :e AND LOWER(d.evt_type) = 'merma' AND eq.equipo_type_id IN ($types)
+                     GROUP BY eq.equipo_type_id, a.ag_reqid";
+        $stmt = $this->erpPdo->prepare($sqlWaste);
+        $stmt->execute([':s' => $startTs, ':e' => $endTs]);
+        $wasteRows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $lines = $this->orderLines(array_merge(array_column($rows, 'req'), array_column($wasteRows, 'req')));
+        foreach ($rows as $r) {
+            $p = self::PROCESS_TYPES[(int)$r['tp']] ?? null;
+            if ($p === null) {
+                continue;
+            }
+            $line = $lines[(int)$r['req']] ?? ['weight' => 0.0, 'ordered' => 0.0];
+            $produced = (float)$r['pu'];
+            $share = $produced / max((float)$r['tot'], 1.0);
+            $out[$p]['proc'] += $produced * $line['weight'];
+            $out[$p]['prog'] += $line['ordered'] * $share * $line['weight'];
+        }
+        foreach ($wasteRows as $r) {
+            $p = self::PROCESS_TYPES[(int)$r['tp']] ?? null;
+            if ($p === null) {
+                continue;
+            }
+            $weight = $lines[(int)$r['req']]['weight'] ?? 0.0;
+            $out[$p]['waste'] += (float)$r['kg'] + (float)$r['units_without_kg'] * $weight;
+        }
+        foreach ($out as $p => $v) {
+            $out[$p] = ['prog' => round($v['prog'], 1), 'proc' => round($v['proc'], 1), 'waste' => round($v['waste'], 2)];
+        }
+        return $out;
+    }
+
+    /**
+     * Stock por artículo y bodega a una fecha: stock actual menos los movimientos del kardex posteriores.
+     *
+     * @param int[] $storehouses
+     * @return array<string, float> clave "item_id:st_id"
+     */
+    private function stockAt(array $storehouses, int $atTs, ?string $titlePrefixSql = null): array
+    {
+        $in = implode(',', array_map('intval', $storehouses));
+        $titleCond = $titlePrefixSql !== null ? " AND ($titlePrefixSql)" : '';
+        $stock = [];
+        $sql = "SELECT s.item_id, s.st_id, SUM(s.iss_inventory) AS qty FROM item_shops_storehouses s
+                INNER JOIN item i ON i.id = s.item_id
+                WHERE s.st_id IN ($in)$titleCond GROUP BY s.item_id, s.st_id";
+        foreach ($this->erpPdo->query($sql)->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $stock[$r['item_id'] . ':' . $r['st_id']] = (float)$r['qty'];
+        }
+        if ($atTs < time()) {
+            $types = "'" . implode("','", array_merge(self::KARDEX_IN, self::KARDEX_OUT)) . "'";
+            $stmt = $this->erpPdo->prepare("SELECT t.item_id, t.tran_st_id, t.tran_type, SUM(t.tran_amount) AS qty FROM tran_data t
+                    INNER JOIN item i ON i.id = t.item_id
+                    WHERE t.tran_crtdat > :at AND t.tran_st_id IN ($in) AND t.tran_type IN ($types)$titleCond
+                    GROUP BY t.item_id, t.tran_st_id, t.tran_type");
+            $stmt->execute([':at' => $atTs]);
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $key = $r['item_id'] . ':' . $r['tran_st_id'];
+                $sign = in_array($r['tran_type'], self::KARDEX_IN, true) ? -1.0 : 1.0; // se deshace el movimiento
+                $stock[$key] = ($stock[$key] ?? 0.0) + $sign * (float)$r['qty'];
+            }
+        }
+        return $stock;
+    }
+
+    /**
+     * Kg de bobinas PP y PLA (y PLA beige / blanco) al cierre de cada mes indicado.
+     *
+     * @param array<string, int> $cutoffs month_key => timestamp de cierre
+     * @return array<string, array{pp: float, pla: float, pla_beige: float, pla_blanco: float}>
+     */
+    public function computeRollStock(array $cutoffs): array
+    {
+        $titles = "i.item_title LIKE 'PLA/%' OR i.item_title LIKE 'PP/%'";
+        $info = [];
+        $sql = 'SELECT i.id, i.item_title, i.item_reg_kg FROM item i WHERE ' . $titles;
+        foreach ($this->erpPdo->query($sql)->fetchAll(PDO::FETCH_ASSOC) as $r) {
+            $info[(int)$r['id']] = ['title' => strtoupper((string)$r['item_title']), 'kg' => (float)$r['item_reg_kg']];
+        }
+        $out = [];
+        foreach ($cutoffs as $monthKey => $ts) {
+            $row = ['pp' => 0.0, 'pla' => 0.0, 'pla_beige' => 0.0, 'pla_blanco' => 0.0];
+            foreach ($this->stockAt(array_values(self::ROLL_STOREHOUSES), $ts, $titles) as $key => $qty) {
+                [$itemId, $stId] = array_map('intval', explode(':', $key));
+                if ($qty <= 0 || !isset($info[$itemId])) {
+                    continue;
+                }
+                $kg = $qty * $info[$itemId]['kg'];
+                $title = $info[$itemId]['title'];
+                if ($stId === self::ROLL_STOREHOUSES['pp'] && str_starts_with($title, 'PP/')) {
+                    $row['pp'] += $kg;
+                } elseif ($stId === self::ROLL_STOREHOUSES['pla'] && str_starts_with($title, 'PLA/')) {
+                    $row['pla'] += $kg;
+                    if (str_contains($title, '/BEIGE/')) {
+                        $row['pla_beige'] += $kg;
+                    } elseif (str_contains($title, '/BLANCO/')) {
+                        $row['pla_blanco'] += $kg;
+                    }
+                }
+            }
+            $out[$monthKey] = array_map(static fn($v) => round($v), $row);
+        }
+        return $out;
+    }
+
+    /**
+     * Producto terminado al cierre: stock por cliente y rotación (artículos sin salidas en 90 días).
+     * El cliente de un artículo es el que más CC/NV lo ha pedido.
+     *
+     * @return array<string, mixed>
+     */
+    public function computeFinishedGoods(int $atTs): array
+    {
+        $stock = [];
+        foreach ($this->stockAt(self::FINISHED_GOODS_STOREHOUSES, $atTs) as $key => $qty) {
+            $itemId = (int)explode(':', $key)[0];
+            $stock[$itemId] = ($stock[$itemId] ?? 0.0) + $qty;
+        }
+        $stock = array_filter($stock, static fn($q) => $q > 0);
+        if ($stock === []) {
+            return ['by_customer' => [], 'total' => 0, 'moved' => 0, 'still' => 0, 'still_by_customer' => []];
+        }
+
+        // Cliente principal de cada artículo.
+        $customerOf = [];
+        $counts = [];
+        foreach (array_chunk(array_keys($stock), 500) as $chunk) {
+            $sql = 'SELECT oi.item_id, o.req_cust_id, COUNT(*) AS n FROM orders_items oi INNER JOIN orders o ON o.id = oi.req_id
+                    WHERE oi.item_id IN (' . implode(',', $chunk) . ') AND o.req_cust_id > 0 GROUP BY oi.item_id, o.req_cust_id';
+            foreach ($this->erpPdo->query($sql)->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $item = (int)$r['item_id'];
+                if (!isset($counts[$item]) || (int)$r['n'] > $counts[$item]) {
+                    $counts[$item] = (int)$r['n'];
+                    $customerOf[$item] = (int)$r['req_cust_id'];
+                }
+            }
+        }
+        $names = [];
+        $ids = array_values(array_unique($customerOf));
+        if ($ids !== []) {
+            foreach ($this->erpPdo->query('SELECT id, cust_name FROM customer WHERE id IN (' . implode(',', $ids) . ')')->fetchAll(PDO::FETCH_ASSOC) as $r) {
+                $names[(int)$r['id']] = self::shortCustomerName((string)$r['cust_name']);
+            }
+        }
+
+        // Artículos con al menos una salida en los 90 días previos al cierre.
+        $in = implode(',', self::FINISHED_GOODS_STOREHOUSES);
+        $outTypes = "'" . implode("','", self::KARDEX_OUT) . "'";
+        $stmt = $this->erpPdo->prepare("SELECT DISTINCT item_id FROM tran_data
+                WHERE tran_crtdat BETWEEN :from AND :to AND tran_st_id IN ($in) AND tran_type IN ($outTypes)");
+        $stmt->execute([':from' => $atTs - self::NO_ROTATION_DAYS * 86400, ':to' => $atTs]);
+        $moved = array_fill_keys(array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN) ?: []), true);
+
+        $byCustomer = [];
+        $stillByCustomer = [];
+        $total = 0.0;
+        $movedUnits = 0.0;
+        foreach ($stock as $itemId => $qty) {
+            $name = $names[$customerOf[$itemId] ?? 0] ?? 'Sin cliente';
+            $byCustomer[$name] = ($byCustomer[$name] ?? 0.0) + $qty;
+            $total += $qty;
+            if (isset($moved[$itemId])) {
+                $movedUnits += $qty;
+            } else {
+                $stillByCustomer[$name] = ($stillByCustomer[$name] ?? 0.0) + $qty;
+            }
+        }
+        arsort($byCustomer);
+        arsort($stillByCustomer);
+        return [
+            'by_customer' => array_map(static fn($v) => round($v), $byCustomer),
+            'total' => round($total),
+            'moved' => round($movedUnits),
+            'still' => round($total - $movedUnits),
+            'still_by_customer' => array_map(static fn($v) => round($v), $stillByCustomer),
+        ];
+    }
+
+    /** Nombre corto del cliente para los gráficos: sin razón social (S.A., SpA, Ltda.). */
+    public static function shortCustomerName(string $name): string
+    {
+        $name = trim(preg_replace('/\s+/', ' ', $name) ?? '');
+        $short = preg_replace('/[\s,]+(S\.?\s?A\.?|SpA|S\.?P\.?A\.?|Ltda\.?|Limitada|E\.?I\.?R\.?L\.?)(\s.*)?$/iu', '', $name) ?? $name;
+        $short = preg_replace('/\s+(Chile|Comercial)$/iu', '', trim($short)) ?? $short;
+        $short = preg_replace('/^(Hipermercados|Supermercados|Cadena Comercial|Comercial|Sociedad Comercial)\s+/iu', '', trim($short)) ?? $short;
+        return $short !== '' ? trim(mb_substr($short, 0, 28)) : $name;
+    }
+
+    /** Timestamp del cierre (25 del mes, 23:59:59) de un mes 'YYYY-MM' en el ciclo 26→25. */
+    private static function cycleEndTs(string $monthKey): int
+    {
+        return (int)strtotime($monthKey . '-25 23:59:59');
+    }
+
+    /**
+     * Proyección de cierre (diapositiva 3). Mes en curso: la misma del panel ERP. Mes cerrado: cierre = producido.
+     *
+     * @return array<string, mixed>
+     */
+    private function closingProjection(string $startDate, string $endDate, float $produced): array
+    {
+        $endTs = (int)strtotime($endDate);
+        if ($endTs < time()) {
+            return ['made' => $produced, 'queue' => 0.0, 'projected' => $produced, 'closed' => true, 'cutoff' => date('d/m/Y', $endTs)];
+        }
+        if (!function_exists('unibagBuildClosingProjection')) {
+            require_once __DIR__ . '/Http/Reports/DashboardAndGraphicsModule.php';
+        }
+        $zone = new DateTimeZone('America/Santiago');
+        $p = unibagBuildClosingProjection($this->receptionService, new DateTimeImmutable(substr($startDate, 0, 10), $zone), new DateTimeImmutable(substr($endDate, 0, 10), $zone));
+        $made = (float)($p['units'] ?? 0);
+        $projected = (float)($p['projected'] ?? $made);
+        return ['made' => $made, 'queue' => max(0.0, $projected - $made), 'projected' => max($projected, $made), 'closed' => false, 'cutoff' => (string)($p['cutoff'] ?? '')];
+    }
+
     /**
      * Obtiene todos los indicadores del mes y el historial (enero a ese mes) para los gráficos.
      *
@@ -133,6 +484,27 @@ class MonthlyPresentationService
         if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $monthKey)) {
             $monthKey = date('Y-m');
         }
+        // La página y la descarga piden lo mismo: se calcula una vez. Mes cerrado: 6 h; mes en curso: 5 min.
+        // Si se corrige data/kpi_historial_2026.json a mano, el caché se descarta (va en la clave la fecha del archivo).
+        $closed = self::cycleEndTs($monthKey) < time();
+        $historyStamp = (string)@filemtime($this->historyPath());
+        $cacheKey = 'monthly-' . $monthKey . '-' . $historyStamp;
+        $cached = ResultCache::get($cacheKey, $closed ? 21600 : 300, $found);
+        if ($found && is_array($cached)) {
+            $cached['issued_at'] = date('d-m-Y');
+            return $cached;
+        }
+        $metrics = $this->computeMonthlyMetrics($monthKey);
+        // La clave se arma con la fecha del historial DESPUÉS del cálculo (el cálculo puede guardar meses nuevos).
+        clearstatcache();
+        ResultCache::put('monthly-' . $monthKey . '-' . (string)@filemtime($this->historyPath()), $metrics);
+        return $metrics;
+    }
+
+    /** @return array<string, mixed> */
+    private function computeMonthlyMetrics(string $monthKey): array
+    {
+        clearstatcache();
         $year = (int)substr($monthKey, 0, 4);
         $monthNum = (int)substr($monthKey, 5, 2);
         $warnings = [];
@@ -141,11 +513,15 @@ class MonthlyPresentationService
         $stored = $this->loadHistory();
         $storedChanged = false;
         $live = $this->computeLiveCycle($monthKey);
+        $liveStartTs = (int)strtotime($live['start_date']);
+        $liveEndTs = (int)strtotime($live['end_date']);
+        $monthClosed = $liveEndTs < time();
 
         $history = [];
         for ($m = 1; $m <= $monthNum; $m++) {
             $key = sprintf('%04d-%02d', $year, $m);
-            if ($key === $monthKey) {
+            $isPublished = ($stored[$key]['origen'] ?? '') === 'plantilla';
+            if ($key === $monthKey && !$isPublished) {
                 $entry = [
                     'origen' => 'calculado',
                     'prod_units' => $live['prod_units'],
@@ -155,12 +531,24 @@ class MonthlyPresentationService
                     'sl_total_cc' => $live['sl_total_cc'],
                     'sl_delayed_cc' => $live['sl_delayed_cc'],
                     'waste_pct' => $live['waste_pct'],
+                    'procesos' => $this->computeProcessBalance($liveStartTs, $liveEndTs),
                 ];
-                if (isset($stored[$key]['procesos'])) {
-                    $entry['procesos'] = $stored[$key]['procesos'];
+                if ($monthClosed) {
+                    // Mes terminado: queda guardado para los informes siguientes.
+                    $stored[$key] = $entry;
+                    $storedChanged = true;
                 }
             } elseif (isset($stored[$key])) {
                 $entry = $stored[$key];
+                if (!isset($entry['procesos'])) {
+                    $p = $this->receptionService->resolveBonusFilterPeriod('period', $key);
+                    $entry['procesos'] = $this->computeProcessBalance(
+                        (int)strtotime($p['start_date'] . ' 00:00:00'),
+                        (int)strtotime($p['end_date'] . ' 23:59:59')
+                    );
+                    $stored[$key]['procesos'] = $entry['procesos'];
+                    $storedChanged = true;
+                }
             } else {
                 $past = $this->computeLiveCycle($key);
                 $entry = [
@@ -172,6 +560,7 @@ class MonthlyPresentationService
                     'sl_total_cc' => $past['sl_total_cc'],
                     'sl_delayed_cc' => $past['sl_delayed_cc'],
                     'waste_pct' => $past['waste_pct'],
+                    'procesos' => $this->computeProcessBalance((int)strtotime($past['start_date']), (int)strtotime($past['end_date'])),
                 ];
                 $stored[$key] = $entry;
                 $storedChanged = true;
@@ -179,54 +568,96 @@ class MonthlyPresentationService
             $entry['month_key'] = $key;
             $history[] = $entry;
         }
-        if ($storedChanged) {
-            $this->saveHistory($stored);
+
+        // Bobinas: 13 cierres hasta el mes del informe. Los meses cerrados se guardan; el en curso usa el stock de hoy.
+        $rollHistory = $this->loadRollHistory();
+        $rollsChanged = false;
+        $cutoffs = [];
+        for ($i = 12; $i >= 0; $i--) {
+            $k = date('Y-m', (int)strtotime($monthKey . '-01 -' . $i . ' months'));
+            $cutoffs[$k] = $k === $monthKey ? min($liveEndTs, time()) : self::cycleEndTs($k);
+        }
+        $missing = array_filter($cutoffs, static fn($ts, $k) => !isset($rollHistory[$k]) || $k === $monthKey, ARRAY_FILTER_USE_BOTH);
+        $computed = [];
+        try {
+            $computed = $this->computeRollStock($missing);
+        } catch (Throwable $e) {
+            $warnings[] = 'No se pudo calcular el stock de bobinas: ' . $e->getMessage();
+        }
+        $rolls = [];
+        foreach ($cutoffs as $k => $ts) {
+            $row = $computed[$k] ?? $rollHistory[$k] ?? null;
+            if (isset($computed[$k]) && $ts < time() && ($k !== $monthKey || $monthClosed)) {
+                $rollHistory[$k] = $computed[$k];
+                $rollsChanged = true;
+            }
+            if ($row !== null) {
+                $rolls[] = ['month_key' => $k] + $row;
+            }
         }
 
-        $prodUnits = (float)$live['prod_units'];
+        if ($storedChanged || $rollsChanged) {
+            $this->saveHistory($stored, $rollsChanged ? $rollHistory : null);
+        }
+
+        $finished = ['by_customer' => [], 'total' => 0, 'moved' => 0, 'still' => 0, 'still_by_customer' => []];
+        try {
+            $finished = $this->computeFinishedGoods(min($liveEndTs, time()));
+        } catch (Throwable $e) {
+            $warnings[] = 'No se pudo calcular el stock de producto terminado: ' . $e->getMessage();
+        }
+        $currentEntry = end($history) ?: [];
+        $projection = $this->closingProjection($live['start_date'], $live['end_date'], (float)($currentEntry['prod_units'] ?? $live['prod_units']));
+
+        // Cifras del mes: las del historial si el mes ya fue publicado; si no, las calculadas recién.
+        $cur = $currentEntry;
+        $prodUnits = (float)($cur['prod_units'] ?? 0);
         $prodMeta = 1000000.0;
         if ($prodUnits <= 0) {
             $warnings[] = 'El ERP no devolvió producción de Corte y Sellado para el ciclo ' . $live['period_label'] . '.';
         }
-        if ((int)$live['sl_total_cc'] <= 0) {
+        if ((int)($cur['sl_total_cc'] ?? 0) <= 0) {
             $warnings[] = 'El ERP no devolvió despachos para el ciclo ' . $live['period_label'] . '.';
         }
-        $slPercentUnits = $live['sl_total_units'] > 0
-            ? max(0.0, min(100.0, (($live['sl_total_units'] - $live['sl_delayed_units']) / $live['sl_total_units']) * 100.0))
-            : 0.0;
+        $slTotalUnits = (float)($cur['sl_total_units'] ?? 0);
+        $slDelayedUnits = (float)($cur['sl_delayed_units'] ?? 0);
+        $slTotalCc = (int)($cur['sl_total_cc'] ?? 0);
+        $slDelayedCc = (int)($cur['sl_delayed_cc'] ?? 0);
+        $slPercentUnits = $slTotalUnits > 0 ? max(0.0, min(100.0, ($slTotalUnits - $slDelayedUnits) / $slTotalUnits * 100.0)) : 0.0;
+        $slPercentCc = $slTotalCc > 0 ? max(0.0, min(100.0, ($slTotalCc - $slDelayedCc) / $slTotalCc * 100.0)) : 0.0;
+        if (count($rolls) < 13) {
+            $warnings[] = 'Bobinas: solo hay ' . count($rolls) . ' de 13 meses con stock calculado.';
+        }
 
-        $metrics = [
+        return [
             'month_key' => $monthKey,
             'start_date' => $live['start_date'],
             'end_date' => $live['end_date'],
             'period_label' => $live['period_label'],
+            'month_closed' => $monthClosed,
+            'issued_at' => date('d-m-Y'),
+            'stock_date' => date('d-m-Y', min($liveEndTs, time())),
+            'origin' => (string)($cur['origen'] ?? 'calculado'),
             'prod_units' => $prodUnits,
             'prod_meta' => $prodMeta,
             'prod_cumpl' => $prodMeta > 0 ? ($prodUnits / $prodMeta * 100.0) : 0.0,
-            'prod_cap' => (float)end($history)['prod_cap'],
-            'sl_total_units' => $live['sl_total_units'],
-            'sl_delayed_units' => $live['sl_delayed_units'],
+            'prod_cap' => (float)($cur['prod_cap'] ?? $capacityDefault),
+            'sl_total_units' => $slTotalUnits,
+            'sl_delayed_units' => $slDelayedUnits,
             'sl_percent_units' => $slPercentUnits,
-            'sl_total_cc' => $live['sl_total_cc'],
-            'sl_delayed_cc' => $live['sl_delayed_cc'],
-            'sl_percent_cc' => $live['sl_percent_cc'],
+            'sl_total_cc' => $slTotalCc,
+            'sl_delayed_cc' => $slDelayedCc,
+            'sl_percent_cc' => $slPercentCc,
             'delayed_orders' => $live['delayed_orders'],
-            'global_waste_percent' => $live['waste_pct'],
+            'global_waste_percent' => (float)($cur['waste_pct'] ?? $live['waste_pct']),
             'total_waste_kg' => $live['total_waste_kg'],
+            'procesos' => (array)($cur['procesos'] ?? []),
+            'projection' => $projection,
+            'finished_goods' => $finished,
+            'rolls' => $rolls,
             'history' => $history,
-            'has_process_balance' => isset($stored[$monthKey]['procesos']),
             'warnings' => $warnings,
         ];
-        // Balance de masa por proceso: solo si el mes lo trae en el historial (no hay fuente automática).
-        foreach (['flexo', 'seri', 'cys', 'emb'] as $p) {
-            $pr = $stored[$monthKey]['procesos'][$p] ?? null;
-            if (is_array($pr)) {
-                $metrics[$p . '_prog_kg'] = (float)($pr['prog'] ?? 0);
-                $metrics[$p . '_proc_kg'] = (float)($pr['proc'] ?? 0);
-                $metrics[$p . '_waste_kg'] = (float)($pr['waste'] ?? 0);
-            }
-        }
-        return $metrics;
     }
 
     /**
@@ -237,7 +668,7 @@ class MonthlyPresentationService
         $metrics = $this->getMonthlyMetrics($monthKey);
         $monthKey = (string)$metrics['month_key'];
         
-        $templatePath = __DIR__ . '/../data/KP´S OPERACIONES AGOSTO 2026.pptx';
+        $templatePath = __DIR__ . '/../data/plantilla_informe_mensual.pptx';
         if (!file_exists($templatePath)) {
             throw new RuntimeException("Plantilla maestra PPTX no encontrada en {$templatePath}");
         }

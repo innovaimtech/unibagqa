@@ -335,9 +335,14 @@ final class ExpectedStockService
                     $cols[strtolower((string)$r['name'])] = true;
                 }
             } else {
-                foreach ($this->all($this->erp, 'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [$table]) as $r) {
-                    $cols[strtolower((string)$r['COLUMN_NAME'])] = true;
-                }
+                // Las columnas de una tabla se recuerdan un día entre solicitudes (antes: 5 a 6 consultas por carga).
+                $cols = (array)ResultCache::remember('erp-table-columns-' . $table, 86400, function () use ($table): array {
+                    $found = [];
+                    foreach ($this->all($this->erp, 'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [$table]) as $r) {
+                        $found[strtolower((string)$r['COLUMN_NAME'])] = true;
+                    }
+                    return $found;
+                });
             }
         } catch (Throwable) {
             $cols = [];
@@ -732,6 +737,23 @@ final class ExpectedStockService
      */
     public function reservedDetail(string $code): array
     {
+        return $this->cachedDetail('reserved', $code, fn(): array => $this->computeReservedDetail($code));
+    }
+
+    /**
+     * Las ventanas de detalle tardaban 2,5 a 6,6 s (recorren eventos y guías del ERP). Se recuerdan lo mismo que
+     * el resumen (FLOW_CACHE_TTL): abrir dos veces el mismo SKU ya no recalcula. En pruebas (sqlite) no hay caché.
+     */
+    private function cachedDetail(string $kind, string $code, callable $compute): array
+    {
+        if ($this->erp === null || $this->erp->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+            return $compute();
+        }
+        return (array)ResultCache::remember('expected-stock-' . $kind . '-' . strtoupper(trim($code)), self::FLOW_CACHE_TTL, $compute);
+    }
+
+    private function computeReservedDetail(string $code): array
+    {
         $item = $this->itemByCode($code);
         $lines = $this->pendingSales([$item['id']]);
         $byOrder = [];
@@ -796,6 +818,11 @@ final class ExpectedStockService
      * @return array{item:array,summary:?array,rows:array<int,array<string,mixed>>,totals:array<string,int>}
      */
     public function productionDetail(string $code): array
+    {
+        return $this->cachedDetail('production', $code, fn(): array => $this->computeProductionDetail($code));
+    }
+
+    private function computeProductionDetail(string $code): array
     {
         $item = $this->itemByCode($code);
         $lines = $this->productionLines([$item['id']]);

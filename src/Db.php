@@ -265,11 +265,14 @@ final class Db
         $lastException = null;
 
         for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            $connectStarted = microtime(true);
             try {
                 $pdo = self::newPdo($dsn, $config['user'] ?? 'root', $config['pass'] ?? '', $options);
+                RequestProfiler::mark('connect_' . $key, (microtime(true) - $connectStarted) * 1000.0);
                 self::$connections[$key] = $pdo;
                 return self::$connections[$key];
             } catch (PDOException $e) {
+                RequestProfiler::mark('connect_' . $key . '_failed', (microtime(true) - $connectStarted) * 1000.0);
                 $lastException = $e;
                 if ($charset !== '' && str_contains($e->getMessage(), 'Unknown character set')) {
                     try {
