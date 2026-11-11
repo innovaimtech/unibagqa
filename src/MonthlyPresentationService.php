@@ -446,24 +446,53 @@ class MonthlyPresentationService
     }
 
     /**
-     * Proyección de cierre (diapositiva 3). Mes en curso: la misma del panel ERP. Mes cerrado: cierre = producido.
+     * Ciclo en curso (26 → 25) que contiene `$today`: desde el día 26 en adelante ya es el ciclo del mes siguiente.
+     *
+     * @return array{0:DateTimeImmutable,1:DateTimeImmutable}
+     */
+    public static function currentCycle(DateTimeImmutable $today): array
+    {
+        $month = (int)$today->format('d') >= 26 ? $today->modify('first day of next month') : $today->modify('first day of this month');
+        $prev = $month->modify('-1 month');
+        $start = $prev->setDate((int)$prev->format('Y'), (int)$prev->format('m'), 26)->setTime(0, 0, 0);
+        $end = $month->setDate((int)$month->format('Y'), (int)$month->format('m'), 25)->setTime(23, 59, 59);
+        return [$start, $end];
+    }
+
+    /**
+     * Proyección de cierre (diapositiva 3): las dos tarjetas del panel ERP para el ciclo EN CURSO, sea cual sea el mes
+     * del informe. «Fabricado» = Corte y Sellado desde el 26 hasta hoy (tarjeta «Corte y Sellado»); «cierre proyectado» =
+     * tarjeta «Proyección de cierre» (promedio por día hábil cumplido × días hábiles del ciclo).
      *
      * @return array<string, mixed>
      */
-    private function closingProjection(string $startDate, string $endDate, float $produced): array
+    private function closingProjection(): array
     {
-        $endTs = (int)strtotime($endDate);
-        if ($endTs < time()) {
-            return ['made' => $produced, 'queue' => 0.0, 'projected' => $produced, 'closed' => true, 'cutoff' => date('d/m/Y', $endTs)];
-        }
         if (!function_exists('unibagBuildClosingProjection')) {
             require_once __DIR__ . '/Http/Reports/DashboardAndGraphicsModule.php';
         }
         $zone = new DateTimeZone('America/Santiago');
-        $p = unibagBuildClosingProjection($this->receptionService, new DateTimeImmutable(substr($startDate, 0, 10), $zone), new DateTimeImmutable(substr($endDate, 0, 10), $zone));
-        $made = (float)($p['units'] ?? 0);
-        $projected = (float)($p['projected'] ?? $made);
-        return ['made' => $made, 'queue' => max(0.0, $projected - $made), 'projected' => max($projected, $made), 'closed' => false, 'cutoff' => (string)($p['cutoff'] ?? '')];
+        [$start, $end] = self::currentCycle(new DateTimeImmutable('today', $zone));
+        $from = $start->format('Y-m-d H:i:s');
+        $to = $end->format('Y-m-d H:i:s');
+        // Misma consulta y misma caché que la tarjeta del panel, para que las cifras coincidan.
+        $kpis = (array)unibagDashboardCached('kpis', $from, $to, fn() => $this->receptionService->getErpOnlyProductionDashboardKpis($from, $to));
+        $made = (float)($kpis['produced_units'] ?? 0.0);
+        $p = unibagBuildClosingProjection($this->receptionService, $start, $end);
+        $projected = $p['projected'] === null ? $made : max((float)$p['projected'], $made);
+        return [
+            'made' => $made,
+            'queue' => max(0.0, $projected - $made),
+            'projected' => $projected,
+            'closed' => false,
+            'start' => $start->format('Y-m-d'),
+            'end' => $end->format('Y-m-d'),
+            'today' => (new DateTimeImmutable('now', $zone))->format('d/m/Y'),
+            'elapsed_days' => (int)$p['elapsed_days'],
+            'total_days' => (int)$p['total_days'],
+            'remaining_days' => (int)$p['remaining_days'],
+            'daily_avg' => (float)$p['daily_avg'],
+        ];
     }
 
     /**
@@ -492,6 +521,8 @@ class MonthlyPresentationService
         $cached = ResultCache::get($cacheKey, $closed ? 21600 : 300, $found);
         if ($found && is_array($cached)) {
             $cached['issued_at'] = date('d-m-Y');
+            // La proyección es del ciclo en curso (cambia día a día): no se toma del caché del mes.
+            $cached['projection'] = $this->closingProjection();
             return $cached;
         }
         $metrics = $this->computeMonthlyMetrics($monthKey);
@@ -607,7 +638,7 @@ class MonthlyPresentationService
             $warnings[] = 'No se pudo calcular el stock de producto terminado: ' . $e->getMessage();
         }
         $currentEntry = end($history) ?: [];
-        $projection = $this->closingProjection($live['start_date'], $live['end_date'], (float)($currentEntry['prod_units'] ?? $live['prod_units']));
+        $projection = $this->closingProjection();
 
         // Cifras del mes: las del historial si el mes ya fue publicado; si no, las calculadas recién.
         $cur = $currentEntry;

@@ -494,6 +494,54 @@
             </div>
         <?php endif; ?>
 
+        <?php
+        // Etiquetas de bobinas generadas al desmontar (impresa y sobrante): siempre visibles para reimprimir.
+        $labelRolls = (isset($prodService) && is_object($prodService) && method_exists($prodService, 'getWorkOrderLabelRolls'))
+            ? $prodService->getWorkOrderLabelRolls((int)($workerOtId ?? 0), (int)($agId ?? 0)) : [];
+        ?>
+        <?php if ($labelRolls !== []): ?>
+            <div id="ot-label-rolls" style="background:#FFFFFF;border:1.5px solid #C7D2FE;border-radius:6px;padding:14px 18px;margin-bottom:18px">
+                <div style="font-weight:bold;font-size:15px;color:#3730A3;display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                    <i class="fa fa-tags" style="color:#4F46E5"></i> Etiquetas de bobinas de esta OT
+                    <span style="font-size:12px;font-weight:normal;color:#64748B">(bobinas impresas y sobrantes generadas al desmontar · reimprímelas aquí)</span>
+                </div>
+                <div style="overflow-x:auto">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px">
+                        <thead>
+                            <tr style="background:#EEF2FF;color:#3730A3;text-align:left">
+                                <th style="padding:7px 9px">Tipo</th><th style="padding:7px 9px">Código</th><th style="padding:7px 9px;text-align:right">Peso</th>
+                                <th style="padding:7px 9px;text-align:right">Metros</th><th style="padding:7px 9px">Bobina origen</th><th style="padding:7px 9px">Fecha</th><th style="padding:7px 9px">Etiqueta</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($labelRolls as $lr): $isLeft = $lr['kind'] === 'leftover'; ?>
+                            <tr style="border-bottom:1px solid #E2E8F0">
+                                <td style="padding:7px 9px">
+                                    <span style="font-size:11.5px;font-weight:bold;padding:3px 8px;border-radius:4px;<?=$isLeft ? 'background:#DCFCE7;color:#047857' : 'background:#E0E7FF;color:#3730A3'?>">
+                                        <?=$isLeft ? 'Sobrante' : 'Bobina impresa'?>
+                                    </span>
+                                </td>
+                                <td style="padding:7px 9px;font-family:monospace;font-weight:bold"><?=htmlspecialchars($lr['roll_code'])?></td>
+                                <td style="padding:7px 9px;text-align:right;white-space:nowrap"><?=number_format($lr['weight_kg'], 2, ',', '.')?> kg</td>
+                                <td style="padding:7px 9px;text-align:right;white-space:nowrap"><?=$lr['meters'] > 0 ? number_format($lr['meters'], 0, ',', '.') . ' m' : '—'?></td>
+                                <td style="padding:7px 9px;font-family:monospace;font-size:12px"><?=htmlspecialchars($lr['parent_code'] !== '' ? $lr['parent_code'] : '—')?></td>
+                                <td style="padding:7px 9px;white-space:nowrap"><?=$lr['created_at'] !== '' ? htmlspecialchars(date('d/m H:i', (int)strtotime($lr['created_at']))) : ''?></td>
+                                <td style="padding:7px 9px;white-space:nowrap">
+                                    <a href="/rolls/<?=(int)$lr['id']?>/label?server_print=1" target="_blank" class="<?=$isLeft ? 'btngreen' : 'btnblue'?>" style="font-size:12px;padding:5px 12px;text-decoration:none;font-weight:bold;border-radius:4px;display:inline-flex;align-items:center;gap:5px">
+                                        <i class="fa fa-print"></i> Imprimir
+                                    </a>
+                                    <a href="/rolls/<?=(int)$lr['id']?>/label" target="_blank" class="btngrey" style="font-size:12px;padding:5px 10px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:5px">
+                                        <i class="fa fa-eye"></i> Ver
+                                    </a>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        <?php endif; ?>
+
         <?php if (!empty($_GET['mounted'])): ?>
             <div style="background:#EFF6FF;border:1.5px solid #3B82F6;border-radius:6px;padding:12px 16px;margin-bottom:18px;color:#1E40AF;font-size:13px;display:flex;align-items:center;gap:8px">
                 <i class="fa fa-check-circle" style="font-size:18px;color:#2563EB"></i>

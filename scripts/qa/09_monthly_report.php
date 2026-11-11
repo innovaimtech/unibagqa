@@ -93,6 +93,12 @@ checkMr('stock por cliente con nombre corto (' . json_encode($fg['by_customer'],
 checkMr('rotación: con salidas en 90 días vs sin rotación', $fg['total'] == 1850 && $fg['moved'] == 1500 && $fg['still'] == 350);
 checkMr('nombre corto sin razón social', MonthlyPresentationService::shortCustomerName('Cadena Comercial OXXO Chile S.A.') === 'OXXO');
 
+// Ciclo en curso de la diapositiva 3 (igual al período por defecto del panel).
+$cyc = static fn(string $d) => array_map(static fn($x) => $x->format('Y-m-d H:i'), MonthlyPresentationService::currentCycle(new DateTimeImmutable($d)));
+checkMr('ciclo en curso: 11/11 → 26/10 a 25/11', $cyc('2026-11-11') === ['2026-10-26 00:00', '2026-11-25 23:59']);
+checkMr('ciclo en curso: el 26 ya es el ciclo siguiente', $cyc('2026-11-26') === ['2026-11-26 00:00', '2026-12-25 23:59']);
+checkMr('ciclo en curso: el 25 cierra el ciclo; enero cruza el año', $cyc('2026-11-25') === ['2026-10-26 00:00', '2026-11-25 23:59'] && $cyc('2027-01-05') === ['2026-12-26 00:00', '2027-01-25 23:59']);
+
 // Generación completa con datos ficticios.
 $py = getenv('PYTHON_BIN') ?: (is_file('C:/Users/Axiliarmu/AppData/Local/Programs/Python/Python313/python.exe') ? 'C:/Users/Axiliarmu/AppData/Local/Programs/Python/Python313/python.exe' : 'python3');
 $template = __DIR__ . '/../../data/plantilla_informe_mensual.pptx';
@@ -113,7 +119,9 @@ if (!$hasPptx) {
     }
     $data = ['month_key' => '2026-10', 'start_date' => '2026-09-26 00:00:00', 'end_date' => '2026-10-25 23:59:59', 'prod_meta' => 1000000,
         'issued_at' => '10-11-2026', 'stock_date' => '25-10-2026', 'history' => $hist, 'rolls' => $rollsData,
-        'projection' => ['made' => 900010, 'queue' => 0, 'projected' => 900010, 'closed' => true],
+        // Informe de octubre (cerrado) descargado el 11/11: la diapositiva 3 muestra el ciclo en curso 26/10 → 25/11.
+        'projection' => ['made' => 400000, 'queue' => 600000, 'projected' => 1000000, 'closed' => false, 'start' => '2026-10-26', 'end' => '2026-11-25',
+            'today' => '11/11/2026', 'elapsed_days' => 10, 'total_days' => 21, 'remaining_days' => 11, 'daily_avg' => 40000],
         'finished_goods' => ['total' => 1850, 'moved' => 1500, 'still' => 350, 'by_customer' => ['Walmart' => 1500, 'Tottus' => 300, 'Sin cliente' => 50], 'still_by_customer' => ['Sin cliente' => 50, 'Tottus' => 300]],
         'delayed_orders' => [['cc_number' => '26-00001-1', 'customer_name' => 'Cliente X', 'product_type' => 'BOL0001', 'units' => 1234, 'required_date' => '01/10/2026', 'delay_days' => 3]]];
     $tmp = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'qa_monthly_' . uniqid();
@@ -138,7 +146,10 @@ charts = [sh for sh in p.slides[6].shapes if getattr(sh, 'has_chart', False) and
 res['merma_series'] = [list(s.values) for s in charts[0].chart.plots[0].series] if charts else []
 res['bad_dash'] = sum(1 for s in p.slides for sh in s.shapes if getattr(sh, 'has_chart', False) and sh.has_chart and ',' in sh.chart._chartSpace.xml.split('prstDash val="')[-1][:30] and 'prstDash val="solid,' in sh.chart._chartSpace.xml)
 res['atrasados_rows'] = len([sh for sh in p.slides[5].shapes if sh.has_table][0].table.rows)
-print(json.dumps(res, ensure_ascii=False))
+pt = [sh for sh in p.slides[2].shapes if sh.has_table][0].table
+res['proy'] = [[pt.cell(r, 1).text, pt.cell(r, 2).text] for r in range(1, 4)]
+res['proy_txt'] = txt(p.slides[2])
+print(json.dumps(res))
 PY;
         file_put_contents($tmp . '_check.py', $check);
         $json = json_decode((string)shell_exec('"' . $py . '" "' . $tmp . '_check.py" "' . $out . '" 2>&1'), true) ?: [];
@@ -150,6 +161,11 @@ PY;
         checkMr('gráfico de merma flexo: 10 meses + Prom', count($ms) === 2 && count($ms[0]) === 11 && (float)$ms[0][9] === 10000.0);
         checkMr('sin estilos de línea inválidos', ($json['bad_dash'] ?? 1) === 0);
         checkMr('atrasados: 1 pedido + encabezado + total', ($json['atrasados_rows'] ?? 0) === 3);
+        $proy = (array)($json['proy'] ?? []);
+        checkMr('proyección: fabricado del 26 a hoy, lo que falta y el cierre proyectado (ciclo en curso)', array_column($proy, 0) === ['400.000', '600.000', '1.000.000']
+            && str_contains((string)($proy[0][1] ?? ''), 'del 26/10/2026 al 11/11/2026') && str_contains((string)($proy[2][1] ?? ''), '25/11/2026'), json_encode($proy, JSON_UNESCAPED_UNICODE));
+        checkMr('proyección: tarjeta con el cierre proyectado y % ya fabricado', str_contains((string)($json['proy_txt'] ?? ''), 'unidades de cierre proyectado al 25/11/2026')
+            && str_contains((string)($json['proy_txt'] ?? ''), '40%'), (string)($json['proy_txt'] ?? ''));
         @unlink($tmp . '_check.py');
         @unlink($out);
     }

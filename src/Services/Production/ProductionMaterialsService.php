@@ -5213,6 +5213,57 @@ trait ProductionMaterialsServiceTrait
 
 
     /**
+     * Etiquetas de bobinas generadas al desmontar en esta OT, para reimprimirlas: la bobina impresa (salida,
+     * ROLL-SE-…) y la bobina sobrante (reception_mode SOBRANTE). Incluye las OT de turnos anteriores de la misma agenda.
+     * Solo lectura.
+     *
+     * @return array<int,array{id:int,kind:string,roll_code:string,weight_kg:float,meters:float,status:string,created_at:string,parent_code:string}>
+     */
+    public function getWorkOrderLabelRolls(int $workerOtId, int $agId = 0): array
+    {
+        if ($this->trzPdo === null || ($workerOtId <= 0 && $agId <= 0)) {
+            return [];
+        }
+        $otIds = $workerOtId > 0 ? [$workerOtId] : [];
+        if ($agId > 0 && $this->erpPdo !== null) {
+            try {
+                $st = $this->erpPdo->prepare('SELECT id FROM prod_worker_ot WHERE wok_ag_id = ?');
+                $st->execute([$agId]);
+                foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $id) {
+                    $otIds[] = (int)$id;
+                }
+            } catch (Throwable) {
+            }
+        }
+        $otIds = array_values(array_unique(array_filter($otIds, static fn($v) => $v > 0)));
+        if ($otIds === []) {
+            return [];
+        }
+        try {
+            $st = $this->trzPdo->prepare("SELECT r.id, r.roll_code, r.weight_kg, r.meters, r.status, r.reception_mode, r.process_stage, r.created_at,
+                        p.roll_code AS parent_code
+                    FROM rolls r LEFT JOIN rolls p ON p.id = r.parent_roll_id
+                    WHERE r.source_work_order_id IN (" . implode(',', $otIds) . ")
+                      AND (r.process_stage = 'PRINTED' OR r.roll_code LIKE 'ROLL-SE-%' OR r.reception_mode = 'SOBRANTE')
+                    ORDER BY r.id DESC LIMIT 200");
+            $st->execute();
+            $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable) {
+            return [];
+        }
+        return array_map(static fn(array $r): array => [
+            'id' => (int)$r['id'],
+            'kind' => (string)$r['reception_mode'] === 'SOBRANTE' ? 'leftover' : 'printed',
+            'roll_code' => (string)$r['roll_code'],
+            'weight_kg' => (float)$r['weight_kg'],
+            'meters' => (float)($r['meters'] ?? 0),
+            'status' => (string)($r['status'] ?? ''),
+            'created_at' => (string)($r['created_at'] ?? ''),
+            'parent_code' => (string)($r['parent_code'] ?? ''),
+        ], $rows);
+    }
+
+    /**
      * Retorna el resumen consolidado de las bobinas impresas semielaboradas generadas en la OT.
      * Incluye la suma total de peso (kg), la suma de metros lineales, el conteo de bobinas y el detalle.
      */

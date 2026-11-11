@@ -351,20 +351,17 @@ class Builder:
     def proyeccion(self, slide):
         p = self.data.get('projection') or {}
         made, queue, projected = float(p.get('made') or 0), float(p.get('queue') or 0), float(p.get('projected') or 0)
-        start = self.data.get('start_date', '')[:10]
-        end = self.data.get('end_date', '')[:10]
+        # Ciclo EN CURSO (26 → hoy), igual que las tarjetas del panel, aunque el informe sea de un mes cerrado.
+        start = str(p.get('start') or self.data.get('start_date', ''))[:10]
+        end = str(p.get('end') or self.data.get('end_date', ''))[:10]
         dmy = lambda s: f"{s[8:10]}/{s[5:7]}/{s[0:4]}" if len(s) == 10 else s
         tables = shapes_of(slide, 'table')
         if self.need(tables, 'proyección: tabla'):
             t = tables[0].table
-            if p.get('closed'):
-                obs = [f"Unidades fabricadas del {dmy(start)} al {dmy(end)} (mes cerrado).",
-                       'Sin unidades pendientes: el mes ya terminó.',
-                       'Cierre real del mes.']
-            else:
-                obs = [f"Unidades fabricadas desde el {dmy(start)} a la fecha ({p.get('cutoff', '')}).",
-                       f"Proyección al ritmo actual hasta el {dmy(end)} (días hábiles restantes).",
-                       'Total de cierre proyectado a la fecha.']
+            rate = f"{fmt_int(p.get('daily_avg') or 0)} unid./día hábil" if p.get('elapsed_days') else 'sin días hábiles completos aún'
+            obs = [f"Unidades fabricadas (Corte y Sellado) del {dmy(start)} al {p.get('today', '')}.",
+                   f"Faltan al mismo ritmo ({rate}, {p.get('remaining_days', 0)} de {p.get('total_days', 0)} días hábiles por cumplir).",
+                   f"Cierre proyectado al {dmy(end)} si se mantiene el ritmo."]
             for i, (val, o) in enumerate(zip([made, queue, projected], obs)):
                 set_cell(t, 1 + i, 1, fmt_int(val))
                 set_cell(t, 1 + i, 2, o)
@@ -379,7 +376,7 @@ class Builder:
             if sh.name == 'Text 2':
                 set_text(sh, fmt_int(projected))
             elif sh.name == 'Text 3' and txt.startswith('unidades'):
-                set_text(sh, 'unidades de cierre real' if p.get('closed') else 'unidades de cierre proyectado')
+                set_text(sh, f"unidades de cierre proyectado al {dmy(end)}")
             elif sh.name == 'Text 5':
                 set_text(sh, fmt_pct(made / projected * 100 if projected > 0 else 0, 0))
             elif sh.name == 'Text 6':

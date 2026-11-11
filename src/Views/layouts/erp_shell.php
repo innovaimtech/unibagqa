@@ -174,7 +174,8 @@
         $isTransfers = str_starts_with($currentPath, '/stock/transfers') || str_starts_with($currentPath, '/stock/traspasos');
         $isDispatch = str_starts_with($currentPath, '/stock/dispatch');
         $isWarehouseBonus = str_starts_with($currentPath, '/stock/bonificacion');
-        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry && !$isTrzTree && !$isTransfers && !$isMatRequests && !$isDispatch && !$isWarehouseBonus;
+        $isWhReport = str_starts_with($currentPath, '/stock/informe');
+        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry && !$isTrzTree && !$isTransfers && !$isMatRequests && !$isDispatch && !$isWarehouseBonus && !$isWhReport;
         $isWh = str_starts_with($currentPath, '/warehouses');
         echo '<a class="subitem' . ($isStock ? ' active' : '') . '" href="/stock"><span>Consulta de stock</span></a>';
         echo '<a class="subitem' . ($isMatRequests ? ' active' : '') . '" href="/stock/material-requests"><span>📋 Solicitudes MP (Bodega 3000)</span></a>';
@@ -185,6 +186,7 @@
         if (warehouseBonusCanAccess()) {
             echo '<a class="subitem' . ($isWarehouseBonus ? ' active' : '') . '" href="/stock/bonificacion"><span>🏅 Bonificación</span></a>';
         }
+        echo '<a class="subitem' . ($isWhReport ? ' active' : '') . '" href="/stock/informe"><span>📊 Informe</span></a>';
         echo '<a class="subitem' . ($isWh ? ' active' : '') . '" href="/warehouses"><span>Configuración de bodega</span></a>';
         // "Recepción de bobinas (OC)" vive solo en el módulo Recepción (antes estaba repetido aquí).
     } elseif ($activeModule === 'inventory') {

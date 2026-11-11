@@ -129,6 +129,9 @@ if (handleDispatchRoutes($path, $method, $currentOperatorName)) {
 if (handleWarehouseBonusRoutes($path, $method, $currentOperatorName)) {
     exit;
 }
+if (handleWarehouseStockReportRoutes($path, $method, $currentOperatorName)) {
+    exit;
+}
 if (handleExpectedStockRoutes($path, $method, $currentOperatorName)) {
     exit;
 }
