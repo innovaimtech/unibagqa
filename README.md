@@ -7,7 +7,6 @@ Plataforma corporativa integrada de **Unibag Chile** para **Gestión ERP e Infor
 ## 📂 Estructura Ordenada del Proyecto
 
 ```text
-├── api/                          # Entrypoint serverless compatible con Vercel (delega a public/index.php)
 ├── data/                         # Plantillas base de reportes ejecutivos (PPTX mensual)
 ├── database/                     # Esquema SQL base y migraciones incrementales
 ├── deploy/                       # Configuraciones de despliegue VPS / Nginx

@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/MachineKind.php';
 require_once __DIR__ . '/StockLedgerService.php';
 require_once __DIR__ . '/BagBoxService.php';
+require_once __DIR__ . '/MonthlyPresentationService.php';
 
 /**
  * Bolsas que usa el Pulpo Serigráfico, por caja con código.
@@ -359,7 +360,12 @@ final class PulpoBagService
     /**
      * Bolsas que la producción necesitó: las que recibieron frente o dorso (la mayor de las dos) más la merma registrada.
      *
-     * @return array{printed:float,merma:float,needed:float}
+     * Con pasadas de frente/dorso se usan solo esas: el sistema antiguo guardaba en evt_amount las pasadas de cada
+     * evento (frente + dorso = la misma bolsa dos veces) y el nuevo las bolsas terminadas. Sin pasadas, evt_amount.
+     * La merma del Pulpo casi siempre se anota solo en kg (evt_amount 0): esos kg se pasan a bolsas con el peso de la
+     * bolsa de la CC (artículo o fórmula de la ficha). Si no hay peso, esos kg quedan en merma_kg_sin_convertir.
+     *
+     * @return array{printed:float,merma:float,needed:float,merma_kg_convertidos:float,merma_kg_sin_convertir:float}
      */
     public function neededForAgenda(int $agendaId): array
     {
@@ -367,12 +373,40 @@ final class PulpoBagService
                 COALESCE(SUM(e.evt_amount),0) AS a
             FROM prod_worker_ot ot JOIN prod_worker_ot_events e ON e.evt_prod_worker_otid = ot.id
             WHERE ot.wok_ag_id = ? AND e.evt_type = 'prod' AND e.evt_status > 0", [$agendaId]) ?? [];
-        $printed = max((float)($row['f'] ?? 0), (float)($row['d'] ?? 0), (float)($row['a'] ?? 0));
-        $merma = $this->one($this->erp, "SELECT COALESCE(SUM(d.evt_amount),0) AS m FROM prod_worker_ot_defectunits d
+        $f = (float)($row['f'] ?? 0);
+        $d = (float)($row['d'] ?? 0);
+        $printed = ($f > 0 || $d > 0) ? max($f, $d) : (float)($row['a'] ?? 0);
+        $merma = $this->one($this->erp, "SELECT COALESCE(SUM(d.evt_amount),0) AS m,
+                COALESCE(SUM(CASE WHEN d.evt_amount > 0 THEN 0 ELSE d.evt_kgstounits END),0) AS kg
+            FROM prod_worker_ot_defectunits d
             JOIN prod_worker_ot_events e ON e.id = d.evt_refid JOIN prod_worker_ot ot ON ot.id = e.evt_prod_worker_otid
             WHERE ot.wok_ag_id = ? AND d.evt_status > 0 AND d.evt_type = 'merma'", [$agendaId]);
         $m = (float)($merma['m'] ?? 0);
-        return ['printed' => $printed, 'merma' => $m, 'needed' => $printed + $m];
+        $kgOnly = (float)($merma['kg'] ?? 0);
+        $kgConverted = 0.0;
+        if ($kgOnly > 0) {
+            $weight = $this->bagWeightKg($agendaId);
+            if ($weight > 0) {
+                $m += round($kgOnly / $weight);
+                $kgConverted = $kgOnly;
+                $kgOnly = 0.0;
+            }
+        }
+        return ['printed' => $printed, 'merma' => $m, 'needed' => $printed + $m,
+            'merma_kg_convertidos' => $kgConverted, 'merma_kg_sin_convertir' => $kgOnly];
+    }
+
+    /** Peso de una bolsa de la CC de la agenda, en kg (0 si no se puede calcular). */
+    private function bagWeightKg(int $agendaId): float
+    {
+        try {
+            $r = $this->one($this->erp, 'SELECT it.item_weight, oi.fab_med_width, oi.fab_med_height, oi.fab_med_fuelle, oi.fab_mat_gramms, oi.fab_manilla_length
+                FROM prod_agenda ag JOIN orders_items oi ON oi.req_id = ag.ag_reqid LEFT JOIN item it ON it.id = oi.item_id
+                WHERE ag.id = ? ORDER BY oi.item_pos LIMIT 1', [$agendaId]);
+        } catch (Throwable) {
+            return 0.0;
+        }
+        return $r === null ? 0.0 : MonthlyPresentationService::unitWeightKg($r);
     }
 
     /**

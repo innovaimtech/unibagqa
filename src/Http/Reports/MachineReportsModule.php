@@ -460,6 +460,7 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
     $body .= '<div class="erp-filter-sub">' . $subtitle . '</div>';
     $body .= '</div>';
     $body .= '<div class="erp-filter-actions">';
+    $body .= '<button type="button" id="btn-open-live-machines" class="ub-btn-primary" style="background:#1d4ed8" title="Ver qué máquinas tienen producción y qué están haciendo ahora">🏭 Máquinas en Producción <span id="badge-live-machines" style="background:rgba(255,255,255,0.25);padding:1px 8px;border-radius:999px;font-size:11px">...</span></button>';
     $body .= '<button type="button" id="btn-open-loaded-rolls-modal" class="ub-btn-primary" title="Ver bobinas cargadas en máquinas y devolver a Bodega 3000">📦 Bobinas en Máquinas <span id="badge-loaded-rolls-count" style="background:rgba(255,255,255,0.25);padding:1px 8px;border-radius:999px;font-size:11px">...</span></button>';
     if (!empty($rows)) {
         $body .= '<a class="btn-filter-excel" href="/reports/machine-production/excel?' . h($exportParams) . '">📥 Exportar Excel (' . $totalRows . ' OTs)</a>';
@@ -1560,6 +1561,125 @@ function unibagRenderMachineProductionReportPage(ReceptionService $service): voi
         })();
         </script>';
     }
+
+    // MODAL: MÁQUINAS CON PRODUCCIÓN EN ESTE MOMENTO (solo lectura)
+    $body .= <<<'HTML'
+    <div id="modal-live-machines" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,0.65);backdrop-filter:blur(4px);z-index:9999;align-items:center;justify-content:center;padding:16px;">
+        <div style="background:#fff;width:min(1200px, 98%);max-height:92vh;display:flex;flex-direction:column;border-radius:16px;box-shadow:0 25px 50px -12px rgba(0,0,0,0.3);border:1px solid #cbd5e1;overflow:hidden;">
+            <div style="background:#1d4ed8;color:#fff;padding:16px 24px;display:flex;justify-content:space-between;align-items:center;gap:12px">
+                <div style="display:flex;align-items:center;gap:12px">
+                    <span style="font-size:24px">🏭</span>
+                    <div>
+                        <div style="font-size:18px;font-weight:800">Máquinas en producción ahora</div>
+                        <div id="lm-counts" style="font-size:12px;opacity:.9">Cargando…</div>
+                    </div>
+                </div>
+                <button type="button" id="lm-close-x" style="background:rgba(255,255,255,0.15);border:none;color:#fff;width:32px;height:32px;border-radius:999px;font-size:20px;cursor:pointer;line-height:1" title="Cerrar">&times;</button>
+            </div>
+            <div style="background:#f8fafc;padding:12px 24px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                <input type="text" id="lm-search" placeholder="Filtrar por máquina, proceso, CC, producto u operador..." style="flex:1;min-width:220px;max-width:460px;padding:7px 12px;border:1px solid #cbd5e1;border-radius:8px;font-size:13px">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <span id="lm-stamp" style="font-size:12px;color:#64748b"></span>
+                    <button type="button" id="lm-refresh" style="background:#fff;border:1px solid #cbd5e1;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700;color:#334155;cursor:pointer">🔄 Actualizar</button>
+                </div>
+            </div>
+            <div style="overflow:auto;flex:1">
+                <table style="width:100%;border-collapse:collapse;font-size:12.5px;text-align:left">
+                    <thead style="position:sticky;top:0;background:#f1f5f9;border-bottom:2px solid #cbd5e1;font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;z-index:2">
+                        <tr>
+                            <th style="padding:10px 14px">Máquina</th>
+                            <th style="padding:10px 14px">Estado</th>
+                            <th style="padding:10px 14px">CC / OT</th>
+                            <th style="padding:10px 14px">Producto</th>
+                            <th style="padding:10px 14px;text-align:right">Producido / Programado</th>
+                            <th style="padding:10px 14px">Operador</th>
+                        </tr>
+                    </thead>
+                    <tbody id="lm-body"><tr><td colspan="6" style="padding:28px;text-align:center;color:#64748b">Cargando máquinas…</td></tr></tbody>
+                </table>
+            </div>
+            <div style="background:#f8fafc;padding:10px 24px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+                <div style="font-size:11.5px;color:#64748b">Máquinas con turno abierto. Estado según el registro abierto de la OT en el ERP. Se actualiza cada minuto mientras está abierta.</div>
+                <button type="button" id="lm-close" style="padding:7px 18px;border:1px solid #cbd5e1;background:#fff;color:#334155;border-radius:8px;font-size:12.5px;font-weight:700;cursor:pointer">Cerrar</button>
+            </div>
+        </div>
+    </div>
+    <script>
+    (function () {
+        var modal = document.getElementById("modal-live-machines");
+        var btn = document.getElementById("btn-open-live-machines");
+        var badge = document.getElementById("badge-live-machines");
+        var tbody = document.getElementById("lm-body");
+        var search = document.getElementById("lm-search");
+        var data = [], timer = null;
+        var STYLE = {
+            producing: ["#dcfce7", "#15803d"], setup: ["#e0f2fe", "#0369a1"], paused: ["#fef3c7", "#b45309"],
+            maintenance: ["#fee2e2", "#b91c1c"], idle: ["#f1f5f9", "#475569"], no_ot: ["#f1f5f9", "#475569"], away: ["#f1f5f9", "#64748b"]
+        };
+        function esc(t) { var d = document.createElement("div"); d.textContent = t == null ? "" : String(t); return d.innerHTML; }
+        function num(v) { return v == null ? "" : Number(v).toLocaleString("es-CL"); }
+        function hm(min) { if (min == null) return ""; var h = Math.floor(min / 60), m = min % 60; return h > 0 ? h + " h " + m + " min" : m + " min"; }
+        function hour(s) { return s ? s.substr(11, 5) : ""; }
+        function render() {
+            var q = (search.value || "").toLowerCase().trim(), html = "", shown = 0;
+            data.forEach(function (m) {
+                var hay = [m.machine_name, m.process, m.state, m.state_detail, m.cc, m.sku, m.product, m.operator].join(" ").toLowerCase();
+                if (q && hay.indexOf(q) === -1) return;
+                shown++;
+                var st = STYLE[m.state_key] || STYLE.idle;
+                var pct = m.planned > 0 ? Math.min(100, Math.round(m.produced * 100 / m.planned)) : 0;
+                html += '<tr style="border-bottom:1px solid #e2e8f0">' +
+                    '<td style="padding:10px 14px"><strong>' + esc(m.machine_name) + '</strong><div style="font-size:11px;color:#0d9488">' + esc(m.process) + '</div></td>' +
+                    '<td style="padding:10px 14px"><span style="display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;font-size:11.5px;font-weight:700;background:' + st[0] + ';color:' + st[1] + '">' +
+                        '<span style="width:7px;height:7px;border-radius:999px;background:' + st[1] + '"></span>' + esc(m.state) + '</span>' +
+                        (m.state_detail ? '<div style="font-size:11px;color:#64748b;margin-top:3px">' + esc(m.state_detail) + '</div>' : '') +
+                        (m.state_since ? '<div style="font-size:11px;color:#94a3b8">desde las ' + hour(m.state_since) + ' (' + hm(m.minutes) + ')</div>' : '') + '</td>' +
+                    '<td style="padding:10px 14px">' + (m.cc ? '<strong>' + esc(m.cc) + '</strong>' : '<span style="color:#94a3b8">-</span>') +
+                        (m.worker_ot_id ? '<div style="font-size:11px;color:#64748b">OT ' + m.worker_ot_id + '</div>' : '') + '</td>' +
+                    '<td style="padding:10px 14px">' + (m.sku ? '<strong>' + esc(m.sku) + '</strong><div style="font-size:11px;color:#64748b;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + esc(m.product) + '">' + esc(m.product) + '</div>' : '<span style="color:#94a3b8">-</span>') + '</td>' +
+                    '<td style="padding:10px 14px;text-align:right;font-variant-numeric:tabular-nums">' + (m.planned != null ? '<strong>' + num(m.produced) + '</strong> / ' + num(m.planned) +
+                        '<div style="height:5px;background:#e2e8f0;border-radius:3px;margin-top:4px;min-width:90px"><div style="height:5px;border-radius:3px;background:#1d4ed8;width:' + pct + '%"></div></div>' : '<span style="color:#94a3b8">-</span>') + '</td>' +
+                    '<td style="padding:10px 14px">' + esc(m.operator) + '<div style="font-size:11px;color:#94a3b8">turno desde ' + hour(m.shift_since) + '</div></td>' +
+                    '</tr>';
+            });
+            if (!data.length) {
+                html = '<tr><td colspan="6" style="padding:36px;text-align:center;color:#64748b"><strong>No hay máquinas con turno abierto en este momento.</strong></td></tr>';
+            } else if (!shown) {
+                html = '<tr><td colspan="6" style="padding:24px;text-align:center;color:#64748b">Ninguna máquina coincide con el filtro.</td></tr>';
+            }
+            tbody.innerHTML = html;
+        }
+        function load() {
+            fetch("/reports/machine-production/live-machines", { headers: { "Accept": "application/json" }, cache: "no-store", credentials: "same-origin" })
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    if (!d || !d.ok) throw new Error(d && d.error ? d.error : "Respuesta inválida");
+                    data = d.machines || [];
+                    var c = d.counts || {};
+                    badge.textContent = (c.producing || 0) + " / " + (c.total || 0);
+                    badge.title = (c.producing || 0) + " produciendo de " + (c.total || 0) + " con turno abierto";
+                    document.getElementById("lm-counts").textContent = (c.producing || 0) + " produciendo · " + (c.paused || 0) + " en pausa · " + (c.other || 0) + " en otro estado · " + (c.total || 0) + " con turno abierto";
+                    document.getElementById("lm-stamp").textContent = "Actualizado " + hour(d.generated_at);
+                    render();
+                })
+                .catch(function (e) {
+                    badge.textContent = "!";
+                    tbody.innerHTML = '<tr><td colspan="6" style="padding:20px;text-align:center;color:#b91c1c">No se pudo consultar: ' + esc(e.message || e) + '</td></tr>';
+                });
+        }
+        function open() { modal.style.display = "flex"; document.body.style.overflow = "hidden"; load(); timer = setInterval(load, 60000); }
+        function close() { modal.style.display = "none"; document.body.style.overflow = ""; if (timer) { clearInterval(timer); timer = null; } }
+        btn.addEventListener("click", open);
+        document.getElementById("lm-close").addEventListener("click", close);
+        document.getElementById("lm-close-x").addEventListener("click", close);
+        document.getElementById("lm-refresh").addEventListener("click", load);
+        modal.addEventListener("click", function (e) { if (e.target === modal) close(); });
+        document.addEventListener("keydown", function (e) { if (e.key === "Escape" && modal.style.display === "flex") close(); });
+        search.addEventListener("input", render);
+        load();
+    })();
+    </script>
+HTML;
 
     // MODAL Y CONTROL DE BOBINAS CARGADAS EN MÁQUINAS (Retorno a Bodega 3000)
     $csrfVal = csrfToken();

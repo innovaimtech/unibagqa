@@ -11,7 +11,8 @@ declare(strict_types=1);
  *
  * Además (solo lectura): reservado = vendido sin despachar en NV de venta (req_isfabricate = 0) de los últimos
  * SALES_MAX_AGE_DAYS días; en producción = lo que falta embalar de las CC de fabricación vivas (con movimiento en
- * PRODUCTION_IDLE_DAYS días o nuevas); proyectado = stock + en producción − reservado. Ventanas de detalle: reservedDetail() y productionDetail().
+ * PRODUCTION_IDLE_DAYS días o nuevas); planificado = lo agendado en máquinas desde el día de planificación vigente
+ * (tope: lo que falta de cada etapa); proyectado (solo para el estado) = stock + planificado − reservado. Ventanas de detalle: reservedDetail() y productionDetail().
  */
 final class ExpectedStockService
 {
@@ -282,10 +283,12 @@ final class ExpectedStockService
             $itemId = (int)($items[$code]['id'] ?? 0);
             $stockQty = (int)floor($inv + 1e-9);
             $res = $flow['reserved'][$itemId] ?? ['qty' => 0, 'orders' => 0, 'due' => 0];
-            $prod = ($flow['production'][$itemId] ?? []) + ['qty' => 0, 'orders' => 0, 'print' => 0, 'seal' => 0];
+            $prod = ($flow['production'][$itemId] ?? []) + ['qty' => 0, 'orders' => 0, 'print' => 0, 'seal' => 0, 'planned' => 0, 'planned_orders' => 0];
             $reserved = ($flowOk && $exists) ? (int)round($res['qty']) : null;
             $inProd = ($flowOk && $exists) ? (int)round($prod['qty']) : null;
-            $projected = ($reserved !== null && $inProd !== null) ? $stockQty + $inProd - $reserved : null;
+            $planned = ($flowOk && $exists) ? (int)round($prod['planned']) : null;
+            // Proyectado (solo para el estado): stock + lo planificado en máquinas − NV sin despachar.
+            $projected = ($reserved !== null && $planned !== null) ? $stockQty + $planned - $reserved : null;
             $projCalc = $projected !== null ? self::compute($m, max(0, $projected), $exists) : null;
             $rows[] = [
                 'id' => (int)$m['id'], 'code' => (string)$m['item_code'], 'description' => (string)$m['description'],
@@ -301,6 +304,7 @@ final class ExpectedStockService
                 'free' => $reserved !== null ? $stockQty - $reserved : null,
                 'in_production' => $inProd, 'production_orders' => (int)$prod['orders'],
                 'to_print' => $inProd !== null ? (int)round($prod['print']) : null, 'to_seal' => $inProd !== null ? (int)round($prod['seal']) : null,
+                'planned' => $planned, 'planned_orders' => (int)$prod['planned_orders'],
                 'projected' => $projected,
                 'projected_diff' => ($projected !== null && $calc['diff'] !== null) ? $projected - (int)$m['target_units'] : null,
                 'projected_status' => $projCalc === null ? '' : ($projected < 0 && in_array($projCalc['status'], ['OK', 'Bajo', 'Sin objetivo'], true) ? 'Crítico' : $projCalc['status']),
@@ -539,6 +543,16 @@ final class ExpectedStockService
                 WHERE pa.ag_reqid IN ($candIn) AND pa.ag_status > 0 GROUP BY pa.ag_reqid, pa.ag_equipotype_id, pa.ag_equipo_id") as $r) {
             $hasStage[(int)$r['ag_reqid']][self::stageOf((int)$r['ag_equipotype_id'], (int)$r['ag_equipo_id'])] = true;
         }
+        // Planificado en máquinas: agendas del día de planificación vigente en adelante (ver planningStart()).
+        $plannedQty = [];
+        if ($this->has('prod_agenda', 'ag_date_stamp')) {
+            foreach ($this->all($this->erp, 'SELECT pa.ag_reqid, pa.ag_equipotype_id, pa.ag_equipo_id, SUM(pa.ag_amount) AS qty FROM prod_agenda pa
+                    WHERE pa.ag_reqid IN (' . $candIn . ') AND pa.ag_status > 0 AND pa.ag_date_stamp >= ' . $this->planningStart() . '
+                    GROUP BY pa.ag_reqid, pa.ag_equipotype_id, pa.ag_equipo_id') as $r) {
+                $stage = self::stageOf((int)$r['ag_equipotype_id'], (int)$r['ag_equipo_id']);
+                $plannedQty[(int)$r['ag_reqid']][$stage] = ($plannedQty[(int)$r['ag_reqid']][$stage] ?? 0.0) + (float)$r['qty'];
+            }
+        }
         $today = strtotime(date('Y-m-d'));
         $out = [];
         foreach ($candidates as $c) {
@@ -556,9 +570,14 @@ final class ExpectedStockService
             if ($pending < 0.5) {
                 continue;
             }
+            // Lo agendado no puede superar lo que falta de cada etapa (la misma CC se vuelve a agendar día a día).
+            $plannedPrint = min($toPrint, ($plannedQty[$oid]['print'] ?? 0.0) * $share);
+            $plannedSeal = min($toSeal, ($plannedQty[$oid]['seal'] ?? 0.0) * $share);
             $last = max((int)$c['packed_last_at'], $lastProd[$oid] ?? 0);
             $reason = '';
-            if ($sealed >= self::PRODUCTION_DONE_RATIO * $ordered) {
+            if ($plannedPrint + $plannedSeal >= 0.5) {
+                $reason = ''; // si está en la agenda de una máquina, cuenta aunque lleve tiempo sin movimiento
+            } elseif ($sealed >= self::PRODUCTION_DONE_RATIO * $ordered) {
                 $reason = 'Sellado/embalado ≥ ' . (int)round(self::PRODUCTION_DONE_RATIO * 100) . ' % (saldo de merma)';
             } elseif ($last > 0 && $last < $today - self::PRODUCTION_IDLE_DAYS * 86400) {
                 $reason = 'Sin producción ni embalaje hace más de ' . self::PRODUCTION_IDLE_DAYS . ' días';
@@ -567,9 +586,32 @@ final class ExpectedStockService
             }
             $out[] = $c + ['printed' => round($printed), 'sealed' => round($sealed), 'needs_print' => $needsPrint,
                 'to_print' => round($toPrint), 'to_seal' => round($toSeal), 'pending' => round($pending),
+                'planned_print' => round($plannedPrint), 'planned_seal' => round($plannedSeal), 'planned' => round($plannedPrint) + round($plannedSeal),
                 'last_activity_at' => $last, 'alive' => $reason === '', 'excluded_reason' => $reason];
         }
         return $out;
+    }
+
+    private ?int $planningStartMemo = null;
+
+    /**
+     * Inicio del día de planificación vigente. En el ERP la agenda se arma día a día (lo pendiente se vuelve a agendar),
+     * así que cuenta lo agendado para hoy o después. Si hoy aún no se planifica (temprano o fin de semana), se toma el
+     * último día con agenda.
+     */
+    private function planningStart(): int
+    {
+        if ($this->planningStartMemo !== null) {
+            return $this->planningStartMemo;
+        }
+        $today = strtotime(date('Y-m-d'));
+        $last = 0;
+        try {
+            $last = (int)($this->all($this->erp, 'SELECT MAX(ag_date_stamp) AS m FROM prod_agenda WHERE ag_status > 0 AND ag_date_stamp < ?', [$today + 86400])[0]['m'] ?? 0);
+        } catch (Throwable) {
+            $last = 0;
+        }
+        return $this->planningStartMemo = $last > 0 ? min($today, strtotime(date('Y-m-d', $last))) : $today;
     }
 
     /** Etapa del proceso: impresión (flexo, serigrafía plana), corte y sellado, embalaje u otra. */
@@ -592,7 +634,7 @@ final class ExpectedStockService
         sort($itemIds);
         $cacheFile = null;
         if ($this->erp->getAttribute(PDO::ATTR_DRIVER_NAME) !== 'sqlite') {
-            $cacheFile = dirname(__DIR__) . '/storage/cache/expected-stock-flow-v3-' . substr(hash('sha256', implode(',', $itemIds)), 0, 16) . '.json';
+            $cacheFile = dirname(__DIR__) . '/storage/cache/expected-stock-flow-v4-' . substr(hash('sha256', implode(',', $itemIds)), 0, 16) . '.json';
             $cached = is_file($cacheFile) && filemtime($cacheFile) > time() - self::FLOW_CACHE_TTL ? json_decode((string)@file_get_contents($cacheFile), true) : null;
             if (is_array($cached) && isset($cached['reserved'], $cached['production'])) {
                 return ['reserved' => self::intKeys($cached['reserved']), 'production' => self::intKeys($cached['production'])];
@@ -615,11 +657,13 @@ final class ExpectedStockService
         $production = [];
         foreach ($this->productionLines($itemIds) as $l) {
             $iid = (int)$l['item_id'];
-            $production[$iid] ??= ['qty' => 0.0, 'orders' => 0, 'print' => 0.0, 'seal' => 0.0];
+            $production[$iid] ??= ['qty' => 0.0, 'orders' => 0, 'print' => 0.0, 'seal' => 0.0, 'planned' => 0.0, 'planned_orders' => 0];
             $production[$iid]['qty'] += (float)$l['pending'];
             $production[$iid]['print'] += (float)$l['to_print'];
             $production[$iid]['seal'] += (float)$l['to_seal'];
             $production[$iid]['orders']++;
+            $production[$iid]['planned'] += (float)$l['planned'];
+            $production[$iid]['planned_orders'] += $l['planned'] > 0 ? 1 : 0;
         }
         $data = ['reserved' => $reserved, 'production' => $production];
         if ($cacheFile !== null) {
@@ -749,7 +793,7 @@ final class ExpectedStockService
         if ($this->erp === null || $this->erp->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
             return $compute();
         }
-        return (array)ResultCache::remember('expected-stock-' . $kind . '-' . strtoupper(trim($code)), self::FLOW_CACHE_TTL, $compute);
+        return (array)ResultCache::remember('expected-stock-v2-' . $kind . '-' . strtoupper(trim($code)), self::FLOW_CACHE_TTL, $compute);
     }
 
     private function computeReservedDetail(string $code): array
@@ -854,7 +898,7 @@ final class ExpectedStockService
                 }
             }
             $agRows = $this->all($this->erp, "SELECT pa.id, pa.ag_reqid, pa.ag_prdid, pa.ag_equipo_id, pa.ag_equipotype_id, pa.ag_date, pa.ag_amount, pa.ag_status,
-                    e.equipo_name, e.equipo_type_id
+                    " . $this->col('prod_agenda', 'pa', 'ag_date_stamp') . " AS ag_date_stamp, e.equipo_name, e.equipo_type_id
                 FROM prod_agenda pa LEFT JOIN equipo e ON e.id = pa.ag_equipo_id
                 WHERE pa.ag_reqid IN ($in) AND pa.ag_status > 0 ORDER BY pa.id");
             $agIds = array_map(static fn($a) => (int)$a['id'], $agRows);
@@ -917,12 +961,13 @@ final class ExpectedStockService
                     'last_at' => (int)($produced[$agId]['last_at'] ?? 0),
                     'state' => $isOpen ? 'En curso' : ($prodQty > 0 ? 'Con producción' : 'Programada'),
                     'operator' => $woks[$agId]['operator'] ?? '',
+                    'in_plan' => (int)$a['ag_date_stamp'] >= $this->planningStart(),
                 ];
             }
         }
         $today = strtotime(date('Y-m-d'));
         $rows = [];
-        $tot = ['ordered' => 0, 'packed' => 0, 'printed' => 0, 'sealed' => 0, 'to_print' => 0, 'to_seal' => 0, 'pending' => 0, 'stock' => 0, 'orders' => 0];
+        $tot = ['ordered' => 0, 'packed' => 0, 'printed' => 0, 'sealed' => 0, 'to_print' => 0, 'to_seal' => 0, 'planned' => 0, 'pending' => 0, 'stock' => 0, 'orders' => 0];
         foreach ($lines as $l) {
             $oid = (int)$l['order_id'];
             $ag = $agendas[$oid] ?? [];
@@ -971,6 +1016,7 @@ final class ExpectedStockService
                 'ordered' => $ordered, 'packed' => $packed, 'pending' => (int)$l['pending'],
                 'printed' => (int)$l['printed'], 'sealed' => (int)$l['sealed'], 'needs_print' => (bool)$l['needs_print'],
                 'to_print' => (int)$l['to_print'], 'to_seal' => (int)$l['to_seal'],
+                'planned' => (int)$l['planned'], 'planned_print' => (int)$l['planned_print'], 'planned_seal' => (int)$l['planned_seal'],
                 'progress' => $ordered > 0 ? min(100, (int)round((int)$l['sealed'] * 100 / $ordered)) : 0,
                 'stage' => $stage, 'agendas' => $ag, 'multi_product' => (bool)$l['multi_product'],
                 'last_activity' => self::day($lastActivity),
@@ -981,7 +1027,7 @@ final class ExpectedStockService
             $tot['ordered'] += $ordered;
             $tot['packed'] += $packed;
             $tot['pending'] += (int)$l['pending'];
-            foreach (['printed', 'sealed', 'to_print', 'to_seal'] as $k) {
+            foreach (['printed', 'sealed', 'to_print', 'to_seal', 'planned'] as $k) {
                 $tot[$k] += (int)$l[$k];
             }
             $tot['stock'] += $stock[$oid]['qty'] ?? 0;

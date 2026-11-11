@@ -24,6 +24,12 @@ $ok = abs($bagBalance['diff']) < 1;
 <div style="margin:12px 20px 0;padding:12px 14px;border-radius:6px;font-size:13px;border:1px solid <?=$ok ? '#A7F3D0' : '#FCD34D'?>;background:<?=$ok ? '#ECFDF5' : '#FFFBEB'?>;color:<?=$ok ? '#065F46' : '#92400E'?>">
     <b>Bolsas usadas de las cajas:</b> <?=$fmt($bagBalance['used'])?> ·
     impresas <?=$fmt($bagBalance['printed'])?> + merma <?=$fmt($bagBalance['merma'])?> = <?=$fmt($bagBalance['needed'])?>.
+    <?php if (($bagBalance['merma_kg_convertidos'] ?? 0) > 0): ?>
+        <span style="font-weight:normal">(la merma incluye <?=number_format((float)$bagBalance['merma_kg_convertidos'], 2, ',', '.')?> kg pasados a bolsas con el peso de la bolsa)</span>
+    <?php endif; ?>
+    <?php if (($bagBalance['merma_kg_sin_convertir'] ?? 0) > 0): ?>
+        <span style="font-weight:normal">(<?=number_format((float)$bagBalance['merma_kg_sin_convertir'], 2, ',', '.')?> kg de merma no se pudieron pasar a bolsas: la CC no tiene peso de bolsa)</span>
+    <?php endif; ?>
     <?php if ($ok): ?>
         Cuadra.
     <?php else: ?>

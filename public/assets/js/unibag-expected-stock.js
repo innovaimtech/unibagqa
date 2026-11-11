@@ -33,7 +33,7 @@
       case 'prod': return r.in_production > 0;
       case 'print': return r.to_print > 0;
       case 'seal': return r.to_seal > 0;
-      case 'proj': return r.projected_status === 'Crítico' || r.projected_status === 'Bajo';
+      case 'plan': return r.planned > 0;
       default: return true;
     }
   }
@@ -59,14 +59,14 @@
   }
 
   function renderKpis() {
-    var s = { all: state.rows.length, crit: 0, low: 0, stock: 0, pal: 0, res: 0, resNv: 0, prod: 0, prodCc: 0, pr: 0, sl: 0, proj: 0 };
+    var s = { all: state.rows.length, crit: 0, low: 0, stock: 0, pal: 0, res: 0, resNv: 0, prod: 0, prodCc: 0, pr: 0, sl: 0, plan: 0, planCc: 0 };
     state.rows.forEach(function (r) {
       if (r.status === 'Crítico') { s.crit++; }
       if (r.status === 'Bajo') { s.low++; }
       s.stock += r.stock || 0; s.pal += r.pallets || 0;
       s.res += r.reserved || 0; s.resNv += r.reserved_orders || 0;
       s.prod += r.in_production || 0; s.prodCc += r.production_orders || 0; s.pr += r.to_print || 0; s.sl += r.to_seal || 0;
-      if (r.projected_status === 'Crítico' || r.projected_status === 'Bajo') { s.proj++; }
+      s.plan += r.planned || 0; s.planCc += r.planned_orders || 0;
     });
     var flow = state.flow_ok !== false;
     var cards = [
@@ -77,7 +77,7 @@
       ['res', 'k-res', flow ? n(s.res) : '—', 'Sin despachar', flow ? n(s.resNv) + ' NV de venta' : 'sin datos', 'file-invoice'],
       ['print', 'k-print', flow ? n(s.pr) : '—', 'Por imprimir', flow ? 'unidades en CC' : 'sin datos', 'print'],
       ['seal', 'k-prod', flow ? n(s.sl) : '—', 'Por cortar y sellar', flow ? 'unidades en CC' : 'sin datos', 'cut'],
-      ['proj', 'k-proj', flow ? n(s.proj) : '—', 'Proyectado bajo', 'productos', 'chart-line']
+      ['plan', 'k-proj', flow ? n(s.plan) : '—', 'Planificado', flow ? 'en máquinas · ' + n(s.planCc) + ' CC' : 'sin datos', 'calendar-check']
     ];
     $('es_kpis').innerHTML = cards.map(function (c) {
       var on = f.kpi === c[0] && c[0] !== '';
@@ -124,26 +124,23 @@
         '<td class="n" data-l="Libre">' + num(r.free, r.free < 0 ? 'es-neg' : '') + '</td>' +
         '<td class="n gs" data-l="Por imprimir">' + linkCell(r, 'production', 'to_print') + '</td>' +
         '<td class="n" data-l="Por cortar y sellar">' + linkCell(r, 'production', 'to_seal') + '</td>' +
-        '<td class="n gs es-strong" data-l="Proyectado">' + num(r.projected, r.projected < 0 ? 'es-neg' : '') + '</td>' +
-        '<td class="n" data-l="vs objetivo">' + (r.projected_diff === null || r.projected_diff === undefined ? '<span class="es-zero">—</span>'
-          : '<span class="' + (r.projected_diff < 0 ? 'es-neg' : 'es-pos') + '">' + signed(r.projected_diff) + '</span>') + '</td>' +
-        '<td class="n gs es-dim" data-l="Objetivo">' + n(r.target_units) + '</td>' +
-        '<td class="n es-dim" data-l="Mínimo">' + n(r.min_units) + '</td>' +
+        '<td class="n gs es-strong" data-l="Planificado en máquinas">' + linkCell(r, 'production', 'planned') + '</td>' +
+        '<td class="n gs es-dim" data-l="Mínimo">' + n(r.min_units) + '</td>' +
         '<td class="gs" data-l="Estado hoy">' + pill(r.status) + '</td>' +
-        '<td data-l="Estado proyectado">' + pill(r.projected_status) + '</td>' +
+        '<td data-l="Estado con planificado">' + pill(r.projected_status) + '</td>' +
         '</tr>';
       var w = r.warehouse_code || 0;
       if (!tot[w]) { tot[w] = { n: 0, s: 0, r: 0, f: 0, pr: 0, sl: 0, j: 0 }; }
-      tot[w].n++; tot[w].s += r.stock || 0; tot[w].r += r.reserved || 0; tot[w].f += r.free || 0; tot[w].pr += r.to_print || 0; tot[w].sl += r.to_seal || 0; tot[w].j += r.projected || 0;
+      tot[w].n++; tot[w].s += r.stock || 0; tot[w].r += r.reserved || 0; tot[w].f += r.free || 0; tot[w].pr += r.to_print || 0; tot[w].sl += r.to_seal || 0; tot[w].j += r.planned || 0;
     });
-    $('es_body').innerHTML = body || '<tr><td colspan="12" class="es-empty">Ningún producto coincide con los filtros.</td></tr>';
+    $('es_body').innerHTML = body || '<tr><td colspan="10" class="es-empty">Ningún producto coincide con los filtros.</td></tr>';
     $('es_count').textContent = rows.length === state.rows.length ? state.rows.length + ' productos' : 'Mostrando ' + rows.length + ' de ' + state.rows.length + ' productos';
     $('es_foot').innerHTML = Object.keys(tot).sort().reverse().map(function (w) {
       var t = tot[w];
       return '<tr class="es-foot"><td class="sticky" data-l="">' + (w === '0' ? 'Sin bodega' : 'Bodega ' + w) + ' <span class="es-sub">' + t.n + ' productos</span></td>' +
         '<td class="n gs" data-l="Stock">' + n(t.s) + '</td><td class="n gs" data-l="Sin despachar">' + n(t.r) + '</td><td class="n" data-l="Libre">' + n(t.f) + '</td>' +
-        '<td class="n gs" data-l="Por imprimir">' + n(t.pr) + '</td><td class="n" data-l="Por cortar y sellar">' + n(t.sl) + '</td><td class="n gs" data-l="Proyectado">' + n(t.j) + '</td>' +
-        '<td></td><td class="gs"></td><td></td><td class="gs"></td><td></td></tr>';
+        '<td class="n gs" data-l="Por imprimir">' + n(t.pr) + '</td><td class="n" data-l="Por cortar y sellar">' + n(t.sl) + '</td><td class="n gs" data-l="Planificado en máquinas">' + n(t.j) + '</td>' +
+        '<td class="gs"></td><td class="gs"></td><td></td></tr>';
     }).join('');
     Array.prototype.forEach.call(document.querySelectorAll('#es_table .es-cols th'), function (th) {
       var on = th.getAttribute('data-sort') === f.sort;
@@ -243,7 +240,7 @@
     if (!s) { return ''; }
     function box(label, v, cls) { return '<div><span>' + label + '</span><b class="' + (cls || '') + '">' + (v === null || v === undefined ? '—' : n(v)) + '</b></div>'; }
     return '<div class="es-sum">' + box('Stock bodega ' + (s.warehouse_code || ''), s.stock) + box('Sin despachar', s.reserved) +
-      box('Libre', s.free, s.free < 0 ? 'es-neg' : '') + box('Por imprimir', s.to_print) + box('Por cortar y sellar', s.to_seal) + box('Proyectado', s.projected, s.projected < 0 ? 'es-neg' : '') + '</div>';
+      box('Libre', s.free, s.free < 0 ? 'es-neg' : '') + box('Por imprimir', s.to_print) + box('Por cortar y sellar', s.to_seal) + box('Planificado en máquinas', s.planned) + '</div>';
   }
 
   function toolsHtml(d, count) {
@@ -282,7 +279,7 @@
         '</td><td></td><td class="n">' + n(t.stock) + '</td><td></td></tr></tfoot>';
     } else {
       html += '<thead><tr><th></th><th>CC · OT</th><th>Cliente · vendedor</th><th>Fecha NV</th><th>Entrega</th><th class="n">Pedido</th><th class="n">Impreso</th><th class="n">Sellado</th>' +
-        '<th class="n">Por imprimir</th><th class="n">Por cortar y sellar</th><th>Avance</th><th>Etapa actual</th><th class="n">Stock de la CC</th></tr></thead><tbody>';
+        '<th class="n">Por imprimir</th><th class="n">Por cortar y sellar</th><th class="n" title="En la agenda de las máquinas desde el día de planificación vigente">Planificado</th><th>Avance</th><th>Etapa actual</th><th class="n">Stock de la CC</th></tr></thead><tbody>';
       d.rows.forEach(function (r, i) {
         var search = [r.cc, r.ot, r.customer, r.seller, r.stage].join(' ').toLowerCase();
         var idle = r.idle_days !== null && r.idle_days > 30 ? '<span class="es-tag amber">sin movimiento ' + r.idle_days + ' d</span>' : '';
@@ -295,15 +292,16 @@
           '<td>' + dmy(r.created) + '</td><td>' + entrega + '</td>' +
           '<td class="n">' + n(r.ordered) + '</td><td class="n">' + (r.needs_print ? n(r.printed) : '<span class="es-tag" title="Sin máquina de impresión programada">sin impresión</span>') + '</td><td class="n">' + n(r.sealed) + '</td>' +
           '<td class="n"><b>' + (r.to_print ? n(r.to_print) : '<span class="es-zero">0</span>') + '</b></td><td class="n"><b>' + (r.to_seal ? n(r.to_seal) : '<span class="es-zero">0</span>') + '</b></td>' +
+          '<td class="n">' + (r.planned ? '<b class="es-plan">' + n(r.planned) + '</b>' : '<span class="es-tag" title="Tiene OT pero no está en la agenda de ninguna máquina para hoy en adelante">sin planificar</span>') + '</td>' +
           '<td><b>' + r.progress + '%</b><div class="es-bar-p"><i style="width:' + r.progress + '%"></i></div></td>' +
           '<td>' + esc(r.stage) + (r.last_activity ? '<span class="es-sub">última actividad ' + dmy(r.last_activity) + '</span>' : '') + idle +
           (r.multi_product ? '<span class="es-tag" title="La CC tiene varios productos: lo embalado se reparte según lo pedido de cada uno">varios productos</span>' : '') +
           (r.status === 'Despacho parcial' ? '<span class="es-tag amber">Despacho parcial</span>' : '') + '</td>' +
           '<td class="n">' + (r.stock ? n(r.stock) + '<span class="es-sub">' + esc(r.stock_places) + '</span>' : '<span class="es-zero">0</span>') + '</td></tr>' +
-          '<tr class="es-agendas" data-for="' + i + '" hidden><td colspan="13">' + agendaHtml(r) + '</td></tr>';
+          '<tr class="es-agendas" data-for="' + i + '" hidden><td colspan="14">' + agendaHtml(r) + '</td></tr>';
       });
       html += '</tbody><tfoot><tr><td></td><td colspan="4">Total ' + n(t.orders) + ' CC</td><td class="n">' + n(t.ordered) + '</td><td class="n">' + n(t.printed) + '</td><td class="n">' + n(t.sealed) +
-        '</td><td class="n">' + n(t.to_print) + '</td><td class="n">' + n(t.to_seal) + '</td><td colspan="2"></td><td class="n">' + n(t.stock) + '</td></tr></tfoot>';
+        '</td><td class="n">' + n(t.to_print) + '</td><td class="n">' + n(t.to_seal) + '</td><td class="n">' + n(t.planned) + '</td><td colspan="2"></td><td class="n">' + n(t.stock) + '</td></tr></tfoot>';
     }
     html += '</table></div>' + excludedHtml(d);
     $('es_modal_body').innerHTML = html;
@@ -356,7 +354,8 @@
     html += '<table><thead><tr><th>Proceso</th><th>Máquina</th><th>Fecha programada</th><th class="n">Programado</th><th class="n">Producido</th><th>Estado</th><th>Operador</th><th>Última producción</th></tr></thead><tbody>';
     r.agendas.forEach(function (a) {
       var tag = a.state === 'En curso' ? 'blue' : (a.state === 'Con producción' ? 'green' : '');
-      html += '<tr><td>' + esc(a.process) + '</td><td>' + esc(a.machine) + '</td><td>' + esc(a.date) + '</td>' +
+      html += '<tr' + (a.in_plan ? ' class="es-in-plan"' : '') + '><td>' + esc(a.process) + '</td><td>' + esc(a.machine) + '</td><td>' + esc(a.date) +
+        (a.in_plan ? ' <span class="es-tag plan" title="Cuenta en lo planificado">vigente</span>' : '') + '</td>' +
         '<td class="n">' + n(a.planned) + '</td><td class="n">' + n(a.produced) + ' ' + a.unit + '</td>' +
         '<td><span class="es-tag ' + tag + '">' + esc(a.state) + '</span></td><td>' + esc(a.operator) + '</td><td>' + dmy(a.last) + '</td></tr>';
     });

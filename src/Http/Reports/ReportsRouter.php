@@ -156,6 +156,27 @@ function handleErpReportRoutes(string $path, string $method, ReceptionService $s
         return true;
     }
 
+    // Máquinas con producción en este momento (estado, OT/CC, producto y operador)
+    if ($path === '/reports/machine-production/live-machines' && $method === 'GET') {
+        header('Content-Type: application/json; charset=utf-8');
+        if (!userCanAccessArea('ERP', sessionAreaPermissions())) {
+            http_response_code(403);
+            echo json_encode(['ok' => false, 'error' => 'No tiene permisos suficientes para ver las máquinas.']);
+            return true;
+        }
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+        try {
+            $snap = (new MachineLiveStatusService(Db::erpPdo()))->snapshot();
+            echo json_encode(['ok' => true] + $snap, JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['ok' => false, 'error' => 'No se pudo consultar el ERP: ' . $e->getMessage()], JSON_UNESCAPED_UNICODE);
+        }
+        return true;
+    }
+
     // Devolución directa de bobina a Bodega 3000 desde el informe de producción por máquina
     if ($path === '/reports/machine-production/return-roll' && $method === 'POST') {
         if (!userCanAccessArea('ERP', sessionAreaPermissions())) {

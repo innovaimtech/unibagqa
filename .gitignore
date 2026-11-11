@@ -1,4 +1,3 @@
-.vercel/
 vendor/
 
 # Entorno local y secretos

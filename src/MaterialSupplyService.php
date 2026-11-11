@@ -252,6 +252,10 @@ final class MaterialSupplyService
         return $ids;
     }
 
+    /**
+     * Material que se puede pedir. Solo la fila de stock GENERAL (iss_order_id = 0): es la que mueve el traspaso a la
+     * 3000 (igual que los traspasos nativos). El stock guardado por CC no se ofrece aquí.
+     */
     public function catalog(int $shopId): array
     {
         $stmt = $this->erp->prepare("SELECT i.id AS item_id, i.item_number_prod AS sku,
@@ -262,7 +266,7 @@ final class MaterialSupplyService
             FROM item_shops_storehouses iss JOIN item i ON i.id=iss.item_id
             JOIN company_shops_storehouses css ON css.id=iss.st_id AND css.st_shop_id=iss.shop_id
             LEFT JOIN item_units u ON u.id=i.item_unit
-            WHERE iss.shop_id=? AND (
+            WHERE iss.shop_id=? AND iss.iss_order_id=0 AND (
                 (iss.st_id IN (5,11) AND i.item_number_prod NOT LIKE 'TIN%')
                 OR (iss.st_id IN (7,24,28) AND i.item_number_prod LIKE 'TIN%'))
               AND (i.item_status>0 OR i.item_status IS NULL)
@@ -287,7 +291,7 @@ final class MaterialSupplyService
                 FROM item_shops_storehouses iss JOIN item i ON i.id=iss.item_id
                 JOIN company_shops_storehouses css ON css.id=iss.st_id AND css.st_shop_id=iss.shop_id
                 LEFT JOIN item_units u ON u.id=i.item_unit
-                WHERE iss.shop_id=? AND iss.st_id IN ($in)
+                WHERE iss.shop_id=? AND iss.st_id IN ($in) AND iss.iss_order_id=0
                   AND (i.item_status>0 OR i.item_status IS NULL)
                   AND iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0)>0
                 ORDER BY i.item_title, i.item_number_prod LIMIT 20000");
@@ -342,7 +346,7 @@ final class MaterialSupplyService
                     iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0) AS available_qty
                 FROM item i JOIN item_shops_storehouses iss ON iss.item_id=i.id
                 LEFT JOIN item_units u ON u.id=i.item_unit
-                WHERE i.id=? AND iss.st_id=? AND iss.shop_id=? AND (i.item_status>0 OR i.item_status IS NULL)
+                WHERE i.id=? AND iss.st_id=? AND iss.shop_id=? AND iss.iss_order_id=0 AND (i.item_status>0 OR i.item_status IS NULL)
                   AND iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0)>0", [$itemId, $source, $shopId]);
             if ($product) return $product;
             throw new RuntimeException('El producto no tiene stock disponible en la bodega 400.');
@@ -354,7 +358,7 @@ final class MaterialSupplyService
             FROM item i JOIN item_shops_storehouses iss ON iss.item_id=i.id
             JOIN company_shops_storehouses css ON css.id=iss.st_id AND css.st_shop_id=iss.shop_id
             LEFT JOIN item_units u ON u.id=i.item_unit
-            WHERE i.id=? AND iss.st_id=? AND iss.shop_id=? AND (i.item_status>0 OR i.item_status IS NULL)
+            WHERE i.id=? AND iss.st_id=? AND iss.shop_id=? AND iss.iss_order_id=0 AND (i.item_status>0 OR i.item_status IS NULL)
               AND ((iss.st_id IN (5,11) AND i.item_number_prod NOT LIKE 'TIN%')
                 OR (iss.st_id IN (7,24,28) AND i.item_number_prod LIKE 'TIN%'))
               AND iss.iss_inventory-COALESCE(iss.iss_inventory_reserved,0)>0",[$itemId,$source,$shopId]);
@@ -1331,8 +1335,10 @@ final class MaterialSupplyService
             if (!$doc) {
                 $anchors = [];
                 foreach ([(int)$r['source_storehouse_id'],16] as $st) {
+                    // Solo la fila de stock GENERAL (iss_order_id = 0), como los traspasos nativos a la 3000. Antes se leía
+                    // cualquier fila del artículo y el UPDATE pisaba también las filas por CC con el mismo saldo.
                     $stock = $this->one($this->erp,'SELECT iss_inventory,iss_inventory_reserved FROM item_shops_storehouses
-                        WHERE item_id=? AND shop_id=? AND st_id=?',[$r['item_id'],$ctx['req_shop_id'],$st]);
+                        WHERE item_id=? AND shop_id=? AND st_id=? AND iss_order_id=0',[$r['item_id'],$ctx['req_shop_id'],$st]);
                     if (!$stock && $st !== 16) throw new RuntimeException('Stock origen no existe.');
                     if ($st !== 16 && (float)$stock['iss_inventory']-(float)$stock['iss_inventory_reserved']+0.000001<$qty) {
                         throw new RuntimeException('Stock disponible insuficiente.');
@@ -1346,7 +1352,7 @@ final class MaterialSupplyService
                 $counter = (int)$company['company_numcounter_storehouse']+1;
                 $number = ($company['company_numformat_storehouse'] ?: 'TR') . sprintf('%08d',$counter);
                 $this->erp->prepare('UPDATE company_data SET company_numcounter_storehouse=? WHERE id=?')->execute([$counter,$ctx['req_company_id']]);
-                $description = 'Solicitud ' . $r['request_key'] . '. ' . $r['sku'] . ' ' . $qty .
+                $description = 'Solicitud ' . $r['request_key'] . ' (CC ' . ($ctx['req_number'] ?? '') . '). ' . $r['sku'] . ' ' . $qty .
                     '. Maquina ' . ($ctx['machine_name'] ?? ('#' . $ctx['win_equipoid'])) .
                     '. Solicitado por ' . $payload['requested_by']['name'] . '; entregado por ' . $payload['prepared_by']['name'] .
                     '. ' . $marker . ' [TRZ-SUPPLY-STOCK:' . base64_encode(json_encode($anchors,JSON_THROW_ON_ERROR)) . ']';
@@ -1357,7 +1363,8 @@ final class MaterialSupplyService
                     VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,0,0,0,?)')->execute([
                         $ctx['req_company_id'],$ctx['req_shop_id'],$ctx['req_company_id'],$ctx['req_shop_id'],
                         time(),$description,$number,$payload['prepared_by']['user_id'],time(),
-                        $ctx['order_id'],$ctx['order_id'],$ctx['req_number'],$ctx['req_number'],$ctx['req_number'],
+                        // Sin CC, igual que los traspasos nativos a la 3000: con CC el ERP lo trata como stock de esa CC.
+                        0,0,'','','',
                     ]);
                 $doc = $this->one($this->erp,'SELECT * FROM storehousechanges WHERE id=?',[(int)$this->erp->lastInsertId()]);
             }
@@ -1394,16 +1401,16 @@ final class MaterialSupplyService
                 if ((int)$doc['strc_status']!==1 || $anchor['fingerprint'] !== $this->fingerprint((int)$r['item_id'],(int)$ctx['req_shop_id'],$st)) {
                     throw new RuntimeException('Otros movimientos impiden recuperar automaticamente. Requiere conciliacion.');
                 }
-                $stock = $this->one($this->erp,'SELECT iss_inventory,iss_inventory_reserved FROM item_shops_storehouses WHERE item_id=? AND shop_id=? AND st_id=?',
+                $stock = $this->one($this->erp,'SELECT iss_inventory,iss_inventory_reserved FROM item_shops_storehouses WHERE item_id=? AND shop_id=? AND st_id=? AND iss_order_id=0',
                     [$r['item_id'],$ctx['req_shop_id'],$st]);
                 $current = (float)($stock['iss_inventory']??0);
                 if (abs($current-$anchor['before'])<0.000001) {
                     if ($st !== 16 && $current-(float)($stock['iss_inventory_reserved']??0)+0.000001<$qty) {
                         throw new RuntimeException('El stock disponible cambio por reservas; requiere conciliacion.');
                     }
-                    if ($stock) $this->erp->prepare('UPDATE item_shops_storehouses SET iss_inventory=? WHERE item_id=? AND shop_id=? AND st_id=?')
+                    if ($stock) $this->erp->prepare('UPDATE item_shops_storehouses SET iss_inventory=? WHERE item_id=? AND shop_id=? AND st_id=? AND iss_order_id=0')
                         ->execute([$anchor['after'],$r['item_id'],$ctx['req_shop_id'],$st]);
-                    else $this->erp->prepare('INSERT INTO item_shops_storehouses(item_id,shop_id,st_id,iss_inventory) VALUES (?,?,?,?)')
+                    else $this->erp->prepare('INSERT INTO item_shops_storehouses(item_id,shop_id,st_id,iss_order_amount,iss_inventory_min,iss_inventory,iss_inventory_reserved,iss_order_id) VALUES (?,?,?,0,0,?,0,0)')
                         ->execute([$r['item_id'],$ctx['req_shop_id'],$st,$anchor['after']]);
                 } elseif (abs($current-$anchor['after'])>=0.000001) throw new RuntimeException('Saldo ambiguo; requiere conciliacion.');
                 $this->erp->prepare("INSERT INTO tran_data(tran_id,tran_pos,tran_type,tran_number,tran_currstock,tran_amount,
@@ -1411,7 +1418,7 @@ final class MaterialSupplyService
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,'item',?,?,?,?,?,?)")->execute([
                         $id,$pos,$type,$doc['strc_number'],$anchor['before'],$qty,$ctx['req_company_id'],$ctx['req_shop_id'],$st,$r['item_id'],$item['item_title'],
                         (int)date('j',(int)$doc['strc_date']),(int)date('n',(int)$doc['strc_date']),(int)date('Y',(int)$doc['strc_date']),
-                        $payload['prepared_by']['user_id'],$doc['strc_crtdat'],$ctx['order_id'],
+                        $payload['prepared_by']['user_id'],$doc['strc_crtdat'],0,
                     ]);
             }
             $this->erp->prepare('UPDATE storehousechanges SET strc_status=2,strc_updusr=?,strc_upddat=? WHERE id=?')

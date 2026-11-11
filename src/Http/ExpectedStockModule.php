@@ -15,7 +15,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../ExpectedStockService.php';
 
-const EXPECTED_STOCK_ASSET_VERSION = '20261109f';
+const EXPECTED_STOCK_ASSET_VERSION = '20261110b';
 
 function expectedStockRoute(string $path): bool
 {
@@ -115,13 +115,13 @@ function expectedStockExcel(array $report): void
 {
     $cell = static fn($v): string => '<td>' . h($v === null ? '' : (string)$v) . '</td>';
     $html = '<table><tr><th>Código</th><th>Descripción</th><th>Grupo</th><th>Bodega</th><th>Stock</th><th>Pallets</th><th>Cajas</th><th>Unid. sueltas</th>'
-        . '<th>Vendido sin despachar (NV)</th><th>N° NV</th><th>Libre</th><th>Esperando impresión</th><th>Esperando corte y sellado</th><th>N° CC</th><th>Proyectado</th>'
-        . '<th>Objetivo</th><th>Mínimo</th><th>Diferencia</th><th>Diferencia proyectada</th><th>Estado</th><th>Estado proyectado</th><th>Otra bodega</th></tr>';
+        . '<th>Vendido sin despachar (NV)</th><th>N° NV</th><th>Libre</th><th>Esperando impresión</th><th>Esperando corte y sellado</th><th>N° CC</th><th>Planificado en máquinas</th>'
+        . '<th>Mínimo</th><th>Estado</th><th>Estado con planificado</th><th>Otra bodega</th></tr>';
     foreach ($report['rows'] as $r) {
         $html .= '<tr>' . $cell($r['code']) . $cell($r['description']) . $cell($r['group_label'] ?? '') . $cell($r['warehouse_code'] ?? '') . $cell((int)$r['stock'])
             . $cell($r['pallets'] ?? '') . $cell($r['boxes'] ?? '') . $cell($r['loose'] ?? '')
             . $cell($r['reserved']) . $cell($r['reserved_orders'] ?? '') . $cell($r['free']) . $cell($r['to_print'] ?? '') . $cell($r['to_seal'] ?? '') . $cell($r['production_orders'] ?? '')
-            . $cell($r['projected']) . $cell($r['target_units'] ?? '') . $cell($r['min_units'] ?? '') . $cell($r['diff'] ?? '') . $cell($r['projected_diff'] ?? '')
+            . $cell($r['planned'] ?? '') . $cell($r['min_units'] ?? '')
             . $cell($r['status']) . $cell($r['projected_status'] ?? '') . $cell((int)$r['other_stock']) . '</tr>';
     }
     SimpleXlsx::streamHtml('stock_esperado_' . date('Ymd_Hi') . '.xlsx', $html . '</table>', 'Stock esperado');
@@ -133,11 +133,11 @@ function expectedStockDetailExcel(string $type, array $detail): void
     $code = (string)($detail['item']['code'] ?? '');
     if ($type === 'production') {
         $html = '<table><tr><th>CC</th><th>OT</th><th>Cliente</th><th>Vendedor</th><th>Fecha NV</th><th>Entrega comprometida</th><th>Próxima entrega planificada</th>'
-            . '<th>Pedido</th><th>Impreso</th><th>Sellado/embalado</th><th>Esperando impresión</th><th>Esperando corte y sellado</th><th>Avance %</th><th>Etapa</th><th>Última actividad</th><th>Stock de la CC</th><th>Estado NV</th><th>Máquinas</th></tr>';
+            . '<th>Pedido</th><th>Impreso</th><th>Sellado/embalado</th><th>Esperando impresión</th><th>Esperando corte y sellado</th><th>Planificado en máquinas</th><th>Avance %</th><th>Etapa</th><th>Última actividad</th><th>Stock de la CC</th><th>Estado NV</th><th>Máquinas</th></tr>';
         foreach ($detail['rows'] as $r) {
             $machines = implode(' | ', array_map(static fn($a) => $a['process'] . ' ' . $a['machine'] . ' (' . $a['date'] . '): ' . $a['produced'] . '/' . $a['planned'] . ' ' . $a['unit'] . ' ' . $a['state'], $r['agendas']));
             $html .= '<tr>' . $cell($r['cc']) . $cell($r['ot']) . $cell($r['customer']) . $cell($r['seller']) . $cell($r['created']) . $cell($r['due']) . $cell($r['next_plan'])
-                . $cell($r['ordered']) . $cell($r['needs_print'] ? $r['printed'] : 'sin impresión') . $cell($r['sealed']) . $cell($r['to_print']) . $cell($r['to_seal']) . $cell($r['progress']) . $cell($r['stage']) . $cell($r['last_activity'])
+                . $cell($r['ordered']) . $cell($r['needs_print'] ? $r['printed'] : 'sin impresión') . $cell($r['sealed']) . $cell($r['to_print']) . $cell($r['to_seal']) . $cell($r['planned'] ?? 0) . $cell($r['progress']) . $cell($r['stage']) . $cell($r['last_activity'])
                 . $cell($r['stock']) . $cell($r['status']) . $cell($machines) . '</tr>';
         }
         $title = 'En producción ' . $code;
@@ -208,8 +208,8 @@ function expectedStockReport(ExpectedStockService $service): string
         . '<div id="es_err"></div>'
         . '<div class="es-wrap"><table class="es-table" id="es_table"><thead>'
         . '<tr class="es-groups"><th class="g-prod sticky">Producto</th><th class="g-stock gs">Bodega</th>'
-        . '<th colspan="2" class="g-res gs">Ventas</th><th colspan="2" class="g-mfg gs">En producción</th><th colspan="2" class="g-proj gs">Proyección</th>'
-        . '<th colspan="2" class="g-goal gs">Meta</th><th colspan="2" class="g-state gs">Estado</th></tr>'
+        . '<th colspan="2" class="g-res gs">Nota de ventas</th><th colspan="2" class="g-mfg gs">En producción</th><th class="g-proj gs">Planificado</th>'
+        . '<th class="g-goal gs">Meta</th><th colspan="2" class="g-state gs">Estado</th></tr>'
         . '<tr class="es-cols">'
         . '<th data-sort="code" class="sticky">Código</th>'
         . '<th data-sort="stock" class="n gs" title="Unidades en la bodega del producto (pallets y cajas debajo)">Stock</th>'
@@ -217,10 +217,9 @@ function expectedStockReport(ExpectedStockService $service): string
         . '<th data-sort="free" class="n" title="Stock − sin despachar">Libre</th>'
         . '<th data-sort="to_print" class="n gs" title="CC en curso: pedido − ya impreso en flexografía o serigrafía. Clic para ver las CC y OT.">Por imprimir</th>'
         . '<th data-sort="to_seal" class="n" title="CC en curso: impreso (o pedido si no lleva impresión) − ya sellado o embalado. Clic para ver las CC y OT.">Por cortar y sellar</th>'
-        . '<th data-sort="projected" class="n gs" title="Stock + por imprimir + por cortar y sellar − sin despachar">Proyectado</th>'
-        . '<th data-sort="projected_diff" class="n" title="Proyectado − objetivo">vs objetivo</th>'
-        . '<th data-sort="target_units" class="n gs">Objetivo</th><th data-sort="min_units" class="n">Mínimo</th>'
-        . '<th data-sort="status_rank" class="gs">Hoy</th><th data-sort="projected_rank">Proyectado</th>'
+        . '<th data-sort="planned" class="n gs" title="Unidades en la agenda de las máquinas (impresión y corte y sellado) para hoy en adelante; si hoy aún no se planifica, la del último día planificado. Clic para ver las CC y máquinas.">En máquinas</th>'
+        . '<th data-sort="min_units" class="n gs">Mínimo</th>'
+        . '<th data-sort="status_rank" class="gs">Hoy</th><th data-sort="projected_rank" title="Estado con stock + planificado − sin despachar">Con planificado</th>'
         . '</tr></thead><tbody id="es_body"></tbody><tfoot id="es_foot"></tfoot></table></div></section>'
         . '<div class="es-modal" id="es_modal" hidden><div class="es-modal-box" role="dialog" aria-modal="true" aria-labelledby="es_modal_title">'
         . '<div class="es-modal-head"><div><div class="es-modal-kicker" id="es_modal_kicker"></div><div class="es-modal-title" id="es_modal_title"></div></div>'

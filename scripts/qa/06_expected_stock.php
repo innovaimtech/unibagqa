@@ -128,7 +128,7 @@ CREATE TABLE orders_delivery_items (id INTEGER PRIMARY KEY, dlv_id INT, item_id 
 CREATE TABLE prod_header (id INTEGER PRIMARY KEY, prd_reqid INT, prd_number TEXT, prd_status INT);
 CREATE TABLE prod_amtplan (id INTEGER PRIMARY KEY, prodplan_prdid INT, prodplan_amt REAL, prodplan_date INT);
 CREATE TABLE equipo (id INTEGER PRIMARY KEY, equipo_name TEXT, equipo_type_id INT);
-CREATE TABLE prod_agenda (id INTEGER PRIMARY KEY, ag_reqid INT, ag_prdid INT, ag_equipo_id INT, ag_equipotype_id INT, ag_date TEXT, ag_amount REAL, ag_status INT);
+CREATE TABLE prod_agenda (id INTEGER PRIMARY KEY, ag_reqid INT, ag_prdid INT, ag_equipo_id INT, ag_equipotype_id INT, ag_date TEXT, ag_amount REAL, ag_status INT, ag_date_stamp INT DEFAULT 0);
 CREATE TABLE prod_worker_init (id INTEGER PRIMARY KEY, win_wrkid INT, win_status INT DEFAULT 1);
 CREATE TABLE workers (id INTEGER PRIMARY KEY, wrk_firstname TEXT, wrk_lastname TEXT);
 CREATE TABLE prod_worker_ot (id INTEGER PRIMARY KEY, wok_ag_id INT, wok_status INT, wok_init_id INT, wok_crtdat INT DEFAULT 0);
@@ -151,7 +151,10 @@ INSERT INTO orders_delivery VALUES (1,101,2,$past),(2,101,5,$now);
 INSERT INTO orders_delivery_items (dlv_id,item_id,item_amount_shipped) VALUES (1,1,300),(2,1,999);
 INSERT INTO prod_header VALUES (501,101,'001234',2);
 INSERT INTO prod_amtplan VALUES (1,501,500,$future);
-INSERT INTO prod_agenda VALUES (601,101,501,40,7,'01.11.2026',5000,1),(602,101,501,30,8,'03.11.2026',1000,1),(603,101,501,25,15,'05.11.2026',1000,1);
+-- Agenda: flexo de hace 5 días (ya no vigente), selladora y embalaje de hoy (vigentes)
+INSERT INTO prod_agenda VALUES (601,101,501,40,7,'01.11.2026',5000,1,$past),(602,101,501,30,8,'03.11.2026',1000,1,$now),(603,101,501,25,15,'05.11.2026',1000,1,$now);
+-- CC 8 agendada hace 5 días y no reagendada -> no está planificada
+INSERT INTO prod_agenda VALUES (604,108,503,30,8,'01.11.2026',400,1,$past);
 INSERT INTO prod_worker_init (id,win_wrkid,win_status) VALUES (1,9,1),(2,9,2);
 -- 704: OT que quedó abierta con el turno ya cerrado -> NO está en curso
 INSERT INTO prod_worker_ot (id,wok_ag_id,wok_status,wok_init_id,wok_crtdat) VALUES (701,601,2,1,$past),(702,602,1,1,$now),(703,603,2,1,$now),(704,601,1,2,$past);
@@ -214,7 +217,9 @@ $check('libre = stock − reservado', $b['free'] === $b['stock'] - 1350);
 $check('por imprimir y por cortar y sellar de CC vivas (excluye la CC sin movimiento y la de merma)', $b['to_print'] === 200 && $b['to_seal'] === 700
     && $b['in_production'] === 900 && $b['production_orders'] === 3);
 $check('la CC con dos productos reparte lo embalado', $by['BOL0251']['in_production'] === 50);
-$check('proyectado = stock + producción − reservado', $b['projected'] === $b['stock'] + 900 - 1350 && $b['projected_diff'] === $b['projected'] - 5000);
+// Planificado: solo la selladora de hoy de la CC 1 (1.000 agendadas, tope lo que falta sellar 550); el embalaje no suma y la CC 8 no se reagendó
+$check('planificado en máquinas = agenda vigente con tope de lo que falta', $b['planned'] === 550 && $b['planned_orders'] === 1);
+$check('proyectado (para el estado) = stock + planificado − reservado', $b['projected'] === $b['stock'] + 550 - 1350);
 $check('estado proyectado calculado', $b['projected_status'] !== '');
 $check('la fecha de entrega más próxima se informa', $b['oldest_due'] === date('Y-m-d', $past));
 
@@ -247,6 +252,18 @@ $check('detalle CC con varios productos lo marca', ($pbyCc['26-00108-1']['multi_
 $check('las CC con saldo sin movimiento se informan aparte sin contarse', count($pd['excluded']) === 2 && $pd['excluded_totals']['pending'] === 100
     && str_contains((string)(array_column($pd['excluded'], 'reason', 'cc')['25-00111-1'] ?? ''), 'Sin producción')
     && str_contains((string)(array_column($pd['excluded'], 'reason', 'cc')['26-00112-1'] ?? ''), 'merma'));
+$check('detalle CC: planificado por CC y agenda vigente marcada', ($cc1['planned'] ?? 0) === 550 && ($ags['SELLADORA 2']['in_plan'] ?? false) === true && ($ags['FLEXO III']['in_plan'] ?? true) === false
+    && ($pbyCc['26-00108-1']['planned'] ?? 1) === 0 && $pd['totals']['planned'] === 550);
+
+// Una CC sin movimiento hace 100 días pero agendada hoy sí cuenta (está en máquina).
+$erp->exec("INSERT INTO prod_agenda VALUES (605,111,504,30,8,'10.11.2026',30,1,$now)");
+$b2 = array_column((new ExpectedStockService($erp, $trz))->report()['rows'], null, 'code')['BOL0250'];
+$check('CC sin movimiento pero agendada hoy cuenta', $b2['planned'] === 580 && $b2['production_orders'] === 4);
+// Si hoy aún no se planifica (lunes temprano), cuenta la agenda del último día planificado.
+$erp->exec('UPDATE prod_agenda SET ag_date_stamp = ag_date_stamp - ' . (3 * $day));
+$b3 = array_column((new ExpectedStockService($erp, $trz))->report()['rows'], null, 'code')['BOL0250'];
+$check('sin agenda hoy: usa el último día planificado', $b3['planned'] === 580);
+
 $check('detalle de código inexistente avisa', $throws(fn() => $svc->productionDetail('NOP9999'), 'no existe'));
 
 // ---- ERP caído

@@ -25,7 +25,10 @@ CREATE TABLE prod_worker_ot (id INTEGER PRIMARY KEY, wok_ag_id INT, wok_init_id 
 CREATE TABLE prod_agenda (id INTEGER PRIMARY KEY, ag_reqid INT, ag_equipotype_id INT);
 CREATE TABLE equipo (id INTEGER PRIMARY KEY, equipo_name TEXT, equipo_type_id INT, equipo_prod_isprinter_seri INT DEFAULT 0);
 CREATE TABLE prod_worker_ot_events (id INTEGER PRIMARY KEY AUTOINCREMENT, evt_prod_worker_otid INT, evt_amount REAL, evt_crtdat INT, evt_enddat INT, evt_status INT, evt_type TEXT, evt_comments TEXT, prod_bobina_kg REAL DEFAULT 0, evt_amount_pulpo_frente REAL DEFAULT 0, evt_amount_pulpo_dorso REAL DEFAULT 0, evt_amount_metros_lineales INT DEFAULT 0);
-CREATE TABLE prod_worker_ot_defectunits (id INTEGER PRIMARY KEY AUTOINCREMENT, evt_refid INT, evt_status INT, evt_type TEXT, evt_amount REAL);
+CREATE TABLE prod_worker_ot_defectunits (id INTEGER PRIMARY KEY AUTOINCREMENT, evt_refid INT, evt_status INT, evt_type TEXT, evt_amount REAL, evt_kgstounits REAL DEFAULT 0);
+ALTER TABLE item ADD COLUMN item_weight REAL DEFAULT 0;
+ALTER TABLE orders_items ADD COLUMN fab_med_width REAL DEFAULT 0; ALTER TABLE orders_items ADD COLUMN fab_med_height REAL DEFAULT 0; ALTER TABLE orders_items ADD COLUMN fab_med_fuelle REAL DEFAULT 0;
+ALTER TABLE orders_items ADD COLUMN fab_mat_gramms REAL DEFAULT 0; ALTER TABLE orders_items ADD COLUMN fab_manilla_length REAL DEFAULT 0;
 CREATE TABLE prod_worker_embalajes (id INTEGER PRIMARY KEY, evt_prod_worker_otid INT, evt_reqid INT, req_v2refid INT, req_codigo_cierre TEXT, req_id_bodega INT, req_embalaje_cajas_completas_amt INT, req_embalaje_bolsas_por_caja_amt INT, req_embalaje_caja_final INT, req_embalaje_bolsas_sobrantes_amt INT, req_embalaje_showroom INT);
 CREATE TABLE embalaje_mixto (id INTEGER PRIMARY KEY, id_embalaje INT);
 CREATE TABLE detalle_mixto (id INTEGER PRIMARY KEY, id_mixto INT, req_number TEXT, id_item INT, total_cajas INT, bolsas_por_caja INT, bolsas_caja_final INT);
@@ -106,6 +109,19 @@ $erp->exec("INSERT INTO prod_worker_ot_events (id,evt_prod_worker_otid,evt_amoun
 $erp->exec("INSERT INTO prod_worker_ot_defectunits (evt_refid,evt_status,evt_type,evt_amount) VALUES (8001,1,'merma',3)");
 $need = $pulpo->neededForAgenda(70);
 $check('bolsas necesarias = impresas + merma', $need['needed'] === 43.0);
+// OT de frente y dorso registrada en el sistema antiguo: cada evento guarda sus pasadas también en evt_amount (857 + 1007).
+// Las bolsas usadas son las de la cara con más pasadas (1007), no la suma. Merma anotada solo en kg: 2,4 kg con bolsa de 24 g = 100 bolsas.
+$erp->exec("UPDATE item SET item_weight = 24 WHERE id = 21;
+INSERT INTO prod_agenda VALUES (71,600,11),(72,500,11);
+INSERT INTO prod_worker_ot (id,wok_ag_id,wok_init_id,wok_status) VALUES (7101,71,1,2),(7201,72,1,2);
+INSERT INTO prod_worker_ot_events (id,evt_prod_worker_otid,evt_amount,evt_status,evt_type,evt_amount_pulpo_frente,evt_amount_pulpo_dorso) VALUES
+ (8101,7101,857,1,'prod',857,0),(8102,7101,1007,1,'prod',0,1007),(8201,7201,500,1,'prod',0,0);
+INSERT INTO prod_worker_ot_defectunits (evt_refid,evt_status,evt_type,evt_amount,evt_kgstounits) VALUES (8101,1,'merma',0,2.4),(8102,1,'merma',0,0),(8201,1,'merma',0,1.5);");
+$need71 = $pulpo->neededForAgenda(71);
+$check('frente y dorso del sistema antiguo: cuenta la cara con más pasadas, no la suma', $need71['printed'] === 1007.0, json_encode($need71));
+$check('merma solo en kg se pasa a bolsas con el peso de la bolsa', $need71['merma'] === 100.0 && $need71['needed'] === 1107.0 && $need71['merma_kg_convertidos'] === 2.4);
+$need72 = $pulpo->neededForAgenda(72);
+$check('sin pasadas usa lo producido; kg sin peso de bolsa quedan avisados', $need72['printed'] === 500.0 && $need72['merma'] === 0.0 && $need72['merma_kg_sin_convertir'] === 1.5, json_encode($need72));
 $check('cerrar con 2 bolsas de más pide confirmar', str_contains($err(fn() => $pulpo->assertReadyToClose(7001, false, '', 'sup')), 'de más'));
 $check('confirmar sin motivo no basta', str_contains($err(fn() => $pulpo->assertReadyToClose(7001, true, 'corto', 'sup')), 'motivo'));
 $pulpo->assertReadyToClose(7001, true, 'dos bolsas rotas al cargar la camilla', 'sup');
