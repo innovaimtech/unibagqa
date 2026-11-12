@@ -963,31 +963,62 @@ final class PrintService
         $lang = $this->getPrintLanguage();
         $lang = $lang === 'tspl' || $lang === 'epl' ? $lang : 'zpl';
 
-        // Fuentes internas [ancho, alto] de cada carácter a escala 1 (203 dpi). EPL tiene letras más angostas que
-        // TSPL: por eso cada texto elige fuente y multiplicador para llenar SU espacio en cualquier impresora.
+        // Fuentes internas [ancho, alto, multiplicador máximo] a 203 dpi. EPL tiene letras más angostas que TSPL, por
+        // eso cada texto elige fuente y multiplicador para llenar SU espacio. La fuente 2 se amplía poco (se ve tosca)
+        // y en EPL no se usa la 5 (sus números tienen otra forma, el «1» se ve raro).
         $bitmapFonts = [
-            'tspl' => [2 => [12, 20], 3 => [16, 24], 4 => [24, 32], 5 => [32, 48]],
-            'epl' => [2 => [10, 16], 3 => [12, 20], 4 => [14, 24], 5 => [32, 48]],
+            'tspl' => [2 => [12, 20, 1], 3 => [16, 24, 6], 4 => [24, 32, 6], 5 => [32, 48, 4]],
+            'epl' => [2 => [10, 16, 2], 3 => [12, 20, 6], 4 => [14, 24, 6]],
         ];
-        /** Mayor tamaño de letra con el que $text cabe en $w de ancho y $maxH de alto: [fuente, mult, ancho, alto]. */
-        $fit = static function (string $text, int $w, int $maxH) use ($lang, $bitmapFonts): array {
-            $len = max(1, strlen($text));
-            if ($lang === 'zpl') {
-                $h = (int)max(16, min($maxH, floor($w / ($len * 0.6))));
-                return [0, 1, (int)floor($h * 0.6), $h];
+        /** Todas las letras posibles, de la más alta a la más baja: [fuente, mult, ancho, alto]. */
+        $candidates = [];
+        if ($lang === 'zpl') {
+            for ($h = 120; $h >= 16; $h -= 2) {
+                $candidates[] = [0, 1, (int)floor($h * 0.6), $h];
             }
-            $best = null;
-            foreach ($bitmapFonts[$lang] as $font => [$cw, $ch]) {
-                for ($mult = 1; $mult <= 6; $mult++) {
-                    if ($ch * $mult > $maxH || $len * $cw * $mult > $w) {
-                        continue;
-                    }
-                    if ($best === null || $ch * $mult > $best[3] || ($ch * $mult === $best[3] && $cw * $mult > $best[2])) {
-                        $best = [$font, $mult, $cw * $mult, $ch * $mult];
-                    }
+        } else {
+            foreach ($bitmapFonts[$lang] as $font => [$cw, $ch, $maxMult]) {
+                for ($mult = 1; $mult <= $maxMult; $mult++) {
+                    $candidates[] = [$font, $mult, $cw * $mult, $ch * $mult];
                 }
             }
-            return $best ?? [2, 1, $bitmapFonts[$lang][2][0], $bitmapFonts[$lang][2][1]];
+            usort($candidates, static fn($a, $b) => [$b[3], $b[2]] <=> [$a[3], $a[2]]);
+        }
+        /** Mayor tamaño de letra con el que $text cabe en $w de ancho y $maxH de alto: [fuente, mult, ancho, alto]. */
+        $fit = static function (string $text, int $w, int $maxH) use ($candidates): array {
+            $len = max(1, strlen($text));
+            foreach ($candidates as $c) {
+                if ($c[3] <= $maxH && $len * $c[2] <= $w) {
+                    return $c;
+                }
+            }
+            return $candidates[count($candidates) - 1];
+        };
+        /** Corta en líneas de $n caracteres por espacios, «/», «-» o comas; solo parte una palabra si no cabe sola. */
+        $wrap = static function (string $value, int $n): array {
+            $n = max(4, $n);
+            $lines = [];
+            $cur = '';
+            foreach (preg_split('/(?<=[ \/\-,])/', $value, -1, PREG_SPLIT_NO_EMPTY) ?: [] as $tok) {
+                while (strlen($tok) > $n) {
+                    if (trim($cur) !== '') {
+                        $lines[] = rtrim($cur);
+                        $cur = '';
+                    }
+                    $lines[] = substr($tok, 0, $n);
+                    $tok = substr($tok, $n);
+                }
+                if (strlen(rtrim($cur . $tok)) > $n) {
+                    $lines[] = rtrim($cur);
+                    $cur = ltrim($tok);
+                } else {
+                    $cur .= $tok;
+                }
+            }
+            if (trim($cur) !== '') {
+                $lines[] = rtrim($cur);
+            }
+            return $lines;
         };
         $rows = [];
         /** Escribe $value en el bloque [x, x+w] alineado L/C/R; devuelve el alto usado. */
@@ -1017,32 +1048,76 @@ final class PrintService
         };
 
         // Cabecera en una sola fila (UNIBAG CHILE a la izquierda, bodega a la derecha), código de barras y número.
-        $text(20, 10, 300, 'L', $fit('UNIBAG CHILE', 300, 34), 'UNIBAG CHILE');
+        $text(20, 8, 300, 'L', $fit('UNIBAG CHILE', 300, 40), 'UNIBAG CHILE');
         $text(330, 12, 462, 'R', $fit($wh, 462, 30), $wh);
         $barY = 54;
         $rows[] = $lang === 'tspl' ? $this->tsplBarcode($code, $barY) : ($lang === 'epl' ? $this->eplBarcode($code, $barY) : $this->zplBarcode($code, $barY));
         $text(20, $barY + self::BARCODE_HEIGHT_DOTS + 6, 772, 'C', $fit($code, 772, 52), $code);
         $line(20, 216, 772, 4);
 
-        // Columna izquierda (x 20..472): SKU lo más grande posible, descripción y referencia al pie.
+        // Columna izquierda (x 20..472): SKU grande arriba; al pie medidas (bobinas) y referencia (CC, lote, cajas);
+        // en medio la descripción con la letra MÁS GRANDE que quepa en el espacio libre, para no dejar blancos.
         $L = 20;
         $LW = 452;
         $top = 226;
         $bottom = 500;
-        $y = $top + $text($L, $top, $LW, 'L', $fit($sku, $LW, 96), $sku) + 10;
-        $small = $fit(str_repeat('M', 18), $LW, 34);
-        $perLine = max(10, intdiv($LW, $small[2]));
-        // La referencia (CC, lote, cajas) siempre cabe completa en 2 líneas: si es larga usa letra más chica.
-        $refFont = $ref !== '' ? $fit(str_repeat('M', max(12, (int)ceil(strlen($ref) / 2) + 2)), $LW, $small[3]) : $small;
-        $refLines = $ref !== '' ? array_slice(explode("\n", wordwrap($ref, max(10, intdiv($LW, $refFont[2])), "\n", true)), 0, 2) : [];
-        $refTop = $bottom - count($refLines) * ($refFont[3] + 4);
-        $descMax = max(0, intdiv($refTop - 6 - $y, $small[3] + 4));
-        $descLines = $desc !== '' ? array_slice(explode("\n", wordwrap($desc, $perLine, "\n", true)), 0, $descMax) : [];
-        foreach ($descLines as $d) {
-            $y += $text($L, $y, $LW, 'L', $small, $d) + 4;
+        $skuF = $fit($sku, $LW, 104);
+        $y = $top + $text($L, $top, $LW, 'L', $skuF, $sku) + 8;
+
+        $specParts = [];
+        if ((float)($e['width_mm'] ?? 0) > 0) {
+            $specParts[] = 'ANCHO ' . (int)round((float)$e['width_mm']) . ' MM';
         }
-        foreach ($refLines as $i => $r) {
-            $text($L, $refTop + $i * ($refFont[3] + 4), $LW, 'L', $refFont, $r);
+        if ((float)($e['microns'] ?? $e['grams'] ?? 0) > 0) {
+            $specParts[] = (int)round((float)($e['microns'] ?? $e['grams'])) . ' G';
+        }
+        if ((float)($e['meters'] ?? 0) > 0) {
+            $specParts[] = number_format((float)$e['meters'], 0, ',', '.') . ' M';
+        }
+        $foot = array_values(array_filter([implode(' - ', $specParts), $ref], static fn($v) => $v !== ''));
+        // Cada dato del pie en UNA línea si se puede (con letra algo menor); si no, se corta por « - ».
+        $longestFoot = $foot === [] ? 'M' : array_reduce($foot, static fn($a, $b) => strlen($b) > strlen($a) ? $b : $a, '');
+        $footF = $fit($longestFoot, $LW, 30);
+        if ($footF[3] < 20) {
+            $footF = $fit(str_repeat('M', 24), $LW, 30);
+        }
+        $footLines = [];
+        foreach ($foot as $part) {
+            foreach ($wrap($part, intdiv($LW, $footF[2])) as $fl) {
+                $footLines[] = $fl;
+            }
+        }
+        $footLines = array_slice($footLines, 0, 3);
+        $footTop = $bottom - count($footLines) * ($footF[3] + 5);
+
+        $area = $footTop - 8 - $y;
+        $descF = null;
+        $descLines = [];
+        if ($desc !== '' && $area > 0) {
+            foreach ($candidates as $c) {
+                if ($c[3] > 64) {
+                    continue;
+                }
+                $lines = $wrap($desc, intdiv($LW, $c[2]));
+                if (count($lines) <= 4 && count($lines) * ($c[3] + 6) - 6 <= $area) {
+                    $descF = $c;
+                    $descLines = $lines;
+                    break;
+                }
+            }
+            if ($descF === null) {
+                $descF = $candidates[count($candidates) - 1];
+                $descLines = array_slice($wrap($desc, intdiv($LW, $descF[2])), 0, max(1, intdiv($area + 6, $descF[3] + 6)));
+            }
+            // El bloque de descripción queda centrado en el espacio libre (sin un hueco grande abajo).
+            $used = count($descLines) * ($descF[3] + 6) - 6;
+            $y += max(0, intdiv($area - $used, 2));
+            foreach ($descLines as $d) {
+                $y += $text($L, $y, $LW, 'L', $descF, $d) + 6;
+            }
+        }
+        foreach ($footLines as $i => $fl) {
+            $text($L, $footTop + $i * ($footF[3] + 5), $LW, 'L', $footF, $fl);
         }
 
         // Recuadro de cantidad (x 484..792): CANTIDAD / número grande / unidad / bulto.
