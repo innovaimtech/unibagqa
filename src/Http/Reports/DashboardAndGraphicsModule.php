@@ -73,6 +73,14 @@ function unibagBuildClosingProjection(ReceptionService $service, DateTimeImmutab
         $fromStr = $start->format('Y-m-d') . ' 00:00:00';
         $toStr = $lastDay->format('Y-m-d') . ' 23:59:59';
         $units = (float)unibagDashboardCached('cys-units', $fromStr, $toStr, static fn() => $service->getCorteSelladoProducedUnits($fromStr, $toStr));
+        if ($units <= 0) {
+            // Con días hábiles ya cumplidos, 0 unidades es casi siempre una consulta fallida que quedó guardada
+            // (el 12-11 dejó la proyección en 0 por 6 horas): se vuelve a consultar y se reemplaza lo guardado.
+            $units = (float)$service->getCorteSelladoProducedUnits($fromStr, $toStr);
+            if ($units > 0) {
+                ResultCache::put('dash-cys-units-' . $fromStr . '-' . $toStr, $units);
+            }
+        }
     }
     $closed = $elapsed >= $total && $total > 0;
     $daily = $elapsed > 0 ? $units / $elapsed : 0.0;

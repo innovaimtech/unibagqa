@@ -95,10 +95,11 @@ checkMr('nombre corto sin razón social', MonthlyPresentationService::shortCusto
 
 // Ciclo en curso de la diapositiva 3 (igual al período por defecto del panel).
 $cyc = static fn(string $d) => array_map(static fn($x) => $x->format('Y-m-d H:i'), MonthlyPresentationService::currentCycle(new DateTimeImmutable($d)));
-checkMr('mes en curso: 11/11 → 01/11 a 30/11', $cyc('2026-11-11') === ['2026-11-01 00:00', '2026-11-30 23:59']);
-checkMr('mes en curso: el 26 sigue en el mismo mes; el 31 cierra diciembre', $cyc('2026-11-26') === ['2026-11-01 00:00', '2026-11-30 23:59']
-    && $cyc('2026-12-31') === ['2026-12-01 00:00', '2026-12-31 23:59']);
-checkMr('mes en curso: febrero 28 (y 29 en bisiesto)', $cyc('2027-02-10') === ['2027-02-01 00:00', '2027-02-28 23:59'] && $cyc('2028-02-10') === ['2028-02-01 00:00', '2028-02-29 23:59']);
+checkMr('ciclo de la proyección: 12/11 → 26/10 a 25/11', $cyc('2026-11-12') === ['2026-10-26 00:00', '2026-11-25 23:59']);
+checkMr('ciclo de la proyección: el 25 cierra el ciclo; el 26 abre el siguiente', $cyc('2026-11-25') === ['2026-10-26 00:00', '2026-11-25 23:59']
+    && $cyc('2026-11-26') === ['2026-11-26 00:00', '2026-12-25 23:59']);
+checkMr('ciclo de la proyección: cruce de año y febrero', $cyc('2026-12-31') === ['2026-12-26 00:00', '2027-01-25 23:59']
+    && $cyc('2027-01-10') === ['2026-12-26 00:00', '2027-01-25 23:59'] && $cyc('2027-03-01') === ['2027-02-26 00:00', '2027-03-25 23:59']);
 // Período del informe: mes calendario, del 1 al último día.
 checkMr('período: octubre 1 a 31, noviembre 1 a 30', MonthlyPresentationService::monthBounds('2026-10') === ['2026-10-01', '2026-10-31']
     && MonthlyPresentationService::monthBounds('2026-11') === ['2026-11-01', '2026-11-30']);
@@ -128,11 +129,12 @@ if (!$hasPptx) {
     }
     $data = ['month_key' => '2026-10', 'start_date' => '2026-09-26 00:00:00', 'end_date' => '2026-10-25 23:59:59', 'prod_meta' => 1000000,
         'issued_at' => '10-11-2026', 'stock_date' => '25-10-2026', 'history' => $hist, 'rolls' => $rollsData,
-        // Informe de octubre (cerrado) descargado el 11/11: la diapositiva 3 muestra el mes en curso 01/11 → 30/11.
-        'projection' => ['made' => 400000, 'queue' => 600000, 'projected' => 1000000, 'closed' => false, 'start' => '2026-11-01', 'end' => '2026-11-30',
+        // Informe de octubre (cerrado) descargado el 11/11: la diapositiva 3 muestra el ciclo en curso 26/10 → 25/11.
+        'projection' => ['made' => 400000, 'queue' => 600000, 'projected' => 1000000, 'closed' => false, 'start' => '2026-10-26', 'end' => '2026-11-25',
             'today' => '11/11/2026', 'elapsed_days' => 10, 'total_days' => 21, 'remaining_days' => 11, 'daily_avg' => 40000],
         'finished_goods' => ['total' => 1850, 'moved' => 1500, 'still' => 350, 'by_customer' => ['Walmart' => 1500, 'Tottus' => 300, 'Sin cliente' => 50], 'still_by_customer' => ['Sin cliente' => 50, 'Tottus' => 300],
             'immobilized' => ['total' => 110405, 'recall' => 104692, 'others' => 5713]],
+        'stock_today' => ['date' => '11-11-2026', 'by_customer' => ['Walmart' => 1200, 'Tottus' => 350, 'Sin cliente' => 40], 'total' => 1590],
         'delayed_orders' => [['cc_number' => '26-00001-1', 'customer_name' => 'Cliente X', 'product_type' => 'BOL0001', 'units' => 1234, 'required_date' => '01/10/2026', 'delay_days' => 3]],
         // Disponibilidad de mantención: 22 días × 8:24, colación 11:00, preventiva 8 h (Selladora I: 4 h).
         'month_closed' => true,
@@ -190,6 +192,8 @@ res['bob_pla'] = [c.text for c in bt.rows[len(bt.rows) - 1].cells]
 def texts(sl):
     return {sh.name: sh.text_frame.text for sh in sl.shapes if sh.has_text_frame and not sh.is_placeholder}
 rot = by_title('BODEGA – ROTACIÓN DE STOCK')
+cl = by_title('BODEGA – STOCK CONSOLIDADO POR CLIENTE')
+res['cli'] = [(se.name, list(se.values)) for sh in cl.shapes if getattr(sh, 'has_chart', False) and sh.has_chart for se in sh.chart.plots[0].series]
 res['rot'] = texts(rot)
 res['rot_chart'] = [list(se.values) for sh in rot.shapes if getattr(sh, 'has_chart', False) and sh.has_chart for se in sh.chart.plots[0].series]
 sinr = by_title('BODEGA – ARTÍCULOS SIN ROTACIÓN')
@@ -207,6 +211,8 @@ PY;
 " . $raw . "
 ";
         }
+        checkMr('stock por cliente: serie al cierre del mes y serie al día de descarga', ($json['cli'] ?? [])
+            === [['Al cierre del mes (25-10-2026)', [1500.0, 300.0, 50.0]], ['Al día de descarga (11-11-2026)', [1200.0, 350.0, 40.0]]], json_encode($json['cli'] ?? null, JSON_UNESCAPED_UNICODE));
         checkMr('rotación: con movimiento 1.850 (400/1000/700) y sin rotación 110.405 (bodega 5000)', ($json['rot_chart'][0] ?? []) === [1850.0, 110405.0]
             && str_contains(implode(' ', (array)($json['rot'] ?? [])), 'Stock total considerado: 112.255'), json_encode([$json['rot'] ?? null, $json['rot_chart'] ?? null], JSON_UNESCAPED_UNICODE));
         checkMr('sin rotación: Recall Tottus 104.692 (94,8%) y Otros 5.713, como la lámina 39 de septiembre', ($json['sinr_tabla'] ?? [])
@@ -241,9 +247,9 @@ PY;
         checkMr('sin estilos de línea inválidos', ($json['bad_dash'] ?? 1) === 0);
         checkMr('atrasados: 1 pedido + encabezado + total', ($json['atrasados_rows'] ?? 0) === 3);
         $proy = (array)($json['proy'] ?? []);
-        checkMr('proyección: fabricado del 1 a hoy, lo que falta y el cierre proyectado (mes en curso)', array_column($proy, 0) === ['400.000', '600.000', '1.000.000']
-            && str_contains((string)($proy[0][1] ?? ''), 'del 01/11/2026 al 11/11/2026') && str_contains((string)($proy[2][1] ?? ''), '30/11/2026'), json_encode($proy, JSON_UNESCAPED_UNICODE));
-        checkMr('proyección: tarjeta con el cierre proyectado y % ya fabricado', str_contains((string)($json['proy_txt'] ?? ''), 'unidades de cierre proyectado al 30/11/2026')
+        checkMr('proyección: fabricado del 26 a hoy, lo que falta y el cierre proyectado (ciclo 26 al 25)', array_column($proy, 0) === ['400.000', '600.000', '1.000.000']
+            && str_contains((string)($proy[0][1] ?? ''), 'del 26/10/2026 al 11/11/2026') && str_contains((string)($proy[2][1] ?? ''), '25/11/2026'), json_encode($proy, JSON_UNESCAPED_UNICODE));
+        checkMr('proyección: tarjeta con el cierre proyectado y % ya fabricado', str_contains((string)($json['proy_txt'] ?? ''), 'unidades de cierre proyectado al 25/11/2026')
             && str_contains((string)($json['proy_txt'] ?? ''), '40%'), (string)($json['proy_txt'] ?? ''));
         // Mismo informe pedido por rango de fechas: portada, encabezado y columna del período con el rango.
         $hist[9]['label'] = '01/10–31/10';

@@ -357,7 +357,7 @@ class Builder:
     def proyeccion(self, slide):
         p = self.data.get('projection') or {}
         made, queue, projected = float(p.get('made') or 0), float(p.get('queue') or 0), float(p.get('projected') or 0)
-        # Mes EN CURSO (del 1 a hoy), aunque el informe sea de un mes cerrado.
+        # Ciclo EN CURSO (del 26 a hoy, cierre el 25), aunque el informe sea de un mes cerrado.
         start = str(p.get('start') or self.data.get('start_date', ''))[:10]
         end = str(p.get('end') or self.data.get('end_date', ''))[:10]
         dmy = lambda s: f"{s[8:10]}/{s[5:7]}/{s[0:4]}" if len(s) == 10 else s
@@ -530,18 +530,44 @@ class Builder:
             ])
 
     def bod_clientes(self, slide):
+        # Dos series: stock al cierre del mes y stock al día en que se descarga el archivo (mismo orden de clientes).
+        # Si el mes aún no termina, el cierre todavía no existe y se muestra solo el stock de hoy.
         fg = self.data.get('finished_goods') or {}
         by = list((fg.get('by_customer') or {}).items())
         top = by[:13]
         rest = sum(v for _, v in by[13:])
         if rest > 0:
             top.append(('Varios', rest))
+        end_date = self.data.get('stock_date', '')
+        today = self.data.get('stock_today') or {}
+        two = bool(today.get('by_customer')) and bool(self.data.get('month_closed', True)) and today.get('date') != end_date
+        series = [(f"Al cierre del mes ({end_date})", [v for _, v in top])]
+        if two:
+            tb = today.get('by_customer') or {}
+            names = [k for k, _ in top if k != 'Varios']
+            vals = [float(tb.get(k) or 0) for k in names]
+            if rest > 0:
+                vals.append(max(0.0, float(today.get('total') or sum(tb.values())) - sum(vals)))
+            series.append((f"Al día de descarga ({today.get('date', '')})", vals))
         charts = shapes_of(slide, 'chart')
         if self.need(charts, 'stock por cliente: gráfico') and top:
             chart = charts[0].chart
-            replace_chart(chart, [k for k, _ in top], [(f"Stock al {self.data.get('stock_date', '')}", [v for _, v in top])])
+            replace_chart(chart, [k for k, _ in top], series)
+            plot = chart.plots[0]
+            for i, ser in enumerate(plot.series):
+                ser.format.fill.solid()
+                ser.format.fill.fore_color.rgb = TEAL if i == 0 else ORANGE
+            if two:
+                plot.gap_width = 60
+                plot.overlap = 0
+                chart.has_legend = True
+                chart.legend.position = XL_LEGEND_POSITION.BOTTOM
+                chart.legend.include_in_layout = False
+                chart.legend.font.size = Pt(9)
             if chart.has_title:
-                set_text(chart.chart_title, f"Stock consolidado por cliente (al {self.data.get('stock_date', '')})")
+                title = (f"Stock consolidado por cliente (cierre {end_date} y día de descarga {today.get('date', '')})" if two
+                         else f"Stock consolidado por cliente (al {end_date})")
+                set_text(chart.chart_title, title)
 
     def bod_rotacion(self, slide):
         # Como se publicó en septiembre: con movimiento = bodegas 400, 1000 y 700; sin rotación = bodega 5000
@@ -567,8 +593,8 @@ class Builder:
                 set_text(sh, f"stock sin rotación ({100 - pm:.0f}%)" if total > 0 else 'stock sin rotación')
             elif sh.name == 'Nota':
                 if imm is not None:
-                    set_text(sh, f"Stock total considerado: {fmt_int(total)} ({fmt_int(moved)} con movimiento en bodegas 400, 1000 y 700 "
-                                 f"+ {fmt_int(still)} sin rotación en bodega 5000, productos inmovilizados).")
+                    set_text(sh, f"Stock total considerado: {fmt_int(total)} ({fmt_int(moved)} con movimiento "
+                                 f"+ {fmt_int(still)} sin rotación en bodega 5000).")
                 else:
                     set_text(sh, f"Stock total (bodegas 400, 1000 y 700): {fmt_int(total)}. "
                                  f"Sin rotación = sin salidas en los últimos 90 días.")

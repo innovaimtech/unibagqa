@@ -574,6 +574,21 @@ class MonthlyPresentationService
     }
 
     /**
+     * Stock consolidado por cliente al día de hoy (día de la descarga), para compararlo con el del cierre del mes.
+     *
+     * @return array{date: string, by_customer: array<string, float>, total: float}|null null si no se pudo calcular
+     */
+    public function stockToday(): ?array
+    {
+        try {
+            $fg = $this->computeFinishedGoods(time());
+        } catch (Throwable) {
+            return null;
+        }
+        return ['date' => date('d-m-Y'), 'by_customer' => (array)($fg['by_customer'] ?? []), 'total' => (float)($fg['total'] ?? 0)];
+    }
+
+    /**
      * Bodega 5000 (productos inmovilizados) al cierre: total, recall Tottus (BOL0352) y el resto.
      * Es el «stock sin rotación» de la presentación (así se publicó en septiembre: recall 104.692 al 30-09).
      *
@@ -628,21 +643,26 @@ class MonthlyPresentationService
     }
 
     /**
-     * Mes calendario en curso que contiene `$today` (del 1 al último día del mes).
+     * Ciclo de producción en curso que contiene `$today`: del 26 del mes anterior al 25 (si hoy es 26 o después,
+     * del 26 de este mes al 25 del siguiente). Es el ciclo de la proyección de cierre (diapositiva 3), igual que el
+     * tablero del ERP; el resto del informe usa el mes calendario.
      *
      * @return array{0:DateTimeImmutable,1:DateTimeImmutable}
      */
     public static function currentCycle(DateTimeImmutable $today): array
     {
-        $start = $today->modify('first day of this month')->setTime(0, 0, 0);
-        $end = $today->modify('last day of this month')->setTime(23, 59, 59);
+        $first = $today->modify('first day of this month')->setTime(0, 0, 0);
+        $base = (int)$today->format('j') >= 26 ? $first : $first->modify('-1 month');
+        $start = $base->setDate((int)$base->format('Y'), (int)$base->format('n'), 26);
+        $endMonth = $base->modify('+1 month');
+        $end = $endMonth->setDate((int)$endMonth->format('Y'), (int)$endMonth->format('n'), 25)->setTime(23, 59, 59);
         return [$start, $end];
     }
 
     /**
-     * Proyección de cierre (diapositiva 3) del MES EN CURSO, sea cual sea el mes del informe. «Fabricado» = Corte y
-     * Sellado desde el día 1 hasta hoy; «cierre proyectado» = promedio por día hábil cumplido × días hábiles del mes
-     * (mismo cálculo que la tarjeta del panel, pero con el mes calendario).
+     * Proyección de cierre (diapositiva 3) del CICLO EN CURSO (26 al 25), sea cual sea el mes del informe.
+     * «Fabricado» = Corte y Sellado desde el 26 hasta hoy; «cierre proyectado» = promedio por día hábil cumplido
+     * × días hábiles del ciclo (mismo cálculo que la tarjeta del panel).
      *
      * @return array<string, mixed>
      */
@@ -710,6 +730,10 @@ class MonthlyPresentationService
             $cached['issued_at'] = date('d-m-Y');
             // La proyección es del ciclo en curso (cambia día a día): no se toma del caché del mes.
             $cached['projection'] = $this->closingProjection();
+            // El stock «al día de la descarga» es del día: si lo guardado es de otro día, se recalcula.
+            if (($cached['stock_today']['date'] ?? '') !== date('d-m-Y')) {
+                $cached['stock_today'] = $this->stockToday();
+            }
             return $cached;
         }
         $metrics = $this->computeMonthlyMetrics($monthKey, $range);
@@ -897,6 +921,7 @@ class MonthlyPresentationService
         }
         $currentEntry = end($history) ?: [];
         $projection = $this->closingProjection();
+        $stockToday = $this->stockToday();
         $maintenance = null;
         try {
             $maintenance = $this->computeMaintenance($monthKey, $liveStartTs, min($liveEndTs, time()) + 1);
@@ -953,6 +978,7 @@ class MonthlyPresentationService
             'procesos' => (array)($cur['procesos'] ?? []),
             'projection' => $projection,
             'finished_goods' => $finished,
+            'stock_today' => $stockToday,
             'maintenance' => $maintenance,
             'rolls' => $rolls,
             'history' => $history,

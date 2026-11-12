@@ -1736,7 +1736,7 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $slidesInfo = [
         [1, 'Portada', 'OPERACIONES · ' . strtoupper($monthLabel), 'Texto', 'badge-dynamic', 'Actualizado'],
         [2, 'Producción – resumen global', number_format($m['prod_units'], 0, ',', '.') . ' Und y gráfico producción vs. capacidad', $calc, 'badge-dynamic', 'Inyectado'],
-        [3, 'Producción – proyección de cierre', 'Mes en curso desde el ' . date('d/m', (int)strtotime((string)($proj['start'] ?? 'today'))) . ': ' . number_format((float)($proj['made'] ?? 0), 0, ',', '.') . ' Und fabricadas · cierre proyectado ' . number_format((float)($proj['projected'] ?? 0), 0, ',', '.') . ' Und', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [3, 'Producción – proyección de cierre', 'Ciclo en curso (26 al 25) desde el ' . date('d/m', (int)strtotime((string)($proj['start'] ?? 'today'))) . ': ' . number_format((float)($proj['made'] ?? 0), 0, ',', '.') . ' Und fabricadas · cierre proyectado ' . number_format((float)($proj['projected'] ?? 0), 0, ',', '.') . ' Und', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
         [4, 'Nivel de servicio [unidades]', number_format($m['sl_total_units'], 0, ',', '.') . ' Und, ' . number_format($m['sl_percent_units'], 1, ',', '.') . '%', $calc, 'badge-dynamic', 'Inyectado'],
         [5, 'Nivel de servicio [C.C.]', $m['sl_total_cc'] . ' pedidos, ' . $m['sl_delayed_cc'] . ' atrasados', $calc, 'badge-dynamic', 'Inyectado'],
         [6, 'Pedidos atrasados', 'Hasta 10 pedidos con mayor atraso', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
