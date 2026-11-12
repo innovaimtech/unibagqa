@@ -885,6 +885,60 @@ def mantencion(b, slide, group):
         else:
             second = 'Sin registros'
         set_lines(sh, [first, second])
+    # Explicación de las máquinas con utilización baja, en el espacio libre entre la tabla y la nota.
+    lines = low_utilization_lines(rows, int(m.get('days') or 0))
+    if lines and note is not None:
+        texts = ['Utilización bajo 50%, según los registros del ERP:'] + lines
+        line_emu = lambda pt: int(pt * 1.2 * 12700)  # alto de una línea de texto
+        free = lambda: note.top - (tables[0].top + sum(int(tr.get('h') or 0) for tr in t._tbl.tr_lst)) - Emu(64008)
+        # Si no cabe a 8 pt, se achican las filas de datos de la tabla (el encabezado queda igual), hasta 0,26".
+        min_row = 237744
+        if free() < line_emu(8) * len(texts):
+            for tr in t._tbl.tr_lst[1:]:
+                tr.set('h', str(min(int(tr.get('h') or min_row), min_row)))
+        height = free()
+        size = next((pt for pt in (10, 9, 8, 7) if line_emu(pt) * len(texts) <= height), 7)
+        top = tables[0].top + sum(int(tr.get('h') or 0) for tr in t._tbl.tr_lst) + Emu(36576)
+        box = slide.shapes.add_textbox(tables[0].left, top, tables[0].width, max(height, line_emu(size) * len(texts)))
+        box.name = 'Explicación utilización baja'
+        tf = box.text_frame
+        tf.word_wrap = True
+        tf.margin_left = tf.margin_right = Emu(45720)
+        tf.margin_top = tf.margin_bottom = Emu(0)
+        for k, text in enumerate(texts):
+            p = tf.paragraphs[0] if k == 0 else tf.add_paragraph()
+            run = p.add_run()
+            run.text = text if k == 0 else '• ' + text
+            run.font.size = Pt(size)
+            run.font.bold = k == 0
+            run.font.color.rgb = RGBColor(0xC0, 0x50, 0x4D) if k == 0 else TEXT
+
+
+def low_utilization_lines(rows, days):
+    """Una línea por máquina con utilización bajo 50%: en qué se fue el tiempo disponible (datos del ERP)."""
+    out = []
+    for r in rows:
+        act = r.get('activity')
+        util = float(r.get('utilization') or 0)
+        if act is None or util >= 50:
+            continue
+        avail = float(r.get('available') or 0) or 1.0
+        reasons = []
+        if days and int(act.get('prod_days') or 0) == 0:
+            reasons.append('no tuvo producción en el período')
+        elif days and int(act.get('prod_days') or 0) < days * 0.75:
+            reasons.append(f"produjo solo {int(act['prod_days'])} de {days} días")
+        if float(act.get('no_record') or 0) >= avail * 0.15:
+            reasons.append(f"{fmt_hm(act['no_record'])} h sin registros de actividad (sin programar)")
+        if float(act.get('setup') or 0) >= avail * 0.15:
+            reasons.append(f"{fmt_hm(act['setup'])} h en apertura de OT sin producción")
+        if float(act.get('pause') or 0) >= avail * 0.15:
+            top = act.get('pause_top') or ''
+            reasons.append(f"{fmt_hm(act['pause'])} h en pausas" + (f" (principalmente «{top.rstrip('.')}»)" if top else ''))
+        if not reasons:
+            reasons.append(f"{fmt_hm(r.get('production', 0))} h en producción de {fmt_hm(avail)} h disponibles")
+        out.append(f"{machine_label(r['name'])} ({util:.0f}%): " + '; '.join(reasons) + '.')
+    return out
 
 
 def main():

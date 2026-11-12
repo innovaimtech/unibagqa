@@ -291,6 +291,87 @@ final class MaintenanceBonusService
         return array_map([self::class,'unionSeconds'],$intervals);
     }
 
+    /**
+     * En qué se fue el tiempo de cada máquina en el período (para explicar una utilización baja), sin contar dos veces
+     * los registros que se pisan: producción; apertura de OT que no se cruza con producción; pausas que no se cruzan con
+     * lo anterior (y su motivo principal); tiempo registrado total y días distintos con producción.
+     *
+     * @return array<int, array{prod_days:int, setup:int, pause:int, pause_top:string, recorded:int}>
+     */
+    public function activityBreakdown(array $period): array
+    {
+        $stmt=$this->erp->prepare("SELECT wi.win_equipoid AS machine_id,ev.evt_type AS type,ev.evt_crtdat AS start_ts,
+                ev.evt_enddat AS end_ts,COALESCE(pt.pause_name,'') AS pause_name
+            FROM prod_worker_ot_events ev
+            INNER JOIN prod_worker_ot ot ON ot.id=ev.evt_prod_worker_otid
+            INNER JOIN prod_worker_init wi ON wi.id=ot.wok_init_id
+            LEFT JOIN prod_pause_types pt ON pt.id=ev.evt_pause_id
+            WHERE ev.evt_status>0 AND ot.wok_status>0
+                AND ev.evt_crtdat>=? AND ev.evt_crtdat<? AND ev.evt_enddat>ev.evt_crtdat");
+        $stmt->execute([$period['start'],$period['end']]);
+        $byMachine=[];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $type=(string)$row['type'];
+            $kind=in_array($type,['prod','prodsericolor'],true) ? 'prod' : ($type==='apertura' ? 'setup' : ($type==='pause' ? 'pause' : 'other'));
+            $interval=[(int)$row['start_ts'],min((int)$row['end_ts'],$period['end'])];
+            $byMachine[(int)$row['machine_id']][$kind][]=$interval;
+            if ($kind==='pause') {
+                $byMachine[(int)$row['machine_id']]['pause_by'][(string)$row['pause_name']][]=$interval;
+            }
+        }
+        $out=[];
+        foreach ($byMachine as $id=>$k) {
+            $prod=self::mergeIntervals($k['prod']??[]);
+            $setup=self::subtractIntervals(self::mergeIntervals($k['setup']??[]),$prod);
+            $busy=self::mergeIntervals(array_merge($prod,$setup));
+            $pause=self::subtractIntervals(self::mergeIntervals($k['pause']??[]),$busy);
+            $all=self::mergeIntervals(array_merge($k['prod']??[],$k['setup']??[],$k['pause']??[],$k['other']??[]));
+            $top='';$topSecs=0;
+            foreach (($k['pause_by']??[]) as $name=>$list) {
+                $secs=self::unionSeconds(self::subtractIntervals(self::mergeIntervals($list),$busy));
+                if ($secs>$topSecs) { $top=$name; $topSecs=$secs; }
+            }
+            $days=[];
+            $zone=new DateTimeZone('America/Santiago');
+            foreach ($prod as [$a]) $days[(new DateTimeImmutable('@'.$a))->setTimezone($zone)->format('Y-m-d')]=true;
+            $out[$id]=['prod_days'=>count($days),'setup'=>self::unionSeconds($setup),'pause'=>self::unionSeconds($pause),
+                'pause_top'=>$top,'recorded'=>self::unionSeconds($all)];
+        }
+        return $out;
+    }
+
+    /** @param list<array{0:int,1:int}> $intervals */
+    private static function mergeIntervals(array $intervals): array
+    {
+        usort($intervals,static fn($a,$b)=>$a[0]<=>$b[0]);
+        $out=[];
+        foreach ($intervals as [$a,$b]) {
+            if ($out && $a<=$out[count($out)-1][1]) $out[count($out)-1][1]=max($out[count($out)-1][1],$b);
+            else $out[]=[$a,$b];
+        }
+        return $out;
+    }
+
+    /** Partes de $a que no se cruzan con $b (ambas listas ya unidas). */
+    private static function subtractIntervals(array $a, array $b): array
+    {
+        $out=[];
+        foreach ($a as [$s,$e]) {
+            $pieces=[[$s,$e]];
+            foreach ($b as [$bs,$be]) {
+                $next=[];
+                foreach ($pieces as [$ps,$pe]) {
+                    if ($be<=$ps || $bs>=$pe) { $next[]=[$ps,$pe]; continue; }
+                    if ($bs>$ps) $next[]=[$ps,$bs];
+                    if ($be<$pe) $next[]=[$be,$pe];
+                }
+                $pieces=$next;
+            }
+            array_push($out,...$pieces);
+        }
+        return $out;
+    }
+
     private function productionEvidence(array $period): array
     {
         $stmt=$this->erp->prepare("SELECT DISTINCT wi.win_equipoid

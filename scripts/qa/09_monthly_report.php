@@ -143,12 +143,14 @@ if (!$hasPptx) {
             'inactive' => ['flexo' => ['FLEXO I'], 'seri' => ['SERI I', 'SERI III'], 'sellado' => ['SELLADORA III']],
             'groups' => [
                 'flexo' => [['name' => 'FLEXO II', 'total' => 665280, 'available' => 596880, 'preventive' => 28800, 'breakdown' => 2901, 'setup' => 291875,
-                    'external' => 12885, 'gross' => 289219, 'maintenance' => 593979, 'real' => 99.51, 'target' => 95, 'meets' => true, 'production' => 272792, 'utilization' => 45.7]],
+                    'external' => 12885, 'gross' => 289219, 'maintenance' => 593979, 'real' => 99.51, 'target' => 95, 'meets' => true, 'production' => 272792, 'utilization' => 45.7,
+                    'activity' => ['prod_days' => 16, 'setup' => 168218, 'pause' => 1525, 'pause_top' => 'Colación', 'recorded' => 450130, 'no_record' => 146750]]],
                 'seri' => [['name' => 'SERI II', 'total' => 665280, 'available' => 596880, 'preventive' => 28800, 'breakdown' => 0, 'setup' => 288628,
                     'external' => 12480, 'gross' => 295772, 'maintenance' => 596880, 'real' => 100.0, 'target' => 95, 'meets' => true, 'production' => 246725, 'utilization' => 41.3]],
                 'sellado' => [
                     ['name' => 'SELLADORA I', 'total' => 665280, 'available' => 611280, 'preventive' => 14400, 'breakdown' => 10771, 'setup' => 46354,
-                        'external' => 0, 'gross' => 554155, 'maintenance' => 600509, 'real' => 98.24, 'target' => 85, 'meets' => true, 'production' => 488944, 'utilization' => 80.0],
+                        'external' => 0, 'gross' => 554155, 'maintenance' => 600509, 'real' => 98.24, 'target' => 85, 'meets' => true, 'production' => 488944, 'utilization' => 80.0,
+                        'activity' => ['prod_days' => 9, 'setup' => 80937, 'pause' => 0, 'pause_top' => '', 'recorded' => 228277, 'no_record' => 383003]],
                     ['name' => 'SELLADORA II', 'total' => 665280, 'available' => 596880, 'preventive' => 28800, 'breakdown' => 40000, 'setup' => 13598,
                         'external' => 4880, 'gross' => 538402, 'maintenance' => 556880, 'real' => 93.3, 'target' => 95, 'meets' => false, 'production' => 589877, 'utilization' => 98.8]]]]];
     $tmp = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'qa_monthly_' . uniqid();
@@ -182,7 +184,8 @@ def mant(i):
     t = [sh for sh in sl.shapes if sh.has_table][0].table
     boxes = {sh.name: [pa.text for pa in sh.text_frame.paragraphs] for sh in sl.shapes if sh.has_text_frame and sh.name.startswith('Utiliz')}
     nota = [sh.text_frame.text for sh in sl.shapes if sh.has_text_frame and sh.name.startswith('Nota')]
-    return {'rows': [[c.text for c in r.cells] for r in t.rows], 'boxes': boxes, 'nota': nota}
+    expl = [sh.text_frame.text for sh in sl.shapes if sh.has_text_frame and sh.name == 'Explicación utilización baja']
+    return {'rows': [[c.text for c in r.cells] for r in t.rows], 'boxes': boxes, 'nota': nota, 'expl': expl}
 def by_title(start):
     return next(sl for sl in p.slides if any(sh.is_placeholder and sh.has_text_frame and sh.text_frame.text.strip().startswith(start) for sh in sl.shapes))
 bt = [sh for sh in by_title('BODEGA – BOBINAS PLANTA').shapes if sh.has_table][0].table
@@ -240,6 +243,11 @@ PY;
         checkMr('sellado: 2 máquinas, no cumple, y preventiva de 4 h de Selladora I en la nota', count($mse['rows'] ?? []) === 3
             && ($mse['rows'][2][8] ?? '') === '93,30%' && str_contains(implode(' ', (array)($mse['nota'] ?? [])), 'Selladora I: mantención preventiva de 4:00 h.'),
             json_encode($mse, JSON_UNESCAPED_UNICODE));
+        $expl = implode(' ', (array)($mf['expl'] ?? []));
+        checkMr('flexo: explica la utilización bajo 50% (días con producción, horas sin registros y apertura de OT)',
+            str_contains($expl, 'Utilización bajo 50%') && str_contains($expl, 'Flexo II (46%): produjo solo 16 de 22 días;')
+            && str_contains($expl, 'h sin registros de actividad (sin programar)') && str_contains($expl, 'h en apertura de OT sin producción.'), $expl);
+        checkMr('sellado: sin explicación cuando ninguna máquina queda bajo 50% (Selladora I con 80%)', ($mse['expl'] ?? null) === [], json_encode($mse['expl'] ?? null, JSON_UNESCAPED_UNICODE));
         checkMr('bobinas PP y PLA en bolsas proyectadas (oct-26: 741.255 / 2.196.811)', ($json['bob'] ?? []) === ['Mes', 'Stock PP', 'Stock PLA', 'Total', 'oct-26', '741.255', '2.196.811', '2.938.066'], json_encode($json['bob'] ?? null, JSON_UNESCAPED_UNICODE));
         checkMr('bobinas PLA beige y blanco en bolsas proyectadas', ($json['bob_pla'] ?? []) === ['oct-26', '52.241', '1.757.326', '1.809.567'], json_encode($json['bob_pla'] ?? null, JSON_UNESCAPED_UNICODE));
         checkMr('portada con el mes', str_contains((string)($json['portada'] ?? ''), 'OCTUBRE 2026'));

@@ -35,6 +35,12 @@ class MonthlyPresentationService
         $period = ['start' => $start, 'end' => $endExclusive];
         $report = $service->report($monthKey, $period);
         $production = $service->productionSeconds($period);
+        // Detalle para explicar una utilización baja (si falla, el informe sale igual, sin la explicación).
+        try {
+            $activity = $service->activityBreakdown($period);
+        } catch (Throwable) {
+            $activity = [];
+        }
         $groups = ['flexo' => [], 'seri' => [], 'sellado' => []];
         $inactive = ['flexo' => [], 'seri' => [], 'sellado' => []];
         $preventive = [];
@@ -58,6 +64,8 @@ class MonthlyPresentationService
                 'real' => $row['real'] === null ? null : (float)$row['real'], 'target' => (float)$row['target'],
                 'meets' => $row['real'] !== null && (float)$row['real'] >= (float)$row['target'],
                 'production' => $prod, 'utilization' => $available > 0 ? min(100.0, $prod / $available * 100) : 0.0,
+                'activity' => isset($activity[(int)$row['id']]) ? $activity[(int)$row['id']]
+                    + ['no_record' => max(0.0, $available - (float)$activity[(int)$row['id']]['recorded'])] : null,
             ];
             $preventive[(string)round((float)$row['preventive'] / 3600, 2)][] = $name;
         }
