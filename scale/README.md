@@ -21,7 +21,7 @@ powershell -ExecutionPolicy Bypass -File .\scale\scale_bridge.ps1 -Mode stub
 ```
 
 ## Ejecutar (modo serial)
-Ejemplo (ajustar COM y parámetros):
+Ejemplo (ajustar COM y parÃ¡metros):
 
 ```powershell
 cd "c:\Users\Axiliarmu\Desktop\unibag proyecto"
@@ -43,9 +43,10 @@ SCALE_HTTP_URL=http://localhost:8765/weight
 ```
 
 
-## Puerto automático (`-ComPort AUTO`, el que usa `iniciar_proyecto.bat`)
+## Puerto automÃ¡tico (`-ComPort AUTO`, el que usa `iniciar_proyecto.bat`)
 - Prueba cada puerto COM de **este** computador (primero los adaptadores USB-serie CH340/Prolific/FTDI/CP210; omite Bluetooth)
-  y se queda con el que envía una trama de peso válida. Antes abría siempre el primero (normalmente COM1) y no probaba los demás.
-- Si el cable se desconecta, o el puerto pasa 10 lecturas sin datos, vuelve a buscar (como máximo cada 5 s).
-- Diagnóstico: `http://localhost:8765/ports` (puertos con su nombre de Windows, puerto activo y resultado de la última búsqueda).
-- Un puerto COM lo puede usar un solo programa a la vez: si la balanza está vinculada en el navegador (Web Serial), el puente no puede abrirla, y al revés.
+  y se queda con el que envÃ­a una trama de peso vÃ¡lida. Antes abrÃ­a siempre el primero (normalmente COM1) y no probaba los demÃ¡s.
+- Si el cable se desconecta, o el puerto pasa 10 lecturas sin datos, vuelve a buscar (como mÃ¡ximo cada 5 s).
+- DiagnÃ³stico: `http://localhost:8765/ports` (puertos con su nombre de Windows, puerto activo y resultado de la Ãºltima bÃºsqueda).
+- Un puerto COM lo puede usar un solo programa a la vez: si la balanza estÃ¡ vinculada en el navegador (Web Serial), el puente no puede abrirla, y al revÃ©s.
+

@@ -175,10 +175,15 @@ function Find-ScalePort() {
       $tried += ("{0} (no se pudo abrir: {1})" -f $c.port, $_.Exception.Message)
       continue
     }
+    # Solo se ESCUCHA (sin enviar comandos): mandar «R» a un puerto que no es la balanza, por ejemplo el de una
+    # impresora por COM, puede imprimir basura. La balanza en envío continuo (C18=4) transmite sola.
     $found = $false
     for ($i = 0; $i -lt 3 -and -not $found; $i++) {
       $raw = ''
-      try { $raw = Read-SerialRaw 250 } catch { break }
+      try {
+        if ($script:serialType -eq 'win32') { $raw = $script:serial.ReadBlock(350) }
+        else { Start-Sleep -Milliseconds 350; if ($script:serial.BytesToRead -gt 0) { $raw = $script:serial.ReadExisting() } }
+      } catch { break }
       if ($null -ne (Parse-WeightKg $raw)) { $found = $true }
     }
     if ($found) {
@@ -300,8 +305,8 @@ function Ensure-SerialOpen() {
   if ($script:serial -ne $null -and $script:serial.IsOpen) { return $true }
 
   if ($script:autoMode) {
-    # Buscar de nuevo como máximo cada 5 s (probar todos los puertos tarda ~1 s por puerto).
-    if (([DateTime]::UtcNow - $script:lastScanAt).TotalSeconds -lt 5) {
+    # Buscar de nuevo como máximo cada 60 s (no ocupar seguido los puertos de otros equipos, como una impresora COM) (probar todos los puertos tarda ~1 s por puerto).
+    if (([DateTime]::UtcNow - $script:lastScanAt).TotalSeconds -lt 60) {
       throw ("Balanza no encontrada. " + $script:lastScanReport)
     }
     $script:lastScanAt = [DateTime]::UtcNow

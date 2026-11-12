@@ -73,7 +73,7 @@ $check('sin cookie: lenguaje del servidor', (new PrintService(['PRINT_LANGUAGE' 
 $hw = (string)file_get_contents($root . '/public/assets/js/unibag-hardware.js');
 $check('navegador: guarda el tipo de impresora de esta PC en la cookie', str_contains($hw, 'function syncClientPrinterLanguageCookie()') && str_contains($hw, 'unibag_print_lang='));
 $check('COM: el lote se envía en tramos (no se corta en lotes grandes)', str_contains($hw, 'bytes.subarray(off, Math.min(bytes.length, off + CHUNK))'));
-$check('impresora USB/COM de esta PC: si falla no se desvía a otra impresora', str_contains($hw, '(preferred === "webserial" || preferred === "webusb") && result && !result.ok'));
+$check('COM/USB de esta PC no disponible: se imprime por el servicio Windows de la misma PC', str_contains($hw, 'var ownLinkError') && str_contains($hw, 'await probeLocalPrintBridge(true);'));
 
 echo $fail === 0 ? "\nETIQUETA DE INGRESO OK\n" : "\nETIQUETA DE INGRESO: $fail fallas\n";
 exit($fail > 0 ? 1 : 0);

@@ -1391,6 +1391,9 @@
     } catch (err) {
       if (err && err.name !== "NotFoundError") {
         showToast("⚠️ " + (err.message || "No se pudo seleccionar el puerto COM de la impresora."), "err", 5500);
+      } else {
+        // Lista vacía o cerrada sin elegir: Windows no muestra ningún puerto COM en este computador.
+        showToast("⚠️ No se eligió ningún puerto COM. Si la lista sale vacía, Windows no ve la impresora por COM: revisa el cable USB, que aparezca en Administrador de dispositivos → Puertos (COM y LPT) y el driver (CH340/Prolific). Mientras tanto se imprime por el servicio de Windows de esta PC si la impresora está instalada ahí.", "err", 9000);
       }
       return false;
     } finally {
@@ -1550,20 +1553,17 @@
       if (result.ambiguous) return stopAmbiguous(result);
     }
 
-    // En esta PC se vinculó una impresora USB o COM: si falla NO se desvía a otra impresora (la etiqueta saldría
-    // en un equipo distinto). Se informa el error para revisar la impresora de este computador.
-    if ((preferred === "webserial" || preferred === "webusb") && result && !result.ok) {
-      var ownErr = (preferred === "webserial" ? "Impresora COM de esta PC: " : "Impresora USB de esta PC: ") + (result.error || "no respondió.");
-      printerState.lastError = ownErr;
-      updatePagePrintBanner(false, ownErr);
-      if (!opts.silentFallback) {
-        showInteractivePrintFallbackToast(job, opts.fallbackUrl || "", ownErr);
-      }
-      return { ok: false, error: ownErr };
-    }
+    // Si la impresora USB/COM vinculada no está disponible se sigue con el servicio local de Windows de ESTA PC
+    // (print_bridge.ps1 solo usa impresoras conectadas a este computador, nunca las compartidas de otro).
+    var ownLinkError = (preferred === "webserial" || preferred === "webusb") && result && !result.ok
+      ? (preferred === "webserial" ? "Impresora COM de esta PC: " : "Impresora USB de esta PC: ") + (result.error || "no respondió.")
+      : "";
 
     // 2. Servicio local de Windows (127.0.0.1:8767): ya no se exige. Solo se usa en una PC donde ya está funcionando;
     //    si no, se imprime por la impresora USB o COM vinculada en el navegador.
+    if (printerState.bridgeOnline !== true && preferred !== "bridge") {
+      await probeLocalPrintBridge(true);
+    }
     if (printerState.bridgeOnline === true || preferred === "bridge") {
       var bridgeRes = await printViaLocalBridge(job);
       if (bridgeRes.ok) {
@@ -1597,7 +1597,7 @@
     }
 
     // 5. Ningún transporte local pudo emitir aún: actualizar banner si existe y mostrar aviso interactivo limpio
-    var errDetail = bridgeErrorMsg || (result && result.error) || printerState.lastError ||
+    var errDetail = (ownLinkError && bridgeErrorMsg ? ownLinkError + " · Servicio Windows: " + bridgeErrorMsg : "") || ownLinkError || bridgeErrorMsg || (result && result.error) || printerState.lastError ||
       "No hay impresora vinculada en esta PC. Abre Hardware y pulsa «Vincular USB Directo» o «Impresora Serial (COM)».";
     updatePagePrintBanner(false, errDetail);
     if (!opts.silentFallback) {
