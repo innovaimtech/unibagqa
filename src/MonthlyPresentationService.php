@@ -6,11 +6,69 @@ class MonthlyPresentationService
 {
     private ReceptionService $receptionService;
     private PDO $erpPdo;
+    /** @var (Closure(): MaintenanceBonusService)|null Crea el cálculo de disponibilidad (necesita la TRZ); solo al usarlo. */
+    private ?Closure $maintenanceFactory;
 
-    public function __construct(ReceptionService $receptionService, PDO $erpPdo)
+    public function __construct(ReceptionService $receptionService, PDO $erpPdo, ?Closure $maintenanceFactory = null)
     {
         $this->receptionService = $receptionService;
         $this->erpPdo = $erpPdo;
+        $this->maintenanceFactory = $maintenanceFactory;
+    }
+
+    /** Tipo de máquina del ERP → lámina de disponibilidad de mantención. */
+    private const MAINTENANCE_GROUPS = [7 => 'flexo', 11 => 'seri', 8 => 'sellado'];
+
+    /**
+     * Disponibilidad de mantención del período del informe (mismo cálculo del bono de mantención):
+     * disponible = jornada − colación − preventiva; % real = (disponible − averías) ÷ disponible;
+     * utilización = tiempo en producción ÷ tiempo disponible. Las máquinas sin registros van aparte («sin programación»).
+     *
+     * @param int $endExclusive fin del período (exclusivo)
+     */
+    public function computeMaintenance(string $monthKey, int $start, int $endExclusive): array
+    {
+        if ($this->maintenanceFactory === null) {
+            throw new RuntimeException('cálculo de mantención no disponible');
+        }
+        $service = ($this->maintenanceFactory)();
+        $period = ['start' => $start, 'end' => $endExclusive];
+        $report = $service->report($monthKey, $period);
+        $production = $service->productionSeconds($period);
+        $groups = ['flexo' => [], 'seri' => [], 'sellado' => []];
+        $inactive = ['flexo' => [], 'seri' => [], 'sellado' => []];
+        $preventive = [];
+        foreach ($report['rows'] as $row) {
+            $group = self::MAINTENANCE_GROUPS[(int)$row['type_id']] ?? null;
+            if ($group === null || str_contains(strtoupper((string)$row['name']), 'PULPO')) {
+                continue;
+            }
+            $name = rtrim(trim((string)$row['name']), '.');
+            if (in_array('Sin registros de actividad', (array)$row['warnings'], true)) {
+                $inactive[$group][] = $name;
+                continue;
+            }
+            $available = (float)$row['available'];
+            $prod = (float)($production[(int)$row['id']] ?? 0);
+            $groups[$group][] = [
+                'name' => $name,
+                'total' => (float)$row['total'], 'available' => $available, 'preventive' => (float)$row['preventive'],
+                'breakdown' => (float)$row['breakdown'], 'setup' => (float)$row['setup'], 'external' => (float)$row['external'],
+                'gross' => (float)$row['gross'], 'maintenance' => (float)$row['maintenance'],
+                'real' => $row['real'] === null ? null : (float)$row['real'], 'target' => (float)$row['target'],
+                'meets' => $row['real'] !== null && (float)$row['real'] >= (float)$row['target'],
+                'production' => $prod, 'utilization' => $available > 0 ? min(100.0, $prod / $available * 100) : 0.0,
+            ];
+            $preventive[(string)round((float)$row['preventive'] / 3600, 2)][] = $name;
+        }
+        return [
+            'days' => (int)$report['calendar']['days'],
+            'daily' => (int)MaintenanceBonusService::DAILY_SECONDS,
+            'lunch' => (int)$report['calendar']['days'] * MaintenanceBonusService::DAILY_LUNCH_SECONDS,
+            'groups' => $groups,
+            'inactive' => $inactive,
+            'preventive_hours' => $preventive,
+        ];
     }
 
     /** Ruta del historial mensual de KPIs (cifras ya publicadas + meses calculados). */
@@ -321,8 +379,37 @@ class MonthlyPresentationService
     /** Una bobina PP/PLA no pesa más que esto; un peso mayor en el ERP es un error de digitación (p. ej. 11440 por 114,40). */
     private const ROLL_MAX_KG = 500.0;
 
-    /** Versión del cálculo de kg de bobinas guardado en el historial; si cambia, los meses guardados se recalculan. */
-    private const ROLL_CALC_VERSION = 2;
+    /** Versión del cálculo de bobinas guardado en el historial; si cambia, los meses calculados se recalculan. */
+    private const ROLL_CALC_VERSION = 3;
+
+    /**
+     * Metros de tela por bolsa de los formatos con más rotación (Libro1 «Stock bobinas»):
+     * promocionales 36x40x12, 40x40x12, 45x40x12, 58x40x12 y boutique 25x30x7, 30x40x12, 37x40x12, 38x38x18, 48x38x16.
+     */
+    public const BAG_FORMATS_M = [0.36, 0.40, 0.46, 0.58, 0.33, 0.43, 0.51, 0.58, 0.65];
+
+    /**
+     * Bolsas que se podrían fabricar con una bobina (mismo cálculo del Libro1): largo (m) ÷ metros por bolsa,
+     * promediado entre los 9 formatos. Las bobinas angostas (manillas, < 50 cm) no cuentan; las de 50 a 99 cm
+     * cuentan en proporción a su ancho (en el Libro1 las de 51 cm se contaban como media bobina).
+     *
+     * @param array<string, mixed> $item item_title, item_reg_width, item_reg_length
+     */
+    public static function rollBags(array $item): float
+    {
+        $width = (float)($item['item_reg_width'] ?? 0);
+        $length = (float)($item['item_reg_length'] ?? 0);
+        // Las medidas del título (ANCHOxGRAMAJExLARGO) mandan: en algunas fichas el ancho está mal (13 por 130).
+        if (preg_match('~/(\d+(?:[.,]\d+)?)X(\d+(?:[.,]\d+)?)X(\d+(?:[.,]\d+)?)\s*$~i', (string)($item['item_title'] ?? ''), $m)) {
+            $width = (float)str_replace(',', '.', $m[1]);
+            $length = (float)str_replace(',', '.', $m[3]);
+        }
+        if ($length <= 0 || $width < 50) {
+            return 0.0;
+        }
+        $perMeter = array_sum(array_map(static fn(float $f): float => 1 / $f, self::BAG_FORMATS_M)) / count(self::BAG_FORMATS_M);
+        return $length * $perMeter * min(1.0, $width / 100);
+    }
 
     /**
      * Kg de una bobina: el peso del artículo (item_reg_kg). Si falta o es imposible (> 500 kg), se usa
@@ -344,10 +431,10 @@ class MonthlyPresentationService
     }
 
     /**
-     * Kg de bobinas PP y PLA (y PLA beige / blanco) al cierre de cada mes indicado.
+     * Kg y bolsas proyectadas (rollBags) de bobinas PP y PLA (y PLA beige / blanco) al cierre de cada mes indicado.
      *
      * @param array<string, int> $cutoffs month_key => timestamp de cierre
-     * @return array<string, array{pp: float, pla: float, pla_beige: float, pla_blanco: float}>
+     * @return array<string, array<string, float>> pp, pla, pla_beige, pla_blanco (kg) y las mismas con sufijo _bolsas
      */
     public function computeRollStock(array $cutoffs): array
     {
@@ -355,27 +442,34 @@ class MonthlyPresentationService
         $info = [];
         $sql = 'SELECT i.id, i.item_title, i.item_reg_kg, i.item_reg_width, i.item_reg_gsm, i.item_reg_length FROM item i WHERE ' . $titles;
         foreach ($this->erpPdo->query($sql)->fetchAll(PDO::FETCH_ASSOC) as $r) {
-            $info[(int)$r['id']] = ['title' => strtoupper((string)$r['item_title']), 'kg' => self::rollWeightKg($r)];
+            $info[(int)$r['id']] = ['title' => strtoupper((string)$r['item_title']), 'kg' => self::rollWeightKg($r), 'bags' => self::rollBags($r)];
         }
         $out = [];
         foreach ($cutoffs as $monthKey => $ts) {
-            $row = ['pp' => 0.0, 'pla' => 0.0, 'pla_beige' => 0.0, 'pla_blanco' => 0.0];
+            $row = ['pp' => 0.0, 'pla' => 0.0, 'pla_beige' => 0.0, 'pla_blanco' => 0.0,
+                'pp_bolsas' => 0.0, 'pla_bolsas' => 0.0, 'pla_beige_bolsas' => 0.0, 'pla_blanco_bolsas' => 0.0];
             foreach ($this->stockAt(array_values(self::ROLL_STOREHOUSES), $ts, $titles) as $key => $qty) {
                 [$itemId, $stId] = array_map('intval', explode(':', $key));
                 if ($qty <= 0 || !isset($info[$itemId])) {
                     continue;
                 }
                 $kg = $qty * $info[$itemId]['kg'];
+                $bags = $qty * $info[$itemId]['bags'];
                 $title = $info[$itemId]['title'];
+                $keys = [];
                 if ($stId === self::ROLL_STOREHOUSES['pp'] && str_starts_with($title, 'PP/')) {
-                    $row['pp'] += $kg;
+                    $keys = ['pp'];
                 } elseif ($stId === self::ROLL_STOREHOUSES['pla'] && str_starts_with($title, 'PLA/')) {
-                    $row['pla'] += $kg;
+                    $keys = ['pla'];
                     if (str_contains($title, '/BEIGE/')) {
-                        $row['pla_beige'] += $kg;
+                        $keys[] = 'pla_beige';
                     } elseif (str_contains($title, '/BLANCO/')) {
-                        $row['pla_blanco'] += $kg;
+                        $keys[] = 'pla_blanco';
                     }
+                }
+                foreach ($keys as $k) {
+                    $row[$k] += $kg;
+                    $row[$k . '_bolsas'] += $bags;
                 }
             }
             $out[$monthKey] = array_map(static fn($v) => round($v), $row);
@@ -706,8 +800,8 @@ class MonthlyPresentationService
         }
 
         // Bobinas: 13 cierres (último día de cada mes) hasta el mes del informe. Los meses cerrados se guardan; el en curso
-        // usa el stock de hoy. Todos son kg calculados por el sistema; los guardados con el corte antiguo del 25 (sin 'corte')
-        // o con el cálculo de kg anterior se recalculan al último día del mes.
+        // usa el stock de hoy. Los publicados en la PPT (origen 'publicado', sep-25 a sep-26, al 25) quedan como están;
+        // los calculados con el corte antiguo del 25 (sin 'corte') o con un cálculo anterior se recalculan al último día del mes.
         $rollHistory = $this->loadRollHistory();
         $rollsChanged = false;
         $cutoffs = [];
@@ -717,7 +811,8 @@ class MonthlyPresentationService
         }
         // Se recalculan también los guardados con un cálculo de kg anterior (sin 'calculo' = ROLL_CALC_VERSION).
         $missing = array_filter($cutoffs, static fn($ts, $k) => !isset($rollHistory[$k]) || $k === $monthKey
-            || !isset($rollHistory[$k]['corte']) || (int)($rollHistory[$k]['calculo'] ?? 1) < self::ROLL_CALC_VERSION, ARRAY_FILTER_USE_BOTH);
+            || (($rollHistory[$k]['origen'] ?? '') !== 'publicado'
+                && (!isset($rollHistory[$k]['corte']) || (int)($rollHistory[$k]['calculo'] ?? 1) < self::ROLL_CALC_VERSION)), ARRAY_FILTER_USE_BOTH);
         $computed = [];
         try {
             $computed = $this->computeRollStock($missing);
@@ -748,6 +843,12 @@ class MonthlyPresentationService
         }
         $currentEntry = end($history) ?: [];
         $projection = $this->closingProjection();
+        $maintenance = null;
+        try {
+            $maintenance = $this->computeMaintenance($monthKey, $liveStartTs, min($liveEndTs, time()) + 1);
+        } catch (Throwable $e) {
+            $warnings[] = 'No se pudo calcular la disponibilidad de mantención: ' . $e->getMessage();
+        }
 
         // Cifras del mes: las del historial si el mes ya fue publicado; si no, las calculadas recién.
         $cur = $currentEntry;
@@ -798,6 +899,7 @@ class MonthlyPresentationService
             'procesos' => (array)($cur['procesos'] ?? []),
             'projection' => $projection,
             'finished_goods' => $finished,
+            'maintenance' => $maintenance,
             'rolls' => $rolls,
             'history' => $history,
             'warnings' => $warnings,

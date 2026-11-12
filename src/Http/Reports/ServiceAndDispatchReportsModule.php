@@ -1557,6 +1557,13 @@ function unibagOutputDailySummaryExcel(ReceptionService $service): void
     SimpleXlsx::streamHtml($filename, $html, 'Resumen Diario Planta');
 }
 
+/** Servicio del informe mensual; la disponibilidad de mantención (necesita la TRZ) se crea solo al calcularla. */
+function unibagMonthlyPresentationService(ReceptionService $service): MonthlyPresentationService
+{
+    return new MonthlyPresentationService($service, Db::erpPdo(), static fn(): MaintenanceBonusService =>
+        new MaintenanceBonusService(Db::erpPdo(), Db::trzPdo(), new BonusConfigurationService(Db::trzPdo())));
+}
+
 /**
  * Renderiza la vista del Generador de Informe Mensual de Operaciones en PPTX.
  */
@@ -1596,7 +1603,7 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $range = unibagMonthlyPresentationRange();
     $rangeAsked = ($_GET['modo'] ?? '') === 'rango';
 
-    $presService = new MonthlyPresentationService($service, Db::erpPdo());
+    $presService = unibagMonthlyPresentationService($service);
     $m = $presService->getMonthlyMetrics($monthKey, $range['from'] ?? null, $range['to'] ?? null);
     $monthKey = (string)$m['month_key'];
 
@@ -1730,8 +1737,8 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
         [13, 'Bodega – stock por cliente', number_format((float)($fg['total'] ?? 0), 0, ',', '.') . ' Und en bodegas 400, 1000 y 700', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
         [14, 'Bodega – rotación de stock', number_format((float)($fg['still'] ?? 0), 0, ',', '.') . ' Und sin salidas en 90 días', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
         [15, 'Bodega – artículos sin rotación', 'Cliente con más stock detenido vs. otros', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
-        [16, 'Bodega – bobinas PP y PLA', 'Kg al último día de cada mes, 13 meses (kardex)', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
-        [17, 'Bodega – bobinas PLA beige y blanco', 'Kg al último día de cada mes, 13 meses (kardex)', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [16, 'Bodega – bobinas PP y PLA', 'Bolsas proyectadas (Libro1) al último día de cada mes, 13 meses', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [17, 'Bodega – bobinas PLA beige y blanco', 'Bolsas proyectadas (Libro1) al último día de cada mes, 13 meses', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
         [18, 'Cierre', 'Fecha de emisión', 'Texto', 'badge-dynamic', 'Actualizado'],
     ];
 
@@ -1799,7 +1806,7 @@ function unibagPreviewMonthlyPresentation(ReceptionService $service): void
     header('Content-Type: text/html; charset=utf-8');
     header('Cache-Control: no-store');
     try {
-        echo (new MonthlyPresentationService($service, Db::erpPdo()))
+        echo (unibagMonthlyPresentationService($service))
             ->generatePreviewHtml(unibagMonthlyPresentationMonthKey(), $range['from'] ?? null, $range['to'] ?? null);
     } catch (Throwable $e) {
         http_response_code(500);
@@ -1822,7 +1829,7 @@ function unibagDownloadMonthlyPresentation(ReceptionService $service): void
     $range = unibagMonthlyPresentationRange();
 
     try {
-        $presService = new MonthlyPresentationService($service, Db::erpPdo());
+        $presService = unibagMonthlyPresentationService($service);
         $filePath = $presService->generatePresentation($monthKey, $range['from'] ?? null, $range['to'] ?? null);
 
         if (!file_exists($filePath)) {

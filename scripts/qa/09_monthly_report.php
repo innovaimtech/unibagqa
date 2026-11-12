@@ -123,7 +123,8 @@ if (!$hasPptx) {
     }
     $rollsData = [];
     for ($i = 12; $i >= 0; $i--) {
-        $rollsData[] = ['month_key' => date('Y-m', strtotime("2026-10-01 -$i months")), 'pp' => 1000 + $i, 'pla' => 2000 + $i, 'pla_beige' => 500, 'pla_blanco' => 1500];
+        $rollsData[] = ['month_key' => date('Y-m', strtotime("2026-10-01 -$i months")), 'pp' => 1000 + $i, 'pla' => 2000 + $i, 'pla_beige' => 500, 'pla_blanco' => 1500,
+            'pp_bolsas' => 741255 + $i, 'pla_bolsas' => 2196811 + $i, 'pla_beige_bolsas' => 52241, 'pla_blanco_bolsas' => 1757326];
     }
     $data = ['month_key' => '2026-10', 'start_date' => '2026-09-26 00:00:00', 'end_date' => '2026-10-25 23:59:59', 'prod_meta' => 1000000,
         'issued_at' => '10-11-2026', 'stock_date' => '25-10-2026', 'history' => $hist, 'rolls' => $rollsData,
@@ -131,7 +132,22 @@ if (!$hasPptx) {
         'projection' => ['made' => 400000, 'queue' => 600000, 'projected' => 1000000, 'closed' => false, 'start' => '2026-11-01', 'end' => '2026-11-30',
             'today' => '11/11/2026', 'elapsed_days' => 10, 'total_days' => 21, 'remaining_days' => 11, 'daily_avg' => 40000],
         'finished_goods' => ['total' => 1850, 'moved' => 1500, 'still' => 350, 'by_customer' => ['Walmart' => 1500, 'Tottus' => 300, 'Sin cliente' => 50], 'still_by_customer' => ['Sin cliente' => 50, 'Tottus' => 300]],
-        'delayed_orders' => [['cc_number' => '26-00001-1', 'customer_name' => 'Cliente X', 'product_type' => 'BOL0001', 'units' => 1234, 'required_date' => '01/10/2026', 'delay_days' => 3]]];
+        'delayed_orders' => [['cc_number' => '26-00001-1', 'customer_name' => 'Cliente X', 'product_type' => 'BOL0001', 'units' => 1234, 'required_date' => '01/10/2026', 'delay_days' => 3]],
+        // Disponibilidad de mantención: 22 días × 8:24, colación 11:00, preventiva 8 h (Selladora I: 4 h).
+        'month_closed' => true,
+        'maintenance' => ['days' => 22, 'daily' => 30240, 'lunch' => 39600,
+            'preventive_hours' => ['8' => ['FLEXO II', 'SERI II', 'SELLADORA II'], '4' => ['SELLADORA I']],
+            'inactive' => ['flexo' => ['FLEXO I'], 'seri' => ['SERI I', 'SERI III'], 'sellado' => ['SELLADORA III']],
+            'groups' => [
+                'flexo' => [['name' => 'FLEXO II', 'total' => 665280, 'available' => 596880, 'preventive' => 28800, 'breakdown' => 2901, 'setup' => 291875,
+                    'external' => 12885, 'gross' => 289219, 'maintenance' => 593979, 'real' => 99.51, 'target' => 95, 'meets' => true, 'production' => 272792, 'utilization' => 45.7]],
+                'seri' => [['name' => 'SERI II', 'total' => 665280, 'available' => 596880, 'preventive' => 28800, 'breakdown' => 0, 'setup' => 288628,
+                    'external' => 12480, 'gross' => 295772, 'maintenance' => 596880, 'real' => 100.0, 'target' => 95, 'meets' => true, 'production' => 246725, 'utilization' => 41.3]],
+                'sellado' => [
+                    ['name' => 'SELLADORA I', 'total' => 665280, 'available' => 611280, 'preventive' => 14400, 'breakdown' => 10771, 'setup' => 46354,
+                        'external' => 0, 'gross' => 554155, 'maintenance' => 600509, 'real' => 98.24, 'target' => 85, 'meets' => true, 'production' => 488944, 'utilization' => 80.0],
+                    ['name' => 'SELLADORA II', 'total' => 665280, 'available' => 596880, 'preventive' => 28800, 'breakdown' => 40000, 'setup' => 13598,
+                        'external' => 4880, 'gross' => 538402, 'maintenance' => 556880, 'real' => 93.3, 'target' => 95, 'meets' => false, 'production' => 589877, 'utilization' => 98.8]]]]];
     $tmp = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'qa_monthly_' . uniqid();
     file_put_contents($tmp . '.json', json_encode($data, JSON_UNESCAPED_UNICODE));
     $out = $tmp . '.pptx';
@@ -157,11 +173,51 @@ res['atrasados_rows'] = len([sh for sh in p.slides[5].shapes if sh.has_table][0]
 pt = [sh for sh in p.slides[2].shapes if sh.has_table][0].table
 res['proy'] = [[pt.cell(r, 1).text, pt.cell(r, 2).text] for r in range(1, 4)]
 res['proy_txt'] = txt(p.slides[2])
+res['titles'] = [next((sh.text_frame.text for sh in sl.shapes if sh.is_placeholder and sh.has_text_frame and sh.text_frame.text.strip()), '') for sl in p.slides]
+def mant(i):
+    sl = p.slides[i]
+    t = [sh for sh in sl.shapes if sh.has_table][0].table
+    boxes = {sh.name: [pa.text for pa in sh.text_frame.paragraphs] for sh in sl.shapes if sh.has_text_frame and sh.name.startswith('Utiliz')}
+    nota = [sh.text_frame.text for sh in sl.shapes if sh.has_text_frame and sh.name.startswith('Nota')]
+    return {'rows': [[c.text for c in r.cells] for r in t.rows], 'boxes': boxes, 'nota': nota}
+def by_title(start):
+    return next(sl for sl in p.slides if any(sh.is_placeholder and sh.has_text_frame and sh.text_frame.text.strip().startswith(start) for sh in sl.shapes))
+bt = [sh for sh in by_title('BODEGA – BOBINAS PLANTA').shapes if sh.has_table][0].table
+res['bob'] = [c.text for c in bt.rows[0].cells] + [c.text for c in bt.rows[len(bt.rows) - 1].cells]
+bt = [sh for sh in by_title('BODEGA – BOBINAS PLA:').shapes if sh.has_table][0].table
+res['bob_pla'] = [c.text for c in bt.rows[len(bt.rows) - 1].cells]
+res['mant'] = [mant(i) for i, x in enumerate(res['titles']) if x.upper().startswith('MANTENCIÓN – DISPONIBILIDAD')]
 print(json.dumps(res))
 PY;
         file_put_contents($tmp . '_check.py', $check);
-        $json = json_decode((string)shell_exec('"' . $py . '" "' . $tmp . '_check.py" "' . $out . '" 2>&1'), true) ?: [];
-        checkMr('18 diapositivas', ($json['n'] ?? 0) === 18);
+        $raw = (string)shell_exec('"' . $py . '" "' . $tmp . '_check.py" "' . $out . '" 2>&1');
+        $json = json_decode($raw, true) ?: [];
+        if (!$json) {
+            echo "Salida de la revisión del PPTX:
+" . $raw . "
+";
+        }
+        checkMr('22 diapositivas (18 + mantención: divisoria y 3 de disponibilidad)', ($json['n'] ?? 0) === 22, json_encode($json['titles'] ?? null, JSON_UNESCAPED_UNICODE));
+        $titles = (array)($json['titles'] ?? []);
+        checkMr('mantención va después de mermas y antes de bodega', array_search('MANTENCIÓN.', $titles, true) === 11
+            && str_starts_with((string)($titles[15] ?? ''), 'BODEGA DE MATERIAS'), json_encode($titles, JSON_UNESCAPED_UNICODE));
+        [$mf, $ms, $mse] = array_pad((array)($json['mant'] ?? []), 3, []);
+        checkMr('flexo: fila con horas H:MM, % real, esperado y cumple', ($mf['rows'][1] ?? [])
+            === ['Flexo II', '184:48', '165:48', '0:48', '81:05', '3:35', '80:20', '165:00', '99,51%', '95%', 'Cumple'],
+            json_encode($mf['rows'] ?? null, JSON_UNESCAPED_UNICODE));
+        checkMr('flexo: una sola fila de máquina (Flexo I sin registros no va en la tabla)', count($mf['rows'] ?? []) === 2);
+        checkMr('flexo: utilización en el cuadro de la imagen y Flexo III sin registros', ($mf['boxes']['Utilización FLEXO 2 Utilización: 59%'] ?? []) === ['FLEXO 2', 'Utilización: 46%']
+            && ($mf['boxes']['Utilización FLEXO 3 Utilización: 44%'] ?? []) === ['FLEXO 3', 'Sin registros'], json_encode($mf['boxes'] ?? null, JSON_UNESCAPED_UNICODE));
+        $nota = implode(' ', (array)($mf['nota'] ?? []));
+        checkMr('flexo: base de cálculo con 22 días, 8:24 h, colación 11:00 y preventiva 8:00', str_contains($nota, '22 días disponibles · 8:24 h programadas por día · colación de 11:00 h · mantención preventiva programada de 8:00 h')
+            && str_contains($nota, 'Sin programación en el período: Flexo I.'), $nota);
+        checkMr('seri: Seri I sin programación en su cuadro y en la nota', ($ms['boxes']['Utilización SERI 1 Utilización: 0%'] ?? [])[1] === 'Sin programación'
+            && str_contains(implode(' ', (array)($ms['nota'] ?? [])), 'Sin programación en el período: Seri I, Seri III.'), json_encode($ms, JSON_UNESCAPED_UNICODE));
+        checkMr('sellado: 2 máquinas, no cumple, y preventiva de 4 h de Selladora I en la nota', count($mse['rows'] ?? []) === 3
+            && ($mse['rows'][2][8] ?? '') === '93,30%' && str_contains(implode(' ', (array)($mse['nota'] ?? [])), 'Selladora I: mantención preventiva de 4:00 h.'),
+            json_encode($mse, JSON_UNESCAPED_UNICODE));
+        checkMr('bobinas PP y PLA en bolsas proyectadas (oct-26: 741.255 / 2.196.811)', ($json['bob'] ?? []) === ['Mes', 'Stock PP', 'Stock PLA', 'Total', 'oct-26', '741.255', '2.196.811', '2.938.066'], json_encode($json['bob'] ?? null, JSON_UNESCAPED_UNICODE));
+        checkMr('bobinas PLA beige y blanco en bolsas proyectadas', ($json['bob_pla'] ?? []) === ['oct-26', '52.241', '1.757.326', '1.809.567'], json_encode($json['bob_pla'] ?? null, JSON_UNESCAPED_UNICODE));
         checkMr('portada con el mes', str_contains((string)($json['portada'] ?? ''), 'OCTUBRE 2026'));
         checkMr('encabezado del diseño con el mes', in_array('REPORTE DE OPERACIONES OCTUBRE 2026', (array)($json['layout'] ?? []), true));
         checkMr('tabla de producción con oct-26 y 900.010', ($json['prod'] ?? []) === ['oct-26', '900.010']);
@@ -184,7 +240,13 @@ PY;
         @unlink($out);
         $lines = [];
         exec($cmd, $lines, $rc);
-        $json = json_decode((string)shell_exec('"' . $py . '" "' . $tmp . '_check.py" "' . $out . '" 2>&1'), true) ?: [];
+        $raw = (string)shell_exec('"' . $py . '" "' . $tmp . '_check.py" "' . $out . '" 2>&1');
+        $json = json_decode($raw, true) ?: [];
+        if (!$json) {
+            echo "Salida de la revisión del PPTX:
+" . $raw . "
+";
+        }
         checkMr('rango: portada con «DEL 01/10/2026 AL 31/10/2026»', $rc === 0 && str_contains((string)($json['portada'] ?? ''), 'DEL 01/10/2026 AL 31/10/2026'));
         checkMr('rango: encabezado del diseño con el rango', in_array('REPORTE DE OPERACIONES DEL 01/10/2026 AL 31/10/2026', (array)($json['layout'] ?? []), true));
         checkMr('rango: columna del período «01/10–31/10» en la tabla de producción', ($json['prod'] ?? []) === ['01/10–31/10', '900.010']);
@@ -193,8 +255,8 @@ PY;
         exec('"' . $py . '" "' . __DIR__ . '/../pptx_preview.py" "' . $out . '" "' . $pv . '" 2>&1', $pvLines, $pvRc);
         $pvHtml = is_file($pv) ? (string)file_get_contents($pv) : '';
         preg_match_all('/class="(im[0-9a-f]{12}) im"/', $pvHtml, $imgs);
-        checkMr('vista previa: 18 láminas con el período, tablas, gráficos e imágenes (' . trim(implode(' ', $pvLines)) . ')', $pvRc === 0
-            && substr_count($pvHtml, '<section class="pg"') === 18 && str_contains($pvHtml, 'REPORTE DE OPERACIONES DEL 01/10/2026 AL 31/10/2026')
+        checkMr('vista previa: 22 láminas con el período, tablas, gráficos e imágenes (' . trim(implode(' ', $pvLines)) . ')', $pvRc === 0
+            && substr_count($pvHtml, '<section class="pg"') === 22 && str_contains($pvHtml, 'REPORTE DE OPERACIONES DEL 01/10/2026 AL 31/10/2026')
             && str_contains($pvHtml, '01/10–31/10') && str_contains($pvHtml, '<table class="tb">') && str_contains($pvHtml, '<svg viewBox')
             && $imgs[1] !== [] && array_diff(array_unique($imgs[1]), array_map(static fn($c) => $c, array_filter(array_unique($imgs[1]), static fn($c) => str_contains($pvHtml, '.' . $c . '{background-image:url(data:image/')))) === []);
         @unlink($pv);
@@ -223,5 +285,14 @@ checkMr('bobina: peso x100 (11440) usa la ficha 130x80x1100 = 114,4', abs($w(114
 checkMr('bobina: ficha mal (ancho 13) pero peso bueno se respeta', abs($w(114.4, 13, 80, 1100) - 114.4) < 0.01);
 checkMr('bobina: sin peso usa la ficha', abs($w(0, 108, 90, 1350) - 131.22) < 0.01);
 checkMr('bobina: peso x100 sin ficha se divide por 100', abs($w(9350, 0, 0, 0) - 93.5) < 0.01);
+
+// Bolsas proyectadas por bobina (Libro1): largo ÷ metros por bolsa, promedio de 9 formatos.
+$b = static fn(string $t, float $wd = 0, float $len = 0): float => MonthlyPresentationService::rollBags(['item_title' => $t, 'item_reg_width' => $wd, 'item_reg_length' => $len]);
+checkMr('bolsas: 13 bobinas PLA 100X55X2300 = 65.630,8 (fila del Libro1)', abs(13 * $b('PLA/BLANCO/W80/100X55X2300') - 65630.822) < 0.01);
+checkMr('bolsas: 483 bobinas 100X80X1500 = 1.590.285 (fila del Libro1)', abs(483 * $b('PLA/BLANCO/W80/100X80X1500') - 1590285.305) < 0.01);
+checkMr('bolsas: PP 130 de ancho cuenta como una bobina (Libro1)', abs($b('PP/AMARILLO/Y20/130X80X1100') - $b('PP/NEGRO/C90/100X80X1100')) < 0.001);
+checkMr('bolsas: manillas (6 cm) no cuentan', $b('PLA/BLANCO/W80/6X85X1400') === 0.0);
+checkMr('bolsas: 51 cm cuenta en proporción (media bobina en el Libro1)', abs($b('PLA/BLANCO/W80/51X80X1446') - 0.51 * 1446 * 2.1950009) < 0.01);
+checkMr('bolsas: el título manda sobre una ficha con ancho mal (13)', abs($b('PP/NARANJO/Y23/130X80X1100', 13, 1100) - $b('PP/NEGRO/C90/100X80X1100')) < 0.001);
 
 exit($failures > 0 ? 1 : 0);

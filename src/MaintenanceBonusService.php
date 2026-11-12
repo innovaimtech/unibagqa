@@ -273,6 +273,24 @@ final class MaintenanceBonusService
             'total'=>$days*(int)self::DAILY_SECONDS,'lunch'=>$days*self::DAILY_LUNCH_SECONDS];
     }
 
+    /** Segundos en produccion por maquina (union de eventos de produccion terminados del periodo).
+     * Production seconds per machine (union of finished production events in the period). */
+    public function productionSeconds(array $period): array
+    {
+        $stmt=$this->erp->prepare("SELECT wi.win_equipoid AS machine_id,ev.evt_crtdat AS start_ts,ev.evt_enddat AS end_ts
+            FROM prod_worker_ot_events ev
+            INNER JOIN prod_worker_ot ot ON ot.id=ev.evt_prod_worker_otid
+            INNER JOIN prod_worker_init wi ON wi.id=ot.wok_init_id
+            WHERE ev.evt_status>0 AND ot.wok_status>0 AND ev.evt_type IN ('prod','prodsericolor')
+                AND ev.evt_crtdat>=? AND ev.evt_crtdat<? AND ev.evt_enddat>ev.evt_crtdat");
+        $stmt->execute([$period['start'],$period['end']]);
+        $intervals=[];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $intervals[(int)$row['machine_id']][]=[(int)$row['start_ts'],min((int)$row['end_ts'],$period['end'])];
+        }
+        return array_map([self::class,'unionSeconds'],$intervals);
+    }
+
     private function productionEvidence(array $period): array
     {
         $stmt=$this->erp->prepare("SELECT DISTINCT wi.win_equipoid
@@ -308,9 +326,14 @@ final class MaintenanceBonusService
             'status'=>$available<=0 || $gross<0 ? 'PENDIENTE' : ($real>=$target ? 'CUMPLE' : 'NO CUMPLE')];
     }
 
-    public function report(string $month): array
+    /**
+     * @param array{start:int,end:int}|null $period Periodo distinto del ciclo del bono (26 al 25), p. ej. el mes
+     *        calendario del informe mensual; fin exclusivo. Los parametros por maquina son los del mes indicado.
+     */
+    public function report(string $month, ?array $period = null): array
     {
-        $period = self::period($month);
+        self::period($month);
+        $period = $period ?? self::period($month);
         $calendar=($this->calendar??new ChileBusinessCalendar())->forPeriod($period);
         $machines = $this->catalog();
         if (!$machines) throw new RuntimeException('No se pudo obtener el catalogo de maquinas del ERP.');

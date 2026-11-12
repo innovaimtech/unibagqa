@@ -46,6 +46,10 @@ KEEP = [
     ('merma_cys', 'title', 'MERMAS PRODUCCION – CORTE Y SELLADO'),
     ('merma_emb', 'title', 'MERMAS PRODUCCION – EMBALAJE'),
     ('merma_total', 'title', 'MERMAS PRODUCCION – TOTAL DE MERMA'),
+    ('div_mant', 'title', 'MANTENCION.'),
+    ('mant_flexo', 'title', 'MANTENCION – DISPONIBILIDAD: FLEXO'),
+    ('mant_seri', 'title', 'MANTENCION – DISPONIBILIDAD: SERI'),
+    ('mant_sellado', 'title', 'MANTENCION – DISPONIBILIDAD: SELLADO'),
     ('div_bodega', 'title', 'BODEGA DE MATERIAS PRIMAS Y PRODUCTO TERMINADO'),
     ('bod_clientes', 'title', 'BODEGA – STOCK CONSOLIDADO POR CLIENTE'),
     ('bod_rotacion', 'title', 'BODEGA – ROTACION DE STOCK'),
@@ -597,7 +601,7 @@ class Builder:
             t = tables[0].table
             for j, (_, name) in enumerate(cols):
                 set_cell(t, 0, 1 + j, name)
-            set_cell(t, 0, 3, 'Total (kg)')
+            set_cell(t, 0, 3, 'Total')
             n_rows = len(t._tbl.tr_lst) - 1
             # Las filas de la tabla muestran los meses más recientes que quepan.
             show = list(range(len(rolls)))[-n_rows:]
@@ -629,6 +633,135 @@ class Builder:
                 ser.format.line.dash_style = MSO_LINE.SQUARE_DOT if i >= 2 else MSO_LINE.SOLID
 
 
+MANT_KEYS = ('div_mant', 'mant_flexo', 'mant_seri', 'mant_sellado')
+ROMAN = {1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI', 7: 'VII', 8: 'VIII', 9: 'IX', 10: 'X'}
+
+
+def fmt_hm(seconds):
+    """Segundos → «H:MM» (las horas pueden pasar de 24)."""
+    v = float(seconds or 0)
+    n = int(round(abs(v) / 60))
+    return ('-' if v < 0 else '') + f"{n // 60}:{n % 60:02d}"
+
+
+def machine_label(name):
+    """«SELLADORA VI.» → «Selladora VI»."""
+    parts = str(name).strip().rstrip('.').split()
+    return ' '.join(p if p in ROMAN.values() else p.capitalize() for p in parts)
+
+
+def set_lines(shape, lines):
+    """Cambia el texto línea por línea (un párrafo por línea), conservando el formato de cada párrafo."""
+    for i, para in enumerate(shape.text_frame.paragraphs):
+        text = lines[i] if i < len(lines) else ''
+        runs = para.runs
+        if runs:
+            runs[0].text = text
+            for r in runs[1:]:
+                r._r.getparent().remove(r._r)
+        else:
+            para.text = text
+
+
+def mantencion(b, slide, group):
+    """Disponibilidad de mantención de un proceso: tabla, base de cálculo y utilización por máquina."""
+    m = b.data.get('maintenance') or {}
+    rows = list((m.get('groups') or {}).get(group) or [])
+    inactive = list((m.get('inactive') or {}).get(group) or [])
+    tables = shapes_of(slide, 'table')
+    if not b.need(tables, f"{slide_title(slide)}: tabla"):
+        return
+    t = tables[0].table
+    headers = [norm(t.cell(0, c).text) for c in range(len(t.columns))]
+    data_rows = len(t._tbl.tr_lst) - 1
+    want = max(len(rows), 1)
+    while data_rows > want:
+        t._tbl.remove(t._tbl.tr_lst[-1])
+        data_rows -= 1
+    while data_rows < want:
+        t._tbl.append(copy.deepcopy(t._tbl.tr_lst[1]))
+        data_rows += 1
+    closed = bool(b.data.get('month_closed', True))
+    for i in range(want):
+        r = rows[i] if i < len(rows) else None
+        for c, h in enumerate(headers):
+            if r is None:
+                v = 'Sin máquinas con registros en el período' if c == 0 else ''
+            elif h.startswith('MAQUINA'):
+                v = machine_label(r['name'])
+            elif h.startswith('HORAS TOTALES'):
+                v = fmt_hm(r['total'])
+            elif h.startswith('TIEMPO DISPONIBLE'):
+                v = fmt_hm(r['available'])
+            elif h.startswith('AVERIAS'):
+                v = fmt_hm(r['breakdown'])
+            elif h.startswith('ALISTAMIENTO'):
+                v = fmt_hm(r['setup'])
+            elif h.startswith('PAROS EXTERNOS'):
+                v = fmt_hm(r['external'])
+            elif h.startswith('TIEMPO OPERATIVO (BRUTO)'):
+                v = fmt_hm(r['gross'])
+            elif h.startswith('TIEMPO OPERATIVO (MANTENCION)'):
+                v = fmt_hm(r['maintenance'])
+            elif h.startswith('% DISPONIB'):
+                v = '—' if r.get('real') is None else fmt_pct(r['real'])
+            elif h.startswith('% ESPERADO'):
+                v = fmt_pct(r['target'], 0)
+            elif h.startswith('CUMPLE'):
+                v = ('Cumple' if r.get('meets') else 'No cumple') if closed else 'En curso'
+            else:
+                v = ''
+            set_cell(t, 1 + i, c, v)
+    shown = {machine_label(r['name']) for r in rows}
+    off_labels = [machine_label(n) for n in inactive]
+    # Base de cálculo del mes.
+    note = shape_named(slide, 'Nota')
+    extra = shape_named(slide, 'Nota sin programación')
+    if note is not None:
+        mine = {}
+        for h, ns in (m.get('preventive_hours') or {}).items():
+            ns = [machine_label(n) for n in ns if machine_label(n) in shown]
+            if ns:
+                mine[h] = ns
+        base_h = max(mine, key=lambda h: len(mine[h])) if mine else '8'
+        text = (f"Base de cálculo del mes: {m.get('days', 0)} días disponibles · {fmt_hm(m.get('daily', 0))} h programadas por día · "
+                f"colación de {fmt_hm(m.get('lunch', 0))} h · mantención preventiva programada de {fmt_hm(float(base_h) * 3600)} h.")
+        for h, ns in sorted(mine.items()):
+            if h != base_h:
+                text += f" {', '.join(ns)}: mantención preventiva de {fmt_hm(float(h) * 3600)} h."
+        text += ' Utilización = tiempo en producción ÷ tiempo disponible.'
+        if off_labels and extra is None:
+            text += ' Sin programación en el período: ' + ', '.join(off_labels) + '.'
+        set_text(note, text)
+        # La nota ocupa 2 líneas: si su cuadro es de una, sube al espacio libre bajo la tabla (sin tocar las imágenes).
+        two_lines = 457200
+        if note.height < two_lines:
+            end = note.top + note.height
+            table_bottom = tables[0].top + sum(int(tr.get('h') or 0) for tr in t._tbl.tr_lst)
+            note.top = max(table_bottom + 91440, end - two_lines)
+            note.height = end - note.top
+    if extra is not None:
+        set_lines(extra, ['Sin programación en el período: ' + ', '.join(off_labels) + '.' if off_labels else ''])
+    # Utilización en los cuadros bajo las imágenes («FLEXO 2 / Utilización: 59%»).
+    by_name = {norm(machine_label(r['name'])): r for r in rows}
+    off = {norm(x) for x in off_labels}
+    for sh in slide.shapes:
+        if not (sh.has_text_frame and sh.name.startswith('Utilizaci')):
+            continue
+        first = sh.text_frame.paragraphs[0].text.strip()
+        parts = first.split()
+        if parts and parts[-1].isdigit():
+            parts[-1] = ROMAN.get(int(parts[-1]), parts[-1])
+        key = norm(' '.join(parts))
+        if key in by_name:
+            second = f"Utilización: {by_name[key]['utilization']:.0f}%"
+        elif key in off:
+            second = 'Sin programación'
+        else:
+            second = 'Sin registros'
+        set_lines(sh, [first, second])
+
+
 def main():
     ap = argparse.ArgumentParser(description='Informe mensual de Operaciones (PPTX)')
     ap.add_argument('--template', default=os.path.join('data', 'plantilla_informe_mensual.pptx'))
@@ -652,7 +785,10 @@ def main():
     prs = Presentation(args.template)
     repair_template(prs)
     found = find_slides(prs)
-    missing = [k for k, _, _ in KEEP if k not in found]
+    # Si no se pudo calcular la mantención, sus 4 láminas no van; el resto del informe sí.
+    with_mant = bool(data.get('maintenance'))
+    keep = [k for k, _, _ in KEEP if with_mant or k not in MANT_KEYS]
+    missing = [k for k in keep if k not in found]
     if missing:
         print('ERROR: la plantilla no tiene estas diapositivas: ' + ', '.join(missing))
         sys.exit(2)
@@ -669,11 +805,16 @@ def main():
     for key, proc in [('merma_flexo', 'flexo'), ('merma_seri', 'seri'), ('merma_cys', 'cys'), ('merma_emb', 'emb')]:
         b.merma_proceso(s(key), proc)
     b.merma_total(s('merma_total'))
+    if with_mant:
+        mantencion(b, s('mant_flexo'), 'flexo')
+        mantencion(b, s('mant_seri'), 'seri')
+        mantencion(b, s('mant_sellado'), 'sellado')
     b.bod_clientes(s('bod_clientes'))
     b.bod_rotacion(s('bod_rotacion'))
     b.bod_sin_rotacion(s('bod_sin_rotacion'))
-    b.bobinas(s('bod_bobinas'), [('pp', 'Stock PP (kg)'), ('pla', 'Stock PLA (kg)')])
-    b.bobinas(s('bod_pla'), [('pla_beige', 'Beige PLA (kg)'), ('pla_blanco', 'Blanco PLA (kg)')])
+    # Bobinas en bolsas proyectadas (cálculo del Libro1: largo ÷ metros por bolsa, promedio de 9 formatos).
+    b.bobinas(s('bod_bobinas'), [('pp_bolsas', 'Stock PP'), ('pla_bolsas', 'Stock PLA')])
+    b.bobinas(s('bod_pla'), [('pla_beige_bolsas', 'Beige PLA'), ('pla_blanco_bolsas', 'Blanco PLA')])
     b.cierre(s('cierre'))
 
     if b.errors:
@@ -683,7 +824,7 @@ def main():
         sys.exit(2)
 
     # Quitar las diapositivas que no calcula el sistema y dejar el orden de KEEP.
-    keep_idx = [found[k] for k, _, _ in KEEP]
+    keep_idx = [found[k] for k in keep]
     sld_ids = list(prs.slides._sldIdLst)
     for i in range(len(sld_ids) - 1, -1, -1):
         if i not in keep_idx:

@@ -1,5 +1,5 @@
 {
-    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Desde octubre 2026 cada mes es el MES CALENDARIO (del 1 al ultimo dia: 28\/29, 30 o 31; ej. 2026-10 = 01-oct a 31-oct; los calculados llevan 'periodo': 'mes'). Hasta septiembre 2026 se publico con el ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses con origen 'plantilla' (2026-01 a 2026-09) son las cifras YA PUBLICADAS (septiembre segun Reporte_Operaciones_Septiembre_2026_UNIFICADO) y no se recalculan. Los meses nuevos se agregan solos con origen 'calculado' cuando el mes termina. El bloque 'procesos' (kg programados\/procesados\/merma) de los meses calculados lo arma el sistema: procesados = unidades producidas x peso de la bolsa; programados = cantidad pedida de la CC repartida segun la produccion del mes; merma = kg registrados en maquina. 'bobinas_kg' = kg de bobinas PP (bodega 200) y PLA (bodega 100) al ultimo dia de cada mes reconstruidos con el kardex (los que llevan 'corte' y 'calculo': 2 ya usan el peso corregido por bobina; los demas se recalculan solos). Peso por bobina = item_reg_kg; si es imposible (> 500 kg, p. ej. 11440 por 114,40) se usa ancho x gramaje x largo. Se puede corregir cualquier valor a mano.",
+    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Desde octubre 2026 cada mes es el MES CALENDARIO (del 1 al ultimo dia: 28/29, 30 o 31; ej. 2026-10 = 01-oct a 31-oct; los calculados llevan 'periodo': 'mes'). Hasta septiembre 2026 se publico con el ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses con origen 'plantilla' (2026-01 a 2026-09) son las cifras YA PUBLICADAS (septiembre segun Reporte_Operaciones_Septiembre_2026_UNIFICADO) y no se recalculan. Los meses nuevos se agregan solos con origen 'calculado' cuando el mes termina. El bloque 'procesos' (kg programados/procesados/merma) de los meses calculados lo arma el sistema: procesados = unidades producidas x peso de la bolsa; programados = cantidad pedida de la CC repartida segun la produccion del mes; merma = kg registrados en maquina. 'bobinas_kg' = stock de bobinas PP (bodega 200) y PLA (bodega 100) al cierre de cada mes, expresado en BOLSAS PROYECTADAS (calculo del Libro1 'Stock bobinas'): bobinas x largo (m) / metros por bolsa, promediado entre 9 formatos (promocionales 0,36/0,40/0,46/0,58 m y boutique 0,33/0,43/0,51/0,58/0,65 m). Sep-25 a sep-26 (origen 'publicado', al 25) son las cifras de la PPT y no se recalculan. Desde oct-26 las calcula el sistema al ultimo dia del mes con el kardex (llevan 'corte' y 'calculo'); tambien guardan los kg (pp, pla...). Se puede corregir cualquier valor a mano.",
     "meses": {
         "2026-01": {
             "origen": "plantilla",
@@ -325,106 +325,108 @@
     },
     "bobinas_kg": {
         "2025-09": {
-            "pp": 253478,
-            "pla": 172527,
-            "pla_beige": 18639,
-            "pla_blanco": 126450
+            "pp_bolsas": 815447,
+            "pla_bolsas": 4213016,
+            "pla_beige_bolsas": 272950,
+            "pla_blanco_bolsas": 3420376,
+            "origen": "publicado",
+            "corte": "2025-09-25"
         },
         "2025-10": {
-            "pp": 25909,
-            "pla": 227751,
-            "pla_beige": 45348,
-            "pla_blanco": 160524,
-            "corte": "2025-10-31",
-            "calculo": 2
+            "pp_bolsas": 646650,
+            "pla_bolsas": 4634260,
+            "pla_beige_bolsas": 531302,
+            "pla_blanco_bolsas": 3689374,
+            "origen": "publicado",
+            "corte": "2025-10-25"
         },
         "2025-11": {
-            "pp": 20548,
-            "pla": 214887,
-            "pla_beige": 42767,
-            "pla_blanco": 156837,
-            "corte": "2025-11-30",
-            "calculo": 2
+            "pp_bolsas": 719525,
+            "pla_bolsas": 4451460,
+            "pla_beige_bolsas": 483561,
+            "pla_blanco_bolsas": 3701995,
+            "origen": "publicado",
+            "corte": "2025-11-25"
         },
         "2025-12": {
-            "pp": 25027,
-            "pla": 178512,
-            "pla_beige": 26979,
-            "pla_blanco": 139387,
-            "corte": "2025-12-31",
-            "calculo": 2
+            "pp_bolsas": 603628,
+            "pla_bolsas": 3268612,
+            "pla_beige_bolsas": 315643,
+            "pla_blanco_bolsas": 2786456,
+            "origen": "publicado",
+            "corte": "2025-12-25"
         },
         "2026-01": {
-            "pp": 26250,
-            "pla": 131222,
-            "pla_beige": 22253,
-            "pla_blanco": 95749,
-            "corte": "2026-01-31",
-            "calculo": 2
+            "pp_bolsas": 664649,
+            "pla_bolsas": 2518072,
+            "pla_beige_bolsas": 211050,
+            "pla_blanco_bolsas": 2132563,
+            "origen": "publicado",
+            "corte": "2026-01-25"
         },
         "2026-02": {
-            "pp": 23434,
-            "pla": 67258,
-            "pla_beige": 19182,
-            "pla_blanco": 39657,
-            "corte": "2026-02-28",
-            "calculo": 2
+            "pp_bolsas": 587385,
+            "pla_bolsas": 843126,
+            "pla_beige_bolsas": 127750,
+            "pla_blanco_bolsas": 616249,
+            "origen": "publicado",
+            "corte": "2026-02-25"
         },
         "2026-03": {
-            "pp": 28846,
-            "pla": 87643,
-            "pla_beige": 25712,
-            "pla_blanco": 44206,
-            "corte": "2026-03-31",
-            "calculo": 2
+            "pp_bolsas": 739499,
+            "pla_bolsas": 1177623,
+            "pla_beige_bolsas": 227074,
+            "pla_blanco_bolsas": 707781,
+            "origen": "publicado",
+            "corte": "2026-03-25"
         },
         "2026-04": {
-            "pp": 25167,
-            "pla": 120629,
-            "pla_beige": 25681,
-            "pla_blanco": 67101,
-            "corte": "2026-04-30",
-            "calculo": 2
+            "pp_bolsas": 633261,
+            "pla_bolsas": 2775855,
+            "pla_beige_bolsas": 624920,
+            "pla_blanco_bolsas": 1531679,
+            "origen": "publicado",
+            "corte": "2026-04-25"
         },
         "2026-05": {
-            "pp": 38930,
-            "pla": 143762,
-            "pla_beige": 17246,
-            "pla_blanco": 103479,
-            "corte": "2026-05-31",
-            "calculo": 2
+            "pp_bolsas": 1021997,
+            "pla_bolsas": 3421495,
+            "pla_beige_bolsas": 432966,
+            "pla_blanco_bolsas": 2421207,
+            "origen": "publicado",
+            "corte": "2026-05-25"
         },
         "2026-06": {
-            "pp": 39388,
-            "pla": 157358,
-            "pla_beige": 16303,
-            "pla_blanco": 116641,
-            "corte": "2026-06-30",
-            "calculo": 2
+            "pp_bolsas": 1038899,
+            "pla_bolsas": 3707220,
+            "pla_beige_bolsas": 434941,
+            "pla_blanco_bolsas": 2691522,
+            "origen": "publicado",
+            "corte": "2026-06-25"
         },
         "2026-07": {
-            "pp": 36476,
-            "pla": 181568,
-            "pla_beige": 16529,
-            "pla_blanco": 140651,
-            "corte": "2026-07-31",
-            "calculo": 2
+            "pp_bolsas": 956147,
+            "pla_bolsas": 4283805,
+            "pla_beige_bolsas": 289632,
+            "pla_blanco_bolsas": 3448142,
+            "origen": "publicado",
+            "corte": "2026-07-25"
         },
         "2026-08": {
-            "pp": 33018,
-            "pla": 135743,
-            "pla_beige": 7757,
-            "pla_blanco": 107471,
-            "corte": "2026-08-31",
-            "calculo": 2
+            "pp_bolsas": 866810,
+            "pla_bolsas": 3245301,
+            "pla_beige_bolsas": 175162,
+            "pla_blanco_bolsas": 2588247,
+            "origen": "publicado",
+            "corte": "2026-08-25"
         },
         "2026-09": {
-            "pp": 28336,
-            "pla": 99369,
-            "pla_beige": 4899,
-            "pla_blanco": 78515,
-            "corte": "2026-09-30",
-            "calculo": 2
+            "pp_bolsas": 741255,
+            "pla_bolsas": 2196811,
+            "pla_beige_bolsas": 52241,
+            "pla_blanco_bolsas": 1757326,
+            "origen": "publicado",
+            "corte": "2026-09-25"
         },
         "2026-10": {
             "pp": 26909,
