@@ -213,7 +213,8 @@ foreach (['epl', 'zpl', 'tspl'] as $lang) {
     $cmd = $printer->buildBoxCommand(['box_code' => 'BOX-006', 'final_sku' => 'X', 'units_qty' => 30, 'units_initial' => 50]);
     $check(strtoupper($lang) . ': etiqueta de caja con unidades originales', str_contains($cmd, 'UNIDADES: 50') && !str_contains($cmd, 'UNIDADES: 30'));
     $cmd = $printer->buildTraceabilityEntryCommand(['traceability_code' => 'TRZ5C4687', 'item_code' => 'X', 'quantity' => 60, 'quantity_initial' => 100]);
-    $check(strtoupper($lang) . ': etiqueta de ingreso con cantidad original', str_contains($cmd, 'CANT: 100') && !str_contains($cmd, 'CANT: 60'));
+    $check(strtoupper($lang) . ': etiqueta de ingreso con cantidad original', preg_match('/[",D]100("|\^FS)/', $cmd) === 1 && preg_match('/[",D]60("|\^FS)/', $cmd) !== 1
+        && str_contains($cmd, 'CANTIDAD') && str_contains($cmd, 'UNIDADES'));
 }
 $check('la cantidad parcial no escribió en el ERP', (int)$erp->query('SELECT COUNT(*) FROM orders_delivery')->fetchColumn() === 8);
 

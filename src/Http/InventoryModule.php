@@ -1989,35 +1989,90 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             return "<div class=\"barcode-svg-wrap\"><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" + (total * module) + "mm\" height=\"' . BARCODE_HEIGHT_MM . 'mm\" viewBox=\"0 0 " + total + " ' . BARCODE_HEIGHT_MM . '\" preserveAspectRatio=\"none\" shape-rendering=\"crispEdges\" role=\"img\" aria-label=\"" + escapeHtml(text) + "\">" + bars.join("") + "</svg></div>";
         }
 
+        // Etiqueta 100x70 mm: cabecera, código de barras y, abajo, producto a la izquierda y la CANTIDAD DEL BULTO
+        // destacada a la derecha (misma distribución que la etiqueta térmica de PrintService::buildTraceabilityEntryCommand).
+        var TRZ_LABEL_CSS = ".trz-lbl{width:100mm;height:70mm;box-sizing:border-box;border:.6mm solid #000;padding:1.6mm 2.2mm 1.3mm;display:flex;flex-direction:column;font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;overflow:hidden;text-align:left;margin:0 auto 4mm}" +
+            ".trz-lbl *{box-sizing:border-box;color:#000}" +
+            ".trz-lbl-co{text-align:center;font-weight:900;font-size:4.4mm;line-height:1;letter-spacing:.3mm}" +
+            ".trz-lbl-wh{text-align:center;font-weight:800;font-size:3.1mm;line-height:1.1;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:.5mm}" +
+            ".trz-lbl .barcode-svg-wrap{width:100%;margin:1mm 0 .5mm}" +
+            ".trz-lbl .barcode-svg-wrap svg{display:block;margin:0 auto;max-width:100%}" +
+            ".trz-lbl-code{text-align:center;font-family:\"Courier New\",monospace;font-weight:900;font-size:5.4mm;line-height:1;letter-spacing:.3mm;word-break:break-all}" +
+            ".trz-lbl-body{flex:1;display:flex;gap:2mm;border-top:.5mm solid #000;margin-top:1.2mm;padding-top:1.4mm;min-height:0}" +
+            ".trz-lbl-info{flex:1;min-width:0;display:flex;flex-direction:column}" +
+            ".trz-lbl-sku{font-weight:900;font-size:8.6mm;line-height:.95;word-break:break-all}" +
+            ".trz-lbl-desc{font-weight:800;font-size:3.1mm;line-height:1.15;margin-top:1.1mm;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}" +
+            ".trz-lbl-spec{font-weight:800;font-size:2.7mm;line-height:1.15;margin-top:.8mm}" +
+            ".trz-lbl-ref{margin-top:auto;padding-top:.8mm;font-weight:900;font-size:3.3mm;line-height:1.12;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}" +
+            ".trz-lbl-qty{width:37mm;flex:none;border:.7mm solid #000;border-radius:1.2mm;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:1mm .8mm}" +
+            ".trz-lbl-qty small{font-size:2.9mm;font-weight:900;letter-spacing:.3mm}" +
+            ".trz-lbl-qty b{display:block;font-size:12.5mm;line-height:1;font-weight:900;margin:.6mm 0 .3mm;white-space:nowrap}" +
+            ".trz-lbl-qty b.mid{font-size:9.5mm}.trz-lbl-qty b.long{font-size:7mm}.trz-lbl-qty b.xlong{font-size:5.4mm}" +
+            ".trz-lbl-qty span{font-size:3.8mm;font-weight:900;letter-spacing:.2mm}" +
+            ".trz-lbl-qty em{font-style:normal;font-size:3.2mm;font-weight:900;border-top:.4mm solid #000;margin-top:1.2mm;padding-top:.8mm;width:100%}" +
+            ".trz-lbl-meta{border-top:.3mm solid #000;margin-top:1.2mm;padding-top:.6mm;text-align:center;font-size:2.6mm;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
+        (function () {
+            var st = document.createElement("style");
+            st.textContent = TRZ_LABEL_CSS + "#printableArea .trz-lbl{max-width:100%}";
+            document.head.appendChild(st);
+        })();
+
+        function trzLabelUnit(unit) {
+            var u = String(unit || "").trim().toUpperCase().replace(/\.+$/, "");
+            if (u === "" || ["UNID", "UND", "UN", "U", "C/U", "CU", "UNIDAD", "UNIDADES", "UNIDS"].indexOf(u) >= 0) return "UNIDADES";
+            return ({ "BOB": "BOBINAS", "CJ": "CAJAS", "CAJA": "CAJAS", "PAQ": "PAQUETES", "ROLLO": "ROLLOS" })[u] || u;
+        }
+
+        function trzLabelQty(data) {
+            var ini = data.quantity_initial;
+            var q = (ini !== null && ini !== undefined && ini !== "" && parseFloat(ini) > 0) ? parseFloat(ini) : parseFloat(data.quantity || 0);
+            return (isFinite(q) ? q : 0).toLocaleString("es-CL", { maximumFractionDigits: 3 });
+        }
+
+        function trzLabelDate(value) {
+            var m = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+            return m ? (m[3] + "/" + m[2] + "/" + m[1] + " " + m[4] + ":" + m[5]) : String(value || "");
+        }
+
         function buildLabelCardHtml(data, idx, totalCount) {
             var wh = data.warehouse_name || "Bodega";
             var code = data.traceability_code || data.code || "-";
-            var sku = (data.item_code || "-");
+            var sku = data.item_code || "-";
             var desc = data.item_description || "";
-            var meta = (data.created_at || "") + " · Op: " + (data.operator_name || "");
-            var barcodeHtml = buildCode128Svg(code);
-            var bultoBadge = (totalCount > 1 || (data.total_packages && data.total_packages > 1))
-                ? ("<div style=\"font-size:13px;font-weight:900;color:#000;margin-bottom:5px;background:#fff;border:2px solid #000;padding:3px 10px;border-radius:6px;display:inline-block\">BULTO " + (data.package_number || (idx + 1)) + " DE " + (data.total_packages || totalCount) + "</div>")
-                : "";
+            var qty = trzLabelQty(data);
+            var qtyClass = qty.length > 8 ? "xlong" : (qty.length > 6 ? "long" : (qty.length > 4 ? "mid" : ""));
+            var pkgTotal = parseInt(data.total_packages || 0, 10) || (totalCount > 1 ? totalCount : 1);
+            var bulto = pkgTotal > 1 ? ("<em>BULTO " + (data.package_number || (idx + 1)) + " DE " + pkgTotal + "</em>") : "";
+
+            var refs = [];
+            var orderRef = String(data.order_ref || "").trim();
+            if (orderRef) refs.push(/^\d{2}-\d+/.test(orderRef) ? "CC " + orderRef : orderRef);
+            if (String(data.lot_number || "").trim()) refs.push("LOTE " + String(data.lot_number).trim());
+            if (String(data.entity_type || "").toUpperCase() === "PALLET" && parseInt(data.box_count || 0, 10) > 0) refs.push(parseInt(data.box_count, 10) + " CAJAS");
 
             var specsArr = [];
-            if (data.width_mm && parseFloat(data.width_mm) > 0) specsArr.push("Ancho: " + Math.round(data.width_mm) + " mm");
-            if (data.microns && parseFloat(data.microns) > 0) specsArr.push("Micras: " + Math.round(data.microns) + " µm");
-            if (data.meters && parseFloat(data.meters) > 0) specsArr.push("Largo: " + parseFloat(data.meters).toLocaleString("es-CL") + " m");
-            var specsHtml = specsArr.length > 0 ? ("<div style=\"font-size:10px;font-weight:900;color:#000;margin-bottom:5px;line-height:1.15;word-break:break-word\">ESPEC.: " + escapeHtml(specsArr.join(" · ")) + "</div>") : "";
+            if (data.width_mm && parseFloat(data.width_mm) > 0) specsArr.push("Ancho " + Math.round(data.width_mm) + " mm");
+            if (data.microns && parseFloat(data.microns) > 0) specsArr.push(Math.round(data.microns) + " µm");
+            if (data.meters && parseFloat(data.meters) > 0) specsArr.push(parseFloat(data.meters).toLocaleString("es-CL") + " m");
 
-            return "<div class=\"printable-label printable-label-page\" style=\"margin-top:" + (idx > 0 ? "14px" : "0") + "\">" +
-                "<div style=\"font-size:15px;font-weight:900;color:#000;letter-spacing:0.8px;margin-bottom:1px;line-height:1.05\">UNIBAG CHILE</div>" +
-                "<div style=\"font-size:10px;font-weight:900;color:#000;text-transform:uppercase;margin-bottom:5px;line-height:1.05\">" + escapeHtml(wh) + "</div>" +
-                bultoBadge +
-                barcodeHtml +
-                "<div style=\"font-family:monospace;font-size:18px;font-weight:900;color:#000;letter-spacing:1px;margin:2px 0 6px;line-height:1.05;word-break:break-word\">" + escapeHtml(code) + "</div>" +
-                "<div style=\"border-top:2px solid #000;padding-top:7px;text-align:left;font-size:11px\">" +
-                    "<div style=\"font-weight:900;font-size:44px;color:#000;margin-bottom:3px;line-height:0.92;letter-spacing:0.35px\">" + escapeHtml(sku) + "</div>" +
-                    "<div style=\"color:#000;margin-bottom:5px;font-size:10.5px;font-weight:800;line-height:1.15;word-break:break-word\">" + escapeHtml(desc) + "</div>" +
-                    specsHtml +
-                    "<div style=\"font-size:8.5px;color:#000;margin-top:6px;text-align:center;font-weight:800;line-height:1.1\">" + escapeHtml(meta) + "</div>" +
+            var meta = trzLabelDate(data.created_at) + (data.operator_name ? " · Op: " + data.operator_name : "");
+
+            return "<div class=\"trz-lbl printable-label-page\">" +
+                "<div class=\"trz-lbl-co\">UNIBAG CHILE</div>" +
+                "<div class=\"trz-lbl-wh\">" + escapeHtml(wh) + "</div>" +
+                buildCode128Svg(code) +
+                "<div class=\"trz-lbl-code\">" + escapeHtml(code) + "</div>" +
+                "<div class=\"trz-lbl-body\">" +
+                    "<div class=\"trz-lbl-info\">" +
+                        "<div class=\"trz-lbl-sku\">" + escapeHtml(sku) + "</div>" +
+                        (desc ? "<div class=\"trz-lbl-desc\">" + escapeHtml(desc) + "</div>" : "") +
+                        (specsArr.length ? "<div class=\"trz-lbl-spec\">" + escapeHtml(specsArr.join(" · ")) + "</div>" : "") +
+                        (refs.length ? "<div class=\"trz-lbl-ref\">" + escapeHtml(refs.join(" · ")) + "</div>" : "") +
+                    "</div>" +
+                    "<div class=\"trz-lbl-qty\"><small>CANTIDAD</small><b class=\"" + qtyClass + "\">" + escapeHtml(qty) + "</b>" +
+                        "<span>" + escapeHtml(trzLabelUnit(data.unit_name)) + "</span>" + bulto + "</div>" +
                 "</div>" +
+                "<div class=\"trz-lbl-meta\">" + escapeHtml(meta) + "</div>" +
             "</div>";
         }
 
@@ -2158,13 +2213,11 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             win.document.write("<!doctype html><html><head><title>Imprimir Etiquetas</title><style>" +
                 "@page { size: 100mm 70mm; margin: 0; }" +
                 "* { box-sizing: border-box; }" +
-                "body { font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; margin: 0; padding: 0; background: #fff; color: #000; text-align: center; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
-                ".barcode-svg-wrap { width:94%; margin:1mm auto 0.8mm auto; }" +
-                ".barcode-svg-wrap svg { display:block; margin:0 auto; max-width:100%; }" +
-                ".printable-label { width: 100mm; height: 70mm; max-width: 100mm; max-height: 70mm; border: 0.8mm solid #000; border-radius: 0; padding: 1.8mm 2.4mm; margin: 0 auto 10px auto; box-sizing: border-box; page-break-inside: avoid; break-inside: avoid; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-start; color:#000 !important; }" +
+                "body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 0; background: #fff; color: #000; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
+                TRZ_LABEL_CSS +
                 "@media print {" +
-                    "body { margin: 0 !important; padding: 0 !important; width: 100mm !important; height: 70mm !important; }" +
-                    ".printable-label-page { width: 100mm !important; height: 70mm !important; margin: 0 !important; padding: 1.8mm 2.4mm !important; page-break-after: always !important; break-after: page !important; page-break-inside: avoid !important; break-inside: avoid !important; border: none !important; color:#000 !important; }" +
+                    "body { margin: 0 !important; padding: 0 !important; width: 100mm !important; }" +
+                    ".printable-label-page { width: 100mm !important; height: 70mm !important; margin: 0 !important; page-break-after: always !important; break-after: page !important; page-break-inside: avoid !important; break-inside: avoid !important; border: none !important; color:#000 !important; }" +
                     ".printable-label-page:last-child { page-break-after: auto !important; break-after: auto !important; margin-bottom: 0 !important; }" +
                 "}" +
             "</style></head><body>" + printable + "</body></html>");

@@ -1,0 +1,62 @@
+<?php
+declare(strict_types=1);
+// Etiqueta de Ingreso con Trazabilidad: muestra la cantidad del bulto y usa toda la etiqueta de 100x70 mm (sin impresora).
+$root = dirname(__DIR__, 2);
+require_once $root . '/src/bootstrap.php';
+
+$fail = 0;
+$check = function (string $name, bool $ok, string $extra = '') use (&$fail): void {
+    echo ($ok ? 'OK   ' : 'FAIL ') . $name . ($extra !== '' && !$ok ? " [$extra]" : '') . "\n";
+    if (!$ok) {
+        $fail++;
+    }
+};
+
+$entry = ['traceability_code' => 'TRZ5C4687', 'item_code' => 'BOL0352', 'item_description' => 'BOLSA KRAFT 30X40 CON MANILLA PLANA IMPRESA 2 COLORES LOGO TOTTUS',
+    'quantity' => 150, 'quantity_initial' => 200, 'unit_name' => 'Unid.', 'package_number' => 3, 'total_packages' => 10,
+    'warehouse_name' => '400 (PROD TERMINADOS REVENTA)', 'operator_name' => 'Gabriel Muñoz', 'created_at' => '2026-11-12 10:15:22',
+    'order_ref' => '26-00808-1', 'entity_type' => 'PALLET', 'box_count' => 50, 'lot_number' => 'L-77'];
+
+$check('unidad legible', PrintService::entryUnitLabel('Unid.') === 'UNIDADES' && PrintService::entryUnitLabel('C/U') === 'UNIDADES'
+    && PrintService::entryUnitLabel('BOB') === 'BOBINAS' && PrintService::entryUnitLabel('KG') === 'KG');
+$check('cantidad con miles chilenos', PrintService::entryQuantityText(125000) === '125.000' && PrintService::entryQuantityText(2.5) === '2,5'
+    && PrintService::entryQuantityText(200) === '200');
+
+// TSPL: medidas exactas de las fuentes internas para comprobar que nada se sale de la etiqueta.
+$tsplFont = [1 => [8, 12], 2 => [12, 20], 3 => [16, 24], 4 => [24, 32], 5 => [32, 48]];
+foreach (['tspl', 'zpl', 'epl'] as $lang) {
+    $cmd = (new PrintService(['PRINT_LANGUAGE' => $lang]))->buildTraceabilityEntryCommand($entry);
+    $L = strtoupper($lang);
+    $check("$L: cantidad original del bulto (200, no el saldo 150) en el recuadro", preg_match('/[",D]200("|\^FS)/', $cmd) === 1 && !preg_match('/[",D]150("|\^FS)/', $cmd)
+        && str_contains($cmd, 'CANTIDAD') && str_contains($cmd, 'UNIDADES'));
+    $check("$L: bulto, referencia, SKU y operador", str_contains($cmd, 'BULTO 3 DE 10') && str_contains($cmd, 'CC 26-00808-1') && str_contains($cmd, 'BOL0352')
+        && str_contains($cmd, '50 CAJAS') && str_contains($cmd, '12/11/2026 10:15 - OP: GABRIEL MUNOZ'));
+    if ($lang === 'tspl') {
+        preg_match_all('/^TEXT (\d+),(\d+),"(\d)",0,(\d),\d,"([^"]*)"/m', $cmd, $m, PREG_SET_ORDER);
+        $out = [];
+        $maxY = 0;
+        foreach ($m as [, $x, $y, $font, $mult, $value]) {
+            [$cw, $ch] = $tsplFont[(int)$font];
+            $right = (int)$x + strlen($value) * $cw * (int)$mult;
+            $bottom = (int)$y + $ch * (int)$mult;
+            $maxY = max($maxY, $bottom);
+            if ($right > 812 - 8 || $bottom > 560 - 8) {
+                $out[] = $value;
+            }
+        }
+        $check('TSPL: ningún texto se sale de la etiqueta', $out === [], implode(' | ', $out));
+        $check('TSPL: usa todo el alto (hasta el pie)', $maxY >= 530, (string)$maxY);
+        $check('TSPL: recuadro de cantidad a la derecha', str_contains($cmd, 'BOX 492,262,792,498,4'));
+        $long = (new PrintService(['PRINT_LANGUAGE' => 'tspl']))->buildTraceabilityEntryCommand(['quantity' => 125000, 'quantity_initial' => null] + $entry);
+        $check('TSPL: cantidad grande cabe en el recuadro', preg_match('/TEXT (\d+),\d+,"5",0,(\d),\d,"125\.000"/', $long, $q) === 1 && (int)$q[1] >= 492 && (int)$q[1] + 7 * 32 * (int)$q[2] <= 792);
+    }
+}
+
+// Etiqueta del navegador (vista previa e impresión con el navegador).
+$src = (string)file_get_contents($root . '/src/Http/InventoryModule.php');
+$check('navegador: la etiqueta muestra CANTIDAD con la cantidad original y la unidad', str_contains($src, 'function trzLabelQty(data)') && str_contains($src, 'data.quantity_initial')
+    && str_contains($src, '<small>CANTIDAD</small>') && str_contains($src, 'trzLabelUnit(data.unit_name)'));
+$check('navegador: etiqueta de 100x70 mm con el mismo estilo en pantalla e impresión', str_contains($src, '.trz-lbl{width:100mm;height:70mm') && substr_count($src, 'TRZ_LABEL_CSS') >= 3);
+
+echo $fail === 0 ? "\nETIQUETA DE INGRESO OK\n" : "\nETIQUETA DE INGRESO: $fail fallas\n";
+exit($fail > 0 ? 1 : 0);

@@ -874,97 +874,176 @@ final class PrintService
         return max(8, (int)floor((812 - strlen($text) * $charWidth * $mult) / 2));
     }
 
+    /** Texto de la unidad para la etiqueta (UNID / C/U / Unid. → UNIDADES; BOB → BOBINAS). */
+    public static function entryUnitLabel(string $unit): string
+    {
+        $u = strtoupper(trim($unit));
+        $u = rtrim($u, '.');
+        if ($u === '' || in_array($u, ['UNID', 'UND', 'UN', 'U', 'C/U', 'CU', 'UNIDAD', 'UNIDADES', 'UNIDS'], true)) {
+            return 'UNIDADES';
+        }
+        return ['BOB' => 'BOBINAS', 'CJ' => 'CAJAS', 'CAJA' => 'CAJAS', 'PAQ' => 'PAQUETES', 'ROLLO' => 'ROLLOS'][$u] ?? $u;
+    }
+
+    /** Cantidad con separador de miles chileno (1.500 · 2,5). */
+    public static function entryQuantityText(float $qty): string
+    {
+        $dec = abs($qty - round($qty)) < 0.0005 ? 0 : (abs($qty * 10 - round($qty * 10)) < 0.005 ? 1 : (abs($qty * 100 - round($qty * 100)) < 0.05 ? 2 : 3));
+        return number_format($qty, $dec, ',', '.');
+    }
+
     /**
-     * Etiqueta 100x70 mm de un ingreso a bodega con código de trazabilidad.
-     * Diseño: UNIBAG CHILE / bodega / código de barras / código / SKU grande / descripción / cantidad / fecha y operador.
+     * Etiqueta 100x70 mm (812x560 puntos) de un ingreso a bodega con código de trazabilidad.
      *
-     * @param array<string, mixed> $e traceability_code, item_code, item_description, quantity,
-     *        unit_name, package_number, total_packages, warehouse_name, operator_name, created_at
+     *  ┌──────────────────────────────────────────────┐
+     *  │                UNIBAG CHILE                  │
+     *  │      400 (PROD TERMINADOS REVENTA)           │
+     *  │           ║║│║║│║│║║│║ (código)            │
+     *  │                TRZ5C4687                     │
+     *  ├──────────────────────────────┬───────────────┤
+     *  │ BOL0352                      │   CANTIDAD    │
+     *  │ BOLSA KRAFT 30X40 ...        │      200      │
+     *  │ (hasta 3 líneas)             │   UNIDADES    │
+     *  │ CC 26-00808-1 · 50 CAJAS     │ BULTO 3 DE 10 │
+     *  ├──────────────────────────────┴───────────────┤
+     *  │      12/11/2026 10:15 - OP: GABRIEL MUÑOZ     │
+     *  └──────────────────────────────────────────────┘
+     * La cantidad es la ORIGINAL del bulto (quantity_initial), no el saldo que queda tras usarlo o despacharlo.
+     *
+     * @param array<string, mixed> $e traceability_code, item_code, item_description, quantity, quantity_initial,
+     *        unit_name, package_number, total_packages, warehouse_name, operator_name, created_at, order_ref,
+     *        lot_number, box_count, entity_type
      */
     public function buildTraceabilityEntryCommand(array $e): string
     {
         $code = strtoupper($this->t((string)($e['traceability_code'] ?? '')));
-        $sku = strtoupper($this->t((string)($e['item_code'] ?? '')));
-        $descLines = explode("\n", wordwrap(strtoupper($this->t(mb_substr(trim((string)($e['item_description'] ?? '')), 0, 120))), 58, "\n", true));
-        $descLines = array_slice($descLines, 0, 2);
-        $qtyNum = (float)($e['quantity_initial'] ?? $e['quantity'] ?? 0);
-        $qty = rtrim(rtrim(number_format($qtyNum, 2, '.', ''), '0'), '.');
-        $unit = strtoupper($this->t((string)($e['unit_name'] ?? '')));
-        $pkgNo = (int)($e['package_number'] ?? 1);
+        $sku = strtoupper($this->t(trim((string)($e['item_code'] ?? ''))));
+        $desc = strtoupper($this->t(trim((string)($e['item_description'] ?? ''))));
+        $initial = $e['quantity_initial'] ?? null;
+        $qtyNum = ($initial !== null && $initial !== '' && (float)$initial > 0) ? (float)$initial : (float)($e['quantity'] ?? 0);
+        $qty = self::entryQuantityText($qtyNum);
+        $unit = $this->t(self::entryUnitLabel((string)($e['unit_name'] ?? '')));
+        $pkgNo = max(1, (int)($e['package_number'] ?? 1));
         $pkgTotal = (int)($e['total_packages'] ?? 1);
-        $qtyLine = 'CANT: ' . $qty . ($unit !== '' ? ' ' . $unit : '');
-        $pkgLine = $pkgTotal > 1 ? ('BULTO ' . max(1, $pkgNo) . ' DE ' . $pkgTotal) : '';
-        $wh = strtoupper($this->t(mb_substr((string)($e['warehouse_name'] ?? ''), 0, 56)));
+        $pkgLine = $pkgTotal > 1 ? 'BULTO ' . $pkgNo . ' DE ' . $pkgTotal : '';
+        $wh = strtoupper($this->t((string)($e['warehouse_name'] ?? '')));
+        $refParts = [];
+        $orderRef = strtoupper($this->t(trim((string)($e['order_ref'] ?? ''))));
+        if ($orderRef !== '') {
+            $refParts[] = preg_match('/^\d{2}-\d+/', $orderRef) === 1 ? 'CC ' . $orderRef : $orderRef;
+        }
+        if (trim((string)($e['lot_number'] ?? '')) !== '') {
+            $refParts[] = 'LOTE ' . strtoupper($this->t(trim((string)$e['lot_number'])));
+        }
+        if ((int)($e['box_count'] ?? 0) > 0 && strtoupper((string)($e['entity_type'] ?? '')) === 'PALLET') {
+            $refParts[] = (int)$e['box_count'] . ' CAJAS';
+        }
+        $ref = implode(' - ', $refParts);
         $op = strtoupper($this->t((string)($e['operator_name'] ?? '')));
         $when = $this->t(trim((string)($e['created_at'] ?? '')));
+        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/', $when, $m) === 1) {
+            $when = "{$m[3]}/{$m[2]}/{$m[1]} {$m[4]}:{$m[5]}";
+        }
         $meta = trim($when . ($op !== '' ? ' - OP: ' . $op : ''));
-        $meta = mb_substr($meta, 0, 78);
         $lang = $this->getPrintLanguage();
-        $skuMult = strlen($sku) <= 17 ? 3 : (strlen($sku) <= 27 ? 2 : 1);
+
+        // Geometría (puntos a 203 dpi): columna izquierda 20..476, recuadro de cantidad 492..792.
+        $L = 20;
+        $LW = 456;
+        $BX = 492;
+        $BW = 300;
+        $top = 262;
+        $boxBottom = 498;
+
+        // Fuentes por tamaño: [ancho de carácter, alto] a escala 1.
+        $fonts = [
+            'tspl' => ['s' => [2, 12, 20], 'm' => [3, 16, 24], 'l' => [4, 24, 32], 'xl' => [5, 32, 48]],
+            'epl' => ['s' => [2, 10, 16], 'm' => [3, 12, 20], 'l' => [4, 14, 24], 'xl' => [5, 32, 48]],
+            'zpl' => ['s' => [0, 13, 22], 'm' => [0, 16, 26], 'l' => [0, 22, 34], 'xl' => [0, 30, 50]],
+        ][$lang === 'tspl' || $lang === 'epl' ? $lang : 'zpl'];
+        /** Mayor multiplicador (≤ $max) con el que el texto cabe en $w. */
+        $fit = static function (string $text, int $w, string $size, int $max) use ($fonts): int {
+            for ($mult = $max; $mult > 1; $mult--) {
+                if (strlen($text) * $fonts[$size][1] * $mult <= $w) {
+                    return $mult;
+                }
+            }
+            return 1;
+        };
+        $rows = [];
+        /** Texto en un bloque [x, x+w] alineado L/C; se recorta si no cabe. Devuelve el alto usado. */
+        $text = function (int $x, int $y, int $w, string $align, string $size, int $mult, string $value) use ($lang, $fonts, &$rows): int {
+            [$font, $cw, $ch] = $fonts[$size];
+            $value = substr($value, 0, max(1, intdiv($w, $cw * $mult)));
+            if ($value === '') {
+                return 0;
+            }
+            $tx = $align === 'C' ? $x + max(0, intdiv($w - strlen($value) * $cw * $mult, 2)) : $x;
+            if ($lang === 'tspl') {
+                $rows[] = 'TEXT ' . $tx . ',' . $y . ',"' . $font . '",0,' . $mult . ',' . $mult . ',"' . $value . '"';
+            } elseif ($lang === 'epl') {
+                $rows[] = 'A' . $tx . ',' . $y . ',0,' . $font . ',' . $mult . ',' . $mult . ',N,"' . $value . '"';
+            } else {
+                $rows[] = '^FO' . $x . ',' . $y . '^FB' . $w . ',1,0,' . $align . ',0^A0N,' . ($ch * $mult) . ',' . ($cw * $mult) . '^FD' . $value . '^FS';
+            }
+            return $ch * $mult;
+        };
+        $line = function (int $x, int $y, int $w, int $h) use ($lang, &$rows): void {
+            $rows[] = $lang === 'tspl' ? "BAR $x,$y,$w,$h" : ($lang === 'epl' ? "LO$x,$y,$w,$h" : "^FO$x,$y^GB$w,$h,$h^FS");
+        };
+
+        // Cabecera, código de barras y número.
+        $text(0, 8, 812, 'C', 'l', 1, 'UNIBAG CHILE');
+        $text(20, 46, 772, 'C', 'm', 1, $wh);
+        $barY = 78;
+        $rows[] = $lang === 'tspl' ? $this->tsplBarcode($code, $barY) : ($lang === 'epl' ? $this->eplBarcode($code, $barY) : $this->zplBarcode($code, $barY));
+        $text(20, $barY + self::BARCODE_HEIGHT_DOTS + 6, 772, 'C', 'l', $fit($code, 772, 'l', 2), $code);
+        $line(20, 252, 772, 3);
+
+        // Columna izquierda: SKU, descripción (hasta 3 líneas) y referencia.
+        $y = $top;
+        $y += $text($L, $y, $LW, 'L', 'l', $fit($sku, $LW, 'l', 2), $sku) + 8;
+        $perLine = intdiv($LW, $fonts['m'][1]);
+        $refLines = $ref !== '' ? array_slice(explode("\n", wordwrap($ref, $perLine, "\n", true)), 0, 2) : [];
+        $descLines = $desc !== '' ? array_slice(explode("\n", wordwrap($desc, $perLine, "\n", true)), 0, 4 - count($refLines)) : [];
+        foreach ($descLines as $d) {
+            $y += $text($L, $y, $LW, 'L', 'm', 1, $d) + 3;
+        }
+        // La referencia (CC, lote, cajas) va al pie de la columna, alineada con el fondo del recuadro de cantidad.
+        $refY = $boxBottom - 4 - count($refLines) * ($fonts['m'][2] + 3);
+        foreach ($refLines as $i => $r) {
+            $text($L, max($y + 4, $refY) + $i * ($fonts['m'][2] + 3), $LW, 'L', 'm', 1, $r);
+        }
+
+        // Recuadro de cantidad.
+        if ($lang === 'tspl') {
+            $rows[] = 'BOX ' . $BX . ',' . $top . ',' . ($BX + $BW) . ',' . $boxBottom . ',4';
+        } elseif ($lang === 'epl') {
+            $rows[] = 'X' . $BX . ',' . $top . ',4,' . ($BX + $BW) . ',' . $boxBottom;
+        } else {
+            $rows[] = '^FO' . $BX . ',' . $top . '^GB' . $BW . ',' . ($boxBottom - $top) . ',4^FS';
+        }
+        $text($BX, $top + 10, $BW, 'C', 'm', 1, 'CANTIDAD');
+        $qMult = $fit($qty, $BW - 24, 'xl', 2);
+        $qHeight = $fonts['xl'][2] * $qMult;
+        $text($BX + 4, $top + 40 + intdiv(96 - $qHeight, 2), $BW - 8, 'C', 'xl', $qMult, $qty);
+        $text($BX + 4, $top + 144, $BW - 8, 'C', 'l', 1, $unit);
+        if ($pkgLine !== '') {
+            $line($BX + 14, $top + 184, $BW - 28, 2);
+            $text($BX + 4, $top + 196, $BW - 8, 'C', 'm', 1, $pkgLine);
+        }
+
+        // Pie: fecha y operador.
+        $line(20, 508, 772, 2);
+        $text(20, 520, 772, 'C', 's', 1, $meta);
 
         if ($lang === 'tspl') {
-            $out = $this->buildTsplHeader() . "\r\n"
-                . 'BAR 20,300,772,3' . "\r\n"
-                . 'TEXT ' . $this->tsplCenterX('UNIBAG CHILE', 4, 2) . ',10,"4",0,2,2,"UNIBAG CHILE"' . "\r\n"
-                . 'TEXT ' . $this->tsplCenterX($wh, 3) . ',64,"3",0,1,1,"' . $wh . '"' . "\r\n"
-                . $this->tsplBarcode($code, 138) . "\r\n"
-                . 'TEXT ' . $this->tsplCenterX($code, 4, 2) . ',244,"4",0,2,2,"' . $code . '"' . "\r\n"
-                . 'TEXT 20,312,"4",0,' . $skuMult . ',' . $skuMult . ',"' . $sku . '"' . "\r\n";
-            foreach ($descLines as $i => $line) {
-                $out .= 'TEXT 20,' . (394 + 26 * $i) . ',"3",0,1,1,"' . $line . '"' . "\r\n";
-            }
-            $out .= 'TEXT 20,454,"4",0,1,1,"' . $qtyLine . '"' . "\r\n";
-            if ($pkgLine !== '') {
-                $out .= 'TEXT ' . max(8, 792 - strlen($pkgLine) * 24) . ',454,"4",0,1,1,"' . $pkgLine . '"' . "\r\n";
-            }
-            return $out . 'TEXT ' . $this->tsplCenterX($meta, 2) . ',520,"2",0,1,1,"' . $meta . '"' . "\r\n" . 'PRINT 1,1';
+            return $this->buildTsplHeader() . "\r\n" . implode("\r\n", $rows) . "\r\nPRINT 1,1";
         }
-
         if ($lang === 'epl') {
-            $rows = [
-                'N',
-                'q812',
-                'Q560,24',
-                ...$this->buildEplDeviceSettings(),
-                'LO20,300,772,3',
-                'A' . $this->eplCenterX('UNIBAG CHILE', 4, 2) . ',10,0,4,2,2,N,"UNIBAG CHILE"',
-                'A' . $this->eplCenterX($wh, 3) . ',64,0,3,1,1,N,"' . $wh . '"',
-                $this->eplBarcode($code, 138),
-                'A' . $this->eplCenterX($code, 4, 2) . ',244,0,4,2,2,N,"' . $code . '"',
-                'A20,312,0,4,' . $skuMult . ',' . $skuMult . ',N,"' . $sku . '"',
-            ];
-            foreach ($descLines as $i => $line) {
-                $rows[] = 'A20,' . (394 + 26 * $i) . ',0,3,1,1,N,"' . $line . '"';
-            }
-            $rows[] = 'A20,454,0,4,1,1,N,"' . $qtyLine . '"';
-            if ($pkgLine !== '') {
-                $rows[] = 'A' . max(8, 792 - strlen($pkgLine) * 14) . ',454,0,4,1,1,N,"' . $pkgLine . '"';
-            }
-            $rows[] = 'A' . $this->eplCenterX($meta, 2) . ',520,0,2,1,1,N,"' . $meta . '"';
-            $rows[] = 'P1';
-            return implode("\r\n", $rows) . "\r\n";
+            return implode("\r\n", ['N', 'q812', 'Q560,24', ...$this->buildEplDeviceSettings(), ...$rows, 'P1']) . "\r\n";
         }
-
-        $descZpl = '';
-        foreach ($descLines as $i => $line) {
-            $descZpl .= '^FO20,' . (394 + 26 * $i) . '^A0N,26,22^FD' . $line . "^FS\n";
-        }
-        $pkgZpl = $pkgLine !== '' ? '^FO0,454^FB792,1,0,R,0^A0N,34,30^FD' . $pkgLine . "^FS\n" : '';
-        return "^XA
-^CI28
-^PW812
-^LL560
-^PR3
-^MD" . $this->getZplDarkness() . "
-^FO0,10^FB812,1,0,C,0^A0N,50,44^FDUNIBAG CHILE^FS
-^FO0,64^FB812,1,0,C,0^A0N,24,22^FD{$wh}^FS
-" . $this->zplBarcode($code, 138) . "
-^FO0,244^FB812,1,0,C,0^A0N,50,44^FD{$code}^FS
-^FO20,300^GB772,3,3^FS
-^FO20,312^A0N," . (24 * $skuMult) . "," . (20 * $skuMult) . "^FD{$sku}^FS
-" . $descZpl . "^FO20,454^A0N,34,30^FD{$qtyLine}^FS
-" . $pkgZpl . "^FO0,520^FB812,1,0,C,0^A0N,22,18^FD{$meta}^FS
-^XZ";
+        return "^XA\n^CI28\n^PW812\n^LL560\n^PR3\n^MD" . $this->getZplDarkness() . "\n" . implode("\n", $rows) . "\n^XZ";
     }
 
     private function buildZpl(array $roll): string
