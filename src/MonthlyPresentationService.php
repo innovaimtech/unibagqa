@@ -159,21 +159,27 @@ class MonthlyPresentationService
                 $lateRows[] = $r;
             }
         }
-        usort($lateRows, static function (array $a, array $b): int {
-            return [(int)($b['delay_days'] ?? 0), (float)($b['dispatched_units'] ?? 0)] <=> [(int)($a['delay_days'] ?? 0), (float)($a['dispatched_units'] ?? 0)];
-        });
-        $delayedOrders = [];
-        foreach (array_slice($lateRows, 0, 12) as $r) {
-            $delayedOrders[] = [
-                'cc_number' => trim((string)($r['cc_number'] ?? '')) !== '' ? (string)$r['cc_number'] : trim((string)($r['doc_type'] ?? '') . ' ' . (string)($r['doc_number'] ?? '')),
-                'ot_number' => '-', // el informe de nivel de servicio no trae el N° de OT
-                'customer_name' => (string)($r['customer_name'] ?? '-'),
-                'product_type' => (string)($r['product_code'] ?? '-'),
-                'units' => (float)($r['dispatched_units'] ?? 0),
-                'required_date' => (string)($r['committed_date'] ?? '-'),
-                'delay_days' => (int)($r['delay_days'] ?? 0),
-            ];
+        // Un pedido atrasado por CC (el informe trae una fila por producto): unidades sumadas y el mayor atraso.
+        $byCc = [];
+        foreach ($lateRows as $r) {
+            $cc = trim((string)($r['cc_number'] ?? '')) !== '' ? (string)$r['cc_number'] : trim((string)($r['doc_type'] ?? '') . ' ' . (string)($r['doc_number'] ?? ''));
+            if (!isset($byCc[$cc])) {
+                $byCc[$cc] = [
+                    'cc_number' => $cc,
+                    'ot_number' => '-', // el informe de nivel de servicio no trae el N° de OT
+                    'customer_name' => (string)($r['customer_name'] ?? '-'),
+                    'product_type' => (string)($r['product_code'] ?? '-'),
+                    'units' => 0.0,
+                    'required_date' => (string)($r['committed_date'] ?? '-'),
+                    'delay_days' => 0,
+                ];
+            }
+            $byCc[$cc]['units'] += (float)($r['dispatched_units'] ?? 0);
+            $byCc[$cc]['delay_days'] = max($byCc[$cc]['delay_days'], (int)($r['delay_days'] ?? 0));
         }
+        $delayedOrders = array_values($byCc);
+        usort($delayedOrders, static fn(array $a, array $b): int => [$b['delay_days'], $b['units']] <=> [$a['delay_days'], $a['units']]);
+        $delayedOrders = array_slice($delayedOrders, 0, 12);
 
         // 3. Merma global del período.
         $wasteReport = $this->receptionService->getErpOperatorWasteReport($startDate, $endDate);
@@ -186,9 +192,11 @@ class MonthlyPresentationService
             'prod_units' => $prodUnits,
             'sl_total_units' => $slTotalUnits,
             'sl_delayed_units' => $slDelayedUnits,
-            'sl_total_cc' => (int)($slSummary['total_dispatches'] ?? 0),
-            'sl_delayed_cc' => (int)($slSummary['delayed_dispatches'] ?? 0),
-            'sl_percent_cc' => (float)($slSummary['service_level_percent'] ?? 0),
+            // C.C. distintas (antes se contaban filas: una por producto despachado).
+            'sl_total_cc' => (int)($slSummary['total_cc'] ?? $slSummary['total_dispatches'] ?? 0),
+            'sl_delayed_cc' => (int)($slSummary['delayed_cc'] ?? $slSummary['delayed_dispatches'] ?? 0),
+            'sl_percent_cc' => (float)($slSummary['service_level_cc_percent'] ?? $slSummary['service_level_percent'] ?? 0),
+            'sl_without_agreed_cc' => (int)($slSummary['without_agreed_cc'] ?? 0),
             'delayed_orders' => $delayedOrders,
             'waste_pct' => (float)($wasteSummary['global_waste_percent'] ?? 0),
             'total_waste_kg' => (float)($wasteSummary['total_waste_kg'] ?? 0),
@@ -378,6 +386,12 @@ class MonthlyPresentationService
 
     /** Una bobina PP/PLA no pesa más que esto; un peso mayor en el ERP es un error de digitación (p. ej. 11440 por 114,40). */
     private const ROLL_MAX_KG = 500.0;
+
+    /**
+     * Versión del nivel de servicio guardado en el historial. 2 = fecha pactada del pedido vs fecha de la factura,
+     * solo despachos confirmados y C.C. distintas. Si cambia, los meses calculados se recalculan.
+     */
+    private const SERVICE_LEVEL_VERSION = 2;
 
     /** Versión del cálculo de bobinas guardado en el historial; si cambia, los meses calculados se recalculan. */
     private const ROLL_CALC_VERSION = 3;
@@ -654,7 +668,7 @@ class MonthlyPresentationService
         $closed = $endTs < time();
         $suffix = $range !== null ? '-r' . $range['from'] . '_' . $range['to'] : '';
         $historyStamp = (string)@filemtime($this->historyPath());
-        $cacheKey = 'monthly-mes-v' . self::ROLL_CALC_VERSION . '-' . $monthKey . $suffix . '-' . $historyStamp;
+        $cacheKey = 'monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '-' . $monthKey . $suffix . '-' . $historyStamp;
         $cached = ResultCache::get($cacheKey, $closed ? 21600 : 300, $found);
         if ($found && is_array($cached)) {
             $cached['issued_at'] = date('d-m-Y');
@@ -665,7 +679,7 @@ class MonthlyPresentationService
         $metrics = $this->computeMonthlyMetrics($monthKey, $range);
         // La clave se arma con la fecha del historial DESPUÉS del cálculo (el cálculo puede guardar meses nuevos).
         clearstatcache();
-        ResultCache::put('monthly-mes-v' . self::ROLL_CALC_VERSION . '-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
+        ResultCache::put('monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
         return $metrics;
     }
 
@@ -719,8 +733,10 @@ class MonthlyPresentationService
         for ($m = 1; $m <= $monthNum; $m++) {
             $key = sprintf('%04d-%02d', $year, $m);
             $isPublished = ($stored[$key]['origen'] ?? '') === 'plantilla';
-            // Meses calculados con el ciclo antiguo 26→25 (sin 'periodo' = 'mes'): se recalculan con el mes calendario.
-            if (isset($stored[$key]) && !$isPublished && ($stored[$key]['periodo'] ?? '') !== 'mes') {
+            // Meses calculados con el ciclo antiguo 26→25 (sin 'periodo' = 'mes') o con el nivel de servicio anterior
+            // (comparaba contra la fecha de la factura): se recalculan.
+            if (isset($stored[$key]) && !$isPublished && (($stored[$key]['periodo'] ?? '') !== 'mes'
+                || (int)($stored[$key]['nivel_servicio'] ?? 1) < self::SERVICE_LEVEL_VERSION)) {
                 unset($stored[$key]);
                 $storedChanged = true;
             }
@@ -752,6 +768,7 @@ class MonthlyPresentationService
                 $entry = [
                     'origen' => 'calculado',
                     'periodo' => 'mes',
+                    'nivel_servicio' => self::SERVICE_LEVEL_VERSION,
                     'prod_units' => $live['prod_units'],
                     'prod_cap' => (float)($stored[$key]['prod_cap'] ?? $capacityDefault),
                     'sl_total_units' => $live['sl_total_units'],
@@ -783,6 +800,7 @@ class MonthlyPresentationService
                 $entry = [
                     'origen' => 'calculado',
                     'periodo' => 'mes',
+                    'nivel_servicio' => self::SERVICE_LEVEL_VERSION,
                     'prod_units' => $past['prod_units'],
                     'prod_cap' => $capacityDefault,
                     'sl_total_units' => $past['sl_total_units'],

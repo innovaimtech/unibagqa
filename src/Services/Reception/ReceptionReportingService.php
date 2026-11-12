@@ -3003,6 +3003,69 @@ trait ReceptionReportingServiceTrait
      * Informe de Nivel de Servicio / Despachos (OTIF):
      * Basado en despacho, detalle_despacho y orders_delivery.
      */
+    /**
+     * Fecha de despacho pactada a partir del texto del pedido (orders.req_despacho_desc). Entiende:
+     * «19-11-2026» / «02/09/2026» / «DESPACHO 02-07-2026», «03-11» / «03/11», «01 octubre» / «1 de Octubre» / «11-Agosto»,
+     * y «10 días hábiles» / «10 ds, habiles» / «10/12 ds. habiles» (fecha del pedido + N días hábiles, lunes a viernes).
+     * Sin año se usa el del pedido (si queda más de 60 días antes del pedido, el año siguiente). Devuelve null si no se entiende.
+     */
+    public static function parseAgreedDispatchDate(string $text, int $orderTs): ?int
+    {
+        $t = strtoupper(trim(strtr($text, ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u',
+            'Á' => 'A', 'É' => 'E', 'Í' => 'I', 'Ó' => 'O', 'Ú' => 'U'])));
+        if ($t === '' || $orderTs <= 0) {
+            return null;
+        }
+        $tz = new DateTimeZone(date_default_timezone_get());
+        $order = (new DateTimeImmutable('@' . $orderTs))->setTimezone($tz)->setTime(0, 0);
+        $date = static function (int $d, int $m, ?int $y) use ($order, $tz): ?int {
+            $guessYear = $y === null;
+            $y = $y ?? (int)$order->format('Y');
+            if ($y < 100) {
+                $y += 2000;
+            }
+            if (!checkdate($m, $d, $y)) {
+                return null;
+            }
+            $dt = (new DateTimeImmutable('now', $tz))->setDate($y, $m, $d)->setTime(0, 0);
+            if ($guessYear && $dt < $order->modify('-60 days')) {
+                $dt = $dt->modify('+1 year');
+            }
+            return $dt->getTimestamp();
+        };
+        if (preg_match('~(\d{1,2})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{2,4})~', $t, $m)) {
+            return $date((int)$m[1], (int)$m[2], (int)$m[3]);
+        }
+        if (preg_match('~(\d{1,3})\s*(?:/\s*\d{1,3}\s*)?(?:DIAS|DS)[\s.,]*HABILES~', $t, $m)) {
+            $dt = $order;
+            for ($n = (int)$m[1]; $n > 0;) {
+                $dt = $dt->modify('+1 day');
+                if ((int)$dt->format('N') <= 5) {
+                    $n--;
+                }
+            }
+            return $dt->getTimestamp();
+        }
+        if (preg_match('~(\d{1,2})\s*(?:DE\s+|-)?\s*(ENE|FEB|MAR|ABR|MAY|JUN|JUL|AGO|SEP|SET|OCT|NOV|DIC)~', $t, $m)) {
+            $months = ['ENE' => 1, 'FEB' => 2, 'MAR' => 3, 'ABR' => 4, 'MAY' => 5, 'JUN' => 6, 'JUL' => 7,
+                'AGO' => 8, 'SEP' => 9, 'SET' => 9, 'OCT' => 10, 'NOV' => 11, 'DIC' => 12];
+            return $date((int)$m[1], $months[$m[2]], null);
+        }
+        if (preg_match('~^(?:DESPACHO\s+)?(\d{1,2})\s*[-/]\s*(\d{1,2})\s*\.?$~', $t, $m)) {
+            return $date((int)$m[1], (int)$m[2], null);
+        }
+        return null;
+    }
+
+    /** Días calendario desde la fecha de $fromTs hasta la de $toTs (negativo si $toTs es antes), sin importar la hora. */
+    public static function calendarDaysBetween(int $fromTs, int $toTs): int
+    {
+        $tz = new DateTimeZone(date_default_timezone_get());
+        $from = (new DateTimeImmutable('@' . $fromTs))->setTimezone($tz)->setTime(0, 0);
+        $to = (new DateTimeImmutable('@' . $toTs))->setTimezone($tz)->setTime(0, 0);
+        return (int)$from->diff($to)->format('%r%a');
+    }
+
     public function getServiceLevelReport(
         string $startAt,
         string $endAt,
@@ -3045,7 +3108,12 @@ trait ReceptionReportingServiceTrait
         }
 
         $where = [
-            "d.fecha_ingreso BETWEEN :start_ts AND :end_ts",
+            // Fecha de despacho = fecha de la factura o guía (cuando sale el stock). El registro del camión
+            // (despacho.fecha_ingreso) suele ingresarse días después; se usa solo si el despacho no tiene documento.
+            "COALESCE(NULLIF(od1.dlv_delivery_date, 0), d.fecha_ingreso) BETWEEN :start_ts AND :end_ts",
+            // Solo despachos confirmados (estado 2). Los borradores (1) y anulados (9) suelen ser copias de un despacho
+            // confirmado del mismo documento: contarlos duplicaba el despacho (p. ej. NV0002524, despachos 3703 y 3704).
+            "d.estado = 2",
         ];
         $params = [
             ':start_ts' => $startTs,
@@ -3083,6 +3151,7 @@ trait ReceptionReportingServiceTrait
                 o1.id AS order_id,
                 o1.req_number AS cc_number,
                 o1.req_crtdat AS order_date,
+                o1.req_despacho_desc AS agreed_text,
                 od1.id AS orders_delivery_id,
                 od1.dlv_delivery_date AS committed_date,
                 od1.dlv_docnum AS guia_factura,
@@ -3103,7 +3172,7 @@ trait ReceptionReportingServiceTrait
             LEFT OUTER JOIN orders_delivery od1 ON d.numero_documento = od1.id
             LEFT OUTER JOIN orders o1 ON o1.id = od1.dlv_order_id
             WHERE " . implode(" AND ", $where) . "
-            ORDER BY d.fecha_ingreso DESC
+            ORDER BY COALESCE(NULLIF(od1.dlv_delivery_date, 0), d.fecha_ingreso) DESC
         ";
 
         try {
@@ -3128,14 +3197,24 @@ trait ReceptionReportingServiceTrait
         $totalDispatches = 0;
         $onTimeCount = 0;
         $delayedCount = 0;
+        $withoutAgreedCount = 0;
         $totalDisp = 0.0;
         $allRows = [];
+        $agreedCache = [];
 
         foreach ($rawRows as $row) {
             $despachoId = (int)$row['despacho_id'];
             $ordersDeliveryId = !empty($row['orders_delivery_id']) ? (int)$row['orders_delivery_id'] : null;
-            $fIngreso = (int)($row['fecha_ingreso'] ?? 0);
-            $committed = (int)($row['committed_date'] ?? 0);
+            $truckTs = (int)($row['fecha_ingreso'] ?? 0);
+            $invoiceTs = (int)($row['committed_date'] ?? 0);
+            // Fecha de despacho: la de la factura/guía; sin documento, la del registro del camión.
+            $fIngreso = $invoiceTs > 0 ? $invoiceTs : $truckTs;
+            // Fecha comprometida: la pactada en el pedido (texto «03-11», «19-11-2026», «10 días hábiles», «01 octubre»).
+            $agreedText = trim((string)($row['agreed_text'] ?? ''));
+            $orderTs = (int)($row['order_date'] ?? 0);
+            $agreedKey = $agreedText . '|' . $orderTs;
+            $agreedCache[$agreedKey] ??= self::parseAgreedDispatchDate($agreedText, $orderTs);
+            $committed = (int)($agreedCache[$agreedKey] ?? 0);
             $dispUnits = (float)($row['dispatched_qty'] ?? 0);
 
             $hasAdj = isset($adjustments[$despachoId]);
@@ -3163,14 +3242,22 @@ trait ReceptionReportingServiceTrait
 
             $isOnTime = true;
             $rowDelayDays = 0;
+            // Sin fecha pactada entendible (y sin fecha ajustada a mano): no cuenta como atraso, queda marcado.
+            $withoutAgreed = !$isJustified && $committed <= 0;
+            if ($withoutAgreed) {
+                $withoutAgreedCount++;
+            }
             if ($isJustified) {
                 $isOnTime = true;
                 $rowDelayDays = 0;
             } elseif ($committed > 0 && $fIngreso > 0) {
-                // Si la fecha de despacho fue posterior a la fecha comprometida (fin de día)
-                if ($fIngreso > ($committed + 86399)) {
+                // Se comparan días calendario: la fecha comprometida trae hora (p. ej. 12:00) y antes un despacho
+                // del día siguiente antes de esa hora quedaba «a tiempo», y los días se redondeaban hacia arriba.
+                $rowDelayDays = self::calendarDaysBetween($committed, $fIngreso);
+                if ($rowDelayDays > 0) {
                     $isOnTime = false;
-                    $rowDelayDays = (int)ceil(($fIngreso - $committed) / 86400);
+                } else {
+                    $rowDelayDays = 0;
                 }
             }
 
@@ -3183,9 +3270,11 @@ trait ReceptionReportingServiceTrait
             $totalDispatches++;
             $totalDisp += $dispUnits;
 
-            $statusLabel = $isOnTime 
-                ? ($hasAdj && $isJustified ? 'A tiempo (Justificado)' : ($hasAdj ? 'A tiempo (Acuerdo)' : 'A tiempo'))
-                : ($hasAdj ? "Atraso {$rowDelayDays}d (Reprog.)" : "Atraso {$rowDelayDays}d");
+            $statusLabel = $withoutAgreed
+                ? 'Sin fecha pactada'
+                : ($isOnTime
+                    ? ($hasAdj && $isJustified ? 'A tiempo (Justificado)' : ($hasAdj ? 'A tiempo (Acuerdo)' : 'A tiempo'))
+                    : ($hasAdj ? "Atraso {$rowDelayDays}d (Reprog.)" : "Atraso {$rowDelayDays}d"));
 
             $allRows[] = [
                 'despacho_id' => $despachoId,
@@ -3201,6 +3290,10 @@ trait ReceptionReportingServiceTrait
                 'cc_number' => trim((string)($row['cc_number'] ?? '')),
                 'product_code' => trim((string)($row['product_code'] ?? '')),
                 'committed_date' => $committed > 0 ? date('d/m/Y', $committed) : 'Sin fecha',
+                'agreed_text' => $agreedText,
+                'without_agreed_date' => $withoutAgreed,
+                'invoice_date' => $invoiceTs > 0 ? date('d/m/Y', $invoiceTs) : '',
+                'truck_date' => $truckTs > 0 ? date('d/m/Y', $truckTs) : '',
                 'raw_committed_date' => $committed > 0 ? date('Y-m-d', $committed) : '',
                 'original_committed_date' => $origCommitted > 0 ? date('d/m/Y', $origCommitted) : 'Sin fecha',
                 'raw_orig_committed_date' => $origCommitted > 0 ? date('Y-m-d', $origCommitted) : '',
@@ -3291,12 +3384,34 @@ trait ReceptionReportingServiceTrait
             }
         }
 
+        // Por CC (pedido): un despacho trae una fila por producto; la CC está atrasada si alguna de sus filas lo está.
+        // Las facturas sin pedido asociado no son C.C.: cuentan en unidades, no en la cantidad de C.C.
+        $ccLate = [];
+        $ccWithoutAgreed = [];
+        foreach ($allRows as $r) {
+            if ($r['cc_number'] === '') {
+                continue;
+            }
+            $key = $r['cc_number'];
+            $ccLate[$key] = ($ccLate[$key] ?? false) || !$r['is_on_time'];
+            if (!empty($r['without_agreed_date'])) {
+                $ccWithoutAgreed[$key] = true;
+            }
+        }
+        $totalCc = count($ccLate);
+        $delayedCc = count(array_filter($ccLate));
+
         $filteredCount = count($filteredRows);
         $result['rows'] = $filteredRows;
         $result['summary'] = [
             'total_dispatches' => $totalDispatches,
             'on_time_dispatches' => $onTimeCount,
             'delayed_dispatches' => $delayedCount,
+            'without_agreed_dispatches' => $withoutAgreedCount,
+            'total_cc' => $totalCc,
+            'delayed_cc' => $delayedCc,
+            'without_agreed_cc' => count($ccWithoutAgreed),
+            'service_level_cc_percent' => $totalCc > 0 ? round(($totalCc - $delayedCc) / $totalCc * 100.0, 2) : 100.0,
             'service_level_percent' => $totalDispatches > 0 ? round(($onTimeCount / $totalDispatches) * 100.0, 2) : 100.0,
             'total_dispatched_units' => $totalDisp,
             'filtered_count' => $filteredCount,

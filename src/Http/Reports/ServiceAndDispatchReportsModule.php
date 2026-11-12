@@ -235,7 +235,10 @@ function unibagRenderServiceLevelReportPage(ReceptionService $service): void
     $body .= '<div class="kpi-num" style="color:#0d9488">' . number_format($summary['on_time_dispatches'], 0, ',', '.') . '</div>';
     $body .= '<div class="kpi-desc">Despachos cumplidos a fecha</div>';
     $body .= '</div>';
-    $body .= '<div class="kpi-footer-hint" style="color:#0d9488">Sin retraso respecto a fecha pactada</div>';
+    $withoutAgreed = (int)($summary['without_agreed_dispatches'] ?? 0);
+    $body .= '<div class="kpi-footer-hint" style="color:#0d9488">' . ($withoutAgreed > 0
+        ? 'Incluye ' . number_format($withoutAgreed, 0, ',', '.') . ' sin fecha pactada'
+        : 'Sin retraso respecto a fecha pactada') . '</div>';
     $body .= '</div>';
 
     // KPI 3: Despachos con Atraso
@@ -281,6 +284,8 @@ function unibagRenderServiceLevelReportPage(ReceptionService $service): void
                 } else {
                     $badge = '<span style="background:#fffbeb;color:#b45309;border:1px solid #fde68a;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px">⚠️ Con atraso (Reprog.)</span>';
                 }
+            } elseif (!empty($r['without_agreed_date'])) {
+                $badge = '<span style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px" title="El pedido no tiene una fecha de despacho pactada que se pueda leer. Corrígela en el pedido o con un ajuste.">? Sin fecha pactada</span>';
             } else {
                 $badge = $r['is_on_time']
                     ? '<span style="background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:800;display:inline-flex;align-items:center;gap:4px">✓ A tiempo</span>'
@@ -298,6 +303,9 @@ function unibagRenderServiceLevelReportPage(ReceptionService $service): void
             } else {
                 $committedDateHtml = h($r['committed_date']);
             }
+            // Texto pactado en el pedido (de ahí sale la fecha comprometida) y fecha del registro del camión si es otra.
+            $agreedText = trim((string)($r['agreed_text'] ?? ''));
+            $committedDateHtml .= '<br><span style="font-size:10px;color:#64748b">Pactado: «' . h($agreedText !== '' ? $agreedText : 'vacío') . '»</span>';
 
             $driverInfo = h($r['transport_company']);
             if ($r['driver_name'] !== '') {
@@ -344,7 +352,9 @@ function unibagRenderServiceLevelReportPage(ReceptionService $service): void
             }
 
             $body .= '<tr>';
-            $body .= '<td class="text-center">' . h($r['date']) . ($r['entry_time'] !== '' && $r['entry_time'] !== '00:00:00' ? '<br><span class="erp-prod-muted" style="font-size:10px">' . h($r['entry_time']) . '</span>' : '') . '</td>';
+            $truckDate = (string)($r['truck_date'] ?? '');
+            $body .= '<td class="text-center">' . h($r['date']) . ($r['entry_time'] !== '' && $r['entry_time'] !== '00:00:00' ? '<br><span class="erp-prod-muted" style="font-size:10px">' . h($r['entry_time']) . '</span>' : '')
+                . ($truckDate !== '' && $truckDate !== $r['date'] ? '<br><span class="erp-prod-muted" style="font-size:10px" title="Fecha del registro del despacho (camión) en el ERP">Registro: ' . h($truckDate) . '</span>' : '') . '</td>';
             $body .= '<td class="text-center"><strong>' . h($r['doc_number']) . '</strong><br><span class="erp-prod-muted" style="font-size:10px">' . h($r['doc_type']) . '</span></td>';
             $body .= '<td><strong>' . h($r['customer_name']) . '</strong></td>';
             $body .= '<td class="text-center" style="font-size:11px">' . h($r['sales_channel']) . '</td>';
@@ -713,7 +723,7 @@ function unibagOutputServiceLevelExcel(ReceptionService $service): void
         echo '<td>' . h($r['product_code']) . '</td>';
         echo '<td>' . h($origDate) . '</td>';
         echo '<td>' . h($adjDate) . '</td>';
-        echo '<td>' . ($r['is_on_time'] ? 'A tiempo' : 'Con atraso') . '</td>';
+        echo '<td>' . (!empty($r['without_agreed_date']) ? 'Sin fecha pactada' : ($r['is_on_time'] ? 'A tiempo' : 'Con atraso')) . '</td>';
         echo '<td class="num-int">' . (int)round((float)($r['delay_days'] ?? 0)) . '</td>';
         echo '<td>' . h($agreementStatus) . '</td>';
         echo '<td>' . h($r['reason_category'] ?? '') . '</td>';
