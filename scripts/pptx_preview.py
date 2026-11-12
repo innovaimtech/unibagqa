@@ -379,9 +379,22 @@ class Renderer:
             vmax_l = max([float(v or 0) for s, _ in line_series for v in s.values] + [0])
             separate = vmax_b > 0 and vmax_l > 0 and (vmax_b / max(vmax_l, 1e-9) > 5 or vmax_l / max(vmax_b, 1e-9) > 5)
             scale_b = (vmax_b if separate else max(vmax_b, vmax_l)) * 1.12 or 1
+            # Si el gráfico trae un máximo fijo en el eje (margen para las etiquetas), se respeta como en PowerPoint.
+            try:
+                fixed_max = ch.value_axis.maximum_scale
+                if fixed_max and not separate and fixed_max >= max(vmax_b, vmax_l):
+                    scale_b = scale_l = float(fixed_max)
+            except Exception:
+                pass
+            # Barras horizontales: el ancho para los nombres depende del nombre más largo; los que no caben se acortan
+            # con «…» (como PowerPoint) en vez de cortarse por la izquierda.
+            label_fs = fs * 0.8
+            char_w = label_fs * 0.55
+            label_w = min(Wv * 0.42, max(Wv * 0.18, max([len(c) for c in cats] + [0]) * char_w + 12)) if horizontal else 0
+            max_chars = max(4, int((label_w - 12) / char_w)) if horizontal else 0
             scale_l = (vmax_l * 1.12 or 1) if separate else scale_b
             leg_h = fs * 2.2 if ch.has_legend else 0
-            x0, x1 = (Wv * 0.22 if horizontal else 70.0), Wv - (60.0 if separate else 20.0)
+            x0, x1 = (label_w if horizontal else 70.0), Wv - (60.0 if separate else (fs * 3.2 if horizontal else 20.0))
             y0, y1 = top + 6, Hv - fs * 2.4 - leg_h
             parts.append(f'<line x1="{x0}" y1="{y1}" x2="{x1}" y2="{y1}" stroke="#bbb"/>')
             for k in range(1, 5):
@@ -431,7 +444,8 @@ class Renderer:
                             parts.append(f'<text x="{x:.1f}" y="{y - 8:.1f}" text-anchor="middle" font-size="{fs * 0.7}" fill="#{col}">{num(v, 1 if v < 100 else 0)}</text>')
             for k, c in enumerate(cats):
                 if horizontal:
-                    parts.append(f'<text x="{x0 - 6}" y="{y0 + band * k + band / 2 + fs * 0.35:.1f}" text-anchor="end" font-size="{fs * 0.8}" fill="#444">{esc(c[:28])}</text>')
+                    shown = c if len(c) <= max_chars else c[:max_chars - 1].rstrip() + '…'
+                    parts.append(f'<text x="{x0 - 6}" y="{y0 + band * k + band / 2 + fs * 0.35:.1f}" text-anchor="end" font-size="{label_fs}" fill="#444">{esc(shown)}</text>')
                 else:
                     parts.append(f'<text x="{x0 + band * k + band / 2:.1f}" y="{y1 + fs * 1.2}" text-anchor="middle" font-size="{fs * (0.8 if n <= 14 else 0.6)}" fill="#444">{esc(c[:14])}</text>')
         if legend and (ch.has_legend or donut):
