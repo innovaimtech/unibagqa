@@ -166,10 +166,46 @@ PY;
             && str_contains((string)($proy[0][1] ?? ''), 'del 26/10/2026 al 11/11/2026') && str_contains((string)($proy[2][1] ?? ''), '25/11/2026'), json_encode($proy, JSON_UNESCAPED_UNICODE));
         checkMr('proyección: tarjeta con el cierre proyectado y % ya fabricado', str_contains((string)($json['proy_txt'] ?? ''), 'unidades de cierre proyectado al 25/11/2026')
             && str_contains((string)($json['proy_txt'] ?? ''), '40%'), (string)($json['proy_txt'] ?? ''));
+        // Mismo informe pedido por rango de fechas: portada, encabezado y columna del período con el rango.
+        $hist[9]['label'] = '01/10–31/10';
+        $data['history'] = $hist;
+        $data['range'] = ['from' => '2026-10-01', 'to' => '2026-10-31'];
+        $data['period_title'] = 'del 01/10/2026 al 31/10/2026';
+        $data['column_label'] = '01/10–31/10';
+        file_put_contents($tmp . '.json', json_encode($data, JSON_UNESCAPED_UNICODE));
+        @unlink($out);
+        $lines = [];
+        exec($cmd, $lines, $rc);
+        $json = json_decode((string)shell_exec('"' . $py . '" "' . $tmp . '_check.py" "' . $out . '" 2>&1'), true) ?: [];
+        checkMr('rango: portada con «DEL 01/10/2026 AL 31/10/2026»', $rc === 0 && str_contains((string)($json['portada'] ?? ''), 'DEL 01/10/2026 AL 31/10/2026'));
+        checkMr('rango: encabezado del diseño con el rango', in_array('REPORTE DE OPERACIONES DEL 01/10/2026 AL 31/10/2026', (array)($json['layout'] ?? []), true));
+        checkMr('rango: columna del período «01/10–31/10» en la tabla de producción', ($json['prod'] ?? []) === ['01/10–31/10', '900.010']);
+        // Vista previa en HTML del PPTX generado (lo que se ve al apretar una lámina).
+        $pv = $tmp . '_preview.html';
+        exec('"' . $py . '" "' . __DIR__ . '/../pptx_preview.py" "' . $out . '" "' . $pv . '" 2>&1', $pvLines, $pvRc);
+        $pvHtml = is_file($pv) ? (string)file_get_contents($pv) : '';
+        preg_match_all('/class="(im[0-9a-f]{12}) im"/', $pvHtml, $imgs);
+        checkMr('vista previa: 18 láminas con el período, tablas, gráficos e imágenes (' . trim(implode(' ', $pvLines)) . ')', $pvRc === 0
+            && substr_count($pvHtml, '<section class="pg"') === 18 && str_contains($pvHtml, 'REPORTE DE OPERACIONES DEL 01/10/2026 AL 31/10/2026')
+            && str_contains($pvHtml, '01/10–31/10') && str_contains($pvHtml, '<table class="tb">') && str_contains($pvHtml, '<svg viewBox')
+            && $imgs[1] !== [] && array_diff(array_unique($imgs[1]), array_map(static fn($c) => $c, array_filter(array_unique($imgs[1]), static fn($c) => str_contains($pvHtml, '.' . $c . '{background-image:url(data:image/')))) === []);
+        @unlink($pv);
         @unlink($tmp . '_check.py');
         @unlink($out);
     }
     @unlink($tmp . '.json');
 }
+
+// Rango de fechas del informe.
+checkMr('rango válido', MonthlyPresentationService::normalizeRange('2026-10-01', '2026-10-31') === ['from' => '2026-10-01', 'to' => '2026-10-31']);
+checkMr('rango de un día', MonthlyPresentationService::normalizeRange('2026-10-05', '2026-10-05') !== null);
+checkMr('rango inválido: desde > hasta, fecha imposible, vacío o más de 1 año', MonthlyPresentationService::normalizeRange('2026-10-31', '2026-10-01') === null
+    && MonthlyPresentationService::normalizeRange('2026-02-30', '2026-03-10') === null && MonthlyPresentationService::normalizeRange('', '2026-03-10') === null
+    && MonthlyPresentationService::normalizeRange('2025-01-01', '2026-06-01') === null);
+$_GET = ['modo' => 'rango', 'desde' => '2026-10-01', 'hasta' => '2026-10-31'];
+checkMr('pantalla: lee modo=rango, desde y hasta', unibagMonthlyPresentationRange() === ['from' => '2026-10-01', 'to' => '2026-10-31']);
+$_GET = ['month' => '2026-10', 'desde' => '2026-10-01', 'hasta' => '2026-10-31'];
+checkMr('pantalla: sin modo=rango se usa el mes operativo', unibagMonthlyPresentationRange() === null);
+$_GET = [];
 
 exit($failures > 0 ? 1 : 0);

@@ -13,7 +13,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../ShiftEndProductionService.php';
 require_once __DIR__ . '/../ShiftEndWarehouseService.php';
 
-const SHIFT_END_ASSET_VERSION = '20261112b';
+const SHIFT_END_ASSET_VERSION = '20261112d';
 
 function handleShiftEndRoutes(string $path, string $method, string $name): bool
 {
@@ -56,7 +56,7 @@ function handleShiftEndRoutes(string $path, string $method, string $name): bool
     }
     try {
         $data = (new ShiftEndProductionService(Db::erpPdo()))->cachedDay($date, isset($_GET['refresh']));
-        render('Final del turno · Producción', $styles . shiftEndProductionPage($data));
+        render('Final del turno · Producción', $styles . shiftEndProductionPage($data, $company));
     } catch (Throwable $e) {
         render('Final del turno · Producción', $styles . '<div class="se-shell">' . shiftEndHeader($date)
             . '<div class="se-alert">No se pudo leer la producción del ERP: ' . h($e->getMessage()) . '</div></div>');
@@ -83,20 +83,40 @@ function shiftEndHeader(string $date, string $area = 'produccion'): string
     $next = $d->modify('+1 day')->format('Y-m-d');
     $isToday = $date === date('Y-m-d');
     $base = '/turno/' . $area;
-    $title = $area === 'bodega' ? 'Final del turno · Bodega' : 'Final del turno · Producción';
-    $stamp = $area === 'bodega' ? 'Movimientos de bodega del ' : 'Lo registrado como producido el ';
-    $html = '<div class="se-head se-noprint"><div><div class="se-title">' . h($title) . '</div>'
-        . '<div class="se-stamp">' . h($stamp . shiftEndDayLabel($date)) . ' (00:00 a 23:59)</div></div>';
+    $html = '<div class="se-head se-noprint"><div><div class="se-title">Final del turno</div>'
+        . '<nav class="se-tabs"><a href="/turno/produccion?fecha=' . h($date) . '"' . ($area === 'bodega' ? '' : ' class="on"') . '>🏭 Producción</a>'
+        . '<a href="/turno/bodega?fecha=' . h($date) . '"' . ($area === 'bodega' ? ' class="on"' : '') . '>📦 Bodega</a></nav></div>';
     $html .= '<form class="se-actions" method="get" action="' . h($base) . '">'
-        . '<a class="se-btn sec" href="' . h($base) . '?fecha=' . h($prev) . '" title="Día anterior">◀</a>'
-        . '<input type="date" name="fecha" value="' . h($date) . '" max="' . h(date('Y-m-d')) . '" onchange="this.form.submit()">'
-        . ($isToday ? '' : '<a class="se-btn sec" href="' . h($base) . '?fecha=' . h($next) . '" title="Día siguiente">▶</a>')
-        . '<a class="se-btn sec" href="' . h($base) . '?fecha=' . h($date) . '&refresh=1">↻ Actualizar</a>';
+        . '<div class="se-datebox"><a class="se-nav" href="' . h($base) . '?fecha=' . h($prev) . '" title="Día anterior">◀</a>'
+        . '<input type="date" name="fecha" value="' . h($date) . '" max="' . h(date('Y-m-d')) . '" onchange="this.form.submit()" aria-label="Fecha del turno">'
+        . ($isToday ? '<span class="se-nav off">▶</span>' : '<a class="se-nav" href="' . h($base) . '?fecha=' . h($next) . '" title="Día siguiente">▶</a>') . '</div>'
+        . ($isToday ? '' : '<a class="se-btn sec" href="' . h($base) . '">Hoy</a>')
+        . '<a class="se-btn sec" href="' . h($base) . '?fecha=' . h($date) . '&refresh=1" title="Volver a leer los datos del ERP">↻ Actualizar</a>'
+        . '<button type="button" class="se-btn sec" onclick="window.print()">🖨 Imprimir</button>';
     if ($area === 'bodega') {
-        $html .= '<button type="button" class="se-btn sec" onclick="window.print()">🖨 Imprimir</button>'
-            . '<a class="se-btn" href="/turno/bodega/excel?fecha=' . h($date) . '">⬇ Excel</a>';
+        $html .= '<a class="se-btn" href="/turno/bodega/excel?fecha=' . h($date) . '">⬇ Excel</a>';
     }
     return $html . '</form></div>';
+}
+
+/** Encabezado del informe (pantalla e impresión). */
+function shiftEndDocHead(string $company, string $title, string $date, string $generatedAt, string $source): string
+{
+    return '<header class="se-doc-head"><div><div class="se-doc-co">' . h($company) . '</div><h1>' . h($title) . '</h1>'
+        . '<div class="se-doc-date">Turno del <b>' . h(shiftEndDayLabel($date)) . '</b> · de 00:00 a 23:59</div></div>'
+        . '<div class="se-doc-meta">Emitido: <b>' . h(date('d/m/Y H:i', strtotime($generatedAt))) . '</b><br>Fuente: ' . h($source) . '</div></header>';
+}
+
+/** Indicador grande del resumen. $tone: prod | waste | info | ok | warn. */
+function shiftEndKpi(string $label, string $value, string $note, string $tone = 'info'): string
+{
+    return '<div class="se-kpi t-' . h($tone) . '"><span>' . h($label) . '</span><b>' . $value . '</b><small>' . $note . '</small></div>';
+}
+
+/** Cantidad sin decimales cuando es entera (120 y no 120,00). */
+function seQ(float|int|null $v): string
+{
+    return $v === null ? '—' : seN($v, abs((float)$v - round((float)$v)) < 0.005 ? 0 : 2);
 }
 
 /** Tabla con encabezado; $rows ya en HTML. */
@@ -121,22 +141,20 @@ function shiftEndWarehousePage(array $d, string $company): string
     $c = static fn($v, string $cls = ''): string => '<td' . ($cls !== '' ? ' class="' . $cls . '"' : '') . '>' . h((string)$v) . '</td>';
     $html = '<div class="se-shell">' . shiftEndHeader($d['date'], 'bodega');
     $html .= '<article class="se-doc">';
-    $html .= '<header class="se-doc-head"><div><div class="se-doc-co">' . h($company) . '</div><h1>Informe de cierre de turno · Bodega</h1>'
-        . '<div class="se-doc-date">Fecha del informe: <b>' . h(shiftEndDayLabel($d['date'])) . '</b> · período 00:00 a 23:59</div></div>'
-        . '<div class="se-doc-meta">Emitido: ' . h(date('d/m/Y H:i', strtotime((string)$d['generated_at']))) . '<br>Fuente: ERP y trazabilidad</div></header>';
+    $html .= shiftEndDocHead($company, 'Informe de cierre de turno · Bodega', (string)$d['date'], (string)$d['generated_at'], 'ERP y trazabilidad');
     foreach ($d['warnings'] as $w) {
         $html .= '<div class="se-alert warn">' . h($w) . '</div>';
     }
 
     // Resumen.
-    $html .= '<section class="se-sec"><h2>Resumen del día</h2><div class="se-kpis">'
-        . '<div class="se-kpi"><span>Bobinas recibidas</span><b>' . seN($t['rolls']) . '</b><small>' . seN($t['rolls_kg'], 1) . ' kg · ' . (int)$t['purchase_lines'] . ' líneas de otras compras</small></div>'
-        . '<div class="se-kpi"><span>Despachos</span><b>' . seN($t['guides']) . '</b><small>' . seN($t['dispatched_units']) . ' unidades despachadas</small></div>'
-        . '<div class="se-kpi"><span>Producto terminado ingresado</span><b>' . seN($t['finished_units']) . '</b><small>unidades en ' . (int)$t['finished_closures'] . ' cierres de embalaje</small></div>'
-        . '<div class="se-kpi"><span>Ingresos registrados por bodega</span><b>' . seN($t['entries']) . '</b><small>lotes de Ingreso con Trazabilidad</small></div></div>';
+    $html .= '<section class="se-sec"><h2>Resumen del día</h2><div class="se-kpis four">'
+        . shiftEndKpi('Bobinas recibidas', seN($t['rolls']), seN($t['rolls_kg'], 1) . ' kg · ' . (int)$t['purchase_lines'] . ' línea(s) de otras compras', 'info')
+        . shiftEndKpi('Despachos', seN($t['guides']), seN($t['dispatched_units']) . ' unidades despachadas', 'prod')
+        . shiftEndKpi('Producto terminado ingresado', seN($t['finished_units']), 'unidades en ' . (int)$t['finished_closures'] . ' cierre(s) de embalaje', 'ok')
+        . shiftEndKpi('Ingresos registrados por bodega', seN($t['entries']), '', 'warn') . '</div>';
     $rows = '';
     foreach ($d['by_warehouse'] as $w) {
-        $rows .= '<tr>' . $c($w['warehouse']) . $c($w['rolls_in'] > 0 ? seN($w['rolls_in']) . ' (' . seN($w['kg_in'], 1) . ' kg)' : '—', 'n')
+        $rows .= '<tr' . ($w['warehouse'] === 'Sin bodega' ? ' class="se-warnrow"' : '') . '>' . $c($w['warehouse']) . $c($w['rolls_in'] > 0 ? seN($w['rolls_in']) . ' (' . seN($w['kg_in'], 1) . ' kg)' : '—', 'n')
             . $c($w['purchases_in'] > 0 ? seN($w['purchases_in']) : '—', 'n') . $c($w['production_in'] > 0 ? seN($w['production_in']) : '—', 'n')
             . $c($w['entries_in'] > 0 ? seN($w['entries_in']) : '—', 'n') . $c($w['dispatched'] > 0 ? seN($w['dispatched']) : '—', 'n') . '</tr>';
     }
@@ -159,7 +177,7 @@ function shiftEndWarehousePage(array $d, string $company): string
     $rows = '';
     foreach ($d['purchases'] as $r) {
         $rows .= '<tr>' . $c($r['time']) . $c($r['document']) . '<td><b>' . h($r['sku']) . '</b> ' . h($r['description']) . '</td>'
-            . $c(seN($r['qty'], 2), 'n') . $c($r['warehouse']) . $c($r['user']) . '</tr>';
+            . $c(seQ($r['qty']), 'n') . $c($r['warehouse']) . $c($r['user']) . '</tr>';
     }
     $html .= '<h3>1.2 Otras compras ingresadas en el ERP</h3>' . shiftEndTable(['Hora', 'Documento', 'Artículo', '#Cantidad', 'Bodega', 'Ingresado por'], $rows,
         'No hay otras compras ingresadas en el ERP en el día.', count($d['purchases'])) . '</section>';
@@ -203,8 +221,7 @@ function shiftEndWarehousePage(array $d, string $company): string
         . $c(seN($t['finished_units']), 'n') . '<td colspan="3"></td></tr>';
     $html .= '<section class="se-sec"><h2>3. Producto terminado desde Corte y Sellado y Embalaje</h2>'
         . shiftEndTable(['Hora', 'Proceso / máquina', 'OT', 'CC / cliente', 'Producto', '#Cajas', '#Unidades', 'Bodega de destino', 'Embaló', 'Validó el cierre'], $rows,
-            'No hubo cierres de embalaje en el día.', count($d['finished']), $foot)
-        . '<p class="se-small">Cada fila es un cierre de embalaje; las unidades entran al stock de la bodega de destino indicada.</p></section>';
+            'No hubo cierres de embalaje en el día.', count($d['finished']), $foot) . '</section>';
 
     // 4. Ingresos de bodega.
     $rows = '';
@@ -214,10 +231,8 @@ function shiftEndWarehousePage(array $d, string $company): string
     }
     $html .= '<section class="se-sec"><h2>4. Mercadería recibida y guardada por bodega</h2>'
         . shiftEndTable(['Hora', 'Tipo', 'Artículo', '#Cantidad', '#Etiquetas', 'Bodega donde se guardó', 'Referencia', 'Recibido por'], $rows,
-            'No hubo ingresos registrados por bodega en el día.', count($d['entries']))
-        . '<p class="se-small">Ingresos hechos en Bodega → Ingreso con Trazabilidad.</p></section>';
+            'No hubo ingresos registrados por bodega en el día.', count($d['entries'])) . '</section>';
 
-    $html .= '<footer class="se-sign"><div><span></span>Entregado por (bodega)</div><div><span></span>Revisado por (jefatura)</div></footer>';
     return $html . '</article></div>';
 }
 
@@ -250,52 +265,103 @@ function shiftEndWarehouseExcel(array $d): void
     ]);
 }
 
+
 /** @param array<string,mixed> $data */
-function shiftEndProductionPage(array $data): string
+function shiftEndProductionPage(array $data, string $company = 'UNIBAG CHILE'): string
 {
     $html = '<div class="se-shell">' . shiftEndHeader($data['date']);
     $t = $data['totals'];
-    $html .= '<div class="se-kpis">';
-    $html .= '<div class="se-kpi total"><span>Máquinas que produjeron</span><b>' . (int)$t['machines'] . '</b><small>' . (int)$t['records'] . ' registros de producción</small></div>';
-    foreach ($data['processes'] as $p) {
-        $html .= '<div class="se-kpi"><span>' . h($p['process']) . '</span><b>' . seN($p['units']) . '</b><small>unidades · ' . (int)$p['machines']
-            . ' máq. · merma ' . seN($p['waste_kg'], 1) . ' kg</small></div>';
-    }
-    $html .= '</div>';
+    $machines = $data['machines'];
+    $html .= '<article class="se-doc">' . shiftEndDocHead($company, 'Informe de cierre de turno · Producción', (string)$data['date'], (string)$data['generated_at'], 'ERP (registros de producción y merma)');
+
     if ((int)$t['open_records'] > 0) {
-        $html .= '<div class="se-alert warn">' . (int)$t['open_records'] . ' registro(s) de producción siguen abiertos (sin hora de término): su cantidad puede cambiar al cerrarlos.</div>';
+        $html .= '<div class="se-alert warn">⚠ ' . (int)$t['open_records'] . ' registro(s) de producción siguen abiertos (sin hora de término): su cantidad puede cambiar cuando el operador los cierre.</div>';
     }
-    if ($data['machines'] === []) {
-        return $html . '<div class="se-empty">No hay producción registrada en este día.</div><div class="se-foot">Consultado ' . h($data['generated_at']) . '</div></div>';
+    if ($machines === []) {
+        return $html . '<div class="se-empty">No hay producción registrada en este día.</div></article></div>';
     }
 
-    $html .= '<div class="se-card"><div class="se-tools"><button type="button" class="se-btn sec" data-se-all="1">＋ Abrir todas</button>'
-        . '<button type="button" class="se-btn sec" data-se-all="0">－ Cerrar todas</button></div>';
-    $html .= '<div class="se-table-wrap"><table class="se-table"><thead><tr><th></th><th>Máquina</th><th>Proceso</th><th>Operador(es)</th>'
-        . '<th>OT</th><th class="n">Unidades</th><th class="n">Metros</th><th class="n">Merma kg</th><th class="n">Merma und</th><th>Horario</th><th>Avisos</th></tr></thead><tbody>';
-    foreach ($data['machines'] as $i => $m) {
-        $id = 'se-d-' . $i;
-        $warn = [];
-        if ($m['open_records'] > 0) {
-            $warn[] = '<span class="se-tag open">' . (int)$m['open_records'] . ' abierto(s)</span>';
+    // Totales por proceso (sumados desde las máquinas).
+    $procs = [];
+    $operators = [];
+    $wasteUnits = 0.0;
+    $meters = 0.0;
+    foreach ($machines as $m) {
+        $p = $m['process'];
+        $procs[$p] ??= ['machines' => 0, 'units' => 0.0, 'meters' => 0.0, 'waste_kg' => 0.0, 'waste_units' => 0.0, 'records' => 0, 'list' => []];
+        $procs[$p]['machines']++;
+        $procs[$p]['units'] += $m['units'];
+        $procs[$p]['meters'] += $m['meters'];
+        $procs[$p]['waste_kg'] += $m['waste_kg'];
+        $procs[$p]['waste_units'] += $m['waste_units'];
+        $procs[$p]['records'] += $m['records'];
+        $procs[$p]['list'][] = $m;
+        foreach ($m['operators'] as $op) {
+            $operators[$op] = true;
         }
-        if ($m['units'] <= 0 && $m['records'] > $m['semi_records']) {
-            $warn[] = '<span class="se-tag bad">Sin unidades</span>';
-        }
-        if ($m['semi_records'] > 0) {
-            $warn[] = '<span class="se-tag semi">' . (int)$m['semi_records'] . ' bobina(s) SE</span>';
-        }
-        $html .= '<tr class="se-row"><td><button type="button" class="se-plus" aria-expanded="false" aria-controls="' . $id . '" title="Ver detalle">+</button></td>'
-            . '<td><b>' . h($m['machine_name']) . '</b></td><td>' . h($m['process']) . '</td><td>' . h(implode(', ', $m['operators'])) . '</td>'
-            . '<td class="n">' . count($m['ots']) . '</td><td class="n strong">' . seN($m['units']) . '</td><td class="n">' . ($m['meters'] > 0 ? seN($m['meters']) : '—') . '</td>'
-            . '<td class="n">' . seN($m['waste_kg'], 1) . '</td><td class="n">' . seN($m['waste_units']) . '</td>'
-            . '<td>' . h(($m['first'] ?? '—') . ' – ' . ($m['last'] ?? '—')) . '</td><td>' . implode(' ', $warn) . '</td></tr>';
-        $html .= '<tr class="se-detail" id="' . $id . '" hidden><td colspan="11">' . shiftEndMachineDetail($m) . '</td></tr>';
+        $wasteUnits += $m['waste_units'];
+        $meters += $m['meters'];
     }
-    $html .= '</tbody><tfoot><tr><td></td><td colspan="4">Total del día</td><td class="n strong">' . seN($t['units']) . '</td><td></td><td class="n">' . seN($t['waste_kg'], 1)
-        . '</td><td colspan="3"></td></tr></tfoot></table></div></div>';
-    $html .= '<div class="se-foot">Unidades = registros de producción del día (sin bobinas semielaboradas, igual que el panel). Consultado ' . h($data['generated_at']) . '</div>';
-    $html .= '<script>(function(){function set(b,open){var r=document.getElementById(b.getAttribute("aria-controls"));if(!r)return;r.hidden=!open;b.setAttribute("aria-expanded",open?"true":"false");b.textContent=open?"−":"+";}'
+    $totalUnits = (float)$t['units'];
+
+    // 1. Resumen.
+    $html .= '<section class="se-sec"><h2>1. Resumen del día</h2><div class="se-kpis four">'
+        . shiftEndKpi('Unidades producidas', seN($totalUnits), '', 'prod')
+        . shiftEndKpi('Máquinas que trabajaron', (string)(int)$t['machines'], count($operators) . ' operador(es) · ' . count($procs) . ' proceso(s)', 'info')
+        . shiftEndKpi('Merma registrada', seN($t['waste_kg'], 1) . ' <em>kg</em>', seN($wasteUnits) . ' unidades de merma', 'waste')
+        . shiftEndKpi('Registros de producción', (string)(int)$t['records'], (int)$t['open_records'] > 0 ? (int)$t['open_records'] . ' abierto(s), revisar' : 'todos cerrados', (int)$t['open_records'] > 0 ? 'warn' : 'ok')
+        . '</div>';
+    $rows = '';
+    foreach ($procs as $name => $p) {
+        $share = $totalUnits > 0 ? $p['units'] / $totalUnits * 100 : 0;
+        $rows .= '<tr><td><b>' . h($name) . '</b></td><td class="n">' . $p['machines'] . '</td><td class="n strong">' . seN($p['units']) . '</td>'
+            . '<td><div class="se-bar"><i style="width:' . round($share, 1) . '%"></i></div><span class="se-small">' . seN($share, 1) . '% del día</span></td>'
+            . '<td class="n">' . ($p['meters'] > 0 ? seN($p['meters']) : '—') . '</td><td class="n">' . seN($p['waste_kg'], 1) . '</td><td class="n">' . seN($p['waste_units']) . '</td></tr>';
+    }
+    $foot = '<tr><td>Total del día</td><td class="n">' . (int)$t['machines'] . '</td><td class="n">' . seN($totalUnits) . '</td><td></td><td class="n">' . ($meters > 0 ? seN($meters) : '—')
+        . '</td><td class="n">' . seN($t['waste_kg'], 1) . '</td><td class="n">' . seN($wasteUnits) . '</td></tr>';
+    $html .= '<h3>Producción por proceso</h3>' . shiftEndTable(['Proceso', '#Máquinas', '#Unidades', 'Participación', '#Metros', '#Merma (kg)', '#Merma (und)'], $rows, '', count($procs), $foot) . '</section>';
+
+    // 2. Detalle por máquina, agrupado por proceso.
+    $html .= '<section class="se-sec"><h2>2. Detalle por máquina</h2>'
+        . '<div class="se-tools se-noprint">'
+        . '<button type="button" class="se-btn sec sm" data-se-all="1">＋ Abrir todas</button><button type="button" class="se-btn sec sm" data-se-all="0">－ Cerrar todas</button></div>';
+    $html .= '<div class="se-table-wrap"><table class="se-table se-machines"><thead><tr><th class="se-col-btn"></th><th>Máquina</th><th>Operador(es)</th>'
+        . '<th class="n">OT</th><th class="n">Unidades</th><th class="n">Metros</th><th class="n">Merma (kg)</th><th class="n">Merma (und)</th><th>Horario</th><th>Estado</th></tr></thead><tbody>';
+    $i = 0;
+    foreach ($procs as $name => $p) {
+        $html .= '<tr class="se-proc"><td colspan="10">' . h($name) . ' <span>· ' . $p['machines'] . ' máquina(s)</span></td></tr>';
+        foreach ($p['list'] as $m) {
+            $id = 'se-d-' . $i++;
+            $state = [];
+            if ($m['open_records'] > 0) {
+                $state[] = '<span class="se-tag open">' . (int)$m['open_records'] . ' abierto(s)</span>';
+            }
+            if ($m['units'] <= 0 && $m['records'] > $m['semi_records']) {
+                $state[] = '<span class="se-tag bad">Sin unidades</span>';
+            }
+            if ($m['semi_records'] > 0) {
+                $state[] = '<span class="se-tag semi" title="Bobinas semielaboradas: se muestran en el detalle pero no suman unidades">' . (int)$m['semi_records'] . ' bobina(s) SE</span>';
+            }
+            if ($state === []) {
+                $state[] = '<span class="se-tag ok">✓ Cerrado</span>';
+            }
+            $html .= '<tr class="se-row"><td class="se-col-btn"><button type="button" class="se-plus" aria-expanded="false" aria-controls="' . $id . '" title="Ver detalle">+</button></td>'
+                . '<td><b>' . h($m['machine_name']) . '</b></td><td>' . h(implode(', ', $m['operators'])) . '</td>'
+                . '<td class="n">' . count($m['ots']) . '</td><td class="n strong">' . seN($m['units']) . '</td><td class="n">' . ($m['meters'] > 0 ? seN($m['meters']) : '—') . '</td>'
+                . '<td class="n">' . seN($m['waste_kg'], 1) . '</td><td class="n">' . seN($m['waste_units']) . '</td>'
+                . '<td class="nowrap">' . h(($m['first'] ?? '—') . ' – ' . ($m['last'] ?? '—')) . '</td><td>' . implode(' ', $state) . '</td></tr>';
+            $html .= '<tr class="se-detail" id="' . $id . '" hidden><td colspan="10">' . shiftEndMachineDetail($m) . '</td></tr>';
+        }
+        $html .= '<tr class="se-subtotal"><td class="se-col-btn"></td><td colspan="3">Subtotal ' . h($name) . '</td><td class="n">' . seN($p['units']) . '</td><td class="n">' . ($p['meters'] > 0 ? seN($p['meters']) : '—')
+            . '</td><td class="n">' . seN($p['waste_kg'], 1) . '</td><td class="n">' . seN($p['waste_units']) . '</td><td colspan="2"></td></tr>';
+    }
+    $html .= '</tbody><tfoot><tr><td class="se-col-btn"></td><td colspan="3">Total del día</td><td class="n">' . seN($totalUnits) . '</td><td class="n">' . ($meters > 0 ? seN($meters) : '—')
+        . '</td><td class="n">' . seN($t['waste_kg'], 1) . '</td><td class="n">' . seN($wasteUnits) . '</td><td colspan="2"></td></tr></tfoot></table></div></section>';
+
+    $html .= '</article>';
+
+    $html .= '<script>(function(){function set(b,open){var r=document.getElementById(b.getAttribute("aria-controls"));if(!r)return;r.hidden=!open;b.setAttribute("aria-expanded",open?"true":"false");b.textContent=open?"−":"+";b.closest("tr").classList.toggle("is-open",open);}'
         . 'document.querySelectorAll(".se-plus").forEach(function(b){b.addEventListener("click",function(){set(b,b.getAttribute("aria-expanded")!=="true");});});'
         . 'document.querySelectorAll("[data-se-all]").forEach(function(x){x.addEventListener("click",function(){var o=x.getAttribute("data-se-all")==="1";document.querySelectorAll(".se-plus").forEach(function(b){set(b,o);});});});})();</script>';
     return $html . '</div>';
@@ -306,15 +372,18 @@ function shiftEndMachineDetail(array $m): string
 {
     $html = '<div class="se-detail-box">';
     // Por OT: programado vs producido hoy.
-    $html .= '<div class="se-sub">Por OT</div><div class="se-table-wrap"><table class="se-table inner"><thead><tr><th>OT</th><th>CC</th><th>Producto</th>'
-        . '<th class="n">Programado OT</th><th class="n">Producido hoy</th><th class="n">Merma und</th><th class="n">Merma kg</th></tr></thead><tbody>';
+    $html .= '<div class="se-sub">Órdenes de trabajo (OT) <span>' . count($m['ots']) . '</span></div><div class="se-table-wrap"><table class="se-table inner"><thead><tr><th>OT</th><th>CC</th><th>Producto</th>'
+        . '<th class="n">Programado OT</th><th class="n">Producido hoy</th><th>Avance del día</th><th class="n">Merma (und)</th><th class="n">Merma (kg)</th></tr></thead><tbody>';
     foreach ($m['ots'] as $o) {
-        $html .= '<tr><td>' . h($o['ot'] ?: '—') . '</td><td>' . h($o['cc'] ?: '—') . '</td><td>' . h(trim($o['sku'] . ' ' . $o['product']) ?: '—') . '</td>'
-            . '<td class="n">' . seN($o['planned']) . '</td><td class="n strong">' . seN($o['units']) . '</td><td class="n">' . seN($o['waste_units']) . '</td><td class="n">' . seN($o['waste_kg'], 1) . '</td></tr>';
+        $pct = $o['planned'] > 0 ? $o['units'] / $o['planned'] * 100 : null;
+        $html .= '<tr><td><b>' . h($o['ot'] ?: '—') . '</b></td><td>' . h($o['cc'] ?: '—') . '</td><td>' . ($o['sku'] !== '' ? '<b>' . h($o['sku']) . '</b> ' : '') . h($o['product'] ?: ($o['sku'] === '' ? '—' : '')) . '</td>'
+            . '<td class="n">' . seN($o['planned']) . '</td><td class="n strong">' . seN($o['units']) . '</td>'
+            . '<td>' . ($pct === null ? '—' : '<div class="se-bar"><i style="width:' . min(100, round($pct, 1)) . '%"></i></div><span class="se-small">' . seN($pct, 1) . '% de la OT</span>') . '</td>'
+            . '<td class="n">' . seN($o['waste_units']) . '</td><td class="n">' . seN($o['waste_kg'], 1) . '</td></tr>';
     }
     $html .= '</tbody></table></div>';
 
-    $html .= '<div class="se-sub">Registros de producción</div>';
+    $html .= '<div class="se-sub">Registros de producción <span>' . count($m['production']) . '</span></div>';
     if ($m['production'] === []) {
         $html .= '<div class="se-muted">Sin registros de producción (solo merma).</div>';
     } else {
@@ -326,12 +395,12 @@ function shiftEndMachineDetail(array $m): string
                 . '<td>' . h($p['operator']) . '</td><td>' . h($p['ot'] ?: '—') . '</td><td>' . h($p['cc'] ?: '—') . '</td>'
                 . '<td class="n strong">' . seN($p['units']) . ($p['semi'] ? ' <span class="se-tag semi" title="Bobina semielaborada: no suma unidades">SE</span>' : '') . '</td>'
                 . '<td class="n">' . ($p['meters'] > 0 ? seN($p['meters']) : '—') . '</td><td class="n">' . ($p['kg'] > 0 ? seN($p['kg'], 1) : '—') . '</td>'
-                . '<td class="obs">' . h($p['comments']) . '</td></tr>';
+                . '<td class="obs">' . h($p['comments'] !== '' ? $p['comments'] : '—') . '</td></tr>';
         }
         $html .= '</tbody></table></div>';
     }
 
-    $html .= '<div class="se-sub">Mermas registradas</div>';
+    $html .= '<div class="se-sub">Mermas registradas <span>' . count($m['waste']) . '</span></div>';
     if ($m['waste'] === []) {
         $html .= '<div class="se-muted">Sin merma registrada en el día.</div>';
     } else {
@@ -339,7 +408,7 @@ function shiftEndMachineDetail(array $m): string
             . '<th class="n">Unidades</th><th class="n">Kg</th><th>Observación</th></tr></thead><tbody>';
         foreach ($m['waste'] as $w) {
             $html .= '<tr><td>' . h($w['time']) . '</td><td>' . h($w['operator']) . '</td><td>' . h($w['ot'] ?: '—') . '</td><td>' . h($w['type']) . '</td>'
-                . '<td class="n">' . seN($w['units']) . '</td><td class="n">' . seN($w['kg'], 1) . '</td><td class="obs">' . h($w['comments']) . '</td></tr>';
+                . '<td class="n">' . seN($w['units']) . '</td><td class="n">' . seN($w['kg'], 1) . '</td><td class="obs">' . h($w['comments'] !== '' ? $w['comments'] : '—') . '</td></tr>';
         }
         $html .= '</tbody></table></div>';
     }

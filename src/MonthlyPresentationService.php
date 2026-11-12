@@ -71,9 +71,12 @@ class MonthlyPresentationService
      *
      * @return array<string, mixed>
      */
-    private function computeLiveCycle(string $monthKey): array
+    private function computeLiveCycle(string $monthKey, ?array $range = null): array
     {
-        $period = $this->receptionService->resolveBonusFilterPeriod('period', $monthKey);
+        // Con rango (desde/hasta) se usa el mismo cálculo que los bonos en modo «range»; sin rango, el ciclo 26→25.
+        $period = $range !== null
+            ? $this->receptionService->resolveBonusFilterPeriod('range', $monthKey, $range['from'], $range['to'])
+            : $this->receptionService->resolveBonusFilterPeriod('period', $monthKey);
         $startDate = (string)$period['start_date'] . ' 00:00:00';
         $endDate = (string)$period['end_date'] . ' 23:59:59';
 
@@ -508,16 +511,23 @@ class MonthlyPresentationService
      * @param string $monthKey Formato 'YYYY-MM' (mes en que TERMINA el ciclo 26-25)
      * @return array<string, mixed>
      */
-    public function getMonthlyMetrics(string $monthKey = ''): array
+    public function getMonthlyMetrics(string $monthKey = '', ?string $from = null, ?string $to = null): array
     {
+        $range = self::normalizeRange($from, $to);
+        if ($range !== null) {
+            // Rango libre: el «mes» del informe es el de la fecha final.
+            $monthKey = substr($range['to'], 0, 7);
+        }
         if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $monthKey)) {
             $monthKey = date('Y-m');
         }
         // La página y la descarga piden lo mismo: se calcula una vez. Mes cerrado: 6 h; mes en curso: 5 min.
         // Si se corrige data/kpi_historial_2026.json a mano, el caché se descarta (va en la clave la fecha del archivo).
-        $closed = self::cycleEndTs($monthKey) < time();
+        $endTs = $range !== null ? (int)strtotime($range['to'] . ' 23:59:59') : self::cycleEndTs($monthKey);
+        $closed = $endTs < time();
+        $suffix = $range !== null ? '-r' . $range['from'] . '_' . $range['to'] : '';
         $historyStamp = (string)@filemtime($this->historyPath());
-        $cacheKey = 'monthly-' . $monthKey . '-' . $historyStamp;
+        $cacheKey = 'monthly-' . $monthKey . $suffix . '-' . $historyStamp;
         $cached = ResultCache::get($cacheKey, $closed ? 21600 : 300, $found);
         if ($found && is_array($cached)) {
             $cached['issued_at'] = date('d-m-Y');
@@ -525,15 +535,45 @@ class MonthlyPresentationService
             $cached['projection'] = $this->closingProjection();
             return $cached;
         }
-        $metrics = $this->computeMonthlyMetrics($monthKey);
+        $metrics = $this->computeMonthlyMetrics($monthKey, $range);
         // La clave se arma con la fecha del historial DESPUÉS del cálculo (el cálculo puede guardar meses nuevos).
         clearstatcache();
-        ResultCache::put('monthly-' . $monthKey . '-' . (string)@filemtime($this->historyPath()), $metrics);
+        ResultCache::put('monthly-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
         return $metrics;
     }
 
+    /**
+     * Rango válido (Y-m-d, desde ≤ hasta, máximo 366 días) o null si no se pidió o no sirve.
+     *
+     * @return array{from:string,to:string}|null
+     */
+    public static function normalizeRange(?string $from, ?string $to): ?array
+    {
+        $from = trim((string)$from);
+        $to = trim((string)$to);
+        $ok = static fn(string $d): bool => preg_match('/^\d{4}-\d{2}-\d{2}$/', $d) === 1
+            && ($o = DateTimeImmutable::createFromFormat('!Y-m-d', $d)) !== false && $o->format('Y-m-d') === $d;
+        if (!$ok($from) || !$ok($to) || $from > $to) {
+            return null;
+        }
+        $days = (int)(new DateTimeImmutable($from))->diff(new DateTimeImmutable($to))->days;
+        return $days <= 366 ? ['from' => $from, 'to' => $to] : null;
+    }
+
+    /** «01/10/2026 al 31/10/2026» y la etiqueta corta para la columna de los gráficos («01/10–31/10»). */
+    private static function rangeLabels(array $range): array
+    {
+        $f = new DateTimeImmutable($range['from']);
+        $t = new DateTimeImmutable($range['to']);
+        $sameYear = $f->format('Y') === $t->format('Y');
+        return [
+            'title' => 'del ' . $f->format('d/m/Y') . ' al ' . $t->format('d/m/Y'),
+            'column' => $f->format('d/m') . '–' . $t->format('d/m') . ($sameYear ? '' : '/' . $t->format('y')),
+        ];
+    }
+
     /** @return array<string, mixed> */
-    private function computeMonthlyMetrics(string $monthKey): array
+    private function computeMonthlyMetrics(string $monthKey, ?array $range = null): array
     {
         clearstatcache();
         $year = (int)substr($monthKey, 0, 4);
@@ -543,7 +583,7 @@ class MonthlyPresentationService
 
         $stored = $this->loadHistory();
         $storedChanged = false;
-        $live = $this->computeLiveCycle($monthKey);
+        $live = $this->computeLiveCycle($monthKey, $range);
         $liveStartTs = (int)strtotime($live['start_date']);
         $liveEndTs = (int)strtotime($live['end_date']);
         $monthClosed = $liveEndTs < time();
@@ -552,6 +592,30 @@ class MonthlyPresentationService
         for ($m = 1; $m <= $monthNum; $m++) {
             $key = sprintf('%04d-%02d', $year, $m);
             $isPublished = ($stored[$key]['origen'] ?? '') === 'plantilla';
+            if ($range !== null) {
+                // Con rango: los meses cuyo ciclo terminó antes del inicio del rango salen del historial como siempre;
+                // los que se cruzan con el rango no se muestran (el rango ocupa su lugar en los gráficos, al final).
+                if ($key === $monthKey) {
+                    $labels = self::rangeLabels($range);
+                    $history[] = [
+                        'origen' => 'rango',
+                        'month_key' => $key,
+                        'label' => $labels['column'],
+                        'prod_units' => $live['prod_units'],
+                        'prod_cap' => round((float)($stored[$key]['prod_cap'] ?? $capacityDefault) * (($liveEndTs - $liveStartTs + 1) / 86400) / 30.4, 0),
+                        'sl_total_units' => $live['sl_total_units'],
+                        'sl_delayed_units' => $live['sl_delayed_units'],
+                        'sl_total_cc' => $live['sl_total_cc'],
+                        'sl_delayed_cc' => $live['sl_delayed_cc'],
+                        'waste_pct' => $live['waste_pct'],
+                        'procesos' => $this->computeProcessBalance($liveStartTs, $liveEndTs),
+                    ];
+                    continue;
+                }
+                if (self::cycleEndTs($key) >= $liveStartTs) {
+                    continue;
+                }
+            }
             if ($key === $monthKey && !$isPublished) {
                 $entry = [
                     'origen' => 'calculado',
@@ -618,7 +682,7 @@ class MonthlyPresentationService
         $rolls = [];
         foreach ($cutoffs as $k => $ts) {
             $row = $computed[$k] ?? $rollHistory[$k] ?? null;
-            if (isset($computed[$k]) && $ts < time() && ($k !== $monthKey || $monthClosed)) {
+            if (isset($computed[$k]) && $ts < time() && ($k !== $monthKey || ($monthClosed && $range === null))) {
                 $rollHistory[$k] = $computed[$k];
                 $rollsChanged = true;
             }
@@ -660,8 +724,12 @@ class MonthlyPresentationService
             $warnings[] = 'Bobinas: solo hay ' . count($rolls) . ' de 13 meses con stock calculado.';
         }
 
+        $labels = $range !== null ? self::rangeLabels($range) : null;
         return [
             'month_key' => $monthKey,
+            'range' => $range,
+            'period_title' => $labels['title'] ?? '',
+            'column_label' => $labels['column'] ?? '',
             'start_date' => $live['start_date'],
             'end_date' => $live['end_date'],
             'period_label' => $live['period_label'],
@@ -694,9 +762,9 @@ class MonthlyPresentationService
     /**
      * Genera la presentación PowerPoint en disco y retorna la ruta completa al archivo generado.
      */
-    public function generatePresentation(string $monthKey = ''): string
+    public function generatePresentation(string $monthKey = '', ?string $from = null, ?string $to = null): string
     {
-        $metrics = $this->getMonthlyMetrics($monthKey);
+        $metrics = $this->getMonthlyMetrics($monthKey, $from, $to);
         $monthKey = (string)$metrics['month_key'];
         
         $templatePath = __DIR__ . '/../data/plantilla_informe_mensual.pptx';
@@ -743,10 +811,38 @@ class MonthlyPresentationService
             throw new RuntimeException("Error al ejecutar generador Python: " . $err);
         }
 
-        // Intentar actualizar la copia en data/ si no está abierta por otro programa
-        @copy($actualOutput, $targetDataPath);
+        // Intentar actualizar la copia en data/ si no está abierta por otro programa (solo el informe del mes, no un rango).
+        if (empty($metrics['range'])) {
+            @copy($actualOutput, $targetDataPath);
+        }
 
         return $actualOutput;
+    }
+
+    /**
+     * Vista previa en HTML de la presentación (todas las láminas), dibujada desde el PPTX generado
+     * con scripts/pptx_preview.py. Se guarda 10 minutos para no regenerar al pasar de lámina.
+     */
+    public function generatePreviewHtml(string $monthKey = '', ?string $from = null, ?string $to = null): string
+    {
+        $range = self::normalizeRange($from, $to);
+        $key = 'pptx-preview-' . md5(json_encode([$monthKey, $range, (string)@filemtime($this->historyPath())]));
+        return (string)ResultCache::remember($key, 600, function () use ($monthKey, $range): string {
+            $pptx = $this->generatePresentation($monthKey, $range['from'] ?? null, $range['to'] ?? null);
+            $html = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'kpis_preview_' . uniqid() . '.html';
+            $cmd = sprintf('%s "%s" "%s" "%s" 2>&1', escapeshellcmd($this->resolvePythonBinary()),
+                __DIR__ . '/../scripts/pptx_preview.py', $pptx, $html);
+            $output = [];
+            $rc = 0;
+            exec($cmd, $output, $rc);
+            @unlink($pptx);
+            if ($rc !== 0 || !is_file($html)) {
+                throw new RuntimeException('No se pudo armar la vista previa: ' . implode("\n", $output));
+            }
+            $out = (string)file_get_contents($html);
+            @unlink($html);
+            return $out;
+        });
     }
 
     /**

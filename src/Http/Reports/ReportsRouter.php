@@ -570,6 +570,11 @@ function handleErpReportRoutes(string $path, string $method, ReceptionService $s
         return true;
     }
 
+    if ($path === '/reports/monthly-presentation/preview' && $method === 'GET') {
+        unibagPreviewMonthlyPresentation($service);
+        return true;
+    }
+
     if ($path === '/reports/monthly-presentation/download' && $method === 'GET') {
         unibagDownloadMonthlyPresentation($service);
         return true;

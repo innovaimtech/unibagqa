@@ -1573,6 +1573,19 @@ function unibagMonthlyPresentationMonthKey(): string
     return ((int)date('j') >= 26) ? date('Y-m', strtotime('first day of next month')) : date('Y-m');
 }
 
+/**
+ * Rango de fechas del informe (?modo=rango&desde=YYYY-MM-DD&hasta=YYYY-MM-DD) o null si se pide el mes operativo.
+ *
+ * @return array{from:string,to:string}|null
+ */
+function unibagMonthlyPresentationRange(): ?array
+{
+    if (($_GET['modo'] ?? '') !== 'rango') {
+        return null;
+    }
+    return MonthlyPresentationService::normalizeRange((string)($_GET['desde'] ?? ''), (string)($_GET['hasta'] ?? ''));
+}
+
 function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
 {
     if (!userCanAccessArea('ERP', sessionAreaPermissions())) {
@@ -1580,9 +1593,12 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     }
 
     $monthKey = unibagMonthlyPresentationMonthKey();
+    $range = unibagMonthlyPresentationRange();
+    $rangeAsked = ($_GET['modo'] ?? '') === 'rango';
 
     $presService = new MonthlyPresentationService($service, Db::erpPdo());
-    $m = $presService->getMonthlyMetrics($monthKey);
+    $m = $presService->getMonthlyMetrics($monthKey, $range['from'] ?? null, $range['to'] ?? null);
+    $monthKey = (string)$m['month_key'];
 
     $monthNames = [
         '01' => 'Enero', '02' => 'Febrero', '03' => 'Marzo', '04' => 'Abril',
@@ -1590,9 +1606,17 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
         '09' => 'Septiembre', '10' => 'Octubre', '11' => 'Noviembre', '12' => 'Diciembre'
     ];
     $monthParts = explode('-', $monthKey);
-    $monthLabel = ($monthNames[$monthParts[1]] ?? 'Mes') . ' ' . $monthParts[0];
+    $monthLabel = $range !== null
+        ? 'Del ' . date('d/m/Y', (int)strtotime($range['from'])) . ' al ' . date('d/m/Y', (int)strtotime($range['to']))
+        : ($monthNames[$monthParts[1]] ?? 'Mes') . ' ' . $monthParts[0];
 
-    $downloadUrl = '/reports/monthly-presentation/download?month=' . urlencode($monthKey);
+    $periodQuery = http_build_query($range !== null
+        ? ['modo' => 'rango', 'desde' => $range['from'], 'hasta' => $range['to']]
+        : ['month' => $monthKey]);
+    $downloadUrl = '/reports/monthly-presentation/download?' . $periodQuery;
+    $previewUrl = '/reports/monthly-presentation/preview?' . $periodQuery;
+    $rangeFrom = $range['from'] ?? (string)($_GET['desde'] ?? date('Y-m-01'));
+    $rangeTo = $range['to'] ?? (string)($_GET['hasta'] ?? date('Y-m-d'));
 
     $body = '<div class="report-shell">';
 
@@ -1604,18 +1628,30 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $body .= '<div class="erp-filter-sub"></div>';
     $body .= '</div>';
     $body .= '<div class="erp-filter-actions">';
+    $body .= '<button type="button" class="btn-filter-secondary" data-ppt-slide="1">👁 Vista previa</button>';
     $body .= '<a class="btn-pptx-download" href="' . h($downloadUrl) . '">📥 Descargar Presentación PPTX (' . h($monthLabel) . ')</a>';
     $body .= '<a class="btn-filter-secondary" href="/reports/operator-waste">← Volver a Informes</a>';
     $body .= '</div>';
     $body .= '</div>';
 
-    $body .= '<form method="get" action="/reports/monthly-presentation" style="display:flex;align-items:flex-end;gap:12px;margin-top:14px;border-top:1px solid #f1f5f9;padding-top:14px">';
-    $body .= '<div style="display:flex;flex-direction:column;gap:5px">';
-    $body .= '<label style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase">Mes de Operación</label>';
-    $body .= '<input type="month" name="month" value="' . h($monthKey) . '" style="height:38px;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px;background:#f8fafc;font-weight:700">';
-    $body .= '</div>';
-    $body .= '<button type="submit" class="btn-filter-apply" style="height:38px;padding:0 16px;border-radius:8px">Consultar Período</button>';
+    $lbl = 'font-size:11px;font-weight:700;color:#475569;text-transform:uppercase';
+    $inp = 'height:38px;width:auto;border:1px solid #cbd5e1;border-radius:8px;padding:0 10px;background:#f8fafc;font-weight:700';
+    $isRange = $rangeAsked;
+    $body .= '<form method="get" action="/reports/monthly-presentation" id="mp-filter" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;margin-top:14px;border-top:1px solid #f1f5f9;padding-top:14px">';
+    $body .= '<div style="display:flex;flex-direction:column;gap:5px"><label style="' . $lbl . '" for="mp-modo">Tipo de período</label>'
+        . '<select name="modo" id="mp-modo" style="' . $inp . '"><option value="mes"' . ($isRange ? '' : ' selected') . '>Mes operativo (26 al 25)</option>'
+        . '<option value="rango"' . ($isRange ? ' selected' : '') . '>Rango de fechas</option></select></div>';
+    $body .= '<div data-mp="mes" style="display:' . ($isRange ? 'none' : 'flex') . ';flex-direction:column;gap:5px"><label style="' . $lbl . '">Mes de operación</label>'
+        . '<input type="month" name="month" value="' . h($monthKey) . '" style="' . $inp . '"' . ($isRange ? ' disabled' : '') . '></div>';
+    $body .= '<div data-mp="rango" style="display:' . ($isRange ? 'flex' : 'none') . ';gap:12px;align-items:flex-end">'
+        . '<div style="display:flex;flex-direction:column;gap:5px"><label style="' . $lbl . '">Desde</label><input type="date" name="desde" value="' . h($rangeFrom) . '" style="' . $inp . '"' . ($isRange ? '' : ' disabled') . ' required></div>'
+        . '<div style="display:flex;flex-direction:column;gap:5px"><label style="' . $lbl . '">Hasta</label><input type="date" name="hasta" value="' . h($rangeTo) . '" style="' . $inp . '"' . ($isRange ? '' : ' disabled') . ' required></div></div>';
+    $body .= '<button type="submit" class="btn-filter-apply" style="height:38px;padding:0 16px;border-radius:8px">Consultar período</button>';
     $body .= '</form>';
+    $body .= '<script>(function(){var s=document.getElementById("mp-modo");if(!s)return;s.addEventListener("change",function(){document.querySelectorAll("#mp-filter [data-mp]").forEach(function(b){var on=b.getAttribute("data-mp")===s.value;b.style.display=on?"flex":"none";b.querySelectorAll("input").forEach(function(i){i.disabled=!on;});});});})();</script>';
+    if ($rangeAsked && $range === null) {
+        $body .= '<div style="margin:10px 0;padding:10px 14px;background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;color:#991b1b;font-size:13px">El rango no es válido (la fecha «desde» debe ser anterior o igual a «hasta» y el rango no puede superar 1 año). Se muestra el mes operativo.</div>';
+    }
     $body .= '</div>';
 
     // Advertencias: datos faltantes o que no se pueden automatizar (antes se rellenaban con cifras de septiembre).
@@ -1626,7 +1662,10 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     foreach ($pptWarnings as $pptWarning) {
         $body .= '<div style="margin:10px 0;padding:10px 14px;background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;color:#92400e;font-size:13px">⚠️ ' . h((string)$pptWarning) . '</div>';
     }
-    $body .= '<div style="margin:6px 0 10px;font-size:12px;color:#64748b">Período calculado: ' . h((string)($m['period_label'] ?? '')) . ' (ciclo 26 al 25, el mismo de la plantilla).</div>';
+    $body .= '<div style="margin:6px 0 10px;font-size:12px;color:#64748b">Período calculado: ' . h((string)($m['period_label'] ?? ''))
+        . ($range !== null
+            ? '. En los gráficos el rango ocupa la última columna («' . h((string)$m['column_label']) . '»); los meses anteriores al rango salen del historial. La capacidad se ajusta a los días del rango.'
+            : ' (ciclo 26 al 25, el mismo de la plantilla).') . '</div>';
 
     // KPIs del Mes Seleccionado
     $body .= '<div class="dashboard-kpis-grid">';
@@ -1697,8 +1736,8 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     ];
 
     foreach ($slidesInfo as $s) {
-        $body .= '<tr>';
-        $body .= '<td style="font-weight:800;color:#0f172a">Lámina ' . h((string)$s[0]) . '</td>';
+        $body .= '<tr class="ppt-row" data-ppt-slide="' . (int)$s[0] . '" title="Ver vista previa de la lámina ' . (int)$s[0] . '">';
+        $body .= '<td style="font-weight:800;color:#0f172a">👁 Lámina ' . h((string)$s[0]) . '</td>';
         $body .= '<td style="font-weight:700">' . h($s[1]) . '</td>';
         $body .= '<td>' . h($s[2]) . '</td>';
         $body .= '<td><span class="' . h($s[4]) . '">' . h($s[3]) . '</span></td>';
@@ -1717,7 +1756,56 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $body .= '</div>';
     $body .= '</div>';
 
+    // Ventana de vista previa: al apretar una lámina (o «Vista previa») se muestra la diapositiva generada.
+    $body .= '<style>.ppt-row{cursor:pointer}.ppt-row:hover td{background:#f0fdfa}'
+        . '#ppt-modal{position:fixed;inset:0;z-index:9999;display:none;background:rgba(15,23,42,.72);padding:18px}'
+        . '#ppt-modal.on{display:flex;flex-direction:column}'
+        . '#ppt-modal .ppt-top{display:flex;justify-content:space-between;align-items:center;gap:10px;color:#fff;font-weight:800;padding:0 4px 10px}'
+        . '#ppt-modal .ppt-top button{height:36px;padding:0 14px;border:0;border-radius:8px;background:#fff;color:#0f172a;font-weight:800;cursor:pointer}'
+        . '#ppt-modal .ppt-box{position:relative;flex:1;min-height:0;border-radius:12px;overflow:hidden;background:#334155}'
+        . '#ppt-modal iframe{width:100%;height:100%;border:0;display:block}'
+        . '#ppt-modal .ppt-wait{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#e2e8f0;font-weight:700;font-size:15px}</style>';
+    $body .= '<div id="ppt-modal" role="dialog" aria-modal="true" aria-label="Vista previa de la presentación"><div class="ppt-top"><span>Vista previa · ' . h($monthLabel) . '</span>'
+        . '<span><a href="' . h($downloadUrl) . '" style="color:#fff;margin-right:12px">📥 Descargar PPTX</a><button type="button" id="ppt-close">✕ Cerrar</button></span></div>'
+        . '<div class="ppt-box"><div class="ppt-wait" id="ppt-wait">Generando la presentación… (puede tardar unos segundos)</div><iframe id="ppt-frame" title="Vista previa"></iframe></div></div>';
+    $body .= '<script>(function(){var url=' . json_encode($previewUrl) . ',m=document.getElementById("ppt-modal"),f=document.getElementById("ppt-frame"),w=document.getElementById("ppt-wait"),loaded=false;'
+        . 'f.addEventListener("load",function(){if(f.getAttribute("src")){loaded=true;w.style.display="none";}});'
+        . 'function open(n){m.classList.add("on");document.body.style.overflow="hidden";if(!f.getAttribute("src")){w.style.display="flex";f.setAttribute("src",url+"#s"+n);}'
+        . 'else if(loaded){try{f.contentWindow.location.hash="s"+n;}catch(e){f.setAttribute("src",url+"#s"+n);}}}'
+        . 'function close(){m.classList.remove("on");document.body.style.overflow="";}'
+        . 'document.querySelectorAll("[data-ppt-slide]").forEach(function(el){el.addEventListener("click",function(){open(el.getAttribute("data-ppt-slide"));});});'
+        . 'document.getElementById("ppt-close").addEventListener("click",close);m.addEventListener("click",function(e){if(e.target===m)close();});'
+        . 'document.addEventListener("keydown",function(e){if(e.key==="Escape"&&m.classList.contains("on"))close();});})();</script>';
+
     render('Informe Mensual PPT', $body);
+    exit;
+}
+
+/**
+ * Vista previa de la presentación (se abre dentro de la ventana de la pantalla del informe).
+ */
+function unibagPreviewMonthlyPresentation(ReceptionService $service): void
+{
+    if (!userCanAccessArea('ERP', sessionAreaPermissions())) {
+        redirectResponse(firstAllowedAreaHome(sessionAreaPermissions()));
+    }
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
+    $range = unibagMonthlyPresentationRange();
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    header('Content-Type: text/html; charset=utf-8');
+    header('Cache-Control: no-store');
+    try {
+        echo (new MonthlyPresentationService($service, Db::erpPdo()))
+            ->generatePreviewHtml(unibagMonthlyPresentationMonthKey(), $range['from'] ?? null, $range['to'] ?? null);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo '<!doctype html><meta charset="utf-8"><body style="font-family:Arial,sans-serif;padding:24px;color:#991b1b">'
+            . '<b>No se pudo generar la vista previa.</b><pre style="white-space:pre-wrap;color:#475569">' . h($e->getMessage()) . '</pre></body>';
+    }
     exit;
 }
 
@@ -1731,16 +1819,19 @@ function unibagDownloadMonthlyPresentation(ReceptionService $service): void
     }
 
     $monthKey = unibagMonthlyPresentationMonthKey();
+    $range = unibagMonthlyPresentationRange();
 
     try {
         $presService = new MonthlyPresentationService($service, Db::erpPdo());
-        $filePath = $presService->generatePresentation($monthKey);
+        $filePath = $presService->generatePresentation($monthKey, $range['from'] ?? null, $range['to'] ?? null);
 
         if (!file_exists($filePath)) {
             throw new RuntimeException("No se encontró el archivo generado en disco.");
         }
 
-        $cleanFilename = 'KPIS_OPERACIONES_' . strtoupper(date('F_Y', strtotime($monthKey . '-01'))) . '.pptx';
+        $cleanFilename = $range !== null
+            ? 'KPIS_OPERACIONES_' . str_replace('-', '', $range['from']) . '_AL_' . str_replace('-', '', $range['to']) . '.pptx'
+            : 'KPIS_OPERACIONES_' . strtoupper(date('F_Y', strtotime($monthKey . '-01'))) . '.pptx';
 
         while (ob_get_level() > 0) {
             ob_end_clean();

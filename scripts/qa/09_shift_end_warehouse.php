@@ -150,9 +150,9 @@ $check('resumen por bodega', ($w['400 (PROD TERMINADOS REVENTA)']['dispatched'] 
 $check('sin trazabilidad: avisa y sigue con el ERP', ($x = (new ShiftEndWarehouseService($erp, null))->day($day))['warnings'] !== [] && count($x['dispatches']) === 2 && count($x['finished']) === 3);
 
 $html = shiftEndWarehousePage($d, 'UNIBAG CHILE');
-$check('informe formal con las 4 secciones, firmas e imprimir', str_contains($html, 'Informe de cierre de turno · Bodega') && str_contains($html, '1. Recepciones de proveedores')
+$check('informe formal con las 4 secciones e imprimir', str_contains($html, 'Informe de cierre de turno · Bodega') && str_contains($html, '1. Recepciones de proveedores')
     && str_contains($html, '2. Despachos') && str_contains($html, '3. Producto terminado desde Corte y Sellado y Embalaje')
-    && str_contains($html, '4. Mercadería recibida y guardada por bodega') && str_contains($html, 'Revisado por') && str_contains($html, 'window.print()'));
+    && str_contains($html, '4. Mercadería recibida y guardada por bodega') && str_contains($html, 'window.print()'));
 $empty = shiftEndWarehousePage((new ShiftEndWarehouseService($erp, $trz))->day('2026-11-01'), 'UNIBAG CHILE');
 $check('día sin movimientos: textos de vacío', str_contains($empty, 'No se recibieron bobinas en el día.') && str_contains($empty, 'No hubo despachos por guía en el día.'));
 

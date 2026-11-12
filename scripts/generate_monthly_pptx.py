@@ -286,8 +286,10 @@ class Builder:
         self.data = data
         self.month_key = month_key
         self.hist = data['history']
-        self.labels = [month_label(h['month_key']) for h in self.hist]
-        self.col = month_label(month_key)
+        # Con rango de fechas, la última columna lleva la etiqueta del rango («01/10–31/10») en vez del mes.
+        self.labels = [h.get('label') or month_label(h['month_key']) for h in self.hist]
+        self.col = data.get('column_label') or month_label(month_key)
+        self.period = (data.get('period_title') or '').upper() or month_name(self.month_key)
         self.errors = []
 
     def need(self, cond, what):
@@ -316,19 +318,19 @@ class Builder:
             for layout in master.slide_layouts:
                 for sh in layout.shapes:
                     if sh.has_text_frame and sh.text_frame.text.strip().upper().startswith('REPORTE DE OPERACIONES'):
-                        set_text(sh, f"REPORTE DE OPERACIONES {month_name(self.month_key)}")
+                        set_text(sh, f"REPORTE DE OPERACIONES {self.period}")
                         done = True
         self.need(done, 'diseño CONTENIDO: encabezado «REPORTE DE OPERACIONES»')
 
     def portada(self, slide):
         sh = shape_named(slide, 'Periodo') or text_shape(slide, MESES_NOM[8])
         if self.need(sh, 'portada: cuadro del período'):
-            set_text(sh, month_name(self.month_key))
+            set_text(sh, self.period)
 
     def cierre(self, slide):
         sh = shape_named(slide, 'Fecha de emisión') or text_shape(slide, 'Reporte de Operaciones')
         if self.need(sh, 'cierre: fecha de emisión'):
-            set_text(sh, f"Reporte de Operaciones · {month_name(self.month_key).capitalize()} · "
+            set_text(sh, f"Reporte de Operaciones · {(self.data.get('period_title') or month_name(self.month_key).capitalize())} · "
                          f"Fecha de emisión: {self.data.get('issued_at', '')}")
 
     def produccion(self, slide):
