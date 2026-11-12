@@ -83,8 +83,23 @@ final class PrintService
         return $this->normalizeProfile((string)($this->env['PRINT_PROFILE'] ?? 'default'));
     }
 
+    /**
+     * Lenguaje de la impresora del computador que hace la petición (cookie `unibag_print_lang`, la fija el panel
+     * de Hardware al elegir «Impresora de esta PC»). Así cada computador recibe las etiquetas en el lenguaje de SU
+     * impresora (Barpos TSPL por COM en uno, HPRT EPL en otro) y no en el único PRINT_LANGUAGE del servidor.
+     */
+    public static function clientPrinterLanguage(): string
+    {
+        $lang = strtolower(trim((string)($_COOKIE['unibag_print_lang'] ?? '')));
+        return in_array($lang, ['epl', 'tspl', 'zpl'], true) ? $lang : '';
+    }
+
     private function getPrintLanguage(): string
     {
+        $client = self::clientPrinterLanguage();
+        if ($client !== '' && empty($this->env['PRINT_IGNORE_CLIENT_LANGUAGE'])) {
+            return $client;
+        }
         $profile = $this->getPrintProfile();
         if ($profile === 'zebra') {
             return $this->normalizeLanguage((string)($this->env['PRINT_ZEBRA_LANGUAGE'] ?? 'zpl'));

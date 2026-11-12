@@ -79,7 +79,7 @@ function unibagInjectHardwareAssets(string $html): string
     $queueJson = json_encode($queuedJobs, $jsonFlags) ?: '[]';
 
     $assets = '<script id="unibag-hardware-config">window.__UNIBAG_HW_CONFIG__=' . $cfgJson . ';window.__UNIBAG_PRINT_QUEUE__=' . $queueJson . ';</script>'
-        . '<script src="/assets/js/unibag-hardware.js?v=20261112a"></script>';
+        . '<script src="/assets/js/unibag-hardware.js?v=20261112b"></script>';
 
     $headPos = stripos($html, '</head>');
     if ($headPos !== false) {

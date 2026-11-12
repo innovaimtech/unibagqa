@@ -58,5 +58,22 @@ $check('navegador: la etiqueta muestra CANTIDAD con la cantidad original y la un
     && str_contains($src, '<small>CANTIDAD</small>') && str_contains($src, 'trzLabelUnit(data.unit_name)'));
 $check('navegador: etiqueta de 100x70 mm con el mismo estilo en pantalla e impresión', str_contains($src, '.trz-lbl{width:100mm;height:70mm') && substr_count($src, 'TRZ_LABEL_CSS') >= 3);
 
+// Cada computador recibe la etiqueta en el lenguaje de SU impresora (cookie del panel de Hardware).
+$_COOKIE['unibag_print_lang'] = 'tspl';
+$ps = new PrintService(['PRINT_LANGUAGE' => 'epl']);
+$job = $ps->buildClientJob($ps->buildTraceabilityEntryCommand($entry), 1, 'x');
+$check('PC con Barpos (TSPL): la etiqueta se arma en TSPL aunque el servidor diga EPL', $job['language'] === 'tspl' && str_contains($job['content'], 'SIZE 100.00 mm'));
+$_COOKIE['unibag_print_lang'] = 'zpl';
+$check('PC con Zebra: ZPL', str_starts_with((new PrintService(['PRINT_LANGUAGE' => 'epl']))->buildTraceabilityEntryCommand($entry), '^XA'));
+$_COOKIE['unibag_print_lang'] = 'xyz';
+$check('cookie inválida: se usa el lenguaje del servidor', (new PrintService(['PRINT_LANGUAGE' => 'epl']))->getConfiguredPrintLanguage() === 'epl');
+unset($_COOKIE['unibag_print_lang']);
+$check('sin cookie: lenguaje del servidor', (new PrintService(['PRINT_LANGUAGE' => 'epl']))->getConfiguredPrintLanguage() === 'epl');
+
+$hw = (string)file_get_contents($root . '/public/assets/js/unibag-hardware.js');
+$check('navegador: guarda el tipo de impresora de esta PC en la cookie', str_contains($hw, 'function syncClientPrinterLanguageCookie()') && str_contains($hw, 'unibag_print_lang='));
+$check('COM: el lote se envía en tramos (no se corta en lotes grandes)', str_contains($hw, 'bytes.subarray(off, Math.min(bytes.length, off + CHUNK))'));
+$check('impresora USB/COM de esta PC: si falla no se desvía a otra impresora', str_contains($hw, '(preferred === "webserial" || preferred === "webusb") && result && !result.ok'));
+
 echo $fail === 0 ? "\nETIQUETA DE INGRESO OK\n" : "\nETIQUETA DE INGRESO: $fail fallas\n";
 exit($fail > 0 ? 1 : 0);

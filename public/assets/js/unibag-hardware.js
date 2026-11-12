@@ -76,6 +76,19 @@
     } catch (_) {}
   }
 
+  // El servidor arma las etiquetas en el lenguaje de la impresora de ESTE computador (cookie por navegador/PC).
+  function syncClientPrinterLanguageCookie() {
+    try {
+      var lang = String(lsGet(LS_KEYS.printerType, "") || "").toLowerCase();
+      if (lang === "epl" || lang === "tspl" || lang === "zpl") {
+        document.cookie = "unibag_print_lang=" + lang + "; path=/; max-age=31536000; SameSite=Lax";
+      } else {
+        document.cookie = "unibag_print_lang=; path=/; max-age=0; SameSite=Lax";
+      }
+    } catch (_) {}
+  }
+  syncClientPrinterLanguageCookie();
+
   function sleep(ms) {
     return new Promise(function (resolve) {
       setTimeout(resolve, ms);
@@ -1453,9 +1466,14 @@
         writer = port.writable.getWriter();
         var bytes = encodeRawPrinterBytes(job.content, job.language);
         var copies = Math.max(1, parseInt(job.copies || 1, 10) || 1);
+        // Por COM (9600 bps ≈ 1 KB/s) un lote de muchas etiquetas tarda más que el tiempo máximo de UNA escritura:
+        // se envía en tramos de 2 KB, cada uno con su propio tiempo máximo.
+        var CHUNK = 2048;
         for (var c = 0; c < copies; c++) {
-          await withWriteTimeout(writer.write(bytes));
-          written++;
+          for (var off = 0; off < bytes.length; off += CHUNK) {
+            await withWriteTimeout(writer.write(bytes.subarray(off, Math.min(bytes.length, off + CHUNK))));
+            written++;
+          }
         }
         // Espera a que el puerto termine de enviar todo antes de cerrarlo.
         await withWriteTimeout(writer.close());
@@ -1530,6 +1548,18 @@
         return result;
       }
       if (result.ambiguous) return stopAmbiguous(result);
+    }
+
+    // En esta PC se vinculó una impresora USB o COM: si falla NO se desvía a otra impresora (la etiqueta saldría
+    // en un equipo distinto). Se informa el error para revisar la impresora de este computador.
+    if ((preferred === "webserial" || preferred === "webusb") && result && !result.ok) {
+      var ownErr = (preferred === "webserial" ? "Impresora COM de esta PC: " : "Impresora USB de esta PC: ") + (result.error || "no respondió.");
+      printerState.lastError = ownErr;
+      updatePagePrintBanner(false, ownErr);
+      if (!opts.silentFallback) {
+        showInteractivePrintFallbackToast(job, opts.fallbackUrl || "", ownErr);
+      }
+      return { ok: false, error: ownErr };
     }
 
     // 2. Servicio local de Windows (127.0.0.1:8767): ya no se exige. Solo se usa en una PC donde ya está funcionando;
@@ -2075,7 +2105,7 @@
       "  </label>" +
       "</div>" +
       (serverLang && serverLang !== tuneLang
-        ? '<div style="margin-top:6px;font-size:11.5px;color:#b45309;font-weight:700">⚠️ El sistema envía las etiquetas en ' + serverLang.toUpperCase() + ": si esta impresora no las imprime, hay que cambiar PRINT_LANGUAGE en el servidor.</div>"
+        ? '<div style="margin-top:6px;font-size:11.5px;color:#b45309;font-weight:700">⚠️ Esta página se cargó con etiquetas en ' + serverLang.toUpperCase() + ": recarga la página (F5) para que se armen en " + tuneLang.toUpperCase() + " para la impresora de esta PC.</div>"
         : "");
 
     body.innerHTML =
@@ -2180,6 +2210,8 @@
     if (selPrinterType) {
       selPrinterType.onchange = function () {
         lsSet(LS_KEYS.printerType, selPrinterType.value);
+        syncClientPrinterLanguageCookie();
+        showToast("🖨️ Las etiquetas de esta PC se armarán para " + selPrinterType.options[selPrinterType.selectedIndex].text + ".", "ok", 3500);
         selPrinterType.blur();
         refreshModalContents();
       };
