@@ -46,11 +46,11 @@ foreach (['tspl', 'zpl', 'epl'] as $lang) {
         }
         $check('TSPL: ningún texto se sale de la etiqueta', $out === [], implode(' | ', $out));
         $check('TSPL: usa todo el alto (hasta el pie)', $maxY >= 530, (string)$maxY);
-        $check('TSPL: recuadro de cantidad a la derecha', str_contains($cmd, 'BOX 484,224,792,502,5'));
-        $check('TSPL: SKU grande (al menos 64 puntos de alto)', preg_match('/TEXT 20,226,"(\d)",0,(\d),\d,"BOL0352"/', $cmd, $sk) === 1 && $tsplFont[(int)$sk[1]][1] * (int)$sk[2] >= 64);
+        $check('TSPL: recuadro de cantidad a la derecha', str_contains($cmd, 'BOX 476,224,776,502,5'));
+        $check('TSPL: SKU grande (al menos 64 puntos de alto)', preg_match('/TEXT 36,226,"(\d)",0,(\d),\d,"BOL0352"/', $cmd, $sk) === 1 && $tsplFont[(int)$sk[1]][1] * (int)$sk[2] >= 64);
         $long = (new PrintService(['PRINT_LANGUAGE' => 'tspl']))->buildTraceabilityEntryCommand(['quantity' => 125000, 'quantity_initial' => null] + $entry);
-        $check('TSPL: cantidad grande cabe en el recuadro', preg_match('/TEXT (\d+),\d+,"(\d)",0,(\d),\d,"125\.000"/', $long, $q) === 1 && (int)$q[1] >= 484
-            && (int)$q[1] + 7 * $tsplFont[(int)$q[2]][0] * (int)$q[3] <= 792);
+        $check('TSPL: cantidad grande cabe en el recuadro', preg_match('/TEXT (\d+),\d+,"(\d)",0,(\d),\d,"125\.000"/', $long, $q) === 1 && (int)$q[1] >= 476
+            && (int)$q[1] + 7 * $tsplFont[(int)$q[2]][0] * (int)$q[3] <= 776);
     }
 }
 
@@ -59,6 +59,17 @@ $src = (string)file_get_contents($root . '/src/Http/InventoryModule.php');
 $check('navegador: la etiqueta muestra CANTIDAD con la cantidad original y la unidad', str_contains($src, 'function trzLabelQty(data)') && str_contains($src, 'data.quantity_initial')
     && str_contains($src, '<small>CANTIDAD</small>') && str_contains($src, 'trzLabelUnit(data.unit_name)'));
 $check('navegador: etiqueta de 100x70 mm con el mismo estilo en pantalla e impresión', str_contains($src, '.trz-lbl{width:100mm;height:70mm') && substr_count($src, 'TRZ_LABEL_CSS') >= 3);
+
+// Bobina como la de la foto: la descripción se corta en «/» (no en medio de un número) y se agregan las medidas.
+$roll = ['traceability_code' => 'RB-20261028-4ID4GQ', 'item_code' => 'TEL0180', 'item_description' => 'PLA/BLANCO/W60/108X90X1400', 'quantity' => 1,
+    'unit_name' => 'BOB', 'warehouse_name' => '100 (MP PLA)', 'operator_name' => 'Gabriel Rodolfo Munoz Messina', 'created_at' => '2026-10-28 14:17:00',
+    'width_mm' => 1080, 'microns' => 90, 'meters' => 1400];
+foreach (['epl', 'tspl', 'zpl'] as $lang) {
+    $cmd = (new PrintService(['PRINT_LANGUAGE' => $lang]))->buildTraceabilityEntryCommand($roll);
+    $check(strtoupper($lang) . ': bobina con descripción cortada en «/», medidas y 1 BOBINAS', (str_contains($cmd, '"108X90X1400"') || str_contains($cmd, '^FD108X90X1400^FS'))
+        && str_contains($cmd, 'ANCHO 1080 MM - 90 G - 1.400 M') && str_contains($cmd, 'BOBINAS') && !str_contains($cmd, '108X90X"'));
+}
+$check('EPL: no usa la fuente 5 (el «1» se veía raro)', !preg_match('/^A\d+,\d+,0,5,/m', (new PrintService(['PRINT_LANGUAGE' => 'epl']))->buildTraceabilityEntryCommand($roll)));
 
 // Cada computador recibe la etiqueta en el lenguaje de SU impresora (cookie del panel de Hardware).
 $_COOKIE['unibag_print_lang'] = 'tspl';

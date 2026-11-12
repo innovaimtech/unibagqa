@@ -1047,18 +1047,25 @@ final class PrintService
                 : ($lang === 'epl' ? "X$x1,$y1,$t,$x2,$y2" : '^FO' . $x1 . ',' . $y1 . '^GB' . ($x2 - $x1) . ',' . ($y2 - $y1) . ',' . $t . '^FS');
         };
 
+        // Márgenes iguales a ambos lados (las impresoras tienen un pequeño desfase físico: con 20 puntos se cortaba
+        // el borde izquierdo). Contenido entre x = $MX y x = 812 - $MX.
+        $MX = 36;
+        $CW = 812 - 2 * $MX;
+
         // Cabecera en una sola fila (UNIBAG CHILE a la izquierda, bodega a la derecha), código de barras y número.
-        $text(20, 8, 300, 'L', $fit('UNIBAG CHILE', 300, 40), 'UNIBAG CHILE');
-        $text(330, 12, 462, 'R', $fit($wh, 462, 30), $wh);
+        $text($MX, 8, 290, 'L', $fit('UNIBAG CHILE', 290, 40), 'UNIBAG CHILE');
+        $text($MX + 300, 12, $CW - 300, 'R', $fit($wh, $CW - 300, 30), $wh);
         $barY = 54;
         $rows[] = $lang === 'tspl' ? $this->tsplBarcode($code, $barY) : ($lang === 'epl' ? $this->eplBarcode($code, $barY) : $this->zplBarcode($code, $barY));
-        $text(20, $barY + self::BARCODE_HEIGHT_DOTS + 6, 772, 'C', $fit($code, 772, 52), $code);
-        $line(20, 216, 772, 4);
+        $text($MX, $barY + self::BARCODE_HEIGHT_DOTS + 6, $CW, 'C', $fit($code, $CW, 52), $code);
+        $line($MX, 216, $CW, 4);
 
-        // Columna izquierda (x 20..472): SKU grande arriba; al pie medidas (bobinas) y referencia (CC, lote, cajas);
+        // Columna izquierda (x $MX..$BX-12): SKU grande arriba; al pie medidas (bobinas) y referencia (CC, lote, cajas);
         // en medio la descripción con la letra MÁS GRANDE que quepa en el espacio libre, para no dejar blancos.
-        $L = 20;
-        $LW = 452;
+        $BW = 300;
+        $BX = 812 - $MX - $BW;
+        $L = $MX;
+        $LW = $BX - 14 - $L;
         $top = 226;
         $bottom = 500;
         $skuF = $fit($sku, $LW, 104);
@@ -1082,8 +1089,20 @@ final class PrintService
             $footF = $fit(str_repeat('M', 24), $LW, 30);
         }
         $footLines = [];
+        // El pie se corta solo entre datos completos (« - »): nunca «50» en una línea y «CAJAS» en otra.
+        $footMax = max(8, intdiv($LW, $footF[2]));
         foreach ($foot as $part) {
-            foreach ($wrap($part, intdiv($LW, $footF[2])) as $fl) {
+            $cur = '';
+            foreach (explode(' - ', $part) as $seg) {
+                $try = $cur === '' ? $seg : $cur . ' - ' . $seg;
+                if ($cur !== '' && strlen($try) > $footMax) {
+                    $footLines[] = $cur . ' -';
+                    $cur = $seg;
+                } else {
+                    $cur = $try;
+                }
+            }
+            foreach ($wrap($cur, $footMax) as $fl) {
                 $footLines[] = $fl;
             }
         }
@@ -1120,9 +1139,7 @@ final class PrintService
             $text($L, $footTop + $i * ($footF[3] + 5), $LW, 'L', $footF, $fl);
         }
 
-        // Recuadro de cantidad (x 484..792): CANTIDAD / número grande / unidad / bulto.
-        $BX = 484;
-        $BW = 308;
+        // Recuadro de cantidad (a la derecha, hasta el margen): CANTIDAD / número grande / unidad / bulto.
         $box($BX, $top - 2, $BX + $BW, $bottom + 2, 5);
         $inner = $BW - 24;
         $text($BX + 12, $top + 8, $inner, 'C', $fit('CANTIDAD', $inner, 28), 'CANTIDAD');
@@ -1136,8 +1153,8 @@ final class PrintService
         }
 
         // Pie: fecha y operador.
-        $line(20, 510, 772, 3);
-        $text(20, 520, 772, 'C', $fit($meta, 772, 28), $meta);
+        $line($MX, 510, $CW, 3);
+        $text($MX, 520, $CW, 'C', $fit($meta, $CW, 28), $meta);
 
         if ($lang === 'tspl') {
             return $this->buildTsplHeader() . "\r\n" . implode("\r\n", $rows) . "\r\nPRINT 1,1";

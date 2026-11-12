@@ -1993,7 +1993,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
         // Etiqueta 100x70 mm: cabecera, código de barras y, abajo, producto a la izquierda y la CANTIDAD DEL BULTO
         // destacada a la derecha (misma distribución que la etiqueta térmica de PrintService::buildTraceabilityEntryCommand).
-        var TRZ_LABEL_CSS = ".trz-lbl{width:100mm;height:70mm;box-sizing:border-box;border:.6mm solid #000;padding:1.6mm 2.2mm 1.3mm;display:flex;flex-direction:column;font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;overflow:hidden;text-align:left;margin:0 auto 4mm}" +
+        var TRZ_LABEL_CSS = ".trz-lbl{width:100mm;height:70mm;box-sizing:border-box;border:.6mm solid #000;padding:1.6mm 4mm 1.3mm;display:flex;flex-direction:column;font-family:Arial,Helvetica,sans-serif;color:#000;background:#fff;overflow:hidden;text-align:left;margin:0 auto 4mm}" +
             ".trz-lbl *{box-sizing:border-box;color:#000}" +
             ".trz-lbl-head{display:flex;justify-content:space-between;align-items:baseline;gap:2mm}" +
             ".trz-lbl-co{font-weight:900;font-size:4.4mm;line-height:1;letter-spacing:.3mm;white-space:nowrap}" +
@@ -2004,7 +2004,7 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
             ".trz-lbl-body{flex:1;display:flex;gap:2mm;border-top:.6mm solid #000;margin-top:1mm;padding-top:1.3mm;min-height:0}" +
             ".trz-lbl-info{flex:1;min-width:0;display:flex;flex-direction:column}" +
             ".trz-lbl-sku{font-weight:900;font-size:12.5mm;line-height:.92;letter-spacing:-.2mm;white-space:nowrap;overflow:hidden}" +
-            ".trz-lbl-desc{font-weight:800;font-size:3.7mm;line-height:1.15;margin-top:1.2mm;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}" +
+            ".trz-lbl-desc{font-weight:800;font-size:3.4mm;line-height:1.15;margin-top:1.2mm;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}" +
             ".trz-lbl-spec{font-weight:800;font-size:2.7mm;line-height:1.15;margin-top:.8mm}" +
             ".trz-lbl-ref{margin-top:auto;padding-top:.8mm;font-weight:900;font-size:3.8mm;line-height:1.12;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}" +
             ".trz-lbl-qty{width:37mm;flex:none;border:.7mm solid #000;border-radius:1.2mm;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:1mm .8mm}" +
@@ -2068,12 +2068,12 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
 
             return "<div class=\"trz-lbl printable-label-page\">" +
                 "<div class=\"trz-lbl-head\"><div class=\"trz-lbl-co\">UNIBAG CHILE</div>" +
-                "<div class=\"trz-lbl-wh\" style=\"font-size:" + trzFitMm(wh, 57, 3.4, 2.2, 0.76) + "mm\">" + escapeHtml(wh) + "</div></div>" +
+                "<div class=\"trz-lbl-wh\" style=\"font-size:" + trzFitMm(wh, 53, 3.4, 2.2, 0.76) + "mm\">" + escapeHtml(wh) + "</div></div>" +
                 buildCode128Svg(code) +
                 "<div class=\"trz-lbl-code\">" + escapeHtml(code) + "</div>" +
                 "<div class=\"trz-lbl-body\">" +
                     "<div class=\"trz-lbl-info\">" +
-                        "<div class=\"trz-lbl-sku\" style=\"font-size:" + trzFitMm(sku, 53, 12.5, 4.5, 0.76) + "mm\">" + escapeHtml(sku) + "</div>" +
+                        "<div class=\"trz-lbl-sku\" style=\"font-size:" + trzFitMm(sku, 50, 12.5, 4.5, 0.76) + "mm\">" + escapeHtml(sku) + "</div>" +
                         (desc ? "<div class=\"trz-lbl-desc\">" + escapeHtml(desc) + "</div>" : "") +
                         (specsArr.length ? "<div class=\"trz-lbl-spec\">" + escapeHtml(specsArr.join(" · ")) + "</div>" : "") +
                         (refs.length ? "<div class=\"trz-lbl-ref\">" + escapeHtml(refs.join(" · ")) + "</div>" : "") +
