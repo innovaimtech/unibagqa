@@ -131,7 +131,8 @@ if (!$hasPptx) {
         // Informe de octubre (cerrado) descargado el 11/11: la diapositiva 3 muestra el mes en curso 01/11 → 30/11.
         'projection' => ['made' => 400000, 'queue' => 600000, 'projected' => 1000000, 'closed' => false, 'start' => '2026-11-01', 'end' => '2026-11-30',
             'today' => '11/11/2026', 'elapsed_days' => 10, 'total_days' => 21, 'remaining_days' => 11, 'daily_avg' => 40000],
-        'finished_goods' => ['total' => 1850, 'moved' => 1500, 'still' => 350, 'by_customer' => ['Walmart' => 1500, 'Tottus' => 300, 'Sin cliente' => 50], 'still_by_customer' => ['Sin cliente' => 50, 'Tottus' => 300]],
+        'finished_goods' => ['total' => 1850, 'moved' => 1500, 'still' => 350, 'by_customer' => ['Walmart' => 1500, 'Tottus' => 300, 'Sin cliente' => 50], 'still_by_customer' => ['Sin cliente' => 50, 'Tottus' => 300],
+            'immobilized' => ['total' => 110405, 'recall' => 104692, 'others' => 5713]],
         'delayed_orders' => [['cc_number' => '26-00001-1', 'customer_name' => 'Cliente X', 'product_type' => 'BOL0001', 'units' => 1234, 'required_date' => '01/10/2026', 'delay_days' => 3]],
         // Disponibilidad de mantención: 22 días × 8:24, colación 11:00, preventiva 8 h (Selladora I: 4 h).
         'month_closed' => true,
@@ -186,6 +187,15 @@ bt = [sh for sh in by_title('BODEGA – BOBINAS PLANTA').shapes if sh.has_table]
 res['bob'] = [c.text for c in bt.rows[0].cells] + [c.text for c in bt.rows[len(bt.rows) - 1].cells]
 bt = [sh for sh in by_title('BODEGA – BOBINAS PLA:').shapes if sh.has_table][0].table
 res['bob_pla'] = [c.text for c in bt.rows[len(bt.rows) - 1].cells]
+def texts(sl):
+    return {sh.name: sh.text_frame.text for sh in sl.shapes if sh.has_text_frame and not sh.is_placeholder}
+rot = by_title('BODEGA – ROTACIÓN DE STOCK')
+res['rot'] = texts(rot)
+res['rot_chart'] = [list(se.values) for sh in rot.shapes if getattr(sh, 'has_chart', False) and sh.has_chart for se in sh.chart.plots[0].series]
+sinr = by_title('BODEGA – ARTÍCULOS SIN ROTACIÓN')
+res['sinr'] = texts(sinr)
+st = [sh for sh in sinr.shapes if sh.has_table][0].table
+res['sinr_tabla'] = [[c.text for c in r.cells] for r in st.rows]
 res['mant'] = [mant(i) for i, x in enumerate(res['titles']) if x.upper().startswith('MANTENCIÓN – DISPONIBILIDAD')]
 print(json.dumps(res))
 PY;
@@ -197,6 +207,11 @@ PY;
 " . $raw . "
 ";
         }
+        checkMr('rotación: con movimiento 1.850 (400/1000/700) y sin rotación 110.405 (bodega 5000)', ($json['rot_chart'][0] ?? []) === [1850.0, 110405.0]
+            && str_contains(implode(' ', (array)($json['rot'] ?? [])), 'Stock total considerado: 112.255'), json_encode([$json['rot'] ?? null, $json['rot_chart'] ?? null], JSON_UNESCAPED_UNICODE));
+        checkMr('sin rotación: Recall Tottus 104.692 (94,8%) y Otros 5.713, como la lámina 39 de septiembre', ($json['sinr_tabla'] ?? [])
+            === [['Sin rotación', 'Recall Tottus', 'Otros'], ['110.405', '104.692', '5.713'], ['100%', '94,8%', '5,2%']]
+            && str_contains(implode(' ', (array)($json['sinr'] ?? [])), 'corresponde a productos del recall Tottus (104.692)'), json_encode([$json['sinr_tabla'] ?? null, $json['sinr'] ?? null], JSON_UNESCAPED_UNICODE));
         checkMr('22 diapositivas (18 + mantención: divisoria y 3 de disponibilidad)', ($json['n'] ?? 0) === 22, json_encode($json['titles'] ?? null, JSON_UNESCAPED_UNICODE));
         $titles = (array)($json['titles'] ?? []);
         checkMr('mantención va después de mermas y antes de bodega', array_search('MANTENCIÓN.', $titles, true) === 11

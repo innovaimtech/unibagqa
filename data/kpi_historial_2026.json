@@ -1,5 +1,5 @@
 {
-    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Desde octubre 2026 cada mes es el MES CALENDARIO (del 1 al ultimo dia: 28/29, 30 o 31; ej. 2026-10 = 01-oct a 31-oct; los calculados llevan 'periodo': 'mes'). Hasta septiembre 2026 se publico con el ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses con origen 'plantilla' (2026-01 a 2026-09) son las cifras YA PUBLICADAS (septiembre segun Reporte_Operaciones_Septiembre_2026_UNIFICADO) y no se recalculan. Los meses nuevos se agregan solos con origen 'calculado' cuando el mes termina. El bloque 'procesos' (kg programados/procesados/merma) de los meses calculados lo arma el sistema: procesados = unidades producidas x peso de la bolsa; programados = cantidad pedida de la CC repartida segun la produccion del mes; merma = kg registrados en maquina. 'bobinas_kg' = stock de bobinas PP (bodega 200) y PLA (bodega 100) al cierre de cada mes, expresado en BOLSAS PROYECTADAS (calculo del Libro1 'Stock bobinas'): bobinas x largo (m) / metros por bolsa, promediado entre 9 formatos (promocionales 0,36/0,40/0,46/0,58 m y boutique 0,33/0,43/0,51/0,58/0,65 m). Sep-25 a sep-26 (origen 'publicado', al 25) son las cifras de la PPT y no se recalculan. Desde oct-26 las calcula el sistema al ultimo dia del mes con el kardex (llevan 'corte' y 'calculo'); tambien guardan los kg (pp, pla...). Se puede corregir cualquier valor a mano.",
+    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Desde octubre 2026 cada mes es el MES CALENDARIO (del 1 al ultimo dia: 28\/29, 30 o 31; ej. 2026-10 = 01-oct a 31-oct; los calculados llevan 'periodo': 'mes'). Hasta septiembre 2026 se publico con el ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses con origen 'plantilla' (2026-01 a 2026-09) son las cifras YA PUBLICADAS (septiembre segun Reporte_Operaciones_Septiembre_2026_UNIFICADO) y no se recalculan. Los meses nuevos se agregan solos con origen 'calculado' cuando el mes termina. El bloque 'procesos' (kg programados\/procesados\/merma) de los meses calculados lo arma el sistema: procesados = unidades producidas x peso de la bolsa; programados = cantidad pedida de la CC repartida segun la produccion del mes; merma = kg registrados en maquina. 'bobinas_kg' = stock de bobinas PP (bodega 200) y PLA (bodega 100) al cierre de cada mes, expresado en BOLSAS PROYECTADAS (calculo del Libro1 'Stock bobinas'): bobinas x largo (m) \/ metros por bolsa, promediado entre 9 formatos (promocionales 0,36\/0,40\/0,46\/0,58 m y boutique 0,33\/0,43\/0,51\/0,58\/0,65 m). Sep-25 a sep-26 (origen 'publicado', al 25) son las cifras de la PPT y no se recalculan. Desde oct-26 las calcula el sistema al ultimo dia del mes con el kardex (llevan 'corte' y 'calculo'); tambien guardan los kg (pp, pla...). Se puede corregir cualquier valor a mano.",
     "meses": {
         "2026-01": {
             "origen": "plantilla",
@@ -292,32 +292,33 @@
         "2026-10": {
             "origen": "calculado",
             "periodo": "mes",
-            "prod_units": 872093,
+            "nivel_servicio": 3,
+            "prod_units": 914637,
             "prod_cap": 1345000,
-            "sl_total_units": 814873,
-            "sl_delayed_units": 788373,
-            "sl_total_cc": 164,
-            "sl_delayed_cc": 158,
-            "waste_pct": 0.51,
+            "sl_total_units": 930055,
+            "sl_delayed_units": 26000,
+            "sl_total_cc": 94,
+            "sl_delayed_cc": 7,
+            "waste_pct": 0.55,
             "procesos": {
                 "flexo": {
-                    "prog": 29271.5,
-                    "proc": 28809.9,
-                    "waste": 187.31
+                    "prog": 29733.9,
+                    "proc": 30602.1,
+                    "waste": 191.31
                 },
                 "seri": {
-                    "prog": 1631.6,
-                    "proc": 1640.5,
-                    "waste": 47.9
+                    "prog": 1669.5,
+                    "proc": 1740.9,
+                    "waste": 53.9
                 },
                 "cys": {
-                    "prog": 40762.1,
-                    "proc": 32196.8,
-                    "waste": 270.76
+                    "prog": 35209.4,
+                    "proc": 33714.2,
+                    "waste": 305.22
                 },
                 "emb": {
-                    "prog": 39286.3,
-                    "proc": 32479.4,
+                    "prog": 34729.6,
+                    "proc": 33860.3,
                     "waste": 2.5
                 }
             }
@@ -429,12 +430,16 @@
             "corte": "2026-09-25"
         },
         "2026-10": {
-            "pp": 26909,
-            "pla": 85646,
-            "pla_beige": 10372,
+            "pp": 26821,
+            "pla": 83740,
+            "pla_beige": 8466,
             "pla_blanco": 58623,
+            "pp_bolsas": 701525,
+            "pla_bolsas": 2264922,
+            "pla_beige_bolsas": 211270,
+            "pla_blanco_bolsas": 1623649,
             "corte": "2026-10-31",
-            "calculo": 2
+            "calculo": 3
         }
     }
 }

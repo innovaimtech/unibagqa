@@ -544,8 +544,15 @@ class Builder:
                 set_text(chart.chart_title, f"Stock consolidado por cliente (al {self.data.get('stock_date', '')})")
 
     def bod_rotacion(self, slide):
+        # Como se publicó en septiembre: con movimiento = bodegas 400, 1000 y 700; sin rotación = bodega 5000
+        # (productos inmovilizados, donde está el recall Tottus).
         fg = self.data.get('finished_goods') or {}
-        total, moved, still = float(fg.get('total') or 0), float(fg.get('moved') or 0), float(fg.get('still') or 0)
+        imm = fg.get('immobilized')
+        if imm is not None:
+            moved, still = float(fg.get('total') or 0), float(imm.get('total') or 0)
+            total = moved + still
+        else:
+            total, moved, still = float(fg.get('total') or 0), float(fg.get('moved') or 0), float(fg.get('still') or 0)
         pm = moved / total * 100 if total > 0 else 0
         for sh in slide.shapes:
             if not sh.has_text_frame or sh.is_placeholder:
@@ -559,17 +566,27 @@ class Builder:
             elif sh.name == 'Text 6':
                 set_text(sh, f"stock sin rotación ({100 - pm:.0f}%)" if total > 0 else 'stock sin rotación')
             elif sh.name == 'Nota':
-                set_text(sh, f"Stock total (bodegas 400, 1000 y 700): {fmt_int(total)}. "
-                             f"Sin rotación = sin salidas en los últimos 90 días.")
+                if imm is not None:
+                    set_text(sh, f"Stock total considerado: {fmt_int(total)} ({fmt_int(moved)} con movimiento en bodegas 400, 1000 y 700 "
+                                 f"+ {fmt_int(still)} sin rotación en bodega 5000, productos inmovilizados).")
+                else:
+                    set_text(sh, f"Stock total (bodegas 400, 1000 y 700): {fmt_int(total)}. "
+                                 f"Sin rotación = sin salidas en los últimos 90 días.")
         charts = shapes_of(slide, 'chart')
         if self.need(charts, 'rotación: gráfico'):
             replace_chart(charts[0].chart, ['Stock con movimiento', 'Sin rotación'], [('Rotación de stock', [moved, still])])
 
     def bod_sin_rotacion(self, slide):
         fg = self.data.get('finished_goods') or {}
-        still = float(fg.get('still') or 0)
-        named = [(k, v) for k, v in (fg.get('still_by_customer') or {}).items() if k != 'Sin cliente']
-        top_name, top_val = named[0] if named else ('—', 0)
+        imm = fg.get('immobilized')
+        if imm is not None:
+            # Bodega 5000: recall Tottus (BOL0352) y el resto.
+            still = float(imm.get('total') or 0)
+            top_name, top_val = 'Recall Tottus', float(imm.get('recall') or 0)
+        else:
+            still = float(fg.get('still') or 0)
+            named = [(k, v) for k, v in (fg.get('still_by_customer') or {}).items() if k != 'Sin cliente']
+            top_name, top_val = named[0] if named else ('—', 0)
         others = max(0.0, still - top_val)
         share = top_val / still * 100 if still > 0 else 0
         tables = shapes_of(slide, 'table')
@@ -587,7 +604,10 @@ class Builder:
             if sh.name == 'Text 2':
                 set_text(sh, fmt_pct(share, 1))
             elif sh.name == 'Text 3':
-                set_text(sh, f"del stock sin rotación corresponde a productos de {top_name} ({fmt_int(top_val)})")
+                if imm is not None:
+                    set_text(sh, f"del stock sin rotación corresponde a productos del recall Tottus ({fmt_int(top_val)})")
+                else:
+                    set_text(sh, f"del stock sin rotación corresponde a productos de {top_name} ({fmt_int(top_val)})")
         charts = shapes_of(slide, 'chart')
         if self.need(charts, 'sin rotación: gráfico'):
             replace_chart(charts[0].chart, [top_name, 'Otros'], [('Detalle sin rotación', [top_val, others])])

@@ -214,6 +214,12 @@ class MonthlyPresentationService
     private const KARDEX_IN = ['stockchangeup', 'sthup', 'invoicesbuy', 'invoicesnotessell'];
     private const KARDEX_OUT = ['stockchangedown', 'sthdown', 'ordersdelivery', 'shipment'];
 
+    /** Bodega ERP 5000 (productos inmovilizados): es el stock «sin rotación» de la lámina de bodega. */
+    private const IMMOBILIZED_STOREHOUSE = 18;
+
+    /** Artículos del recall Tottus (se muestran aparte dentro de la bodega 5000). */
+    private const RECALL_TOTTUS_CODES = ['BOL0352'];
+
     /** Días sin salidas para considerar un artículo «sin rotación». */
     private const NO_ROTATION_DAYS = 90;
 
@@ -506,8 +512,9 @@ class MonthlyPresentationService
             $stock[$itemId] = ($stock[$itemId] ?? 0.0) + $qty;
         }
         $stock = array_filter($stock, static fn($q) => $q > 0);
+        $immobilized = $this->computeImmobilized($atTs);
         if ($stock === []) {
-            return ['by_customer' => [], 'total' => 0, 'moved' => 0, 'still' => 0, 'still_by_customer' => []];
+            return ['by_customer' => [], 'total' => 0, 'moved' => 0, 'still' => 0, 'still_by_customer' => [], 'immobilized' => $immobilized];
         }
 
         // Cliente principal de cada artículo.
@@ -562,7 +569,35 @@ class MonthlyPresentationService
             'moved' => round($movedUnits),
             'still' => round($total - $movedUnits),
             'still_by_customer' => array_map(static fn($v) => round($v), $stillByCustomer),
+            'immobilized' => $immobilized,
         ];
+    }
+
+    /**
+     * Bodega 5000 (productos inmovilizados) al cierre: total, recall Tottus (BOL0352) y el resto.
+     * Es el «stock sin rotación» de la presentación (así se publicó en septiembre: recall 104.692 al 30-09).
+     *
+     * @return array{total: float, recall: float, others: float}
+     */
+    public function computeImmobilized(int $atTs): array
+    {
+        $byItem = [];
+        foreach ($this->stockAt([self::IMMOBILIZED_STOREHOUSE], $atTs) as $key => $qty) {
+            $itemId = (int)explode(':', $key)[0];
+            $byItem[$itemId] = ($byItem[$itemId] ?? 0.0) + $qty;
+        }
+        $byItem = array_filter($byItem, static fn($q) => $q > 0);
+        $recallIds = [];
+        if ($byItem !== []) {
+            $codes = implode(',', array_map(fn(string $c): string => (string)$this->erpPdo->quote($c), self::RECALL_TOTTUS_CODES));
+            $recallIds = array_map('intval', $this->erpPdo->query("SELECT id FROM item WHERE item_number_prod IN ($codes)")->fetchAll(PDO::FETCH_COLUMN) ?: []);
+        }
+        $total = array_sum($byItem);
+        $recall = 0.0;
+        foreach ($recallIds as $id) {
+            $recall += $byItem[$id] ?? 0.0;
+        }
+        return ['total' => round($total), 'recall' => round($recall), 'others' => round($total - $recall)];
     }
 
     /** Nombre corto del cliente para los gráficos: sin razón social (S.A., SpA, Ltda.). */
@@ -669,7 +704,7 @@ class MonthlyPresentationService
         $closed = $endTs < time();
         $suffix = $range !== null ? '-r' . $range['from'] . '_' . $range['to'] : '';
         $historyStamp = (string)@filemtime($this->historyPath());
-        $cacheKey = 'monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '-' . $monthKey . $suffix . '-' . $historyStamp;
+        $cacheKey = 'monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '.b2-' . $monthKey . $suffix . '-' . $historyStamp;
         $cached = ResultCache::get($cacheKey, $closed ? 21600 : 300, $found);
         if ($found && is_array($cached)) {
             $cached['issued_at'] = date('d-m-Y');
@@ -680,7 +715,7 @@ class MonthlyPresentationService
         $metrics = $this->computeMonthlyMetrics($monthKey, $range);
         // La clave se arma con la fecha del historial DESPUÉS del cálculo (el cálculo puede guardar meses nuevos).
         clearstatcache();
-        ResultCache::put('monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
+        ResultCache::put('monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '.b2-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
         return $metrics;
     }
 
