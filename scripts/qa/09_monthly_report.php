@@ -134,7 +134,7 @@ if (!$hasPptx) {
             'today' => '11/11/2026', 'elapsed_days' => 10, 'total_days' => 21, 'remaining_days' => 11, 'daily_avg' => 40000],
         'finished_goods' => ['total' => 1850, 'moved' => 1500, 'still' => 350, 'by_customer' => ['Walmart' => 1500, 'Tottus' => 300, 'Sin cliente' => 50], 'still_by_customer' => ['Sin cliente' => 50, 'Tottus' => 300],
             'immobilized' => ['total' => 110405, 'recall' => 104692, 'others' => 5713]],
-        'stock_today' => ['date' => '11-11-2026', 'by_customer' => ['Walmart' => 1200, 'Tottus' => 350, 'Sin cliente' => 40], 'total' => 1590],
+        'stock_today' => ['date' => '11-11-2026', 'by_customer' => ['Walmart' => 1200, 'Tottus' => 350, 'Sin cliente' => 40], 'total' => 1590, 'recall' => 70522],
         'delayed_orders' => [['cc_number' => '26-00001-1', 'customer_name' => 'Cliente X', 'product_type' => 'BOL0001', 'units' => 1234, 'required_date' => '01/10/2026', 'delay_days' => 3]],
         // Disponibilidad de mantención: 22 días × 8:24, colación 11:00, preventiva 8 h (Selladora I: 4 h).
         'month_closed' => true,
@@ -218,6 +218,9 @@ PY;
         checkMr('sin rotación: Recall Tottus 104.692 (94,8%) y Otros 5.713, como la lámina 39 de septiembre', ($json['sinr_tabla'] ?? [])
             === [['Sin rotación', 'Recall Tottus', 'Otros'], ['110.405', '104.692', '5.713'], ['100%', '94,8%', '5,2%']]
             && str_contains(implode(' ', (array)($json['sinr'] ?? [])), 'corresponde a productos del recall Tottus (104.692)'), json_encode([$json['sinr_tabla'] ?? null, $json['sinr'] ?? null], JSON_UNESCAPED_UNICODE));
+        checkMr('sin rotación: tarjeta del recall Tottus al día de descarga (70.522, 34.170 menos que al cierre)',
+            str_contains(implode(' ', (array)($json['sinr'] ?? [])), '70.522')
+            && str_contains(implode(' ', (array)($json['sinr'] ?? [])), 'Recall Tottus al día de descarga (11-11-2026): 34.170 menos que al cierre'), json_encode($json['sinr'] ?? null, JSON_UNESCAPED_UNICODE));
         checkMr('22 diapositivas (18 + mantención: divisoria y 3 de disponibilidad)', ($json['n'] ?? 0) === 22, json_encode($json['titles'] ?? null, JSON_UNESCAPED_UNICODE));
         $titles = (array)($json['titles'] ?? []);
         checkMr('mantención va después de mermas y antes de bodega', array_search('MANTENCIÓN.', $titles, true) === 11

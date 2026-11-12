@@ -576,7 +576,7 @@ class MonthlyPresentationService
     /**
      * Stock consolidado por cliente al día de hoy (día de la descarga), para compararlo con el del cierre del mes.
      *
-     * @return array{date: string, by_customer: array<string, float>, total: float}|null null si no se pudo calcular
+     * @return array{date: string, by_customer: array<string, float>, total: float, recall: ?float}|null null si no se pudo calcular
      */
     public function stockToday(): ?array
     {
@@ -585,7 +585,10 @@ class MonthlyPresentationService
         } catch (Throwable) {
             return null;
         }
-        return ['date' => date('d-m-Y'), 'by_customer' => (array)($fg['by_customer'] ?? []), 'total' => (float)($fg['total'] ?? 0)];
+        // recall: unidades del recall Tottus (BOL0352) en la bodega 5000 a la fecha; null si no se pudo leer.
+        $recall = isset($fg['immobilized']['recall']) ? (float)$fg['immobilized']['recall'] : null;
+        return ['date' => date('d-m-Y'), 'by_customer' => (array)($fg['by_customer'] ?? []), 'total' => (float)($fg['total'] ?? 0),
+            'recall' => $recall];
     }
 
     /**
@@ -731,7 +734,7 @@ class MonthlyPresentationService
             // La proyección es del ciclo en curso (cambia día a día): no se toma del caché del mes.
             $cached['projection'] = $this->closingProjection();
             // El stock «al día de la descarga» es del día: si lo guardado es de otro día, se recalcula.
-            if (($cached['stock_today']['date'] ?? '') !== date('d-m-Y')) {
+            if (($cached['stock_today']['date'] ?? '') !== date('d-m-Y') || !array_key_exists('recall', (array)($cached['stock_today'] ?? []))) {
                 $cached['stock_today'] = $this->stockToday();
             }
             return $cached;

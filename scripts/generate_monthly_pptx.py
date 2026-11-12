@@ -676,6 +676,46 @@ class Builder:
         charts = shapes_of(slide, 'chart')
         if self.need(charts, 'sin rotación: gráfico'):
             replace_chart(charts[0].chart, [top_name, 'Otros'], [('Detalle sin rotación', [top_val, others])])
+        # Recall Tottus al día de la descarga: segunda tarjeta bajo la del cierre (mismo formato).
+        today = self.data.get('stock_today') or {}
+        end_date = self.data.get('stock_date', '')
+        if imm is not None and today.get('recall') is not None and today.get('date') and today.get('date') != end_date:
+            self.recall_today_card(slide, float(today['recall']), top_val, today['date'], end_date)
+
+    def recall_today_card(self, slide, recall_today, recall_close, today_date, end_date):
+        card = next((sh for sh in slide.shapes if sh.name.startswith('Tarjeta')), None)
+        # El título de la lámina también se llama «Text 3»: se toman solo los cuadros que no son título.
+        big = next((sh for sh in slide.shapes if sh.name == 'Text 2' and not sh.is_placeholder), None)
+        small = next((sh for sh in slide.shapes if sh.name == 'Text 3' and not sh.is_placeholder), None)
+        if card is None or big is None or small is None:
+            self.errors.append('sin rotación: tarjeta del recall (para el dato del día de descarga)')
+            return
+        gap = Emu(137160)
+        height = Emu(1143000)
+        dy = card.top + card.height + gap - card.top
+        new = []
+        for src in (card, big, small):
+            el = copy.deepcopy(src._element)
+            slide.shapes._spTree.append(el)
+            new.append([sh for sh in slide.shapes if sh._element is el][0])
+        n_card, n_big, n_small = new
+        ids = [int(x) for x in slide.shapes._spTree.xpath('//p:cNvPr/@id')]
+        for k, sh in enumerate(new):
+            sh._element.xpath('./*/p:cNvPr')[0].set('id', str(max(ids) + 1 + k))
+        n_card.name = 'Tarjeta recall al día de descarga'
+        n_big.name = 'Recall hoy (cifra)'
+        n_small.name = 'Recall hoy (texto)'
+        n_card.top = card.top + dy
+        n_card.height = height
+        n_big.top = n_card.top + Emu(45720)
+        n_big.height = Emu(640080)
+        n_small.top = n_big.top + n_big.height
+        n_small.height = Emu(411480)
+        set_text(n_big, fmt_int(recall_today))
+        diff = recall_today - recall_close
+        change = (f"{fmt_int(abs(diff))} menos que al cierre del {end_date}" if diff < 0
+                  else f"{fmt_int(diff)} más que al cierre del {end_date}" if diff > 0 else f"igual que al cierre del {end_date}")
+        set_text(n_small, f"Recall Tottus al día de descarga ({today_date}): {change}")
 
     def bobinas(self, slide, cols):
         rolls = self.data.get('rolls') or []
