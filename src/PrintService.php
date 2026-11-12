@@ -248,63 +248,8 @@ final class PrintService
      *
      * @return array{host: string, port: int}|null
      */
-    /**
-     * Impresora de red elegida en ESTE computador (panel Hardware → «Impresora en red», cookie `unibag_print_ip`).
-     * Solo IPs de red local (10.x, 172.16-31.x, 192.168.x) y puertos de impresora (9100-9109, 6101): el servidor nunca
-     * se conecta a otra dirección aunque la cookie se manipule.
-     *
-     * @return array{host: string, port: int}|null
-     */
-    public static function parseNetworkPrinter(string $value): ?array
-    {
-        if (preg_match('/^\s*(?:tcp:\/\/)?(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?\s*$/', $value, $m) !== 1) {
-            return null;
-        }
-        $ip = $m[1];
-        $port = isset($m[2]) && $m[2] !== '' ? (int)$m[2] : 9100;
-        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE) !== false) {
-            return null; // no es IPv4 privada
-        }
-        if (!(($port >= 9100 && $port <= 9109) || $port === 6101)) {
-            return null;
-        }
-        return ['host' => $ip, 'port' => $port];
-    }
-
-    public static function clientNetworkPrinter(): ?array
-    {
-        return self::parseNetworkPrinter((string)($_COOKIE['unibag_print_ip'] ?? ''));
-    }
-
-    /**
-     * Envía la etiqueta RAW a una impresora de red (puerto 9100) desde el servidor web.
-     * Funciona cuando el servidor está en la misma red que la impresora (sistema abierto en la red local).
-     *
-     * @param array{host: string, port: int} $target
-     * @return array{ok: bool, error: ?string, ambiguous?: bool, printer: string}
-     */
-    public function sendNetworkRaw(array $target, string $content, int $copies = 1): array
-    {
-        $name = $target['host'] . ':' . $target['port'];
-        $fp = @stream_socket_client('tcp://' . $name, $errno, $errstr, 3.0);
-        if (!is_resource($fp)) {
-            return ['ok' => false, 'printer' => $name, 'error' => 'El servidor no logra conectarse con la impresora ' . $name
-                . ' (' . trim((string)$errstr) . '). Revisa que esté encendida y en la red, y que el sistema esté abierto desde la red de la planta.'];
-        }
-        stream_set_timeout($fp, 15);
-        $ok = $this->writeAll($fp, str_repeat($content, max(1, $copies)));
-        @fclose($fp);
-        return $ok
-            ? ['ok' => true, 'printer' => $name, 'error' => null]
-            : ['ok' => false, 'printer' => $name, 'ambiguous' => true, 'error' => 'El envío a ' . $name . ' se cortó a mitad: revisa qué etiquetas salieron antes de reimprimir.'];
-    }
-
     private function getConfiguredTcpEndpoint(): ?array
     {
-        $clientNet = self::clientNetworkPrinter();
-        if ($clientNet !== null && empty($this->env['PRINT_IGNORE_CLIENT_LANGUAGE'])) {
-            return $clientNet;
-        }
         $profile = $this->getPrintProfile();
         $host = '';
         $port = (int)($this->env['PRINT_TCP_PORT'] ?? 9100);
@@ -1016,96 +961,108 @@ final class PrintService
         }
         $meta = trim($when . ($op !== '' ? ' - OP: ' . $op : ''));
         $lang = $this->getPrintLanguage();
+        $lang = $lang === 'tspl' || $lang === 'epl' ? $lang : 'zpl';
 
-        // Geometría (puntos a 203 dpi): columna izquierda 20..476, recuadro de cantidad 492..792.
-        $L = 20;
-        $LW = 456;
-        $BX = 492;
-        $BW = 300;
-        $top = 262;
-        $boxBottom = 498;
-
-        // Fuentes por tamaño: [ancho de carácter, alto] a escala 1.
-        $fonts = [
-            'tspl' => ['s' => [2, 12, 20], 'm' => [3, 16, 24], 'l' => [4, 24, 32], 'xl' => [5, 32, 48]],
-            'epl' => ['s' => [2, 10, 16], 'm' => [3, 12, 20], 'l' => [4, 14, 24], 'xl' => [5, 32, 48]],
-            'zpl' => ['s' => [0, 13, 22], 'm' => [0, 16, 26], 'l' => [0, 22, 34], 'xl' => [0, 30, 50]],
-        ][$lang === 'tspl' || $lang === 'epl' ? $lang : 'zpl'];
-        /** Mayor multiplicador (≤ $max) con el que el texto cabe en $w. */
-        $fit = static function (string $text, int $w, string $size, int $max) use ($fonts): int {
-            for ($mult = $max; $mult > 1; $mult--) {
-                if (strlen($text) * $fonts[$size][1] * $mult <= $w) {
-                    return $mult;
+        // Fuentes internas [ancho, alto] de cada carácter a escala 1 (203 dpi). EPL tiene letras más angostas que
+        // TSPL: por eso cada texto elige fuente y multiplicador para llenar SU espacio en cualquier impresora.
+        $bitmapFonts = [
+            'tspl' => [2 => [12, 20], 3 => [16, 24], 4 => [24, 32], 5 => [32, 48]],
+            'epl' => [2 => [10, 16], 3 => [12, 20], 4 => [14, 24], 5 => [32, 48]],
+        ];
+        /** Mayor tamaño de letra con el que $text cabe en $w de ancho y $maxH de alto: [fuente, mult, ancho, alto]. */
+        $fit = static function (string $text, int $w, int $maxH) use ($lang, $bitmapFonts): array {
+            $len = max(1, strlen($text));
+            if ($lang === 'zpl') {
+                $h = (int)max(16, min($maxH, floor($w / ($len * 0.6))));
+                return [0, 1, (int)floor($h * 0.6), $h];
+            }
+            $best = null;
+            foreach ($bitmapFonts[$lang] as $font => [$cw, $ch]) {
+                for ($mult = 1; $mult <= 6; $mult++) {
+                    if ($ch * $mult > $maxH || $len * $cw * $mult > $w) {
+                        continue;
+                    }
+                    if ($best === null || $ch * $mult > $best[3] || ($ch * $mult === $best[3] && $cw * $mult > $best[2])) {
+                        $best = [$font, $mult, $cw * $mult, $ch * $mult];
+                    }
                 }
             }
-            return 1;
+            return $best ?? [2, 1, $bitmapFonts[$lang][2][0], $bitmapFonts[$lang][2][1]];
         };
         $rows = [];
-        /** Texto en un bloque [x, x+w] alineado L/C; se recorta si no cabe. Devuelve el alto usado. */
-        $text = function (int $x, int $y, int $w, string $align, string $size, int $mult, string $value) use ($lang, $fonts, &$rows): int {
-            [$font, $cw, $ch] = $fonts[$size];
-            $value = substr($value, 0, max(1, intdiv($w, $cw * $mult)));
+        /** Escribe $value en el bloque [x, x+w] alineado L/C/R; devuelve el alto usado. */
+        $text = function (int $x, int $y, int $w, string $align, array $f, string $value) use ($lang, &$rows): int {
+            [$font, $mult, $cw, $ch] = $f;
+            $value = substr($value, 0, max(1, intdiv($w, max(1, $cw))));
             if ($value === '') {
                 return 0;
             }
-            $tx = $align === 'C' ? $x + max(0, intdiv($w - strlen($value) * $cw * $mult, 2)) : $x;
+            $tw = strlen($value) * $cw;
+            $tx = $align === 'C' ? $x + max(0, intdiv($w - $tw, 2)) : ($align === 'R' ? $x + max(0, $w - $tw) : $x);
             if ($lang === 'tspl') {
                 $rows[] = 'TEXT ' . $tx . ',' . $y . ',"' . $font . '",0,' . $mult . ',' . $mult . ',"' . $value . '"';
             } elseif ($lang === 'epl') {
                 $rows[] = 'A' . $tx . ',' . $y . ',0,' . $font . ',' . $mult . ',' . $mult . ',N,"' . $value . '"';
             } else {
-                $rows[] = '^FO' . $x . ',' . $y . '^FB' . $w . ',1,0,' . $align . ',0^A0N,' . ($ch * $mult) . ',' . ($cw * $mult) . '^FD' . $value . '^FS';
+                $rows[] = '^FO' . $x . ',' . $y . '^FB' . $w . ',1,0,' . $align . ',0^A0N,' . $ch . ',' . $cw . '^FD' . $value . '^FS';
             }
-            return $ch * $mult;
+            return $ch;
         };
         $line = function (int $x, int $y, int $w, int $h) use ($lang, &$rows): void {
             $rows[] = $lang === 'tspl' ? "BAR $x,$y,$w,$h" : ($lang === 'epl' ? "LO$x,$y,$w,$h" : "^FO$x,$y^GB$w,$h,$h^FS");
         };
+        $box = function (int $x1, int $y1, int $x2, int $y2, int $t) use ($lang, &$rows): void {
+            $rows[] = $lang === 'tspl' ? "BOX $x1,$y1,$x2,$y2,$t"
+                : ($lang === 'epl' ? "X$x1,$y1,$t,$x2,$y2" : '^FO' . $x1 . ',' . $y1 . '^GB' . ($x2 - $x1) . ',' . ($y2 - $y1) . ',' . $t . '^FS');
+        };
 
-        // Cabecera, código de barras y número.
-        $text(0, 8, 812, 'C', 'l', 1, 'UNIBAG CHILE');
-        $text(20, 46, 772, 'C', 'm', 1, $wh);
-        $barY = 78;
+        // Cabecera en una sola fila (UNIBAG CHILE a la izquierda, bodega a la derecha), código de barras y número.
+        $text(20, 10, 300, 'L', $fit('UNIBAG CHILE', 300, 34), 'UNIBAG CHILE');
+        $text(330, 12, 462, 'R', $fit($wh, 462, 30), $wh);
+        $barY = 54;
         $rows[] = $lang === 'tspl' ? $this->tsplBarcode($code, $barY) : ($lang === 'epl' ? $this->eplBarcode($code, $barY) : $this->zplBarcode($code, $barY));
-        $text(20, $barY + self::BARCODE_HEIGHT_DOTS + 6, 772, 'C', 'l', $fit($code, 772, 'l', 2), $code);
-        $line(20, 252, 772, 3);
+        $text(20, $barY + self::BARCODE_HEIGHT_DOTS + 6, 772, 'C', $fit($code, 772, 52), $code);
+        $line(20, 216, 772, 4);
 
-        // Columna izquierda: SKU, descripción (hasta 3 líneas) y referencia.
-        $y = $top;
-        $y += $text($L, $y, $LW, 'L', 'l', $fit($sku, $LW, 'l', 2), $sku) + 8;
-        $perLine = intdiv($LW, $fonts['m'][1]);
-        $refLines = $ref !== '' ? array_slice(explode("\n", wordwrap($ref, $perLine, "\n", true)), 0, 2) : [];
-        $descLines = $desc !== '' ? array_slice(explode("\n", wordwrap($desc, $perLine, "\n", true)), 0, 4 - count($refLines)) : [];
+        // Columna izquierda (x 20..472): SKU lo más grande posible, descripción y referencia al pie.
+        $L = 20;
+        $LW = 452;
+        $top = 226;
+        $bottom = 500;
+        $y = $top + $text($L, $top, $LW, 'L', $fit($sku, $LW, 96), $sku) + 10;
+        $small = $fit(str_repeat('M', 18), $LW, 34);
+        $perLine = max(10, intdiv($LW, $small[2]));
+        // La referencia (CC, lote, cajas) siempre cabe completa en 2 líneas: si es larga usa letra más chica.
+        $refFont = $ref !== '' ? $fit(str_repeat('M', max(12, (int)ceil(strlen($ref) / 2) + 2)), $LW, $small[3]) : $small;
+        $refLines = $ref !== '' ? array_slice(explode("\n", wordwrap($ref, max(10, intdiv($LW, $refFont[2])), "\n", true)), 0, 2) : [];
+        $refTop = $bottom - count($refLines) * ($refFont[3] + 4);
+        $descMax = max(0, intdiv($refTop - 6 - $y, $small[3] + 4));
+        $descLines = $desc !== '' ? array_slice(explode("\n", wordwrap($desc, $perLine, "\n", true)), 0, $descMax) : [];
         foreach ($descLines as $d) {
-            $y += $text($L, $y, $LW, 'L', 'm', 1, $d) + 3;
+            $y += $text($L, $y, $LW, 'L', $small, $d) + 4;
         }
-        // La referencia (CC, lote, cajas) va al pie de la columna, alineada con el fondo del recuadro de cantidad.
-        $refY = $boxBottom - 4 - count($refLines) * ($fonts['m'][2] + 3);
         foreach ($refLines as $i => $r) {
-            $text($L, max($y + 4, $refY) + $i * ($fonts['m'][2] + 3), $LW, 'L', 'm', 1, $r);
+            $text($L, $refTop + $i * ($refFont[3] + 4), $LW, 'L', $refFont, $r);
         }
 
-        // Recuadro de cantidad.
-        if ($lang === 'tspl') {
-            $rows[] = 'BOX ' . $BX . ',' . $top . ',' . ($BX + $BW) . ',' . $boxBottom . ',4';
-        } elseif ($lang === 'epl') {
-            $rows[] = 'X' . $BX . ',' . $top . ',4,' . ($BX + $BW) . ',' . $boxBottom;
-        } else {
-            $rows[] = '^FO' . $BX . ',' . $top . '^GB' . $BW . ',' . ($boxBottom - $top) . ',4^FS';
-        }
-        $text($BX, $top + 10, $BW, 'C', 'm', 1, 'CANTIDAD');
-        $qMult = $fit($qty, $BW - 24, 'xl', 2);
-        $qHeight = $fonts['xl'][2] * $qMult;
-        $text($BX + 4, $top + 40 + intdiv(96 - $qHeight, 2), $BW - 8, 'C', 'xl', $qMult, $qty);
-        $text($BX + 4, $top + 144, $BW - 8, 'C', 'l', 1, $unit);
+        // Recuadro de cantidad (x 484..792): CANTIDAD / número grande / unidad / bulto.
+        $BX = 484;
+        $BW = 308;
+        $box($BX, $top - 2, $BX + $BW, $bottom + 2, 5);
+        $inner = $BW - 24;
+        $text($BX + 12, $top + 8, $inner, 'C', $fit('CANTIDAD', $inner, 28), 'CANTIDAD');
+        $qtyArea = $pkgLine !== '' ? 128 : 160;
+        $qf = $fit($qty, $inner, $qtyArea);
+        $text($BX + 12, $top + 42 + intdiv($qtyArea - $qf[3], 2), $inner, 'C', $qf, $qty);
+        $text($BX + 12, $top + 46 + $qtyArea, $inner, 'C', $fit($unit, $inner, 40), $unit);
         if ($pkgLine !== '') {
-            $line($BX + 14, $top + 184, $BW - 28, 2);
-            $text($BX + 4, $top + 196, $BW - 8, 'C', 'm', 1, $pkgLine);
+            $line($BX + 14, $bottom - 50, $BW - 28, 3);
+            $text($BX + 12, $bottom - 40, $inner, 'C', $fit($pkgLine, $inner, 36), $pkgLine);
         }
 
         // Pie: fecha y operador.
-        $line(20, 508, 772, 2);
-        $text(20, 520, 772, 'C', 's', 1, $meta);
+        $line(20, 510, 772, 3);
+        $text(20, 520, 772, 'C', $fit($meta, 772, 28), $meta);
 
         if ($lang === 'tspl') {
             return $this->buildTsplHeader() . "\r\n" . implode("\r\n", $rows) . "\r\nPRINT 1,1";

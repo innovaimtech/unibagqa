@@ -174,13 +174,6 @@ function Test-IsVirtualPrinter([string]$name) {
 }
 
 function Resolve-ThermalPrinterName([string]$requested, [string]$lang) {
-  # Una impresora compartida desde otro computador se usa SOLO si esta PC la eligio por su nombre exacto en el panel
-  # de Hardware (eleccion guardada en este computador). En modo automatico nunca se usa.
-  if (-not [string]::IsNullOrWhiteSpace($requested)) {
-    foreach ($np in @(Get-NetworkWindowsPrinters)) {
-      if ($np -ieq $requested.Trim()) { return $np }
-    }
-  }
   $installed = @(Get-InstalledWindowsPrinters)
   if ($installed.Count -eq 0) {
     # Sin impresoras propias en este computador: no se imprime en una compartida de otro PC.
@@ -251,43 +244,6 @@ function Resolve-ThermalPrinterName([string]$requested, [string]$lang) {
   return $reqTrim
 }
 
-# Impresora de red (Ethernet/Wi-Fi): "192.168.1.177", "192.168.1.177:9100" o "tcp://192.168.1.177:9100".
-# Se envía RAW al puerto 9100 (JetDirect), que usan Zebra, HPRT, Barpos/TSC y la mayoría de térmicas de red.
-function Get-TcpPrinterTarget([string]$name) {
-  $m = [regex]::Match([string]$name, '^\s*(?:tcp://)?(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?\s*$')
-  if (-not $m.Success) { return $null }
-  $port = 9100
-  if ($m.Groups[2].Success -and $m.Groups[2].Value -ne '') { $port = [int]$m.Groups[2].Value }
-  return @{ host = $m.Groups[1].Value; port = $port }
-}
-
-function Send-TcpPrinterBytes([string]$hostName, [int]$port, [byte[]]$bytes) {
-  $client = New-Object System.Net.Sockets.TcpClient
-  try {
-    $ar = $client.BeginConnect($hostName, $port, $null, $null)
-    if (-not $ar.AsyncWaitHandle.WaitOne(3000)) {
-      throw ("La impresora de red {0}:{1} no responde (revisa que este encendida, el cable de red y que el PC este en la misma red)." -f $hostName, $port)
-    }
-    $client.EndConnect($ar)
-    $client.SendTimeout = 15000
-    $stream = $client.GetStream()
-    $stream.Write($bytes, 0, $bytes.Length)
-    $stream.Flush()
-  } finally {
-    $client.Close()
-  }
-}
-
-function Test-TcpPrinter([string]$hostName, [int]$port) {
-  $client = New-Object System.Net.Sockets.TcpClient
-  try {
-    $ar = $client.BeginConnect($hostName, $port, $null, $null)
-    if (-not $ar.AsyncWaitHandle.WaitOne(2500)) { return $false }
-    $client.EndConnect($ar)
-    return $true
-  } catch { return $false } finally { $client.Close() }
-}
-
 # Liberar puerto 8767 si quedó una instancia previa colgada
 try {
   $existingConns = Get-NetTCPConnection -LocalPort 8767 -State Listen -ErrorAction SilentlyContinue
@@ -356,7 +312,6 @@ try {
         network_printers_ignored = $networkList
         computer = $env:COMPUTERNAME
         local_only = (-not $AllowNetworkPrinters)
-        supports_tcp = $true
         default_printer = $defPrinter
       }
       $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
@@ -366,18 +321,6 @@ try {
       continue
     }
 
-    if ($path -eq '/tcp-check') {
-      $target = Get-TcpPrinterTarget ([string]$req.QueryString['printer'])
-      $okTcp = $false
-      if ($null -ne $target) { $okTcp = Test-TcpPrinter $target.host $target.port }
-      $res.StatusCode = 200
-      $payload = New-JsonResponse @{ ok = $okTcp; printer = if ($null -ne $target) { "{0}:{1}" -f $target.host, $target.port } else { '' }; error = if ($null -eq $target) { 'IP invalida.' } elseif (-not $okTcp) { 'No responde en ese puerto.' } else { $null } }
-      $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-      $res.ContentType = 'application/json; charset=utf-8'
-      $res.OutputStream.Write($bytes, 0, $bytes.Length)
-      $res.OutputStream.Close()
-      continue
-    }
     if ($path -ne '/print') {
       $res.StatusCode = 404
       $payload = New-JsonResponse @{ ok = $false; error = 'Not found'; path = $path }
@@ -451,30 +394,6 @@ try {
       continue
     }
 
-    $tcpTarget = Get-TcpPrinterTarget $requestedPrinter
-    if ($null -ne $tcpTarget -and -not [string]::IsNullOrWhiteSpace($content)) {
-      $tcpName = "{0}:{1}" -f $tcpTarget.host, $tcpTarget.port
-      try {
-        $rawTcp = if ($language -eq 'zpl') { [System.Text.Encoding]::UTF8.GetBytes($content) } else { [System.Text.Encoding]::GetEncoding(28591).GetBytes($content) }
-        $ms = New-Object System.IO.MemoryStream
-        for ($i = 0; $i -lt $copies; $i++) { $ms.Write($rawTcp, 0, $rawTcp.Length) }
-        Send-TcpPrinterBytes $tcpTarget.host $tcpTarget.port $ms.ToArray()
-        if (-not [string]::IsNullOrWhiteSpace($jobId)) {
-          if ($script:processedJobs.Count -ge 200) { $script:processedJobs.Clear() }
-          $script:processedJobs[$jobId] = $tcpName
-        }
-        $res.StatusCode = 200
-        $payload = New-JsonResponse @{ ok = $true; language = $language; printer = $tcpName; transport = 'tcp' }
-      } catch {
-        $res.StatusCode = 502
-        $payload = New-JsonResponse @{ ok = $false; printer = $tcpName; error = $_.Exception.Message }
-      }
-      $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
-      $res.ContentType = 'application/json; charset=utf-8'
-      $res.OutputStream.Write($bytes, 0, $bytes.Length)
-      $res.OutputStream.Close()
-      continue
-    }
     $resolvedPrinter = Resolve-ThermalPrinterName -requested $requestedPrinter -lang $language
 
     if ([string]::IsNullOrWhiteSpace($resolvedPrinter)) {

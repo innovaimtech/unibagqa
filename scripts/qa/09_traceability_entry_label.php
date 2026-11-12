@@ -46,9 +46,11 @@ foreach (['tspl', 'zpl', 'epl'] as $lang) {
         }
         $check('TSPL: ningún texto se sale de la etiqueta', $out === [], implode(' | ', $out));
         $check('TSPL: usa todo el alto (hasta el pie)', $maxY >= 530, (string)$maxY);
-        $check('TSPL: recuadro de cantidad a la derecha', str_contains($cmd, 'BOX 492,262,792,498,4'));
+        $check('TSPL: recuadro de cantidad a la derecha', str_contains($cmd, 'BOX 484,224,792,502,5'));
+        $check('TSPL: SKU grande (al menos 64 puntos de alto)', preg_match('/TEXT 20,226,"(\d)",0,(\d),\d,"BOL0352"/', $cmd, $sk) === 1 && $tsplFont[(int)$sk[1]][1] * (int)$sk[2] >= 64);
         $long = (new PrintService(['PRINT_LANGUAGE' => 'tspl']))->buildTraceabilityEntryCommand(['quantity' => 125000, 'quantity_initial' => null] + $entry);
-        $check('TSPL: cantidad grande cabe en el recuadro', preg_match('/TEXT (\d+),\d+,"5",0,(\d),\d,"125\.000"/', $long, $q) === 1 && (int)$q[1] >= 492 && (int)$q[1] + 7 * 32 * (int)$q[2] <= 792);
+        $check('TSPL: cantidad grande cabe en el recuadro', preg_match('/TEXT (\d+),\d+,"(\d)",0,(\d),\d,"125\.000"/', $long, $q) === 1 && (int)$q[1] >= 484
+            && (int)$q[1] + 7 * $tsplFont[(int)$q[2]][0] * (int)$q[3] <= 792);
     }
 }
 

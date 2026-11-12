@@ -63,59 +63,6 @@ function handleApiRoutes(
     PrintService $printer,
     string $currentOperatorName
 ): bool {
-    // Impresión en una impresora de red (IP:9100) desde el servidor web: el navegador no puede abrir conexiones TCP,
-    // el servidor sí. La IP es la que eligió ESTE computador (cookie unibag_print_ip), validada como IP de red local.
-    if ($path === '/api/print/network' && $method === 'POST') {
-        header('Content-Type: application/json; charset=utf-8');
-        $token = (string)($_POST['_csrf'] ?? '');
-        $sessionToken = (string)($_SESSION['csrf'] ?? '');
-        $cookieToken = (string)($_COOKIE[csrfCookieName()] ?? '');
-        if ($token === '' || (!hash_equals($sessionToken, $token) && ($cookieToken === '' || !hash_equals($cookieToken, $token)))) {
-            http_response_code(400);
-            echo json_encode(['ok' => false, 'error' => 'Sesión vencida: recarga la página (F5) y vuelve a imprimir.'], JSON_UNESCAPED_UNICODE);
-            return true;
-        }
-        if (empty($_SESSION['auth_user_id']) && empty($_SESSION['user_id']) && empty($_SESSION['operator_name'])) {
-            http_response_code(401);
-            echo json_encode(['ok' => false, 'error' => 'Inicia sesión para imprimir.'], JSON_UNESCAPED_UNICODE);
-            return true;
-        }
-        $target = PrintService::parseNetworkPrinter((string)($_POST['printer_ip'] ?? '')) ?? PrintService::clientNetworkPrinter();
-        if ($target === null) {
-            echo json_encode(['ok' => false, 'error' => 'IP de impresora no válida (solo red local, puerto 9100).'], JSON_UNESCAPED_UNICODE);
-            return true;
-        }
-        if (session_status() === PHP_SESSION_ACTIVE) {
-            session_write_close();
-        }
-        if (isset($_POST['check'])) {
-            $fp = @stream_socket_client('tcp://' . $target['host'] . ':' . $target['port'], $errno, $errstr, 2.5);
-            $ok = is_resource($fp);
-            if ($ok) {
-                fclose($fp);
-            }
-            echo json_encode(['ok' => $ok, 'printer' => $target['host'] . ':' . $target['port'],
-                'error' => $ok ? null : 'El servidor no llega a ' . $target['host'] . ':' . $target['port'] . '.'], JSON_UNESCAPED_UNICODE);
-            return true;
-        }
-        $content = (string)($_POST['content'] ?? '');
-        if ($content === '' || strlen($content) > 5_000_000) {
-            echo json_encode(['ok' => false, 'error' => 'Trabajo de impresión vacío o demasiado grande.'], JSON_UNESCAPED_UNICODE);
-            return true;
-        }
-        $language = strtolower((string)($_POST['language'] ?? 'epl'));
-        // ZPL viaja en UTF-8; EPL y TSPL en un byte por carácter (Latin-1), igual que el puente y el navegador.
-        if ($language !== 'zpl') {
-            $converted = @mb_convert_encoding($content, 'ISO-8859-1', 'UTF-8');
-            if (is_string($converted)) {
-                $content = $converted;
-            }
-        }
-        $copies = max(1, min(50, (int)($_POST['copies'] ?? 1)));
-        echo json_encode($printer->sendNetworkRaw($target, $content, $copies), JSON_UNESCAPED_UNICODE);
-        return true;
-    }
-
     if ($path === '/api/scale/weight' && $method === 'GET') {
         // Endpoint de lectura de balanza: entrega JSON de estado (ok=true con peso o ok=false con detalle)
         header('Content-Type: application/json; charset=utf-8');
