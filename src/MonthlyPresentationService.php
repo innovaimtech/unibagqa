@@ -735,7 +735,7 @@ class MonthlyPresentationService
         $closed = $endTs < time();
         $suffix = $range !== null ? '-r' . $range['from'] . '_' . $range['to'] : '';
         $historyStamp = (string)@filemtime($this->historyPath());
-        $cacheKey = 'monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '.b2-' . $monthKey . $suffix . '-' . $historyStamp;
+        $cacheKey = 'monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '.b3-' . $monthKey . $suffix . '-' . $historyStamp;
         $cached = ResultCache::get($cacheKey, $closed ? 21600 : 300, $found);
         if ($found && is_array($cached)) {
             $cached['issued_at'] = date('d-m-Y');
@@ -750,7 +750,7 @@ class MonthlyPresentationService
         $metrics = $this->computeMonthlyMetrics($monthKey, $range);
         // La clave se arma con la fecha del historial DESPUÉS del cálculo (el cálculo puede guardar meses nuevos).
         clearstatcache();
-        ResultCache::put('monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '.b2-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
+        ResultCache::put('monthly-mes-v' . self::ROLL_CALC_VERSION . '.' . self::SERVICE_LEVEL_VERSION . '.b3-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
         return $metrics;
     }
 
