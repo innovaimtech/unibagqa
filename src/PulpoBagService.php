@@ -332,6 +332,15 @@ final class PulpoBagService
         return $done;
     }
 
+    /** Partes de caja con código temporal (de un traspaso con saldo) que esperan en la 3000 para cargarse sin escanear. */
+    public function waitingPartials(): array
+    {
+        $this->boxes->ensureSchema();
+        $stmt = $this->trz->prepare("SELECT * FROM boxes WHERE status = 'IN_WAREHOUSE' AND erp_st_id = 16 AND source_kind = ? AND units_qty > 0 ORDER BY id");
+        $stmt->execute([BagBoxService::SOURCE_PARTIAL]);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
     public function mountedBoxes(int $otId): array
     {
         $this->boxes->ensureSchema();

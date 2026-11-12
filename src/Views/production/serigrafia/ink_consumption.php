@@ -70,6 +70,7 @@
                 <input type="hidden" name="agid" value="<?=$agId?>">
                 <input type="hidden" name="worker_ot_id" value="<?=$workerOtId?>">
                 <input type="hidden" name="ink_action" value="seri_consume">
+                <input type="hidden" name="op_key" value="<?=bin2hex(random_bytes(16))?>">
                 <input type="hidden" name="return_to" value="<?=htmlspecialchars($returnTo)?>">
 
                 <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px;align-items:start">
@@ -284,6 +285,9 @@
                 if (leftEl) leftEl.focus();
                 return false;
             }
+            // Evita el doble clic: el botón queda desactivado mientras se envía (el servidor además ignora un reenvío con la misma clave).
+            var btn = form.querySelector('button[type="submit"]');
+            if (btn) { btn.disabled = true; btn.style.opacity = '.6'; }
             return true;
         };
     }

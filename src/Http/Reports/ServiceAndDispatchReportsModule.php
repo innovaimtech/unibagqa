@@ -1561,8 +1561,8 @@ function unibagOutputDailySummaryExcel(ReceptionService $service): void
  * Renderiza la vista del Generador de Informe Mensual de Operaciones en PPTX.
  */
 /**
- * Mes del informe mensual: el que llega por ?month=YYYY-MM o, si no llega (o es inválido), el del ciclo en curso.
- * El ciclo va del 26 al 25 y se nombra por el mes en que termina (desde el día 26 ya cuenta el mes siguiente).
+ * Mes del informe mensual: el que llega por ?month=YYYY-MM o, si no llega (o es inválido), el mes en curso.
+ * Es el mes calendario: del día 1 al último día del mes (28 o 29 en febrero, 30 o 31 en el resto).
  */
 function unibagMonthlyPresentationMonthKey(): string
 {
@@ -1570,7 +1570,7 @@ function unibagMonthlyPresentationMonthKey(): string
     if (preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $monthKey) === 1) {
         return $monthKey;
     }
-    return ((int)date('j') >= 26) ? date('Y-m', strtotime('first day of next month')) : date('Y-m');
+    return date('Y-m');
 }
 
 /**
@@ -1639,7 +1639,7 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $isRange = $rangeAsked;
     $body .= '<form method="get" action="/reports/monthly-presentation" id="mp-filter" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;margin-top:14px;border-top:1px solid #f1f5f9;padding-top:14px">';
     $body .= '<div style="display:flex;flex-direction:column;gap:5px"><label style="' . $lbl . '" for="mp-modo">Tipo de período</label>'
-        . '<select name="modo" id="mp-modo" style="' . $inp . '"><option value="mes"' . ($isRange ? '' : ' selected') . '>Mes operativo (26 al 25)</option>'
+        . '<select name="modo" id="mp-modo" style="' . $inp . '"><option value="mes"' . ($isRange ? '' : ' selected') . '>Mes (del 1 al último día)</option>'
         . '<option value="rango"' . ($isRange ? ' selected' : '') . '>Rango de fechas</option></select></div>';
     $body .= '<div data-mp="mes" style="display:' . ($isRange ? 'none' : 'flex') . ';flex-direction:column;gap:5px"><label style="' . $lbl . '">Mes de operación</label>'
         . '<input type="month" name="month" value="' . h($monthKey) . '" style="' . $inp . '"' . ($isRange ? ' disabled' : '') . '></div>';
@@ -1665,7 +1665,7 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $body .= '<div style="margin:6px 0 10px;font-size:12px;color:#64748b">Período calculado: ' . h((string)($m['period_label'] ?? ''))
         . ($range !== null
             ? '. En los gráficos el rango ocupa la última columna («' . h((string)$m['column_label']) . '»); los meses anteriores al rango salen del historial. La capacidad se ajusta a los días del rango.'
-            : ' (ciclo 26 al 25, el mismo de la plantilla).') . '</div>';
+            : ' (mes calendario, del día 1 al último día del mes). Los meses publicados hasta septiembre 2026 se mantienen con su ciclo 26 al 25.') . '</div>';
 
     // KPIs del Mes Seleccionado
     $body .= '<div class="dashboard-kpis-grid">';
@@ -1717,7 +1717,7 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
     $slidesInfo = [
         [1, 'Portada', 'OPERACIONES · ' . strtoupper($monthLabel), 'Texto', 'badge-dynamic', 'Actualizado'],
         [2, 'Producción – resumen global', number_format($m['prod_units'], 0, ',', '.') . ' Und y gráfico producción vs. capacidad', $calc, 'badge-dynamic', 'Inyectado'],
-        [3, 'Producción – proyección de cierre', 'Ciclo en curso desde el ' . date('d/m', (int)strtotime((string)($proj['start'] ?? 'today'))) . ': ' . number_format((float)($proj['made'] ?? 0), 0, ',', '.') . ' Und fabricadas · cierre proyectado ' . number_format((float)($proj['projected'] ?? 0), 0, ',', '.') . ' Und', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [3, 'Producción – proyección de cierre', 'Mes en curso desde el ' . date('d/m', (int)strtotime((string)($proj['start'] ?? 'today'))) . ': ' . number_format((float)($proj['made'] ?? 0), 0, ',', '.') . ' Und fabricadas · cierre proyectado ' . number_format((float)($proj['projected'] ?? 0), 0, ',', '.') . ' Und', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
         [4, 'Nivel de servicio [unidades]', number_format($m['sl_total_units'], 0, ',', '.') . ' Und, ' . number_format($m['sl_percent_units'], 1, ',', '.') . '%', $calc, 'badge-dynamic', 'Inyectado'],
         [5, 'Nivel de servicio [C.C.]', $m['sl_total_cc'] . ' pedidos, ' . $m['sl_delayed_cc'] . ' atrasados', $calc, 'badge-dynamic', 'Inyectado'],
         [6, 'Pedidos atrasados', 'Hasta 10 pedidos con mayor atraso', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
@@ -1730,8 +1730,8 @@ function unibagRenderMonthlyPresentationPage(ReceptionService $service): void
         [13, 'Bodega – stock por cliente', number_format((float)($fg['total'] ?? 0), 0, ',', '.') . ' Und en bodegas 400, 1000 y 700', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
         [14, 'Bodega – rotación de stock', number_format((float)($fg['still'] ?? 0), 0, ',', '.') . ' Und sin salidas en 90 días', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
         [15, 'Bodega – artículos sin rotación', 'Cliente con más stock detenido vs. otros', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
-        [16, 'Bodega – bobinas PP y PLA', 'Kg al 25 de cada mes, 13 meses (kardex)', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
-        [17, 'Bodega – bobinas PLA beige y blanco', 'Kg al 25 de cada mes, 13 meses (kardex)', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [16, 'Bodega – bobinas PP y PLA', 'Kg al último día de cada mes, 13 meses (kardex)', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
+        [17, 'Bodega – bobinas PLA beige y blanco', 'Kg al último día de cada mes, 13 meses (kardex)', 'Calculado (ERP)', 'badge-dynamic', 'Inyectado'],
         [18, 'Cierre', 'Fecha de emisión', 'Texto', 'badge-dynamic', 'Actualizado'],
     ];
 

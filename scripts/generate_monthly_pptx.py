@@ -353,7 +353,7 @@ class Builder:
     def proyeccion(self, slide):
         p = self.data.get('projection') or {}
         made, queue, projected = float(p.get('made') or 0), float(p.get('queue') or 0), float(p.get('projected') or 0)
-        # Ciclo EN CURSO (26 → hoy), igual que las tarjetas del panel, aunque el informe sea de un mes cerrado.
+        # Mes EN CURSO (del 1 a hoy), aunque el informe sea de un mes cerrado.
         start = str(p.get('start') or self.data.get('start_date', ''))[:10]
         end = str(p.get('end') or self.data.get('end_date', ''))[:10]
         dmy = lambda s: f"{s[8:10]}/{s[5:7]}/{s[0:4]}" if len(s) == 10 else s

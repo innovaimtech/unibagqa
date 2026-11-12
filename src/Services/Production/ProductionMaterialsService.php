@@ -4379,13 +4379,17 @@ trait ProductionMaterialsServiceTrait
                     KEY idx_wo_machine_ink_status (status)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             ");
+        } catch (Throwable) {}
 
-            // Asegurar columnas nuevas si la tabla ya existía previamente
+        // Asegurar columnas nuevas si la tabla ya existía previamente (aparte del CREATE: si este falla, igual se agregan).
+        try {
             $cols = [
                 "initial_weight_kg" => "DECIMAL(10,3) NOT NULL DEFAULT 0.000",
                 "leftover_qty" => "DECIMAL(10,3) NOT NULL DEFAULT 0.000",
                 "color_label" => "VARCHAR(100) NULL",
                 "machine_process" => "VARCHAR(50) NULL DEFAULT 'SERIGRAFIA'",
+                // Clave del formulario de consumo de tinta: un doble clic o recargar la página no descuenta dos veces.
+                "op_key" => "VARCHAR(40) NULL",
             ];
             foreach ($cols as $col => $type) {
                 try {
@@ -4741,7 +4745,8 @@ trait ProductionMaterialsServiceTrait
         string $colorLabel,
         string $operatorName,
         string $comments = '',
-        int $warehouseCode = 16
+        int $warehouseCode = 16,
+        string $opKey = ''
     ): array {
         if ($workerOtId <= 0 && $agId <= 0) {
             return ['ok' => false, 'error' => 'No se pudo identificar la orden de trabajo para registrar la tinta.'];
@@ -4760,6 +4765,35 @@ trait ProductionMaterialsServiceTrait
         $loadedKg = max(0.0, round($loadedKg, 3));
         $leftoverKg = max(0.0, round($leftoverKg, 3));
         $consumedKg = round($consumedKg, 3);
+
+        // El sobrante no puede ser mayor que el tarro (la pantalla ya lo frena; el servidor también, para no dejar un
+        // registro con consumo 0 que después confunde la ficha del pulpo).
+        if ($initialWeightKg > 0.0 && $leftoverKg > $initialWeightKg + 0.0005) {
+            return ['ok' => false, 'error' => 'Lo que sobró (' . number_format($leftoverKg, 2, ',', '.') . ' kg) no puede ser mayor que el peso al inicio del tarro ('
+                . number_format($initialWeightKg, 2, ',', '.') . ' kg).'];
+        }
+        if ($initialWeightKg <= 0.0 && $loadedKg > 0.0 && $leftoverKg > $loadedKg + 0.0005) {
+            return ['ok' => false, 'error' => 'Lo que sobró no puede ser mayor que lo cargado.'];
+        }
+
+        // Doble clic o recarga del formulario: si esta clave ya se registró, se devuelve ese registro sin descontar otra vez.
+        $opKey = strtolower(trim($opKey));
+        if ($opKey !== '' && preg_match('/^[a-f0-9]{32}$/', $opKey) !== 1) {
+            $opKey = '';
+        }
+        if ($opKey !== '') {
+            try {
+                $dup = $this->trzPdo->prepare('SELECT id, item_code, item_name, consumed_qty FROM work_order_machine_ink_loads WHERE op_key = ? LIMIT 1');
+                $dup->execute([$opKey]);
+                $prev = $dup->fetch(PDO::FETCH_ASSOC);
+                if ($prev) {
+                    return ['ok' => true, 'load_id' => (int)$prev['id'], 'consumed_kg' => (float)$prev['consumed_qty'],
+                        'item_code' => (string)$prev['item_code'], 'item_name' => (string)$prev['item_name'], 'warning' => '', 'duplicate' => true];
+                }
+            } catch (Throwable) {
+                // Sin la columna op_key (esquema antiguo) se registra igual que antes.
+            }
+        }
 
         if ($initialWeightKg > 0.0) {
             $consumedKg = max(0.0, round($initialWeightKg - $leftoverKg, 3));
@@ -4792,6 +4826,10 @@ trait ProductionMaterialsServiceTrait
             $itemCode = trim((string)($item['item_number_prod'] ?? ''));
             $itemName = trim((string)($item['item_title'] ?? ''));
             $colorLabel = trim($colorLabel);
+            // Solo tintas (código TIN), igual que la carga a máquina: antes se podía descontar cualquier artículo como tinta.
+            if (stripos($itemCode, 'TIN') !== 0) {
+                return ['ok' => false, 'error' => 'El artículo ' . ($itemCode !== '' ? $itemCode : $itemName) . ' no es una tinta (código TIN) de Bodega 3000.'];
+            }
 
             // 1. Insertar en work_order_machine_ink_loads
             $stmt = $this->trzPdo->prepare("
@@ -4824,6 +4862,13 @@ trait ProductionMaterialsServiceTrait
                 ':closed_at' => $now,
             ]);
             $loadId = (int)$this->trzPdo->lastInsertId();
+            if ($opKey !== '') {
+                try {
+                    $this->trzPdo->prepare('UPDATE work_order_machine_ink_loads SET op_key = ? WHERE id = ?')->execute([$opKey, $loadId]);
+                } catch (Throwable) {
+                    // Esquema antiguo sin op_key: sigue funcionando sin la protección de doble envío.
+                }
+            }
 
             // 2. Descontar la tinta de Bodega 3000 con documento y kardex. Si el ERP no lo acepta, no queda el registro a medias.
             $stockWarning = '';

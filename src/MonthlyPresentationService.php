@@ -35,7 +35,7 @@ class MonthlyPresentationService
     }
 
     /**
-     * Kg de bobinas guardados por mes (cierre del 25): ['2026-10' => ['pp' => .., 'pla' => .., ...]].
+     * Kg de bobinas guardados por mes (al último día del mes; los publicados hasta sep-26, al 25): ['2026-10' => ['pp' => .., ...]].
      *
      * @return array<string, array<string, float>>
      */
@@ -65,18 +65,17 @@ class MonthlyPresentationService
     }
 
     /**
-     * Calcula con datos EN VIVO del ERP los indicadores de un ciclo (26 del mes anterior al 25 del mes).
-     * Se usa el mismo ciclo para producción, nivel de servicio y merma: es el que reproduce exactamente
-     * las cifras de la plantilla (ej. sep-26: 883.422 unid., 202/162 CC, 0,68 % de merma).
+     * Calcula con datos EN VIVO del ERP los indicadores de un MES CALENDARIO (del 1 al último día: 28, 29, 30 o 31).
+     * Se usa el mismo período para producción, nivel de servicio y merma. Hasta septiembre 2026 el informe se publicó
+     * con el ciclo 26→25: esos meses publicados quedan como están en el historial.
      *
      * @return array<string, mixed>
      */
     private function computeLiveCycle(string $monthKey, ?array $range = null): array
     {
-        // Con rango (desde/hasta) se usa el mismo cálculo que los bonos en modo «range»; sin rango, el ciclo 26→25.
-        $period = $range !== null
-            ? $this->receptionService->resolveBonusFilterPeriod('range', $monthKey, $range['from'], $range['to'])
-            : $this->receptionService->resolveBonusFilterPeriod('period', $monthKey);
+        // Rango (desde/hasta) o mes calendario: el mismo cálculo que los bonos en modo «range».
+        [$from, $to] = $range !== null ? [$range['from'], $range['to']] : self::monthBounds($monthKey);
+        $period = $this->receptionService->resolveBonusFilterPeriod('range', $monthKey, $from, $to);
         $startDate = (string)$period['start_date'] . ' 00:00:00';
         $endDate = (string)$period['end_date'] . ' 23:59:59';
 
@@ -125,7 +124,7 @@ class MonthlyPresentationService
         return [
             'start_date' => $startDate,
             'end_date' => $endDate,
-            'period_label' => (string)($period['label'] ?? ''),
+            'period_label' => $range !== null ? (string)($period['label'] ?? '') : 'Mes: ' . date('d/m/Y', strtotime($from)) . ' a ' . date('d/m/Y', strtotime($to)),
             'prod_units' => $prodUnits,
             'sl_total_units' => $slTotalUnits,
             'sl_delayed_units' => $slDelayedUnits,
@@ -442,30 +441,39 @@ class MonthlyPresentationService
         return $short !== '' ? trim(mb_substr($short, 0, 28)) : $name;
     }
 
-    /** Timestamp del cierre (25 del mes, 23:59:59) de un mes 'YYYY-MM' en el ciclo 26→25. */
-    private static function cycleEndTs(string $monthKey): int
+    /**
+     * Primer y último día (Y-m-d) del mes calendario 'YYYY-MM': 28 o 29 en febrero, 30 o 31 en el resto.
+     *
+     * @return array{0:string,1:string}
+     */
+    public static function monthBounds(string $monthKey): array
     {
-        return (int)strtotime($monthKey . '-25 23:59:59');
+        $first = new DateTimeImmutable($monthKey . '-01');
+        return [$first->format('Y-m-d'), $first->format('Y-m-t')];
+    }
+
+    /** Timestamp del cierre de un mes 'YYYY-MM' (último día del mes, 23:59:59). */
+    private static function monthEndTs(string $monthKey): int
+    {
+        return (int)strtotime(self::monthBounds($monthKey)[1] . ' 23:59:59');
     }
 
     /**
-     * Ciclo en curso (26 → 25) que contiene `$today`: desde el día 26 en adelante ya es el ciclo del mes siguiente.
+     * Mes calendario en curso que contiene `$today` (del 1 al último día del mes).
      *
      * @return array{0:DateTimeImmutable,1:DateTimeImmutable}
      */
     public static function currentCycle(DateTimeImmutable $today): array
     {
-        $month = (int)$today->format('d') >= 26 ? $today->modify('first day of next month') : $today->modify('first day of this month');
-        $prev = $month->modify('-1 month');
-        $start = $prev->setDate((int)$prev->format('Y'), (int)$prev->format('m'), 26)->setTime(0, 0, 0);
-        $end = $month->setDate((int)$month->format('Y'), (int)$month->format('m'), 25)->setTime(23, 59, 59);
+        $start = $today->modify('first day of this month')->setTime(0, 0, 0);
+        $end = $today->modify('last day of this month')->setTime(23, 59, 59);
         return [$start, $end];
     }
 
     /**
-     * Proyección de cierre (diapositiva 3): las dos tarjetas del panel ERP para el ciclo EN CURSO, sea cual sea el mes
-     * del informe. «Fabricado» = Corte y Sellado desde el 26 hasta hoy (tarjeta «Corte y Sellado»); «cierre proyectado» =
-     * tarjeta «Proyección de cierre» (promedio por día hábil cumplido × días hábiles del ciclo).
+     * Proyección de cierre (diapositiva 3) del MES EN CURSO, sea cual sea el mes del informe. «Fabricado» = Corte y
+     * Sellado desde el día 1 hasta hoy; «cierre proyectado» = promedio por día hábil cumplido × días hábiles del mes
+     * (mismo cálculo que la tarjeta del panel, pero con el mes calendario).
      *
      * @return array<string, mixed>
      */
@@ -478,7 +486,7 @@ class MonthlyPresentationService
         [$start, $end] = self::currentCycle(new DateTimeImmutable('today', $zone));
         $from = $start->format('Y-m-d H:i:s');
         $to = $end->format('Y-m-d H:i:s');
-        // Misma consulta y misma caché que la tarjeta del panel, para que las cifras coincidan.
+        // Misma consulta y misma caché que la tarjeta del panel.
         $kpis = (array)unibagDashboardCached('kpis', $from, $to, fn() => $this->receptionService->getErpOnlyProductionDashboardKpis($from, $to));
         $made = (float)($kpis['produced_units'] ?? 0.0);
         $p = unibagBuildClosingProjection($this->receptionService, $start, $end);
@@ -508,7 +516,7 @@ class MonthlyPresentationService
      *   así el informe del mes siguiente lo encuentra solo.
      * - No hay valores de respaldo inventados: si no hay datos, se informa en 'warnings'.
      *
-     * @param string $monthKey Formato 'YYYY-MM' (mes en que TERMINA el ciclo 26-25)
+     * @param string $monthKey Formato 'YYYY-MM' (mes calendario: del 1 al último día)
      * @return array<string, mixed>
      */
     public function getMonthlyMetrics(string $monthKey = '', ?string $from = null, ?string $to = null): array
@@ -523,11 +531,11 @@ class MonthlyPresentationService
         }
         // La página y la descarga piden lo mismo: se calcula una vez. Mes cerrado: 6 h; mes en curso: 5 min.
         // Si se corrige data/kpi_historial_2026.json a mano, el caché se descarta (va en la clave la fecha del archivo).
-        $endTs = $range !== null ? (int)strtotime($range['to'] . ' 23:59:59') : self::cycleEndTs($monthKey);
+        $endTs = $range !== null ? (int)strtotime($range['to'] . ' 23:59:59') : self::monthEndTs($monthKey);
         $closed = $endTs < time();
         $suffix = $range !== null ? '-r' . $range['from'] . '_' . $range['to'] : '';
         $historyStamp = (string)@filemtime($this->historyPath());
-        $cacheKey = 'monthly-' . $monthKey . $suffix . '-' . $historyStamp;
+        $cacheKey = 'monthly-mes-' . $monthKey . $suffix . '-' . $historyStamp;
         $cached = ResultCache::get($cacheKey, $closed ? 21600 : 300, $found);
         if ($found && is_array($cached)) {
             $cached['issued_at'] = date('d-m-Y');
@@ -538,7 +546,7 @@ class MonthlyPresentationService
         $metrics = $this->computeMonthlyMetrics($monthKey, $range);
         // La clave se arma con la fecha del historial DESPUÉS del cálculo (el cálculo puede guardar meses nuevos).
         clearstatcache();
-        ResultCache::put('monthly-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
+        ResultCache::put('monthly-mes-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
         return $metrics;
     }
 
@@ -592,8 +600,13 @@ class MonthlyPresentationService
         for ($m = 1; $m <= $monthNum; $m++) {
             $key = sprintf('%04d-%02d', $year, $m);
             $isPublished = ($stored[$key]['origen'] ?? '') === 'plantilla';
+            // Meses calculados con el ciclo antiguo 26→25 (sin 'periodo' = 'mes'): se recalculan con el mes calendario.
+            if (isset($stored[$key]) && !$isPublished && ($stored[$key]['periodo'] ?? '') !== 'mes') {
+                unset($stored[$key]);
+                $storedChanged = true;
+            }
             if ($range !== null) {
-                // Con rango: los meses cuyo ciclo terminó antes del inicio del rango salen del historial como siempre;
+                // Con rango: los meses que terminaron antes del inicio del rango salen del historial como siempre;
                 // los que se cruzan con el rango no se muestran (el rango ocupa su lugar en los gráficos, al final).
                 if ($key === $monthKey) {
                     $labels = self::rangeLabels($range);
@@ -612,13 +625,14 @@ class MonthlyPresentationService
                     ];
                     continue;
                 }
-                if (self::cycleEndTs($key) >= $liveStartTs) {
+                if (self::monthEndTs($key) >= $liveStartTs) {
                     continue;
                 }
             }
             if ($key === $monthKey && !$isPublished) {
                 $entry = [
                     'origen' => 'calculado',
+                    'periodo' => 'mes',
                     'prod_units' => $live['prod_units'],
                     'prod_cap' => (float)($stored[$key]['prod_cap'] ?? $capacityDefault),
                     'sl_total_units' => $live['sl_total_units'],
@@ -636,6 +650,7 @@ class MonthlyPresentationService
             } elseif (isset($stored[$key])) {
                 $entry = $stored[$key];
                 if (!isset($entry['procesos'])) {
+                    // Meses publicados sin kg por proceso: se calculan con el ciclo con que se publicaron (26→25).
                     $p = $this->receptionService->resolveBonusFilterPeriod('period', $key);
                     $entry['procesos'] = $this->computeProcessBalance(
                         (int)strtotime($p['start_date'] . ' 00:00:00'),
@@ -648,6 +663,7 @@ class MonthlyPresentationService
                 $past = $this->computeLiveCycle($key);
                 $entry = [
                     'origen' => 'calculado',
+                    'periodo' => 'mes',
                     'prod_units' => $past['prod_units'],
                     'prod_cap' => $capacityDefault,
                     'sl_total_units' => $past['sl_total_units'],
@@ -664,15 +680,24 @@ class MonthlyPresentationService
             $history[] = $entry;
         }
 
-        // Bobinas: 13 cierres hasta el mes del informe. Los meses cerrados se guardan; el en curso usa el stock de hoy.
+        // Bobinas: 13 cierres (último día de cada mes) hasta el mes del informe. Los meses cerrados se guardan; el en curso
+        // usa el stock de hoy. Los cierres publicados (hasta el último mes de la plantilla, al 25) quedan como están;
+        // los calculados con el corte antiguo del 25 (sin 'corte') se recalculan al último día del mes.
+        $lastPublished = '';
+        foreach ($stored as $k => $v) {
+            if (($v['origen'] ?? '') === 'plantilla' && $k > $lastPublished) {
+                $lastPublished = $k;
+            }
+        }
         $rollHistory = $this->loadRollHistory();
         $rollsChanged = false;
         $cutoffs = [];
         for ($i = 12; $i >= 0; $i--) {
             $k = date('Y-m', (int)strtotime($monthKey . '-01 -' . $i . ' months'));
-            $cutoffs[$k] = $k === $monthKey ? min($liveEndTs, time()) : self::cycleEndTs($k);
+            $cutoffs[$k] = $k === $monthKey ? min($liveEndTs, time()) : self::monthEndTs($k);
         }
-        $missing = array_filter($cutoffs, static fn($ts, $k) => !isset($rollHistory[$k]) || $k === $monthKey, ARRAY_FILTER_USE_BOTH);
+        $missing = array_filter($cutoffs, static fn($ts, $k) => !isset($rollHistory[$k]) || $k === $monthKey
+            || ($k > $lastPublished && !isset($rollHistory[$k]['corte'])), ARRAY_FILTER_USE_BOTH);
         $computed = [];
         try {
             $computed = $this->computeRollStock($missing);
@@ -683,7 +708,7 @@ class MonthlyPresentationService
         foreach ($cutoffs as $k => $ts) {
             $row = $computed[$k] ?? $rollHistory[$k] ?? null;
             if (isset($computed[$k]) && $ts < time() && ($k !== $monthKey || ($monthClosed && $range === null))) {
-                $rollHistory[$k] = $computed[$k];
+                $rollHistory[$k] = $computed[$k] + ['corte' => date('Y-m-d', $ts)];
                 $rollsChanged = true;
             }
             if ($row !== null) {
@@ -709,10 +734,10 @@ class MonthlyPresentationService
         $prodUnits = (float)($cur['prod_units'] ?? 0);
         $prodMeta = 1000000.0;
         if ($prodUnits <= 0) {
-            $warnings[] = 'El ERP no devolvió producción de Corte y Sellado para el ciclo ' . $live['period_label'] . '.';
+            $warnings[] = 'El ERP no devolvió producción de Corte y Sellado para el período ' . $live['period_label'] . '.';
         }
         if ((int)($cur['sl_total_cc'] ?? 0) <= 0) {
-            $warnings[] = 'El ERP no devolvió despachos para el ciclo ' . $live['period_label'] . '.';
+            $warnings[] = 'El ERP no devolvió despachos para el período ' . $live['period_label'] . '.';
         }
         $slTotalUnits = (float)($cur['sl_total_units'] ?? 0);
         $slDelayedUnits = (float)($cur['sl_delayed_units'] ?? 0);

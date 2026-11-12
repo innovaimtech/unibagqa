@@ -12,11 +12,17 @@ declare(strict_types=1);
  * Estados: IN_WAREHOUSE (disponible en su bodega), IN_MACHINE (en una máquina, con saldo), CONSUMED (sin saldo),
  * DISPATCHED (despachada), VOID (anulada porque se corrigió o borró el embalaje que la creó).
  */
+require_once __DIR__ . '/StockLedgerService.php';
+
 final class BagBoxService
 {
     public const SOURCE_PACKAGING = 'EMBALAJE';
     public const SOURCE_PURCHASE = 'COMPRA';
     public const SOURCE_LABEL = 'ETIQUETA';
+    /** Etiqueta del Ingreso con Trazabilidad (pallet, bulto…) que se escaneó en un traspaso y pasó a manejarse como caja. */
+    public const SOURCE_ENTRY = 'INGRESO';
+    /** Parte sacada de una caja en un traspaso: código temporal, no se imprime ni se escanea; se consume en el Pulpo. */
+    public const SOURCE_PARTIAL = 'SALDO';
 
     private PDO $trz;
     private PDO $erp;
@@ -58,6 +64,13 @@ final class BagBoxService
         return $stmt->fetch() !== false;
     }
 
+    private function indexExists(string $table, string $index): bool
+    {
+        $stmt = $this->trz->prepare('SHOW INDEX FROM `' . $table . '` WHERE Key_name = ?');
+        $stmt->execute([$index]);
+        return $stmt->fetch() !== false;
+    }
+
     private function tableExists(string $table): bool
     {
         if ($this->sqlite) {
@@ -92,18 +105,23 @@ final class BagBoxService
                 $this->trz->exec('ALTER TABLE boxes ADD COLUMN ' . $column . ' ' . $definition);
             }
         }
+        // Ojo: en MySQL toda instrucción de estructura (CREATE INDEX, ALTER, CREATE TABLE) confirma de golpe la transacción
+        // abierta, y esta función se llama dentro de transacciones (escaneo, traspaso, ingreso). Antes se ejecutaban
+        // siempre y el commit posterior fallaba con «There is no active transaction». Ahora solo si de verdad falta algo.
         if (!$this->sqlite) {
-            try {
-                $this->trz->exec('CREATE INDEX idx_boxes_source ON boxes (source_kind, source_ref)');
-            } catch (Throwable) {
-                // ya existe
+            foreach (['idx_boxes_source' => '(source_kind, source_ref)', 'idx_boxes_erp_stock' => '(erp_item_id, erp_st_id, status)'] as $index => $cols) {
+                if (!$this->indexExists('boxes', $index)) {
+                    try {
+                        $this->trz->exec('CREATE INDEX ' . $index . ' ON boxes ' . $cols);
+                    } catch (Throwable) {
+                        // creado en paralelo
+                    }
+                }
             }
-            try {
-                $this->trz->exec('CREATE INDEX idx_boxes_erp_stock ON boxes (erp_item_id, erp_st_id, status)');
-            } catch (Throwable) {
-                // ya existe
+            $col = $this->one($this->trz, "SHOW COLUMNS FROM boxes LIKE 'source_roll_id'");
+            if ($col !== null && strtoupper((string)($col['Null'] ?? 'YES')) === 'NO') {
+                @$this->trz->exec('ALTER TABLE boxes MODIFY source_roll_id BIGINT UNSIGNED NULL DEFAULT NULL');
             }
-            @$this->trz->exec('ALTER TABLE boxes MODIFY source_roll_id BIGINT UNSIGNED NULL DEFAULT NULL');
         }
         // Saldo original de la etiqueta trazable (Despacho también lo agrega; aquí por si aún no corrió).
         if ($this->tableExists('traceability_warehouse_entries') && !$this->columnExists('traceability_warehouse_entries', 'quantity_initial')) {
@@ -112,7 +130,7 @@ final class BagBoxService
         $engine = $this->sqlite ? '' : ' ENGINE=InnoDB';
         $auto = $this->sqlite ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY';
         // Diario de movimientos de unidades de una caja (uso en máquina, devolución, traspaso). Solo se inserta y se marca.
-        $this->trz->exec('CREATE TABLE IF NOT EXISTS box_unit_moves (
+        if (!$this->tableExists('box_unit_moves')) $this->trz->exec('CREATE TABLE IF NOT EXISTS box_unit_moves (
             id ' . $auto . ',
             box_id BIGINT NOT NULL,
             kind VARCHAR(16) NOT NULL,
@@ -217,6 +235,80 @@ final class BagBoxService
         return $entry === null ? null : $this->byId((int)$entry['entity_id'], $forUpdate);
     }
 
+    /**
+     * Etiqueta del Ingreso con Trazabilidad (de cualquier tipo: caja, pallet, bulto) de ese artículo y bodega del ERP,
+     * convertida en caja para traspasarla y usarla en el Pulpo. Si ya es caja, devuelve esa caja. null si el código no es
+     * una etiqueta de ese artículo con saldo en esa bodega.
+     */
+    public function adoptEntry(string $code, int $itemId, int $stId, string $operator = ''): ?array
+    {
+        $this->ensureSchema();
+        $code = strtoupper(preg_replace('/\s+/', '', trim($code)) ?? '');
+        if ($code === '' || !$this->tableExists('traceability_warehouse_entries')) {
+            return null;
+        }
+        $box = $this->find($code, true);
+        if ($box !== null) {
+            return $box;
+        }
+        $entry = $this->one($this->trz, 'SELECT * FROM traceability_warehouse_entries WHERE UPPER(traceability_code) = ? ORDER BY id DESC LIMIT 1', [$code]);
+        if ($entry === null) {
+            return null;
+        }
+        $qty = round((float)($entry['quantity'] ?? 0), 3);
+        $status = strtoupper((string)($entry['status'] ?? ''));
+        if ((int)($entry['item_id'] ?? 0) !== $itemId) {
+            throw new RuntimeException('La etiqueta ' . $code . ' es de ' . ($entry['item_code'] ?? '¿?') . ', no del producto pedido.');
+        }
+        if ((int)($entry['warehouse_id'] ?? 0) !== $stId) {
+            throw new RuntimeException('La etiqueta ' . $code . ' no está en la bodega de origen (está en ' . ($entry['warehouse_name'] ?? '¿?') . ').');
+        }
+        if ($qty <= 0 || in_array($status, ['CONSUMED', 'VOID', 'DISPATCHED', 'CANCELLED'], true)) {
+            throw new RuntimeException('La etiqueta ' . $code . ' no tiene saldo disponible.');
+        }
+        // CC de la etiqueta solo si el ERP tiene stock de ese artículo con esa CC en la bodega (si no, stock general).
+        $orderId = 0;
+        $orderRef = trim((string)($entry['order_ref'] ?? ''));
+        if ($orderRef !== '') {
+            $order = $this->one($this->erp, 'SELECT id FROM orders WHERE req_number = ? LIMIT 1', [$orderRef]);
+            if ($order !== null && $this->one($this->erp, 'SELECT item_id FROM item_shops_storehouses WHERE item_id = ? AND st_id = ? AND iss_order_id = ? AND iss_inventory > 0 LIMIT 1',
+                    [$itemId, $stId, (int)$order['id']]) !== null) {
+                $orderId = (int)$order['id'];
+            }
+        }
+        $this->trz->prepare('INSERT INTO boxes (box_code, work_order_id, source_roll_id, pallet_id, final_sku, units_qty, units_initial,
+                destination_mode, customer_order_ref, warehouse_id, operator_name, status, erp_item_id, erp_st_id, erp_order_id, source_kind, source_ref)
+                VALUES (?, NULL, NULL, NULL, ?, ?, ?, \'BODEGA\', ?, ?, ?, \'IN_WAREHOUSE\', ?, ?, ?, ?, ?)')
+            ->execute([$code, mb_substr((string)$entry['item_code'], 0, 80), $qty, round((float)($entry['quantity_initial'] ?? $qty) ?: $qty, 3),
+                $orderRef !== '' ? $orderRef : null, $this->localWarehouseId($stId), mb_substr($operator ?: 'Bodega', 0, 120),
+                $itemId, $stId, $orderId ?: null, self::SOURCE_ENTRY, 'entry:' . (int)$entry['id']]);
+        $id = (int)$this->trz->lastInsertId();
+        $this->movement($id, 'ADJUSTMENT', null, null, ['adopted_entry' => (int)$entry['id'], 'code' => $code, 'units' => $qty, 'entity_type' => $entry['entity_type'] ?? '']);
+        return $this->byId($id, true);
+    }
+
+    /**
+     * Parte sacada de una caja en un traspaso: queda en la Bodega 3000 con un código temporal (no se imprime ni se escanea).
+     * Idempotente por $ref: si ya existe, devuelve la misma.
+     */
+    public function createPartial(array $parent, float $units, string $ref, string $operator): array
+    {
+        $this->ensureSchema();
+        $existing = $this->one($this->trz, 'SELECT * FROM boxes WHERE source_kind = ? AND source_ref = ? LIMIT 1', [self::SOURCE_PARTIAL, $ref]);
+        if ($existing !== null) {
+            return $existing;
+        }
+        $box = $this->create(['item_id' => (int)$parent['erp_item_id'], 'st_id' => 16, 'order_id' => (int)($parent['erp_order_id'] ?? 0),
+            'units' => $units, 'sku' => (string)$parent['final_sku'], 'order_num' => (string)($parent['customer_order_ref'] ?? ''),
+            'source_kind' => self::SOURCE_PARTIAL, 'source_ref' => $ref, 'operator' => $operator,
+            'description' => 'Parte de la caja ' . $parent['box_code'] . ' (código temporal, no se escanea)']);
+        if ($this->tableExists('traceability_warehouse_entries')) {
+            $this->trz->prepare("UPDATE traceability_warehouse_entries SET comments = ? WHERE traceability_code = ?")
+                ->execute(['Código temporal: ' . StockLedgerService::fmt($units) . ' bolsas sacadas de la caja ' . $parent['box_code'] . ' para el Pulpo Serigráfico', $box['box_code']]);
+        }
+        return $box;
+    }
+
     /** Una caja es de bolsas con stock en el ERP si sabe su artículo y su bodega del ERP. */
     public static function isErpLinked(array $box): bool
     {
@@ -246,8 +338,10 @@ final class BagBoxService
                 $entry['warehouse_name'] = $this->erpStoreName((int)$fields['erp_st_id']);
             }
             if ($entry !== []) {
+                // La etiqueta de la caja: la creada con la caja (BOX + id) o la del Ingreso con Trazabilidad con el mismo código.
+                $code = (string)($this->one($this->trz, 'SELECT box_code FROM boxes WHERE id = ?', [$boxId])['box_code'] ?? '');
                 $this->trz->prepare('UPDATE traceability_warehouse_entries SET ' . implode(', ', array_map(static fn($f) => $f . ' = ?', array_keys($entry)))
-                    . " WHERE entity_type = 'BOX' AND entity_id = ?")->execute([...array_values($entry), $boxId]);
+                    . " WHERE (entity_type = 'BOX' AND entity_id = ?) OR traceability_code = ?")->execute([...array_values($entry), $boxId, $code]);
             }
         }
     }

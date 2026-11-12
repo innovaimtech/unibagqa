@@ -571,7 +571,8 @@ function handleProductionMaterialsRoutes(
                 $colorLabel,
                 $currentOperatorName,
                 $comments,
-                16
+                16,
+                (string)($_POST['op_key'] ?? '')
             );
             $param = $res['ok'] ? '&ink_consumed=1' . (($res['warning'] ?? '') !== '' ? '&supply_warning=' . rawurlencode((string)$res['warning']) : '')
                 : '&error=' . rawurlencode((string)($res['error'] ?? 'Error al registrar consumo de tinta de serigrafía.'));

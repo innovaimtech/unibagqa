@@ -5,7 +5,7 @@
  * @var int $workerOtId
  */
 $pulpoBags = null;
-$mounted = $moves = [];
+$mounted = $moves = $waiting = [];
 $need = ['printed' => 0.0, 'merma' => 0.0, 'needed' => 0.0];
 $used = 0.0;
 $loadError = '';
@@ -18,6 +18,7 @@ try {
         $mounted = $pulpoBags->mountedBoxes($workerOtId);
     }
     $moves = $pulpoBags->moves($agId);
+    $waiting = $pulpoBags->waitingPartials();
     $need = $pulpoBags->neededForAgenda($agId);
     $used = $pulpoBags->consumedForAgenda($agId);
 } catch (Throwable $e) {
@@ -52,6 +53,22 @@ $csrf = htmlspecialchars(csrfToken());
         <input name="code" required maxlength="60" class="inptxt" style="flex:1;min-width:220px;font-size:15px" placeholder="Escanea el código de la caja (BX...)" autofocus>
         <button class="btngreen" style="padding:8px 18px">Poner caja en máquina</button>
     </form>
+
+    <?php if ($waiting !== [] && $workerOtId > 0): ?>
+        <div style="background:#EFF6FF;border:1px solid #93C5FD;border-radius:6px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#1E3A8A">
+            <b>Bolsas traspasadas con código temporal</b> (parte de una caja que quedó con saldo en bodega). No se escanean: cárgalas con el botón.
+            <?php foreach ($waiting as $wb): ?>
+            <form method="post" action="<?=$action?>" style="display:flex;gap:8px;align-items:center;margin-top:6px">
+                <input type="hidden" name="_csrf" value="<?=$csrf?>">
+                <input type="hidden" name="agid" value="<?=$agId?>">
+                <input type="hidden" name="bag_action" value="mount">
+                <input type="hidden" name="code" value="<?=htmlspecialchars((string)$wb['box_code'])?>">
+                <span><b><?=$fmt((float)$wb['units_qty'])?></b> bolsas <?=htmlspecialchars((string)$wb['final_sku'])?><?=!empty($wb['customer_order_ref']) ? ' · CC ' . htmlspecialchars((string)$wb['customer_order_ref']) : ''?> <span style="color:#64748B">(<?=htmlspecialchars((string)$wb['box_code'])?>)</span></span>
+                <button class="btnblue" style="padding:5px 12px">Cargar en la máquina</button>
+            </form>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
 
     <?php if ($pending !== []): ?>
         <form method="post" action="<?=$action?>" style="background:#FFFBEB;border:1px solid #F59E0B;border-radius:6px;padding:10px 14px;margin-bottom:12px;color:#92400E;font-size:13px">

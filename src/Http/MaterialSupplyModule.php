@@ -90,7 +90,7 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
                     // Bobinas: la cantidad sale de las bobinas escaneadas. Otros materiales: cantidad indicada.
                     $service->dispatch((string)($_POST['dispatch_key']??''),(string)($_POST['request_key']??''),
                         isset($_POST['quantity']) ? supplyPostedQuantity() : 0.0,(string)($_POST['codes']??''),$actor,
-                        (string)($_POST['change_reason']??''));
+                        (string)($_POST['change_reason']??''),(string)($_POST['saldo_code']??''));
                 }
             } else {
                 if ($path === '/production/materials/receive') {
@@ -769,29 +769,34 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
     </dialog>
     <?php endif; ?>
     <?php if ($warehouse && (int)$r['source_storehouse_id']!==16 && $r['status']==='ACCEPTED' && $remaining>0):
-        $isBoxReq=strtoupper((string)($r['material_kind']??''))==='BOXES';
+        // Cajas y productos de la 400 con etiquetas de trazabilidad se traspasan escaneando sus etiquetas.
+        $isBoxReq=$service->usesLabelScan($r);
         $isRoll=$isBoxReq || str_starts_with(strtoupper($r['sku']),'TEL'); $reqQty=(float)$r['requested_qty']; $scans=$isRoll?$service->scans($r['request_key']):[];
         $scanTotal=0.0; $hasSubstitute=false;
         foreach ($scans as $sc) { if ($sc['state']==='SCANNED') { $scanTotal+=(float)$sc['quantity']; if (!empty($sc['substitute'])) $hasSubstitute=true; } }
         $needReason=$hasSubstitute || (!$isBoxReq && $isRoll && $scanTotal>0 && abs($scanTotal-$reqQty)>0.000001); ?>
     <dialog id="supply_dispatch_<?=$i?>" class="supply-dialog">
-        <h2>Preparar y despachar</h2>
+        <h2>Preparar y traspasar</h2>
         <b><?=supplyEscape($r['sku'])?></b> <?=supplyEscape($r['description'])?>
+        <?php if ($isBoxReq): ?>
+        <p>Se solicitaron <b><?=supplyEscape(supplyNum($reqQty))?> <?=supplyEscape($r['unit'])?></b> desde la Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?>. Escanea la etiqueta de trazabilidad de cada caja que envías. Al traspasar se descuenta del origen, se carga en la 3000 Insumos en Producción y se genera el traspaso ERP.</p>
+        <?php else: ?>
         <p>Se solicitaron <b><?=supplyEscape($r['requested_qty'])?> <?=supplyEscape($r['unit'])?></b> desde la Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?>. Puedes enviar otra bobina compatible (otro código o metros distintos) o más unidades; en ese caso debes escribir el motivo. Al despachar se descuenta el stock de origen, se carga en la bodega 3000 Insumos en Producción y se genera el traspaso ERP.</p>
+        <?php endif; ?>
         <?php if ($isRoll): ?>
         <form method="post" action="/stock/material-supply/scan" autocomplete="off">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
-            <label><?php if ($isBoxReq): ?>Escanea el código de cada caja (<?=supplyEscape(supplyNum($scanTotal))?> bolsas en cajas escaneadas · se pidieron <?=supplyEscape(supplyNum($reqQty))?>). Cada caja se traspasa completa, con su CC.<?php else: ?>Escanea el código de trazabilidad de la bobina (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se solicitaron <?=supplyEscape(supplyNum($reqQty))?>)<?php endif; ?></label>
+            <label><?php if ($isBoxReq): ?>Escanea la etiqueta de trazabilidad de cada caja (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se pidieron <?=supplyEscape(supplyNum($reqQty))?>). Si se pasan de lo pedido, abajo eliges qué caja se queda con el saldo.<?php else: ?>Escanea el código de trazabilidad de la bobina (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se solicitaron <?=supplyEscape(supplyNum($reqQty))?>)<?php endif; ?></label>
             <input name="code" required maxlength="60" autofocus placeholder="Escanea aquí; el lector envía Enter" oninput="var v=this.value.replace(/['`´’‘‛]/g,'-');if(v!==this.value)this.value=v;">
             <div class="supply-actions"><button class="btnblue">Registrar escaneo</button></div>
         </form>
         <?php if ($scans): ?>
-        <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Código</th><th>Producto</th><th>Metros</th><th>Escaneado por</th><th>Fecha</th><th>Estado</th><th></th></tr></thead><tbody>
+        <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Código</th><th>Producto</th><th><?=$isBoxReq?'Cantidad':'Metros'?></th><th>Escaneado por</th><th>Fecha</th><th>Estado</th><th></th></tr></thead><tbody>
         <?php foreach ($scans as $s): ?>
         <tr><td><b><?=supplyEscape($s['code'])?></b></td>
             <td><?=supplyEscape($s['sku']??'')?><?php if (!empty($s['substitute'])): ?> <span style="background:#fef3c7;color:#92400e;border-radius:8px;padding:1px 7px;font-weight:700;font-size:12px">Reemplazo</span><?php endif; ?></td>
-            <td><?=!empty($s['meters'])?supplyEscape(supplyNum((float)$s['meters'])).' m':'-'?></td>
+            <td><?php if ($isBoxReq): ?><b><?=supplyEscape(supplyNum((float)$s['quantity']))?></b><?php else: ?><?=!empty($s['meters'])?supplyEscape(supplyNum((float)$s['meters'])).' m':'-'?><?php endif; ?></td>
             <td><?=supplyEscape(supplyActorLabel($s['scanned_by']))?></td><td><?=supplyDate($s['scanned_at'])?></td>
             <td><?=supplyEscape(['SCANNED'=>'Escaneada','DISPATCHED'=>'Despachada','RECEIVED'=>'Recibida'][$s['state']]??$s['state'])?></td>
             <td><?php if ($s['state']==='SCANNED'): ?>
@@ -814,9 +819,20 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
             <label>Cantidad a entregar (mínimo lo solicitado: <?=supplyEscape(supplyNum($reqQty))?>)</label>
             <input type="number" name="quantity" min="<?=supplyEscape($reqQty)?>" step="any" value="<?=supplyEscape($r['requested_qty'])?>" required oninput="var n=parseFloat(this.value),m=<?=json_encode($reqQty)?>,t=this.form.querySelector('textarea[name=change_reason]');if(t){t.required=(n!==m);}">
             <?php endif; ?>
+            <?php if ($isBoxReq && $scanTotal > $reqQty + 0.000001):
+                $excess = round($scanTotal - $reqQty, 3); ?>
+            <label style="margin-top:8px">¿Qué caja se queda con el saldo? (sobran <?=supplyEscape(supplyNum($excess))?> de lo pedido)</label>
+            <select name="saldo_code" style="width:100%">
+                <option value="">Ninguna: se traspasan todas las cajas completas</option>
+                <?php foreach ($scans as $sc): if ($sc['state']!=='SCANNED' || (float)$sc['quantity'] <= $excess + 0.0005) continue; ?>
+                <option value="<?=supplyEscape($sc['code'])?>"><?=supplyEscape($sc['code'])?>: tiene <?=supplyEscape(supplyNum((float)$sc['quantity']))?>, salen <?=supplyEscape(supplyNum((float)$sc['quantity'] - $excess))?> y queda con <?=supplyEscape(supplyNum($excess))?> en la bodega</option>
+                <?php endforeach; ?>
+            </select>
+            <div style="font-size:12px;color:#475569;margin-top:4px">Lo que sale de esa caja llega a la 3000 con un código temporal y queda cargado en el Pulpo (no se imprime ni se escanea).</div>
+            <?php endif; ?>
             <label style="margin-top:8px">Motivo del cambio <?=$needReason?'(obligatorio: envías algo distinto a lo solicitado)':'(solo si envías otro código, otros metros o más unidades)'?></label>
             <textarea name="change_reason" rows="2" maxlength="500" style="width:100%" <?=$needReason?'required minlength="10"':''?> placeholder="Ej.: la bobina pedida no tiene stock físico; se envía una de otros metros"></textarea>
-            <div class="supply-actions"><button class="btngreen" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="'.($isBoxReq?'Faltan cajas por escanear':'Faltan bobinas por escanear').'"':''?>>Despachar a 3000 Insumos en Producción</button></div>
+            <div class="supply-actions"><button class="btngreen" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="'.($isBoxReq?'Faltan cajas por escanear':'Faltan bobinas por escanear').'"':''?>>Traspasar a 3000 Insumos en Producción</button></div>
         </form>
         <form method="post" action="/stock/material-supply/cancel-request" style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
