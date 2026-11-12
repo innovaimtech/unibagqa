@@ -1243,8 +1243,9 @@
     if (/Access denied|claimInterface|SecurityError/i.test(msg)) {
       // Windows bloquea el USB directo mientras la impresora tenga su driver de impresora de Windows.
       msg = "Windows está usando esta impresora con su propio driver y no deja que el navegador la tome por USB. " +
-        "Cierra otras pestañas o programas que la usen y vuelve a intentar. Si sigue igual, en esta PC hay que cambiar " +
-        "una sola vez el driver USB de la impresora a «WinUSB» (programa Zadig), o usar «Impresora Serial (COM)» si la impresora tiene puerto COM.";
+        "Cierra otras pestañas o programas que la usen y vuelve a intentar. Si sigue igual, usa «Impresora Serial (COM)» " +
+        "si la impresora tiene puerto COM, o el servicio de Windows de esta PC. No cambies el driver a WinUSB (Zadig): " +
+        "el adaptador deja de aparecer como puerto COM y la impresora serial deja de funcionar.";
     }
     return msg;
   }
@@ -2070,6 +2071,11 @@
       var sel = pName === savedDefaultPrinter ? " selected" : "";
       printerOptionsHtml += '<option value="' + escapeHtml(pName) + '"' + sel + ">" + escapeHtml(pName) + "</option>";
     }
+    // Impresoras compartidas desde otro computador: solo si esta PC la elige a propósito (no se usan en Automática).
+    for (var ni = 0; ni < printerState.networkPrintersIgnored.length; ni++) {
+      var nName = String(printerState.networkPrintersIgnored[ni]);
+      printerOptionsHtml += '<option value="' + escapeHtml(nName) + '"' + (nName === savedDefaultPrinter ? " selected" : "") + ">" + escapeHtml(nName) + " — compartida desde otro computador</option>";
+    }
 
     // Ajuste de intensidad y velocidad según el lenguaje de la impresora de esta PC
     var tuneLang = normalizeLanguage(lsGet(LS_KEYS.printerType, "")) || normalizeLanguage(lsGet(LS_KEYS.lastPrintLanguage, "")) || normalizeLanguage(CFG.printLanguage) || "epl";
@@ -2145,7 +2151,7 @@
           "</div>" +
           (printerState.networkPrintersIgnored.length
             ? '<div style="margin-top:6px;font-size:11.5px;color:#475569">Este computador' + (printerState.bridgeComputer ? " (" + escapeHtml(printerState.bridgeComputer) + ")" : "") +
-              " solo imprime en sus propias impresoras. Se ignoran las compartidas desde otro computador: " + escapeHtml(printerState.networkPrintersIgnored.join(", ")) + ".</div>"
+              " usa en Automática solo sus propias impresoras. Para imprimir en una compartida desde otro computador, elígela en la lista: " + escapeHtml(printerState.networkPrintersIgnored.join(", ")) + ".</div>"
             : "")
         : '<div style="margin-top:8px;padding:8px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;font-size:11.5px;color:#334155">' +
           "💡 Para imprimir sin instalar nada: pulsa <b>Vincular USB Directo</b> (impresora por cable USB) o <b>Impresora Serial (COM)</b> y elige la impresora. Se hace una sola vez por PC; el navegador la recuerda en todas las pantallas." +

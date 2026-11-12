@@ -1541,6 +1541,8 @@ function unibagRenderTraceabilityEntryPage(ReceptionService $service, string $cu
     $body .= '<button type="button" class="btn" style="background:#00A9A6" onclick="printLabelNow()">🖨️ Imprimir Todas las Etiquetas</button>';
     $body .= '<button type="button" class="btn secondary" onclick="printLabelBrowser()" title="Usa el cuadro de impresion del navegador">Imprimir con el navegador</button>';
     $body .= '</div>';
+    $body .= '<div style="margin-top:8px;font-size:11.5px;color:#475569;text-align:right;line-height:1.4">Con el navegador, si la etiqueta sale más chica: en el cuadro de impresión abre <b>Más opciones</b> y usa '
+        . '<b>Tamaño del papel 100 x 70 mm</b>, <b>Márgenes: Ninguno</b> y <b>Escala: Predeterminada</b>. Si no aparece ese tamaño, créalo en las Preferencias de la impresora en Windows.</div>';
     $body .= '</div>';
     $body .= '</div>';
 
