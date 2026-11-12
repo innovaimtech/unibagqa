@@ -1,5 +1,5 @@
 {
-    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Desde octubre 2026 cada mes es el MES CALENDARIO (del 1 al ultimo dia: 28/29, 30 o 31; ej. 2026-10 = 01-oct a 31-oct; los calculados llevan 'periodo': 'mes'). Hasta septiembre 2026 se publico con el ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses con origen 'plantilla' (2026-01 a 2026-09) son las cifras YA PUBLICADAS (septiembre segun Reporte_Operaciones_Septiembre_2026_UNIFICADO) y no se recalculan. Los meses nuevos se agregan solos con origen 'calculado' cuando el mes termina. El bloque 'procesos' (kg programados\/procesados\/merma) de los meses calculados lo arma el sistema: procesados = unidades producidas x peso de la bolsa; programados = cantidad pedida de la CC repartida segun la produccion del mes; merma = kg registrados en maquina. 'bobinas_kg' = kg de bobinas PP (bodega 200) y PLA (bodega 100) al ultimo dia de cada mes (los publicados hasta 2026-09, al 25; los calculados llevan 'corte'), reconstruidos con el kardex. Se puede corregir cualquier valor a mano.",
+    "_comentario": "Historial mensual de KPIs de Operaciones que usa el Informe Mensual PPTX. Desde octubre 2026 cada mes es el MES CALENDARIO (del 1 al ultimo dia: 28\/29, 30 o 31; ej. 2026-10 = 01-oct a 31-oct; los calculados llevan 'periodo': 'mes'). Hasta septiembre 2026 se publico con el ciclo 26 al 25 (ej. 2026-09 = 26-ago a 25-sep). Los meses con origen 'plantilla' (2026-01 a 2026-09) son las cifras YA PUBLICADAS (septiembre segun Reporte_Operaciones_Septiembre_2026_UNIFICADO) y no se recalculan. Los meses nuevos se agregan solos con origen 'calculado' cuando el mes termina. El bloque 'procesos' (kg programados\/procesados\/merma) de los meses calculados lo arma el sistema: procesados = unidades producidas x peso de la bolsa; programados = cantidad pedida de la CC repartida segun la produccion del mes; merma = kg registrados en maquina. 'bobinas_kg' = kg de bobinas PP (bodega 200) y PLA (bodega 100) al ultimo dia de cada mes reconstruidos con el kardex (los que llevan 'corte' y 'calculo': 2 ya usan el peso corregido por bobina; los demas se recalculan solos). Peso por bobina = item_reg_kg; si es imposible (> 500 kg, p. ej. 11440 por 114,40) se usa ancho x gramaje x largo. Se puede corregir cualquier valor a mano.",
     "meses": {
         "2026-01": {
             "origen": "plantilla",
@@ -291,33 +291,34 @@
         },
         "2026-10": {
             "origen": "calculado",
-            "prod_units": 816643,
+            "periodo": "mes",
+            "prod_units": 872093,
             "prod_cap": 1345000,
-            "sl_total_units": 653923,
-            "sl_delayed_units": 546851,
-            "sl_total_cc": 161,
-            "sl_delayed_cc": 145,
+            "sl_total_units": 814873,
+            "sl_delayed_units": 788373,
+            "sl_total_cc": 164,
+            "sl_delayed_cc": 158,
             "waste_pct": 0.51,
             "procesos": {
                 "flexo": {
-                    "prog": 25312.9,
-                    "proc": 26109.4,
-                    "waste": 182
+                    "prog": 29271.5,
+                    "proc": 28809.9,
+                    "waste": 187.31
                 },
                 "seri": {
-                    "prog": 1240.1,
-                    "proc": 1270.9,
-                    "waste": 40
+                    "prog": 1631.6,
+                    "proc": 1640.5,
+                    "waste": 47.9
                 },
                 "cys": {
-                    "prog": 30420.5,
-                    "proc": 30319,
-                    "waste": 254.51
+                    "prog": 40762.1,
+                    "proc": 32196.8,
+                    "waste": 270.76
                 },
                 "emb": {
-                    "prog": 31187.7,
-                    "proc": 31118.6,
-                    "waste": 2.81
+                    "prog": 39286.3,
+                    "proc": 32479.4,
+                    "waste": 2.5
                 }
             }
         }
@@ -330,82 +331,108 @@
             "pla_blanco": 126450
         },
         "2025-10": {
-            "pp": 252861,
-            "pla": 208612,
-            "pla_beige": 28399,
-            "pla_blanco": 156651
+            "pp": 25909,
+            "pla": 227751,
+            "pla_beige": 45348,
+            "pla_blanco": 160524,
+            "corte": "2025-10-31",
+            "calculo": 2
         },
         "2025-11": {
-            "pp": 190696,
-            "pla": 222667,
-            "pla_beige": 42754,
-            "pla_blanco": 163329
+            "pp": 20548,
+            "pla": 214887,
+            "pla_beige": 42767,
+            "pla_blanco": 156837,
+            "corte": "2025-11-30",
+            "calculo": 2
         },
         "2025-12": {
-            "pp": 207645,
-            "pla": 186641,
-            "pla_beige": 30958,
-            "pla_blanco": 143298
+            "pp": 25027,
+            "pla": 178512,
+            "pla_beige": 26979,
+            "pla_blanco": 139387,
+            "corte": "2025-12-31",
+            "calculo": 2
         },
         "2026-01": {
-            "pp": 206650,
-            "pla": 143577,
-            "pla_beige": 24021,
-            "pla_blanco": 104423
+            "pp": 26250,
+            "pla": 131222,
+            "pla_beige": 22253,
+            "pla_blanco": 95749,
+            "corte": "2026-01-31",
+            "calculo": 2
         },
         "2026-02": {
-            "pp": 204907,
-            "pla": 69602,
-            "pla_beige": 19772,
-            "pla_blanco": 41054
+            "pp": 23434,
+            "pla": 67258,
+            "pla_beige": 19182,
+            "pla_blanco": 39657,
+            "corte": "2026-02-28",
+            "calculo": 2
         },
         "2026-03": {
-            "pp": 210407,
-            "pla": 81328,
-            "pla_beige": 14102,
-            "pla_blanco": 49373
+            "pp": 28846,
+            "pla": 87643,
+            "pla_beige": 25712,
+            "pla_blanco": 44206,
+            "corte": "2026-03-31",
+            "calculo": 2
         },
         "2026-04": {
-            "pp": 206817,
-            "pla": 133944,
-            "pla_beige": 31080,
-            "pla_blanco": 73800
+            "pp": 25167,
+            "pla": 120629,
+            "pla_beige": 25681,
+            "pla_blanco": 67101,
+            "corte": "2026-04-30",
+            "calculo": 2
         },
         "2026-05": {
-            "pp": 219964,
-            "pla": 161567,
-            "pla_beige": 18206,
-            "pla_blanco": 118896
+            "pp": 38930,
+            "pla": 143762,
+            "pla_beige": 17246,
+            "pla_blanco": 103479,
+            "corte": "2026-05-31",
+            "calculo": 2
         },
         "2026-06": {
-            "pp": 220862,
-            "pla": 160310,
-            "pla_beige": 16183,
-            "pla_blanco": 119474
+            "pp": 39388,
+            "pla": 157358,
+            "pla_beige": 16303,
+            "pla_blanco": 116641,
+            "corte": "2026-06-30",
+            "calculo": 2
         },
         "2026-07": {
-            "pp": 218838,
-            "pla": 183132,
-            "pla_beige": 8579,
-            "pla_blanco": 149926
+            "pp": 36476,
+            "pla": 181568,
+            "pla_beige": 16529,
+            "pla_blanco": 140651,
+            "corte": "2026-07-31",
+            "calculo": 2
         },
         "2026-08": {
-            "pp": 204046,
-            "pla": 138812,
+            "pp": 33018,
+            "pla": 135743,
             "pla_beige": 7757,
-            "pla_blanco": 109817
+            "pla_blanco": 107471,
+            "corte": "2026-08-31",
+            "calculo": 2
         },
         "2026-09": {
-            "pp": 198334,
-            "pla": 106788,
+            "pp": 28336,
+            "pla": 99369,
             "pla_beige": 4899,
-            "pla_blanco": 85439
+            "pla_blanco": 78515,
+            "corte": "2026-09-30",
+            "calculo": 2
         },
         "2026-10": {
-            "pp": 163168,
-            "pla": 94274,
-            "pla_beige": 10254,
-            "pla_blanco": 67012
+            "pp": 26909,
+            "pla": 85646,
+            "pla_beige": 10372,
+            "pla_blanco": 58623,
+            "corte": "2026-10-31",
+            "calculo": 2
         }
     }
 }

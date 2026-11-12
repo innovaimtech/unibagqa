@@ -318,6 +318,31 @@ class MonthlyPresentationService
         return $stock;
     }
 
+    /** Una bobina PP/PLA no pesa más que esto; un peso mayor en el ERP es un error de digitación (p. ej. 11440 por 114,40). */
+    private const ROLL_MAX_KG = 500.0;
+
+    /** Versión del cálculo de kg de bobinas guardado en el historial; si cambia, los meses guardados se recalculan. */
+    private const ROLL_CALC_VERSION = 2;
+
+    /**
+     * Kg de una bobina: el peso del artículo (item_reg_kg). Si falta o es imposible (> 500 kg), se usa
+     * ancho (cm) × gramaje (g/m²) × largo (m) / 100.000; si la ficha tampoco sirve, el peso dividido por 100.
+     *
+     * @param array<string, mixed> $item
+     */
+    public static function rollWeightKg(array $item): float
+    {
+        $kg = (float)($item['item_reg_kg'] ?? 0);
+        $formula = (float)($item['item_reg_width'] ?? 0) * (float)($item['item_reg_gsm'] ?? 0) * (float)($item['item_reg_length'] ?? 0) / 100000.0;
+        if ($kg > 0 && $kg <= self::ROLL_MAX_KG) {
+            return $kg;
+        }
+        if ($formula > 0 && $formula <= self::ROLL_MAX_KG) {
+            return $formula;
+        }
+        return $kg > self::ROLL_MAX_KG && $kg / 100.0 <= self::ROLL_MAX_KG ? $kg / 100.0 : 0.0;
+    }
+
     /**
      * Kg de bobinas PP y PLA (y PLA beige / blanco) al cierre de cada mes indicado.
      *
@@ -328,9 +353,9 @@ class MonthlyPresentationService
     {
         $titles = "i.item_title LIKE 'PLA/%' OR i.item_title LIKE 'PP/%'";
         $info = [];
-        $sql = 'SELECT i.id, i.item_title, i.item_reg_kg FROM item i WHERE ' . $titles;
+        $sql = 'SELECT i.id, i.item_title, i.item_reg_kg, i.item_reg_width, i.item_reg_gsm, i.item_reg_length FROM item i WHERE ' . $titles;
         foreach ($this->erpPdo->query($sql)->fetchAll(PDO::FETCH_ASSOC) as $r) {
-            $info[(int)$r['id']] = ['title' => strtoupper((string)$r['item_title']), 'kg' => (float)$r['item_reg_kg']];
+            $info[(int)$r['id']] = ['title' => strtoupper((string)$r['item_title']), 'kg' => self::rollWeightKg($r)];
         }
         $out = [];
         foreach ($cutoffs as $monthKey => $ts) {
@@ -535,7 +560,7 @@ class MonthlyPresentationService
         $closed = $endTs < time();
         $suffix = $range !== null ? '-r' . $range['from'] . '_' . $range['to'] : '';
         $historyStamp = (string)@filemtime($this->historyPath());
-        $cacheKey = 'monthly-mes-' . $monthKey . $suffix . '-' . $historyStamp;
+        $cacheKey = 'monthly-mes-v' . self::ROLL_CALC_VERSION . '-' . $monthKey . $suffix . '-' . $historyStamp;
         $cached = ResultCache::get($cacheKey, $closed ? 21600 : 300, $found);
         if ($found && is_array($cached)) {
             $cached['issued_at'] = date('d-m-Y');
@@ -546,7 +571,7 @@ class MonthlyPresentationService
         $metrics = $this->computeMonthlyMetrics($monthKey, $range);
         // La clave se arma con la fecha del historial DESPUÉS del cálculo (el cálculo puede guardar meses nuevos).
         clearstatcache();
-        ResultCache::put('monthly-mes-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
+        ResultCache::put('monthly-mes-v' . self::ROLL_CALC_VERSION . '-' . $monthKey . $suffix . '-' . (string)@filemtime($this->historyPath()), $metrics);
         return $metrics;
     }
 
@@ -681,14 +706,8 @@ class MonthlyPresentationService
         }
 
         // Bobinas: 13 cierres (último día de cada mes) hasta el mes del informe. Los meses cerrados se guardan; el en curso
-        // usa el stock de hoy. Los cierres publicados (hasta el último mes de la plantilla, al 25) quedan como están;
-        // los calculados con el corte antiguo del 25 (sin 'corte') se recalculan al último día del mes.
-        $lastPublished = '';
-        foreach ($stored as $k => $v) {
-            if (($v['origen'] ?? '') === 'plantilla' && $k > $lastPublished) {
-                $lastPublished = $k;
-            }
-        }
+        // usa el stock de hoy. Todos son kg calculados por el sistema; los guardados con el corte antiguo del 25 (sin 'corte')
+        // o con el cálculo de kg anterior se recalculan al último día del mes.
         $rollHistory = $this->loadRollHistory();
         $rollsChanged = false;
         $cutoffs = [];
@@ -696,8 +715,9 @@ class MonthlyPresentationService
             $k = date('Y-m', (int)strtotime($monthKey . '-01 -' . $i . ' months'));
             $cutoffs[$k] = $k === $monthKey ? min($liveEndTs, time()) : self::monthEndTs($k);
         }
+        // Se recalculan también los guardados con un cálculo de kg anterior (sin 'calculo' = ROLL_CALC_VERSION).
         $missing = array_filter($cutoffs, static fn($ts, $k) => !isset($rollHistory[$k]) || $k === $monthKey
-            || ($k > $lastPublished && !isset($rollHistory[$k]['corte'])), ARRAY_FILTER_USE_BOTH);
+            || !isset($rollHistory[$k]['corte']) || (int)($rollHistory[$k]['calculo'] ?? 1) < self::ROLL_CALC_VERSION, ARRAY_FILTER_USE_BOTH);
         $computed = [];
         try {
             $computed = $this->computeRollStock($missing);
@@ -708,7 +728,7 @@ class MonthlyPresentationService
         foreach ($cutoffs as $k => $ts) {
             $row = $computed[$k] ?? $rollHistory[$k] ?? null;
             if (isset($computed[$k]) && $ts < time() && ($k !== $monthKey || ($monthClosed && $range === null))) {
-                $rollHistory[$k] = $computed[$k] + ['corte' => date('Y-m-d', $ts)];
+                $rollHistory[$k] = $computed[$k] + ['corte' => date('Y-m-d', $ts), 'calculo' => self::ROLL_CALC_VERSION];
                 $rollsChanged = true;
             }
             if ($row !== null) {

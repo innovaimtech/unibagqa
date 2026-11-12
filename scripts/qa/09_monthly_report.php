@@ -20,7 +20,7 @@ $erp->exec('CREATE TABLE prod_agenda (id INTEGER PRIMARY KEY, ag_equipo_id INTEG
 $erp->exec('CREATE TABLE prod_worker_ot (id INTEGER PRIMARY KEY, wok_ag_id INTEGER)');
 $erp->exec('CREATE TABLE prod_worker_ot_events (id INTEGER PRIMARY KEY, evt_prod_worker_otid INTEGER, evt_type TEXT, evt_amount REAL, evt_crtdat INTEGER, evt_status INTEGER, evt_comments TEXT)');
 $erp->exec('CREATE TABLE prod_worker_ot_defectunits (id INTEGER PRIMARY KEY, evt_refid INTEGER, evt_type TEXT, evt_amount REAL, evt_kgstounits REAL, evt_crtdat INTEGER)');
-$erp->exec('CREATE TABLE item (id INTEGER PRIMARY KEY, item_title TEXT, item_weight REAL, item_reg_kg REAL)');
+$erp->exec('CREATE TABLE item (id INTEGER PRIMARY KEY, item_title TEXT, item_weight REAL, item_reg_kg REAL, item_reg_width REAL DEFAULT 0, item_reg_gsm REAL DEFAULT 0, item_reg_length REAL DEFAULT 0)');
 $erp->exec('CREATE TABLE orders (id INTEGER PRIMARY KEY, req_cust_id INTEGER)');
 $erp->exec('CREATE TABLE orders_items (req_id INTEGER, item_pos INTEGER, item_id INTEGER, item_amount REAL, fab_med_width REAL, fab_med_height REAL, fab_med_fuelle REAL, fab_mat_gramms REAL, fab_manilla_length REAL)');
 $erp->exec('CREATE TABLE customer (id INTEGER PRIMARY KEY, cust_name TEXT)');
@@ -35,7 +35,7 @@ $before = strtotime('2026-09-20 10:00:00');
 // Máquinas: 1 flexo (7), 2 selladora (8), 3 embalaje (15).
 $erp->exec('INSERT INTO equipo VALUES (1,7),(2,8),(3,15)');
 // CC 100: bolsa con peso de artículo 40 g, pedido 10.000. CC 200: sin peso de artículo, por fórmula.
-$erp->exec("INSERT INTO item VALUES (10,'Bolsa A',40,0),(20,'Bolsa B',0,0)");
+$erp->exec("INSERT INTO item (id, item_title, item_weight, item_reg_kg) VALUES (10,'Bolsa A',40,0),(20,'Bolsa B',0,0)");
 $erp->exec('INSERT INTO orders_items VALUES (100,1,10,10000,0,0,0,0,0),(100,2,10,99999,0,0,0,0,0),(200,1,20,4000,30,40,10,70,0)');
 // CC 100 en selladora: 6.000 antes del período y 4.000 dentro → programado dentro = 10.000 × 4.000/10.000.
 $erp->exec('INSERT INTO prod_agenda VALUES (1,2,100,10000),(2,2,200,4000),(3,1,100,10000),(4,3,100,10000)');
@@ -68,7 +68,7 @@ checkMr('embalaje: evento anulado no cuenta; merma sin kg = unidades × peso', $
 checkMr('seri sin datos queda en 0', $b['seri'] === ['prog' => 0.0, 'proc' => 0.0, 'waste' => 0.0]);
 
 // Bobinas: PLA en bodega 5, PP en 11. Stock de hoy y kardex posterior al cierre.
-$erp->exec("INSERT INTO item VALUES (30,'PLA/BEIGE/Y26/100X70X1650',0,100),(31,'PLA/BLANCO/W80/100X70X1650',0,120),(32,'PP/ROJO/R01/100X80X1100',0,500),(33,'PRODUCTO GENERICO',0,0)");
+$erp->exec("INSERT INTO item (id, item_title, item_weight, item_reg_kg) VALUES (30,'PLA/BEIGE/Y26/100X70X1650',0,100),(31,'PLA/BLANCO/W80/100X70X1650',0,120),(32,'PP/ROJO/R01/100X80X1100',0,500),(33,'PRODUCTO GENERICO',0,0)");
 $erp->exec('INSERT INTO item_shops_storehouses VALUES (30,30010,5,3,0),(31,30010,5,2,0),(32,30010,11,4,0),(33,30010,5,-100,0)');
 $cut = strtotime('2026-10-25 23:59:59');
 $after = strtotime('2026-11-02 10:00:00');
@@ -80,7 +80,7 @@ checkMr('bobinas al cierre reconstruidas con el kardex (' . json_encode($r) . ')
     $r['pla_beige'] == 400.0 && $r['pla_blanco'] == 240.0 && $r['pla'] == 640.0 && $r['pp'] == 1000.0);
 
 // Producto terminado: bodegas 1, 14 y 10; cliente = el que más lo pidió.
-$erp->exec("INSERT INTO item VALUES (40,'Bolsa Walmart',0,0),(41,'Bolsa Tottus',0,0),(42,'Bolsa sin pedidos',0,0)");
+$erp->exec("INSERT INTO item (id, item_title, item_weight, item_reg_kg) VALUES (40,'Bolsa Walmart',0,0),(41,'Bolsa Tottus',0,0),(42,'Bolsa sin pedidos',0,0)");
 $erp->exec('INSERT INTO item_shops_storehouses VALUES (40,30010,14,1000,0),(40,30010,1,500,0),(41,30010,10,300,0),(42,30010,14,50,0)');
 $erp->exec("INSERT INTO customer VALUES (1,'Walmart Chile S.A.'),(2,'Hipermercados Tottus S.A.'),(3,'Otro')");
 $erp->exec('INSERT INTO orders VALUES (501,1),(502,1),(503,3),(504,2)');
@@ -215,5 +215,13 @@ checkMr('pantalla: lee modo=rango, desde y hasta', unibagMonthlyPresentationRang
 $_GET = ['month' => '2026-10', 'desde' => '2026-10-01', 'hasta' => '2026-10-31'];
 checkMr('pantalla: sin modo=rango se usa el mes operativo', unibagMonthlyPresentationRange() === null);
 $_GET = [];
+
+// Peso por bobina: se corrigen pesos imposibles del ERP (p. ej. 11440 por 114,40).
+$w = static fn(float $kg, float $wd, float $gsm, float $len): float => MonthlyPresentationService::rollWeightKg(['item_reg_kg' => $kg, 'item_reg_width' => $wd, 'item_reg_gsm' => $gsm, 'item_reg_length' => $len]);
+checkMr('bobina: peso normal del ERP', abs($w(88, 100, 80, 1100) - 88) < 0.01);
+checkMr('bobina: peso x100 (11440) usa la ficha 130x80x1100 = 114,4', abs($w(11440, 130, 80, 1100) - 114.4) < 0.01);
+checkMr('bobina: ficha mal (ancho 13) pero peso bueno se respeta', abs($w(114.4, 13, 80, 1100) - 114.4) < 0.01);
+checkMr('bobina: sin peso usa la ficha', abs($w(0, 108, 90, 1350) - 131.22) < 0.01);
+checkMr('bobina: peso x100 sin ficha se divide por 100', abs($w(9350, 0, 0, 0) - 93.5) < 0.01);
 
 exit($failures > 0 ? 1 : 0);
