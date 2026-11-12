@@ -1087,6 +1087,53 @@ final class MaterialSupplyService
         }
     }
 
+    /**
+     * Registra un lote de códigos de trazabilidad (desde las casillas de carga múltiple) de una sola vez.
+     * Cada código válido queda guardado en su propia transacción; si alguno falla se informa sin perder los válidos.
+     *
+     * @param array<int,mixed>|string $rawCodes
+     * @return array{loaded: string[], skipped: string[]}
+     */
+    public function scanBatch(string $requestKey, array|string $rawCodes, array $actor): array
+    {
+        $items = is_array($rawCodes) ? $rawCodes : [$rawCodes];
+        $codes = [];
+        foreach ($items as $item) {
+            foreach (preg_split('/[\s,;]+/', trim((string)$item)) ?: [] as $part) {
+                $norm = self::normalizeScannedCode($part);
+                if ($norm !== '' && !in_array($norm, $codes, true)) {
+                    $codes[] = $norm;
+                }
+            }
+        }
+        if ($codes === []) {
+            throw new RuntimeException('Escanea o escribe al menos un código de trazabilidad en las casillas.');
+        }
+        $this->ensureSchema();
+        $loaded = [];
+        $skipped = [];
+        $errors = [];
+        foreach ($codes as $code) {
+            if ($this->one($this->trz, "SELECT scan_key FROM production_supply_scans WHERE request_key=? AND code=? AND state='SCANNED'", [$requestKey, $code])) {
+                $skipped[] = $code;
+                continue;
+            }
+            try {
+                $this->scan($requestKey, $code, $actor);
+                $loaded[] = $code;
+            } catch (Throwable $e) {
+                $errors[] = $e->getMessage();
+            }
+        }
+        if ($errors !== []) {
+            if ($loaded !== []) {
+                throw new RuntimeException('Se cargaron ' . count($loaded) . ' código(s) (' . implode(', ', $loaded) . '), pero hubo problema con: ' . implode(' | ', $errors));
+            }
+            throw new RuntimeException(implode(' | ', $errors));
+        }
+        return ['loaded' => $loaded, 'skipped' => $skipped];
+    }
+
     /** Escaneo de una caja de bolsas: debe estar disponible en la bodega de origen y ser del producto pedido. */
     private function scanBox(array $r, string $code, array $actor, string $who): void
     {
@@ -1242,7 +1289,11 @@ final class MaterialSupplyService
     {
         if (trim($codes) === '') return;
         if ($this->one($this->trz, 'SELECT dispatch_key FROM production_supply_dispatches WHERE dispatch_key=?', [$dispatchKey])) return;
-        foreach (array_values(array_unique(array_filter(preg_split('/[\s,;]+/', trim($codes)) ?: []))) as $code) {
+        $seen = [];
+        foreach (preg_split('/[\s,;]+/', trim($codes)) ?: [] as $rawCode) {
+            $code = self::normalizeScannedCode($rawCode);
+            if ($code === '' || isset($seen[$code])) continue;
+            $seen[$code] = true;
             if ($this->one($this->trz, "SELECT scan_key FROM production_supply_scans WHERE request_key=? AND code=? AND state='SCANNED'", [$requestKey, $code])) continue;
             $this->scan($requestKey, $code, $actor);
         }

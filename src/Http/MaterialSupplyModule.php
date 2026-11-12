@@ -77,7 +77,8 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
                 } elseif ($path === '/stock/material-supply/reject') {
                     $service->reject($requestKey,(string)($_POST['reason']??''),$actor);
                 } elseif ($path === '/stock/material-supply/scan') {
-                    $service->scan($requestKey,(string)($_POST['code']??''),$actor);
+                    $rawCodes = $_POST['codes'] ?? ($_POST['code'] ?? '');
+                    $service->scanBatch($requestKey, $rawCodes, $actor);
                 } elseif ($path === '/stock/material-supply/scan-void') {
                     $service->voidScan((string)($_POST['scan_key']??''),(string)($_POST['reason']??''),$actor);
                 } elseif ($path === '/stock/material-supply/cancel-request') {
@@ -88,8 +89,12 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
                     $service->cancelPending((string)($_POST['dispatch_key']??''),(string)($_POST['reason']??''),$actor);
                 } else {
                     // Bobinas: la cantidad sale de las bobinas escaneadas. Otros materiales: cantidad indicada.
+                    $rawDispatchCodes = $_POST['codes'] ?? '';
+                    if (is_array($rawDispatchCodes)) {
+                        $rawDispatchCodes = implode("\n", array_map('strval', $rawDispatchCodes));
+                    }
                     $service->dispatch((string)($_POST['dispatch_key']??''),(string)($_POST['request_key']??''),
-                        isset($_POST['quantity']) ? supplyPostedQuantity() : 0.0,(string)($_POST['codes']??''),$actor,
+                        isset($_POST['quantity']) ? supplyPostedQuantity() : 0.0,(string)$rawDispatchCodes,$actor,
                         (string)($_POST['change_reason']??''),(string)($_POST['saldo_code']??''));
                 }
             } else {
@@ -135,7 +140,7 @@ function handleMaterialSupplyRoutes(string $path, string $method, ProductionServ
     } catch (Throwable $e) {
         if ($method === 'POST') {
             $reopenOnError = '';
-            if ($isWarehouse && in_array($path, ['/stock/material-supply/scan','/stock/material-supply/scan-void'], true)
+            if ($isWarehouse && in_array($path, ['/stock/material-supply/scan','/stock/material-supply/scan-void','/stock/material-supply/dispatch'], true)
                 && preg_match('/^[a-f0-9]{32}$/D', (string)($_POST['request_key']??'')) === 1) {
                 $reopenOnError = '&open=' . $_POST['request_key'];
             }
@@ -303,14 +308,41 @@ function supplyAssets(): void
     .sp-pager-btns button.active{background:#115452;color:#fff;border-color:#115452}
     .sp-pager-btns button:disabled{opacity:.4;cursor:default}
     .sp-dots{color:#94a3b8;font-weight:800}
-    @media(max-width:640px){.sp-sm{flex:1 1 100%}.sp-pager{justify-content:center}.sp-pager-sum{width:100%;text-align:center}}
+    /* casillas de carga múltiple */
+    .sp-slot-box{background:#f8fafc;border:1px solid #cbd5e1;border-radius:14px;padding:14px;margin:10px 0 14px}
+    .sp-slot-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+    .sp-slot-bar label{margin:0;font-size:13px;font-weight:800;color:#334155}
+    .sp-slot-bar input.sp-slot-count-inp{width:84px!important;padding:7px 10px!important;font-size:15px!important;font-weight:800;text-align:center}
+    .sp-slot-summary{margin-left:auto;background:#e0f2fe;color:#0369a1;padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:800}
+    .sp-slot-help{font-size:12.5px;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:8px 12px;margin-bottom:10px;line-height:1.4}
+    .sp-slot-list{display:flex;flex-direction:column;gap:8px;max-height:320px;overflow-y:auto;padding-right:4px}
+    .sp-slot-row{display:flex;align-items:center;gap:8px}
+    .sp-slot-idx{min-width:36px;height:36px;border-radius:9px;background:#e2e8f0;color:#334155;font-weight:800;font-size:13px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+    .sp-slot-row.filled .sp-slot-idx{background:#16a34a;color:#fff}
+    .sp-slot-row.dup .sp-slot-idx{background:#dc2626;color:#fff}
+    .sp-slot-row input.sp-slot-input{flex:1;padding:9px 12px!important;font-size:15px!important;font-family:monospace;font-weight:700}
+    .sp-slot-row.filled input.sp-slot-input{border-color:#22c55e;background:#f0fdf4}
+    .sp-slot-row.dup input.sp-slot-input{border-color:#ef4444;background:#fef2f2}
+    .sp-slot-tag{font-size:12px;font-weight:800;white-space:nowrap}
+    .sp-slot-row.filled .sp-slot-tag{color:#15803d}
+    .sp-slot-row.dup .sp-slot-tag{color:#b91c1c}
+    .sp-slot-rm{border:1px solid #cbd5e1;background:#fff;color:#64748b;border-radius:8px;width:36px;height:36px;font-size:14px;font-weight:800;cursor:pointer;flex-shrink:0}
+    .sp-slot-rm:hover{background:#fee2e2;color:#991b1b;border-color:#fca5a5}
+    @media(max-width:640px){.sp-sm{flex:1 1 100%}.sp-pager{justify-content:center}.sp-pager-sum{width:100%;text-align:center}.sp-slot-summary{margin-left:0;width:100%;text-align:center}}
     </style>
     <script>
     var supplyCompatibleOnly=false;
     var SP_KEYS={rolls:'roll',inks:'ink',products:'product'};
     var SP_STATE={rolls:{page:1},inks:{page:1},products:{page:1}};
     function spNorm(t){t=(t||'').toLowerCase();try{t=t.normalize('NFD').replace(/[̀-ͯ]/g,'');}catch(e){}return t;}
-    function supplyOpen(id){var d=document.getElementById(id);if(d)d.showModal();}
+    function supplyOpen(id){
+        var d=document.getElementById(id);
+        if(d){
+            d.showModal();
+            var f=d.querySelector('.sp-slot-input')||d.querySelector('input[name=code]');
+            if(f)setTimeout(function(){f.focus();},40);
+        }
+    }
     function supplyCtl(section,name){return document.getElementById('sp_'+name+'_'+section);}
     function supplyApply(section,keepPage){
         var wrap=document.getElementById('supply_catalog_'+section);if(!wrap)return;
@@ -407,8 +439,262 @@ function supplyAssets(): void
         d.showModal();
         setTimeout(function(){q.focus();},50);
     }
+    /* ---- Cargador por casillas (sin pérdida en escaneo rápido) ---- */
+    function spNormCode(v){
+        return String(v||'').replace(/['`´’‘‛]/g,'-').trim();
+    }
+    function spSplitCodes(raw){
+        var s=String(raw||'').replace(/['`´’‘‛]/g,'-');
+        s=s.replace(/([A-Za-z0-9])((?:RB|CJ|BT|TRZ)-\d)/gi,'$1 $2');
+        return s.split(/[\s,;]+/).map(function(p){return p.trim();}).filter(Boolean);
+    }
+    function spCreateSlotRow(idx,val){
+        var row=document.createElement('div');
+        row.className='sp-slot-row';
+        row.innerHTML='<span class="sp-slot-idx">#'+idx+'</span>'
+            +'<input type="text" name="codes[]" class="sp-slot-input" maxlength="240" autocomplete="off" placeholder="Escanea o escribe el código #'+idx+'">'
+            +'<span class="sp-slot-tag"></span>'
+            +'<button type="button" class="sp-slot-rm" onclick="spClearOrRemoveSlot(this)" title="Limpiar o quitar casilla">✕</button>';
+        var inp=row.querySelector('.sp-slot-input');
+        if(val)inp.value=val;
+        return row;
+    }
+    function spRefreshSlots(form){
+        if(!form)return;
+        var list=form.querySelector('.sp-slot-list');if(!list)return;
+        var rows=[].slice.call(list.querySelectorAll('.sp-slot-row'));
+        var countInp=form.querySelector('.sp-slot-count-inp');
+        if(countInp)countInp.value=rows.length;
+        var existing=[];
+        try{existing=JSON.parse(form.dataset.existing||'[]');}catch(e){}
+        var seen={};
+        existing.forEach(function(c){seen[String(c).toUpperCase()]=true;});
+        var validCodes=[],dupCount=0;
+        rows.forEach(function(row,i){
+            var badge=row.querySelector('.sp-slot-idx');if(badge)badge.textContent='#'+(i+1);
+            var inp=row.querySelector('.sp-slot-input');if(!inp)return;
+            inp.placeholder='Escanea o escribe el código #'+(i+1);
+            var tag=row.querySelector('.sp-slot-tag');
+            var v=spNormCode(inp.value);
+            if(inp.value!==v&&document.activeElement!==inp)inp.value=v;
+            row.classList.remove('filled','dup');
+            if(tag)tag.textContent='';
+            if(v!==''){
+                var up=v.toUpperCase();
+                if(seen[up]){
+                    row.classList.add('dup');
+                    if(tag)tag.textContent='⚠️ Repetido';
+                    dupCount++;
+                }else{
+                    seen[up]=true;
+                    row.classList.add('filled');
+                    if(tag)tag.textContent='✓ Listo';
+                    validCodes.push(v);
+                }
+            }
+        });
+        var sum=form.querySelector('.sp-slot-summary');
+        if(sum)sum.textContent=validCodes.length+' de '+rows.length+' casilla(s) con código'+(dupCount?' · '+dupCount+' repetido(s)':'');
+        var scanBtn=form.querySelector('.sp-scan-submit-btn');
+        if(scanBtn){
+            scanBtn.disabled=(validCodes.length===0||dupCount>0);
+            scanBtn.textContent=validCodes.length>0?('📥 Cargar todos los códigos ('+validCodes.length+')'):'📥 Cargar todos los códigos a la lista';
+        }
+        var dlg=form.closest('dialog');
+        if(dlg){
+            var dispForm=dlg.querySelector('.sp-dispatch-form');
+            if(dispForm){
+                var hiddenCodes=dispForm.querySelector('input[name="codes"]');
+                if(hiddenCodes)hiddenCodes.value=validCodes.join('\n');
+                var dispBtn=dispForm.querySelector('.sp-dispatch-submit-btn');
+                if(dispBtn){
+                    var isBox=form.dataset.isBox==='1';
+                    var reqQty=parseFloat(form.dataset.reqQty||'0')||0;
+                    var scanTotal=parseFloat(form.dataset.scanTotal||'0')||0;
+                    var ready=isBox?((scanTotal>0||validCodes.length>0)&&dupCount===0):((scanTotal+validCodes.length+0.000001>=reqQty)&&dupCount===0);
+                    dispBtn.disabled=!ready;
+                    dispBtn.textContent=validCodes.length>0
+                        ?('🚀 Cargar ('+validCodes.length+') y Traspasar a 3000 Insumos en Producción')
+                        :'Traspasar a 3000 Insumos en Producción';
+                }
+            }
+        }
+    }
+    function spDistributeInput(inp,advance){
+        var form=inp.closest('.sp-batch-scan-form');if(!form)return;
+        var list=form.querySelector('.sp-slot-list');if(!list)return;
+        var parts=spSplitCodes(inp.value);
+        var inputs=[].slice.call(list.querySelectorAll('.sp-slot-input'));
+        var idx=inputs.indexOf(inp);
+        if(parts.length===0){
+            inp.value='';
+            spRefreshSlots(form);
+            return;
+        }
+        var existing={};
+        try{(JSON.parse(form.dataset.existing||'[]')||[]).forEach(function(c){existing[String(c).toUpperCase()]=true;});}catch(e){}
+        inputs.forEach(function(other,j){
+            if(j!==idx){
+                var ov=spNormCode(other.value).toUpperCase();
+                if(ov)existing[ov]=true;
+            }
+        });
+        var uniqueParts=[];
+        parts.forEach(function(p){
+            var up=p.toUpperCase();
+            if(!existing[up]){
+                existing[up]=true;
+                uniqueParts.push(p);
+            }
+        });
+        if(uniqueParts.length===0){
+            inp.value='';
+            spRefreshSlots(form);
+            inp.focus();
+            return;
+        }
+        inp.value=uniqueParts[0];
+        var curIdx=idx;
+        for(var k=1;k<uniqueParts.length;k++){
+            curIdx++;
+            inputs=[].slice.call(list.querySelectorAll('.sp-slot-input'));
+            while(curIdx<inputs.length&&spNormCode(inputs[curIdx].value)!=='')curIdx++;
+            if(curIdx>=inputs.length){
+                var nr=spCreateSlotRow(inputs.length+1,uniqueParts[k]);
+                list.appendChild(nr);
+            }else{
+                inputs[curIdx].value=uniqueParts[k];
+            }
+        }
+        spRefreshSlots(form);
+        if(advance||uniqueParts.length>1){
+            inputs=[].slice.call(list.querySelectorAll('.sp-slot-input'));
+            var nextEmpty=null;
+            for(var m=curIdx+1;m<inputs.length;m++){
+                if(spNormCode(inputs[m].value)===''){nextEmpty=inputs[m];break;}
+            }
+            if(!nextEmpty){
+                for(var n=0;n<inputs.length;n++){
+                    if(spNormCode(inputs[n].value)===''){nextEmpty=inputs[n];break;}
+                }
+            }
+            if(!nextEmpty){
+                var extraRow=spCreateSlotRow(inputs.length+1,'');
+                list.appendChild(extraRow);
+                spRefreshSlots(form);
+                nextEmpty=extraRow.querySelector('.sp-slot-input');
+            }
+            if(nextEmpty)nextEmpty.focus();
+        }
+    }
+    function spApplySlotCount(btn){
+        var form=btn.closest('.sp-batch-scan-form');if(!form)return;
+        var list=form.querySelector('.sp-slot-list');
+        var countInp=form.querySelector('.sp-slot-count-inp');
+        var target=Math.max(1,Math.min(100,parseInt(countInp?countInp.value:'1',10)||1));
+        var rows=[].slice.call(list.querySelectorAll('.sp-slot-row'));
+        if(rows.length<target){
+            for(var i=rows.length;i<target;i++){
+                list.appendChild(spCreateSlotRow(i+1,''));
+            }
+        }else if(rows.length>target){
+            for(var j=rows.length-1;j>=0&&list.querySelectorAll('.sp-slot-row').length>target;j--){
+                var inp=rows[j].querySelector('.sp-slot-input');
+                if(!inp||spNormCode(inp.value)===''){
+                    rows[j].remove();
+                }
+            }
+        }
+        spRefreshSlots(form);
+        var firstEmpty=[].slice.call(list.querySelectorAll('.sp-slot-input')).find(function(x){return spNormCode(x.value)==='';});
+        if(firstEmpty)firstEmpty.focus();
+    }
+    function spAddSlotRow(btn){
+        var form=btn.closest('.sp-batch-scan-form');if(!form)return;
+        var list=form.querySelector('.sp-slot-list');
+        var n=list.querySelectorAll('.sp-slot-row').length+1;
+        var row=spCreateSlotRow(n,'');
+        list.appendChild(row);
+        spRefreshSlots(form);
+        var inp=row.querySelector('.sp-slot-input');if(inp)inp.focus();
+    }
+    function spCleanEmptySlots(btn){
+        var form=btn.closest('.sp-batch-scan-form');if(!form)return;
+        var list=form.querySelector('.sp-slot-list');
+        var rows=[].slice.call(list.querySelectorAll('.sp-slot-row'));
+        rows.forEach(function(r){
+            var inp=r.querySelector('.sp-slot-input');
+            if(list.querySelectorAll('.sp-slot-row').length>1&&(!inp||spNormCode(inp.value)==='')){
+                r.remove();
+            }
+        });
+        spRefreshSlots(form);
+    }
+    function spClearOrRemoveSlot(btn){
+        var form=btn.closest('.sp-batch-scan-form');if(!form)return;
+        var list=form.querySelector('.sp-slot-list');
+        var row=btn.closest('.sp-slot-row');if(!row)return;
+        var inp=row.querySelector('.sp-slot-input');
+        if(inp&&spNormCode(inp.value)!==''){
+            inp.value='';
+            spRefreshSlots(form);
+            inp.focus();
+            return;
+        }
+        if(list.querySelectorAll('.sp-slot-row').length>1){
+            row.remove();
+            spRefreshSlots(form);
+        }
+    }
+    document.addEventListener('keydown',function(e){
+        var t=e.target;
+        if(!t||!t.classList)return;
+        if(t.classList.contains('sp-slot-input')&&(e.key==='Enter'||e.keyCode===13)){
+            e.preventDefault();
+            e.stopPropagation();
+            spDistributeInput(t,true);
+        }else if(t.classList.contains('sp-slot-count-inp')&&(e.key==='Enter'||e.keyCode===13)){
+            e.preventDefault();
+            e.stopPropagation();
+            spApplySlotCount(t);
+        }
+    },true);
+    document.addEventListener('input',function(e){
+        var t=e.target;
+        if(!t||!t.classList||!t.classList.contains('sp-slot-input'))return;
+        var v=t.value.replace(/['`´’‘‛]/g,'-');
+        if(v!==t.value)t.value=v;
+        if(/[\s,;]/.test(v)||/([A-Za-z0-9])((?:RB|CJ|BT|TRZ)-\d)/i.test(v)){
+            spDistributeInput(t,true);
+        }else{
+            spRefreshSlots(t.closest('.sp-batch-scan-form'));
+        }
+    });
     document.addEventListener('DOMContentLoaded',function(){
         ['rolls','inks','products','boxes'].forEach(function(s){supplyApply(s);});
+        document.querySelectorAll('.sp-batch-scan-form').forEach(function(f){
+            spRefreshSlots(f);
+            f.addEventListener('submit',function(ev){
+                var list=f.querySelectorAll('.sp-slot-input');
+                var hasAny=false;
+                for(var i=0;i<list.length;i++){
+                    list[i].value=spNormCode(list[i].value);
+                    if(list[i].value!=='')hasAny=true;
+                }
+                if(!hasAny){ev.preventDefault();return;}
+                var btn=f.querySelector('.sp-scan-submit-btn');
+                if(btn){btn.disabled=true;btn.textContent='Cargando códigos...';}
+            });
+        });
+        document.querySelectorAll('.sp-dispatch-form').forEach(function(df){
+            df.addEventListener('submit',function(){
+                var dlg=df.closest('dialog');
+                if(dlg){
+                    var sf=dlg.querySelector('.sp-batch-scan-form');
+                    if(sf)spRefreshSlots(sf);
+                }
+            });
+        });
     });
     </script>
     <?php
@@ -783,13 +1069,46 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
         <?php else: ?>
         <p>Se solicitaron <b><?=supplyEscape($r['requested_qty'])?> <?=supplyEscape($r['unit'])?></b> desde la Bodega <?=supplyWarehouseLabel((int)$r['source_storehouse_id'])?>. Puedes enviar otra bobina compatible (otro código o metros distintos) o más unidades; en ese caso debes escribir el motivo. Al despachar se descuenta el stock de origen, se carga en la bodega 3000 Insumos en Producción y se genera el traspaso ERP.</p>
         <?php endif; ?>
-        <?php if ($isRoll): ?>
-        <form method="post" action="/stock/material-supply/scan" autocomplete="off">
+        <?php if ($isRoll):
+            $existingCodes = [];
+            foreach ($scans as $scRow) {
+                if (($scRow['state'] ?? '') === 'SCANNED' && !empty($scRow['code'])) {
+                    $existingCodes[] = strtoupper((string)$scRow['code']);
+                }
+            }
+            $defaultSlots = $isBoxReq
+                ? max(1, min(15, ($reqQty - $scanTotal) > 0.0005 ? 3 : 1))
+                : max(1, min(30, (int)ceil(max(0.0, $reqQty - $scanTotal))));
+        ?>
+        <form method="post" action="/stock/material-supply/scan" autocomplete="off" class="sp-batch-scan-form"
+            data-is-box="<?=$isBoxReq?'1':'0'?>" data-req-qty="<?=supplyEscape((string)$reqQty)?>"
+            data-scan-total="<?=supplyEscape((string)$scanTotal)?>"
+            data-existing="<?=supplyEscape(json_encode($existingCodes))?>">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
-            <label><?php if ($isBoxReq): ?>Escanea la etiqueta de trazabilidad de cada caja (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se pidieron <?=supplyEscape(supplyNum($reqQty))?>). Si se pasan de lo pedido, abajo eliges qué caja se queda con el saldo.<?php else: ?>Escanea el código de trazabilidad de la bobina (<?=supplyEscape(supplyNum($scanTotal))?> escaneadas · se solicitaron <?=supplyEscape(supplyNum($reqQty))?>)<?php endif; ?></label>
-            <input name="code" required maxlength="60" autofocus placeholder="Escanea aquí; el lector envía Enter" oninput="var v=this.value.replace(/['`´’‘‛]/g,'-');if(v!==this.value)this.value=v;">
-            <div class="supply-actions"><button class="btnblue">Registrar escaneo</button></div>
+            <label><?php if ($isBoxReq): ?>Carga por casillas de etiquetas de cajas (<?=supplyEscape(supplyNum($scanTotal))?> ya cargadas · se pidieron <?=supplyEscape(supplyNum($reqQty))?>). Si se pasan de lo pedido, abajo eliges qué caja se queda con el saldo.<?php else: ?>Carga por casillas de códigos de trazabilidad de bobina (<?=supplyEscape(supplyNum($scanTotal))?> ya cargadas · se solicitaron <?=supplyEscape(supplyNum($reqQty))?>)<?php endif; ?></label>
+            <div class="sp-slot-box">
+                <div class="sp-slot-bar">
+                    <label>Cantidad de casillas:</label>
+                    <input type="number" class="sp-slot-count-inp" min="1" max="100" value="<?=$defaultSlots?>">
+                    <button type="button" class="btngrey" onclick="spApplySlotCount(this)">Generar casillas</button>
+                    <button type="button" class="btngrey" onclick="spAddSlotRow(this)">+ Agregar casilla</button>
+                    <button type="button" class="btngrey" onclick="spCleanEmptySlots(this)">Limpiar vacías</button>
+                    <span class="sp-slot-summary">0 de <?=$defaultSlots?> casilla(s) con código</span>
+                </div>
+                <div class="sp-slot-help">💡 Escanea rápido sin esperar: cada lectura llena su casilla y pasa automáticamente a la siguiente sin recargar la página. Al finalizar, presiona el botón para cargar todos los códigos de una sola vez.</div>
+                <div class="sp-slot-list">
+                    <?php for ($slotIdx = 1; $slotIdx <= $defaultSlots; $slotIdx++): ?>
+                    <div class="sp-slot-row">
+                        <span class="sp-slot-idx">#<?=$slotIdx?></span>
+                        <input type="text" name="codes[]" class="sp-slot-input" maxlength="240" autocomplete="off" <?=$slotIdx===1?'autofocus':''?> placeholder="Escanea o escribe el código #<?=$slotIdx?>">
+                        <span class="sp-slot-tag"></span>
+                        <button type="button" class="sp-slot-rm" onclick="spClearOrRemoveSlot(this)" title="Limpiar o quitar casilla">✕</button>
+                    </div>
+                    <?php endfor; ?>
+                </div>
+            </div>
+            <div class="supply-actions"><button type="submit" class="btnblue sp-scan-submit-btn" disabled>📥 Cargar todos los códigos a la lista</button></div>
         </form>
         <?php if ($scans): ?>
         <div style="overflow:auto"><table class="supply-table"><thead><tr><th>Código</th><th>Producto</th><th><?=$isBoxReq?'Cantidad':'Metros'?></th><th>Escaneado por</th><th>Fecha</th><th>Estado</th><th></th></tr></thead><tbody>
@@ -811,10 +1130,11 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
         </tbody></table></div>
         <?php endif; ?>
         <?php else: ?><p>Este material se entrega por cantidad: no requiere escanear códigos.</p><?php endif; ?>
-        <form method="post" action="/stock/material-supply/dispatch">
+        <form method="post" action="/stock/material-supply/dispatch" class="sp-dispatch-form">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
             <input type="hidden" name="request_key" value="<?=supplyEscape($r['request_key'])?>">
             <input type="hidden" name="dispatch_key" value="<?=bin2hex(random_bytes(16))?>">
+            <input type="hidden" name="codes" value="">
             <?php if (!$isRoll): ?>
             <label>Cantidad a entregar (mínimo lo solicitado: <?=supplyEscape(supplyNum($reqQty))?>)</label>
             <input type="number" name="quantity" min="<?=supplyEscape($reqQty)?>" step="any" value="<?=supplyEscape($r['requested_qty'])?>" required oninput="var n=parseFloat(this.value),m=<?=json_encode($reqQty)?>,t=this.form.querySelector('textarea[name=change_reason]');if(t){t.required=(n!==m);}">
@@ -832,7 +1152,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
             <?php endif; ?>
             <label style="margin-top:8px">Motivo del cambio <?=$needReason?'(obligatorio: envías algo distinto a lo solicitado)':'(solo si envías otro código, otros metros o más unidades)'?></label>
             <textarea name="change_reason" rows="2" maxlength="500" style="width:100%" <?=$needReason?'required minlength="10"':''?> placeholder="Ej.: la bobina pedida no tiene stock físico; se envía una de otros metros"></textarea>
-            <div class="supply-actions"><button class="btngreen" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="'.($isBoxReq?'Faltan cajas por escanear':'Faltan bobinas por escanear').'"':''?>>Traspasar a 3000 Insumos en Producción</button></div>
+            <div class="supply-actions"><button class="btngreen sp-dispatch-submit-btn" <?=($isRoll && $scanTotal+0.000001<$reqQty)?'disabled title="'.($isBoxReq?'Faltan cajas por escanear':'Faltan bobinas por escanear').'"':''?>>Traspasar a 3000 Insumos en Producción</button></div>
         </form>
         <form method="post" action="/stock/material-supply/cancel-request" style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:10px">
             <input type="hidden" name="_csrf" value="<?=supplyEscape(csrfToken())?>">
@@ -848,7 +1168,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
         foreach ($requests as $i=>$r) {
             if ($r['request_key']===(string)$_GET['open']) {
                 echo '<script>document.addEventListener("DOMContentLoaded",function(){var d=document.getElementById("supply_dispatch_'.(int)$i.'");'
-                    .'if(d&&d.showModal){d.showModal();var f=d.querySelector("input[name=code]");if(f)f.focus();}});</script>';
+                    .'if(d&&d.showModal){d.showModal();var f=d.querySelector(".sp-slot-input")||d.querySelector("input[name=code]");if(f)f.focus();}});</script>';
             }
         }
     }

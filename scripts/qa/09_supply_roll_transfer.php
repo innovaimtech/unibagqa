@@ -110,4 +110,15 @@ $svc->resume(str_repeat('d', 32), $actor);
 $check('tras reponer stock, Reintentar completa el despacho', $stock(5, 0) === 7.0 && $stock(16, 0) === 6.0
     && (int)$trz->query("SELECT warehouse_id FROM rolls WHERE id=3")->fetchColumn() === 18);
 
+// Carga masiva por casillas (scanBatch): carga múltiples códigos de una sola vez normalizando comillas.
+$trz->exec("INSERT INTO rolls VALUES (4,'RB-4',1,1,'RECEIVED',NULL,1,119,1400),(5,'RB-5',1,1,'RECEIVED',NULL,1,119,1400)");
+$trz->exec("INSERT INTO traceability_warehouse_entries (entity_type,entity_id,warehouse_id,warehouse_name) VALUES ('ROLL',4,5,'100 (MP PLA)'),('ROLL',5,5,'100 (MP PLA)')");
+$req3 = str_repeat('e', 32);
+$trz->prepare("INSERT INTO production_supply_requests (request_key,erp_target,worker_ot_id,agenda_id,context,item_id,sku,description,
+    source_storehouse_id,requested_qty,unit,requested_by,notes,created_at,status)
+    VALUES (?,?,1,0,?,64,'TEL0064','PLA verde',5,2,'UN',?,'',?, 'ACCEPTED')")
+    ->execute([$req3, 'sqlite-test', json_encode($ctx), json_encode(['user_id' => 9, 'name' => 'Operador']), time()]);
+$batchRes = $svc->scanBatch($req3, ["RB'4", 'RB-5', ''], $actor);
+$check('scanBatch carga múltiples casillas de una sola vez', $batchRes['loaded'] === ['RB-4', 'RB-5']);
+
 exit($fail > 0 ? 1 : 0);

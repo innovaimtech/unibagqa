@@ -96,8 +96,28 @@ function mrStyles(): string
     .mr-deliv:last-child{border-bottom:0}
     .mr-deliv b{font-size:14px}
     .mr-deliv .q{font-weight:900;font-size:15px;white-space:nowrap;color:#0f766e}
+    .mr-slot-box{background:#f8fafc;border:1px solid #cbd5e1;border-radius:12px;padding:14px;margin-bottom:14px}
+    .mr-slot-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+    .mr-slot-bar label{font-size:12px;font-weight:800;color:#334155;text-transform:uppercase;letter-spacing:.04em}
+    .mr-slot-count{width:84px;height:38px;padding:0 10px;border:1px solid #cbd5e1;border-radius:9px;font-size:15px;font-weight:800;text-align:center;background:#fff}
+    .mr-slot-sum{margin-left:auto;background:#e0f2fe;color:#0369a1;padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:800}
+    .mr-slot-list{display:flex;flex-direction:column;gap:8px;max-height:360px;overflow-y:auto;padding-right:2px}
+    .mr-slot-row{display:flex;align-items:center;gap:8px}
+    .mr-slot-idx{min-width:38px;height:42px;border-radius:10px;background:#e2e8f0;color:#334155;font-weight:800;font-size:13px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+    .mr-slot-row.filled .mr-slot-idx{background:#16a34a;color:#fff}
+    .mr-slot-row.dup .mr-slot-idx{background:#dc2626;color:#fff}
+    .mr-slot-input{flex:1;min-width:0;height:44px;padding:0 14px;border:1px solid #cbd5e1;border-radius:10px;font-size:15px;font-family:monospace;font-weight:700;background:#fff}
+    .mr-slot-input:focus{outline:2px solid #5eead4;outline-offset:1px;border-color:#14b8a6}
+    .mr-slot-row.filled .mr-slot-input{border-color:#22c55e;background:#f0fdf4}
+    .mr-slot-row.dup .mr-slot-input{border-color:#ef4444;background:#fef2f2}
+    .mr-slot-tag{font-size:12px;font-weight:800;white-space:nowrap}
+    .mr-slot-row.filled .mr-slot-tag{color:#15803d}
+    .mr-slot-row.dup .mr-slot-tag{color:#b91c1c}
+    .mr-slot-rm{border:1px solid #cbd5e1;background:#fff;color:#64748b;border-radius:10px;width:40px;height:42px;font-size:14px;font-weight:800;cursor:pointer;flex-shrink:0}
+    .mr-slot-rm:hover{background:#fee2e2;color:#991b1b;border-color:#fca5a5}
     @media(max-width:820px){
       .mr-pad{padding:14px 16px}
+      .mr-slot-sum{margin-left:0;width:100%;text-align:center}
       .mr-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}
       .mr-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
       .mr-steps{grid-template-columns:1fr}
@@ -236,20 +256,93 @@ function mrAcceptCard(int $requestId, bool $mobile): string
         . '<button class="mr-btn big' . ($mobile ? ' block' : '') . '" type="submit">' . ($mobile ? 'Tomar solicitud' : 'Aceptar solicitud') . '</button></form>');
 }
 
-/** Escaneo por código de barras + cámara. Los ids se mantienen: los usa el script de cámara. */
-function mrScanCards(int $requestId, bool $mobile): string
+/** Escaneo por casillas múltiples (código de barras + cámara). Los ids se mantienen: los usa el script de cámara. */
+function mrScanCards(int $requestId, bool $mobile, float $pendingQty = 1.0): string
 {
-    $form = '<form method="post" action="/stock/material-requests/' . $requestId . '/scan">'
+    $defaultSlots = max(1, min(30, (int)ceil($pendingQty > 0 ? $pendingQty : 1)));
+    $slotsHtml = '';
+    for ($s = 1; $s <= $defaultSlots; $s++) {
+        $slotsHtml .= '<div class="mr-slot-row">'
+            . '<span class="mr-slot-idx">#' . $s . '</span>'
+            . '<input ' . ($s === 1 ? 'id="request_scan_code" autofocus ' : '') . 'name="scan_codes[]" class="mr-slot-input" type="text" value="" maxlength="240" autocomplete="off" placeholder="Escanea la etiqueta o escribe el código #' . $s . '">'
+            . '<span class="mr-slot-tag"></span>'
+            . '<button type="button" class="mr-slot-rm" title="Limpiar o quitar casilla">✕</button>'
+            . '</div>';
+    }
+    $form = '<form method="post" action="/stock/material-requests/' . $requestId . '/scan" id="mr_batch_scan_form" autocomplete="off">'
         . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
         . ($mobile ? '<input type="hidden" name="return_mode" value="mobile">' : '')
-        . '<div class="mr-form-row"><div class="mr-field"><label for="request_scan_code">Código de barras / ID de bobina</label>'
-        . '<input id="request_scan_code" name="scan_code" type="text" value="" autofocus autocomplete="off" placeholder="Escanea la etiqueta o escribe el código"></div>'
-        . '<button class="mr-btn big" type="submit">Ingresar bobina</button></div></form>'
-        // La pistola en teclado español escribe «'» en lugar de «-»: se corrige al escribir y antes de enviar.
-        . '<script>(function(){var i=document.getElementById("request_scan_code");if(!i)return;'
-        . 'function fix(){var v=i.value,n=v.replace(/[\'`´’‘‛]/g,"-");if(n!==v){var p=i.selectionStart;i.value=n;try{i.setSelectionRange(p,p);}catch(e){}}}'
-        . 'i.addEventListener("input",fix);if(i.form)i.form.addEventListener("submit",function(){fix();i.value=i.value.trim();},true);})();</script>'
-        . ($mobile ? '' : '<div class="mr-hint">Al registrar la bobina, el sistema mueve automáticamente el inventario y la trazabilidad a la <b>3000 Insumos en Producción</b> y la asigna a la OT.</div>');
+        . '<div class="mr-slot-box">'
+        . '<div class="mr-slot-bar">'
+        . '<label for="mr_slot_count">Casillas a cargar:</label>'
+        . '<input id="mr_slot_count" class="mr-slot-count" type="number" min="1" max="100" value="' . $defaultSlots . '">'
+        . '<button class="mr-btn sec" type="button" id="mr_slot_apply">Generar casillas</button>'
+        . '<button class="mr-btn sec" type="button" id="mr_slot_add">+ Agregar casilla</button>'
+        . '<button class="mr-btn sec" type="button" id="mr_slot_clean">Limpiar vacías</button>'
+        . '<span class="mr-slot-sum" id="mr_slot_sum">0 de ' . $defaultSlots . ' casilla(s) con código</span>'
+        . '</div>'
+        . '<div class="mr-hint" style="margin:0 0 10px">💡 Escanea cada bobina seguida: al leer un código pasa automáticamente a la siguiente casilla sin recargar la página. Cuando termines, presiona el botón para cargar todos los códigos y atender la solicitud de una sola vez.</div>'
+        . '<div class="mr-slot-list" id="mr_slot_list">' . $slotsHtml . '</div>'
+        . '</div>'
+        . '<button class="mr-btn big block" type="submit" id="mr_submit_all_btn" disabled>🚀 Cargar todos los códigos y atender solicitud</button></form>'
+        . '<script>(function(){'
+        . 'var form=document.getElementById("mr_batch_scan_form"),list=document.getElementById("mr_slot_list"),cntInp=document.getElementById("mr_slot_count"),sumEl=document.getElementById("mr_slot_sum"),subBtn=document.getElementById("mr_submit_all_btn");'
+        . 'if(!form||!list)return;'
+        . 'function norm(v){return String(v||"").replace(/[\'`´’‘‛]/g,"-").trim();}'
+        . 'function splitCodes(raw){var s=String(raw||"").replace(/[\'`´’‘‛]/g,"-").replace(/([A-Za-z0-9])((?:RB|CJ|BT|TRZ)-\\d)/gi,"$1 $2");return s.split(/[\\s,;]+/).map(function(p){return p.trim();}).filter(Boolean);}'
+        . 'function makeRow(idx,val){var d=document.createElement("div");d.className="mr-slot-row";d.innerHTML=\'<span class="mr-slot-idx">#\'+idx+\'</span><input name="scan_codes[]" class="mr-slot-input" type="text" value="" maxlength="240" autocomplete="off" placeholder="Escanea la etiqueta o escribe el código #\'+idx+\'"><span class="mr-slot-tag"></span><button type="button" class="mr-slot-rm" title="Limpiar o quitar casilla">✕</button>\';var inp=d.querySelector(".mr-slot-input");if(val)inp.value=val;return d;}'
+        . 'function refresh(){'
+        . 'var rows=[].slice.call(list.querySelectorAll(".mr-slot-row"));if(cntInp)cntInp.value=rows.length;'
+        . 'var seen={},valid=[],dups=0;'
+        . 'rows.forEach(function(r,i){'
+        . 'var idxEl=r.querySelector(".mr-slot-idx");if(idxEl)idxEl.textContent="#"+(i+1);'
+        . 'var inp=r.querySelector(".mr-slot-input");if(!inp)return;'
+        . 'if(i===0)inp.id="request_scan_code";else if(inp.id==="request_scan_code")inp.removeAttribute("id");'
+        . 'inp.placeholder="Escanea la etiqueta o escribe el código #"+(i+1);'
+        . 'var tag=r.querySelector(".mr-slot-tag");var v=norm(inp.value);'
+        . 'if(inp.value!==v&&document.activeElement!==inp)inp.value=v;'
+        . 'r.classList.remove("filled","dup");if(tag)tag.textContent="";'
+        . 'if(v!==""){var up=v.toUpperCase();if(seen[up]){r.classList.add("dup");if(tag)tag.textContent="⚠️ Repetido";dups++;}else{seen[up]=true;r.classList.add("filled");if(tag)tag.textContent="✓ Listo";valid.push(v);}}'
+        . '});'
+        . 'if(sumEl)sumEl.textContent=valid.length+" de "+rows.length+" casilla(s) con código"+(dups?" · "+dups+" repetido(s)":"");'
+        . 'if(subBtn){subBtn.disabled=(valid.length===0||dups>0);subBtn.textContent=valid.length>0?("🚀 Cargar "+valid.length+" código(s) y atender solicitud"):"🚀 Cargar todos los códigos y atender solicitud";}'
+        . '}'
+        . 'function distribute(inp,advance){'
+        . 'var parts=splitCodes(inp.value);var inputs=[].slice.call(list.querySelectorAll(".mr-slot-input"));var idx=inputs.indexOf(inp);'
+        . 'if(parts.length===0){inp.value="";refresh();return;}'
+        . 'var seen={};inputs.forEach(function(o,j){if(j!==idx){var ov=norm(o.value).toUpperCase();if(ov)seen[ov]=true;}});'
+        . 'var uniq=[];parts.forEach(function(p){var u=p.toUpperCase();if(!seen[u]){seen[u]=true;uniq.push(p);}});'
+        . 'if(uniq.length===0){inp.value="";refresh();inp.focus();return;}'
+        . 'inp.value=uniq[0];var cur=idx;'
+        . 'for(var k=1;k<uniq.length;k++){cur++;inputs=[].slice.call(list.querySelectorAll(".mr-slot-input"));while(cur<inputs.length&&norm(inputs[cur].value)!=="")cur++;if(cur>=inputs.length){list.appendChild(makeRow(inputs.length+1,uniq[k]));}else{inputs[cur].value=uniq[k];}}'
+        . 'refresh();'
+        . 'if(advance||uniq.length>1){'
+        . 'inputs=[].slice.call(list.querySelectorAll(".mr-slot-input"));var next=null;'
+        . 'for(var m=cur+1;m<inputs.length;m++){if(norm(inputs[m].value)===""){next=inputs[m];break;}}'
+        . 'if(!next){for(var n=0;n<inputs.length;n++){if(norm(inputs[n].value)===""){next=inputs[n];break;}}}'
+        . 'if(!next){var nr=makeRow(inputs.length+1,"");list.appendChild(nr);refresh();next=nr.querySelector(".mr-slot-input");}'
+        . 'if(next)next.focus();'
+        . '}'
+        . '}'
+        . 'window.mrAddScannedCode=function(raw){'
+        . 'var code=norm(raw);if(!code)return false;'
+        . 'var inputs=[].slice.call(list.querySelectorAll(".mr-slot-input"));'
+        . 'var target=inputs.find(function(x){return norm(x.value)==="";});'
+        . 'if(!target){var nr=makeRow(inputs.length+1,"");list.appendChild(nr);target=nr.querySelector(".mr-slot-input");}'
+        . 'target.value=code;distribute(target,true);return true;'
+        . '};'
+        . 'list.addEventListener("keydown",function(e){if(e.target&&e.target.classList.contains("mr-slot-input")&&(e.key==="Enter"||e.keyCode===13)){e.preventDefault();e.stopPropagation();distribute(e.target,true);}},true);'
+        . 'list.addEventListener("input",function(e){var t=e.target;if(!t||!t.classList.contains("mr-slot-input"))return;var v=t.value.replace(/[\'`´’‘‛]/g,"-");if(v!==t.value)t.value=v;if(/[\\s,;]/.test(v)||/([A-Za-z0-9])((?:RB|CJ|BT|TRZ)-\\d)/i.test(v)){distribute(t,true);}else{refresh();}});'
+        . 'list.addEventListener("click",function(e){var b=e.target.closest(".mr-slot-rm");if(!b)return;var r=b.closest(".mr-slot-row");if(!r)return;var inp=r.querySelector(".mr-slot-input");if(inp&&norm(inp.value)!==""){inp.value="";refresh();inp.focus();return;}if(list.querySelectorAll(".mr-slot-row").length>1){r.remove();refresh();}});'
+        . 'function applyCount(){var target=Math.max(1,Math.min(100,parseInt(cntInp?cntInp.value:"1",10)||1));var rows=[].slice.call(list.querySelectorAll(".mr-slot-row"));if(rows.length<target){for(var i=rows.length;i<target;i++)list.appendChild(makeRow(i+1,""));}else if(rows.length>target){for(var j=rows.length-1;j>=0&&list.querySelectorAll(".mr-slot-row").length>target;j--){var inp=rows[j].querySelector(".mr-slot-input");if(!inp||norm(inp.value)==="")rows[j].remove();}}refresh();var fe=[].slice.call(list.querySelectorAll(".mr-slot-input")).find(function(x){return norm(x.value)==="";});if(fe)fe.focus();}'
+        . 'var btnApply=document.getElementById("mr_slot_apply");if(btnApply)btnApply.addEventListener("click",applyCount);'
+        . 'if(cntInp)cntInp.addEventListener("keydown",function(e){if(e.key==="Enter"||e.keyCode===13){e.preventDefault();applyCount();}});'
+        . 'var btnAdd=document.getElementById("mr_slot_add");if(btnAdd)btnAdd.addEventListener("click",function(){var n=list.querySelectorAll(".mr-slot-row").length+1;var r=makeRow(n,"");list.appendChild(r);refresh();var inp=r.querySelector(".mr-slot-input");if(inp)inp.focus();});'
+        . 'var btnClean=document.getElementById("mr_slot_clean");if(btnClean)btnClean.addEventListener("click",function(){[].slice.call(list.querySelectorAll(".mr-slot-row")).forEach(function(r){var inp=r.querySelector(".mr-slot-input");if(list.querySelectorAll(".mr-slot-row").length>1&&(!inp||norm(inp.value)===""))r.remove();});refresh();});'
+        . 'form.addEventListener("submit",function(e){var inputs=[].slice.call(list.querySelectorAll(".mr-slot-input")),any=false;inputs.forEach(function(x){x.value=norm(x.value);if(x.value!=="")any=true;});if(!any){e.preventDefault();return;}if(subBtn){subBtn.disabled=true;subBtn.textContent="Procesando códigos...";}});'
+        . 'refresh();'
+        . '})();</script>'
+        . ($mobile ? '' : '<div class="mr-hint">Al cargar los códigos, el sistema mueve automáticamente el inventario y la trazabilidad de todas las bobinas a la <b>3000 Insumos en Producción</b> y las asigna a la OT.</div>');
     $cam = '<div class="mr-cam-status" id="camera_scan_status">'
         . ($mobile ? 'Abre la cámara trasera o toma una foto del código de barras.' : 'Pulsa «Abrir cámara» para usar la cámara del dispositivo. Si el navegador la bloquea en esta red, usa «Tomar foto».')
         . '</div><div class="mr-cam-btns">'
@@ -258,8 +351,8 @@ function mrScanCards(int $requestId, bool $mobile): string
         . '<button class="mr-btn sec" type="button" id="camera_scan_capture">Tomar foto</button>'
         . '<input type="file" id="camera_scan_file" accept="image/*" capture="environment" style="display:none"></div>'
         . '<div class="mr-video"><video id="camera_scan_video" playsinline muted></video></div>';
-    return mrSection('Paso 2 · Entregar la bobina', 'Escanea la etiqueta de la bobina que se entrega.', $form)
-        . mrSection('Escanear con cámara', 'Alternativa si no tienes pistola lectora.', $cam);
+    return mrSection('Paso 2 · Cargar códigos de trazabilidad por casillas', 'Define cuántas casillas necesitas, escanea todas las etiquetas seguidas y envíalas juntas con un solo botón.', $form)
+        . mrSection('Escanear con cámara', 'Alternativa si no tienes pistola lectora (cada lectura se agrega a una casilla).', $cam);
 }
 
 function mrManualCard(int $requestId, string $unit, float $pending, bool $mobile): string

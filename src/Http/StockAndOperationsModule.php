@@ -166,27 +166,61 @@ if (preg_match('#^/stock/material-requests/(\d+)/scan$#', $path, $m) === 1 && $m
     $redirectBase = $returnMode === 'mobile'
         ? '/mobile/picking/' . $requestId
         : '/stock/material-requests/' . $requestId;
-    $scanCode = trim((string)($_POST['scan_code'] ?? ''));
-    if ($scanCode === '') {
-        header('Location: ' . $redirectBase . '?error=' . rawurlencode('Debes escanear el código de barras de la bobina.'));
+    $rawInputs = [];
+    if (isset($_POST['scan_codes']) && is_array($_POST['scan_codes'])) {
+        $rawInputs = array_merge($rawInputs, $_POST['scan_codes']);
+    }
+    if (isset($_POST['scan_code']) && is_string($_POST['scan_code']) && trim($_POST['scan_code']) !== '') {
+        $rawInputs[] = $_POST['scan_code'];
+    }
+    $codes = [];
+    foreach ($rawInputs as $rawItem) {
+        $clean = str_replace(["'", '`', '´', '’', '‘', '‛'], '-', (string)$rawItem);
+        $clean = preg_replace('/([A-Za-z0-9])((?:RB|CJ|BT|TRZ)-\d)/i', '$1 $2', $clean) ?? $clean;
+        foreach (preg_split('/[\s,;]+/', trim($clean)) ?: [] as $part) {
+            $part = trim($part);
+            if ($part !== '' && !in_array($part, $codes, true)) {
+                $codes[] = $part;
+            }
+        }
+    }
+    if ($codes === []) {
+        header('Location: ' . $redirectBase . '?error=' . rawurlencode('Debes escanear o escribir al menos un código de trazabilidad en las casillas.'));
         exit;
     }
 
-    $roll = $service->getRollByScanCode($scanCode);
-    if ($roll === null) {
-        header('Location: ' . $redirectBase . '?error=' . rawurlencode('No se encontró una bobina con ese código.'));
-        exit;
-    }
-
-    $result = $service->deliverMaterialRequest($requestId, (int)$roll['id'], $currentOperatorName);
     $reqData = $service->getMaterialRequest($requestId);
     $otLabel = trim((string)($reqData['ot_code'] ?? ''));
-    $rollCode = trim((string)($roll['roll_code'] ?? ('#' . $roll['id'])));
-    $okMsg = '✅ Bobina ' . $rollCode . ($otLabel !== '' ? (' entregada a OT ' . $otLabel) : '') . ' y trasladada exitosamente a 3000 Insumos en Producción.';
-    $query = (($result['ok'] ?? false) === true)
-        ? '?ok=' . rawurlencode($okMsg)
-        : '?error=' . rawurlencode((string)reset($result['errors']));
-    header('Location: ' . $redirectBase . $query);
+    $deliveredCodes = [];
+    $errors = [];
+
+    foreach ($codes as $code) {
+        $roll = $service->getRollByScanCode($code);
+        if ($roll === null) {
+            $errors[] = $code . ': No se encontró una bobina con ese código.';
+            continue;
+        }
+        $result = $service->deliverMaterialRequest($requestId, (int)$roll['id'], $currentOperatorName);
+        if (($result['ok'] ?? false) === true) {
+            $deliveredCodes[] = trim((string)($roll['roll_code'] ?? ('#' . $roll['id'])));
+        } else {
+            $errMsg = !empty($result['errors']) ? (string)reset($result['errors']) : 'No se pudo entregar la bobina.';
+            $errors[] = $code . ': ' . $errMsg;
+        }
+    }
+
+    $params = [];
+    if ($deliveredCodes !== []) {
+        $count = count($deliveredCodes);
+        $listStr = implode(', ', $deliveredCodes);
+        $params['ok'] = $count === 1
+            ? ('✅ Bobina ' . $listStr . ($otLabel !== '' ? (' entregada a OT ' . $otLabel) : '') . ' y trasladada exitosamente a 3000 Insumos en Producción.')
+            : ('✅ ' . $count . ' bobinas (' . $listStr . ')' . ($otLabel !== '' ? (' entregadas a OT ' . $otLabel) : '') . ' y trasladadas exitosamente a 3000 Insumos en Producción.');
+    }
+    if ($errors !== []) {
+        $params['error'] = implode(' | ', $errors);
+    }
+    header('Location: ' . $redirectBase . ($params !== [] ? ('?' . http_build_query($params)) : ''));
     exit;
 }
 
@@ -234,7 +268,7 @@ if (preg_match('#^/mobile/picking/(\d+)$#', $path, $m) === 1 && $method === 'GET
     }
 
     if ($requestOperational && $pendingQty > 0 && in_array((string)$request['status'], ['ACCEPTED', 'PARTIAL'], true) && (string)($request['request_type'] ?? 'ROLL') === 'ROLL') {
-        $body .= mrScanCards($requestId, true);
+        $body .= mrScanCards($requestId, true, $pendingQty);
 
         $body .= '<script>
           (function () {
@@ -311,6 +345,12 @@ if (preg_match('#^/mobile/picking/(\d+)$#', $path, $m) === 1 && $method === 'GET
                 if (codes && codes.length > 0) {
                   var rawValue = (codes[0].rawValue || "").trim();
                   if (rawValue !== "") {
+                    if (typeof window.mrAddScannedCode === "function") {
+                      window.mrAddScannedCode(rawValue);
+                      setStatus("✓ Código agregado a casilla: " + rawValue + ". Puedes escanear otro o pulsar el botón de carga.", false);
+                      scanTimer = window.setTimeout(scanLoop, 1200);
+                      return;
+                    }
                     input.value = rawValue;
                     isSubmitting = true;
                     setStatus("Código detectado. Ingresando bobina...", false);
@@ -340,6 +380,11 @@ if (preg_match('#^/mobile/picking/(\d+)$#', $path, $m) === 1 && $method === 'GET
                 if (codes && codes.length > 0) {
                   var rawValue = (codes[0].rawValue || "").trim();
                   if (rawValue !== "") {
+                    if (typeof window.mrAddScannedCode === "function") {
+                      window.mrAddScannedCode(rawValue);
+                      setStatus("✓ Código detectado desde la foto y agregado a casilla: " + rawValue, false);
+                      return;
+                    }
                     input.value = rawValue;
                     isSubmitting = true;
                     setStatus("Código detectado desde la foto. Ingresando bobina...", false);
@@ -452,7 +497,7 @@ if (preg_match('#^/stock/material-requests/(\d+)$#', $path, $m) === 1 && $method
     }
 
     if ($requestOperational && $pendingQty > 0 && in_array((string)$request['status'], ['ACCEPTED', 'PARTIAL'], true) && (string)($request['request_type'] ?? 'ROLL') === 'ROLL') {
-        $body .= mrScanCards($requestId, false);
+        $body .= mrScanCards($requestId, false, $pendingQty);
 
         $body .= '<script>
           (function () {
@@ -529,6 +574,12 @@ if (preg_match('#^/stock/material-requests/(\d+)$#', $path, $m) === 1 && $method
                 if (codes && codes.length > 0) {
                   var rawValue = (codes[0].rawValue || "").trim();
                   if (rawValue !== "") {
+                    if (typeof window.mrAddScannedCode === "function") {
+                      window.mrAddScannedCode(rawValue);
+                      setStatus("✓ Código agregado a casilla: " + rawValue + ". Puedes escanear otro o pulsar el botón de carga.", false);
+                      scanTimer = window.setTimeout(scanLoop, 1200);
+                      return;
+                    }
                     input.value = rawValue;
                     isSubmitting = true;
                     setStatus("Código detectado. Ingresando bobina...", false);
@@ -558,6 +609,11 @@ if (preg_match('#^/stock/material-requests/(\d+)$#', $path, $m) === 1 && $method
                 if (codes && codes.length > 0) {
                   var rawValue = (codes[0].rawValue || "").trim();
                   if (rawValue !== "") {
+                    if (typeof window.mrAddScannedCode === "function") {
+                      window.mrAddScannedCode(rawValue);
+                      setStatus("✓ Código detectado desde la foto y agregado a casilla: " + rawValue, false);
+                      return;
+                    }
                     input.value = rawValue;
                     isSubmitting = true;
                     setStatus("Código detectado desde la foto. Ingresando bobina...", false);
