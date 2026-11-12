@@ -54,6 +54,7 @@
     printTuning: "unibag_hw_print_tuning",
     lastPrintLanguage: "unibag_hw_last_print_language",
     printerType: "unibag_hw_printer_type",
+    printerIp: "unibag_hw_printer_ip",
     bridgeLastOnline: "unibag_hw_bridge_last_online"
   };
 
@@ -88,6 +89,37 @@
     } catch (_) {}
   }
   syncClientPrinterLanguageCookie();
+
+  // Impresora de red de ESTE computador (IP:9100): el servidor web le envía las etiquetas directo.
+  function syncClientPrinterIpCookie() {
+    try {
+      var ip = String(lsGet(LS_KEYS.printerIp, "") || "").trim();
+      document.cookie = ip
+        ? "unibag_print_ip=" + encodeURIComponent(ip) + "; path=/; max-age=31536000; SameSite=Lax"
+        : "unibag_print_ip=; path=/; max-age=0; SameSite=Lax";
+    } catch (_) {}
+  }
+  syncClientPrinterIpCookie();
+
+  async function postNetworkPrint(fields) {
+    var fd = new FormData();
+    fd.append("_csrf", CFG.csrf || "");
+    Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
+    var res = await ORIGINAL_FETCH("/api/print/network", { method: "POST", body: fd, credentials: "same-origin" });
+    var data = await res.json().catch(function () { return null; });
+    return data || { ok: false, error: "Respuesta inválida del servidor (HTTP " + res.status + ")." };
+  }
+
+  async function printViaNetwork(job) {
+    var ip = String(lsGet(LS_KEYS.printerIp, "") || "").trim();
+    try {
+      var data = await postNetworkPrint({ printer_ip: ip, content: job.content, language: job.language || CFG.printLanguage || "epl", copies: Math.max(1, parseInt(job.copies || 1, 10) || 1), job_id: job.job_id || "" });
+      if (data.ok) return { ok: true, transport: "network", printer: "Impresora en red " + (data.printer || ip) };
+      return { ok: false, ambiguous: !!data.ambiguous, error: data.error || "No se pudo imprimir en la impresora de red." };
+    } catch (err) {
+      return { ok: false, ambiguous: false, error: "No se pudo contactar al servidor para imprimir en red: " + (err && err.message ? err.message : err) };
+    }
+  }
 
   function sleep(ms) {
     return new Promise(function (resolve) {
@@ -1535,6 +1567,22 @@
       return { ok: false, ambiguous: true, error: msg };
     }
 
+    // 0. Impresora en red elegida en esta PC: el servidor web la imprime directo por IP (sin programas en el PC).
+    if (String(lsGet(LS_KEYS.printerIp, "") || "").trim() !== "") {
+      var netRes = await printViaNetwork(job);
+      if (netRes.ok) {
+        notifyPrintSuccess(job, netRes, opts);
+        return netRes;
+      }
+      if (netRes.ambiguous) return stopAmbiguous(netRes);
+      printerState.lastError = netRes.error;
+      updatePagePrintBanner(false, netRes.error);
+      if (!opts.silentFallback) {
+        showInteractivePrintFallbackToast(job, opts.fallbackUrl || "", netRes.error);
+      }
+      return { ok: false, error: netRes.error };
+    }
+
     await refreshPrinterLink();
 
     // 1. Si el usuario configuró explícitamente WebUSB o WebSerial primero
@@ -2217,6 +2265,37 @@
       selPrinterType.onchange = function () {
         lsSet(LS_KEYS.printerType, selPrinterType.value);
         syncClientPrinterLanguageCookie();
+
+  // Impresora de red de ESTE computador (IP:9100): el servidor web le envía las etiquetas directo.
+  function syncClientPrinterIpCookie() {
+    try {
+      var ip = String(lsGet(LS_KEYS.printerIp, "") || "").trim();
+      document.cookie = ip
+        ? "unibag_print_ip=" + encodeURIComponent(ip) + "; path=/; max-age=31536000; SameSite=Lax"
+        : "unibag_print_ip=; path=/; max-age=0; SameSite=Lax";
+    } catch (_) {}
+  }
+  syncClientPrinterIpCookie();
+
+  async function postNetworkPrint(fields) {
+    var fd = new FormData();
+    fd.append("_csrf", CFG.csrf || "");
+    Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
+    var res = await ORIGINAL_FETCH("/api/print/network", { method: "POST", body: fd, credentials: "same-origin" });
+    var data = await res.json().catch(function () { return null; });
+    return data || { ok: false, error: "Respuesta inválida del servidor (HTTP " + res.status + ")." };
+  }
+
+  async function printViaNetwork(job) {
+    var ip = String(lsGet(LS_KEYS.printerIp, "") || "").trim();
+    try {
+      var data = await postNetworkPrint({ printer_ip: ip, content: job.content, language: job.language || CFG.printLanguage || "epl", copies: Math.max(1, parseInt(job.copies || 1, 10) || 1), job_id: job.job_id || "" });
+      if (data.ok) return { ok: true, transport: "network", printer: "Impresora en red " + (data.printer || ip) };
+      return { ok: false, ambiguous: !!data.ambiguous, error: data.error || "No se pudo imprimir en la impresora de red." };
+    } catch (err) {
+      return { ok: false, ambiguous: false, error: "No se pudo contactar al servidor para imprimir en red: " + (err && err.message ? err.message : err) };
+    }
+  }
         showToast("🖨️ Las etiquetas de esta PC se armarán para " + selPrinterType.options[selPrinterType.selectedIndex].text + ".", "ok", 3500);
         selPrinterType.blur();
         refreshModalContents();

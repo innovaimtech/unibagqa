@@ -20,7 +20,11 @@ param(
   [string]$Listen = 'http://localhost:8767/',
   [string]$DefaultPrinter = '',
   # Por defecto NO se usan impresoras compartidas desde otro computador (\\PC\Impresora).
-  [switch]$AllowNetworkPrinters
+  [switch]$AllowNetworkPrinters,
+  # Recibir etiquetas de otros computadores por la red (puerto 9100) e imprimirlas en la impresora de este PC.
+  [switch]$ShareOnNetwork,
+  [int]$SharePort = 9100,
+  [string]$SharePrinter = ''
 )
 
 Set-StrictMode -Version Latest
@@ -310,6 +314,74 @@ try {
 # Registro de trabajos ya procesados (job_id -> impresora) para evitar duplicados.
 $script:processedJobs = @{}
 
+# ------------------------------------------------------------------------------------------------------------------
+# Compartir la impresora de ESTE computador por la red (puerto 9100, como una impresora de red).
+# Se activa creando print\compartir_en_red.txt (lo hace compartir_impresora_en_red.bat). Dentro del archivo puede ir
+# el nombre exacto de la impresora; vacío = la térmica conectada a este PC. Los demás computadores imprimen aquí
+# escribiendo la IP de este PC en Hardware → «Impresora en red».
+# ------------------------------------------------------------------------------------------------------------------
+$script:shareInfo = @{ enabled = $false; port = $SharePort; printer = ''; error = '' }
+$shareFlag = Join-Path $PSScriptRoot 'compartir_en_red.txt'
+if ($ShareOnNetwork -or (Test-Path $shareFlag)) {
+  $sharePrinterName = $SharePrinter
+  if ([string]::IsNullOrWhiteSpace($sharePrinterName) -and (Test-Path $shareFlag)) {
+    $sharePrinterName = ((Get-Content $shareFlag -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1) -as [string])
+    if ($null -eq $sharePrinterName) { $sharePrinterName = '' }
+    $sharePrinterName = $sharePrinterName.Trim()
+  }
+  $resolvedShare = if ([string]::IsNullOrWhiteSpace($sharePrinterName)) {
+    @(Get-InstalledWindowsPrinters | Where-Object { Test-IsThermalPrinterName $_ }) | Select-Object -First 1
+  } else {
+    Resolve-ThermalPrinterName -requested $sharePrinterName -lang ''
+  }
+  if ([string]::IsNullOrWhiteSpace([string]$resolvedShare)) {
+    $script:shareInfo.error = 'No hay impresora termica en este computador para compartir.'
+    Write-Host ("[RED] " + $script:shareInfo.error) -ForegroundColor Red
+  } else {
+    $shareWorker = {
+      param($tcp, $printerName)
+      while ($true) {
+        $client = $tcp.AcceptTcpClient()
+        try {
+          $client.ReceiveTimeout = 5000
+          $stream = $client.GetStream()
+          $ms = New-Object System.IO.MemoryStream
+          $buf = New-Object byte[] 8192
+          while ($true) {
+            $n = 0
+            try { $n = $stream.Read($buf, 0, $buf.Length) } catch { break }
+            if ($n -le 0) { break }
+            $ms.Write($buf, 0, $n)
+            if ($ms.Length -gt 20MB) { break }
+          }
+          if ($ms.Length -gt 0) {
+            [RawPrinterHelper]::SendBytesToPrinter($printerName, $ms.ToArray(), 'UNIBAG_LABEL_RED')
+          }
+        } catch {
+        } finally {
+          $client.Close()
+        }
+      }
+    }
+    try {
+      $shareTcp = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $SharePort)
+      $shareTcp.Start()
+      $shareRs = [runspacefactory]::CreateRunspace()
+      $shareRs.Open()
+      $sharePs = [powershell]::Create()
+      $sharePs.Runspace = $shareRs
+      [void]$sharePs.AddScript($shareWorker).AddArgument($shareTcp).AddArgument([string]$resolvedShare)
+      [void]$sharePs.BeginInvoke()
+      $script:shareInfo.enabled = $true
+      $script:shareInfo.printer = [string]$resolvedShare
+      Write-Host ("[RED] Impresora '{0}' compartida en la red: puerto {1} de este computador ({2})." -f $resolvedShare, $SharePort, $env:COMPUTERNAME) -ForegroundColor Green
+    } catch {
+      $script:shareInfo.error = $_.Exception.Message
+      Write-Host ("[RED] No se pudo abrir el puerto {0}: {1}" -f $SharePort, $_.Exception.Message) -ForegroundColor Red
+    }
+  }
+}
+
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add($Listen)
 if ($Listen.Contains('localhost:')) {
@@ -357,6 +429,7 @@ try {
         computer = $env:COMPUTERNAME
         local_only = (-not $AllowNetworkPrinters)
         supports_tcp = $true
+        network_share = $script:shareInfo
         default_printer = $defPrinter
       }
       $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)

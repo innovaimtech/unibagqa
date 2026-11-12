@@ -248,8 +248,63 @@ final class PrintService
      *
      * @return array{host: string, port: int}|null
      */
+    /**
+     * Impresora de red elegida en ESTE computador (panel Hardware → «Impresora en red», cookie `unibag_print_ip`).
+     * Solo IPs de red local (10.x, 172.16-31.x, 192.168.x) y puertos de impresora (9100-9109, 6101): el servidor nunca
+     * se conecta a otra dirección aunque la cookie se manipule.
+     *
+     * @return array{host: string, port: int}|null
+     */
+    public static function parseNetworkPrinter(string $value): ?array
+    {
+        if (preg_match('/^\s*(?:tcp:\/\/)?(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?\s*$/', $value, $m) !== 1) {
+            return null;
+        }
+        $ip = $m[1];
+        $port = isset($m[2]) && $m[2] !== '' ? (int)$m[2] : 9100;
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE) !== false) {
+            return null; // no es IPv4 privada
+        }
+        if (!(($port >= 9100 && $port <= 9109) || $port === 6101)) {
+            return null;
+        }
+        return ['host' => $ip, 'port' => $port];
+    }
+
+    public static function clientNetworkPrinter(): ?array
+    {
+        return self::parseNetworkPrinter((string)($_COOKIE['unibag_print_ip'] ?? ''));
+    }
+
+    /**
+     * Envía la etiqueta RAW a una impresora de red (puerto 9100) desde el servidor web.
+     * Funciona cuando el servidor está en la misma red que la impresora (sistema abierto en la red local).
+     *
+     * @param array{host: string, port: int} $target
+     * @return array{ok: bool, error: ?string, ambiguous?: bool, printer: string}
+     */
+    public function sendNetworkRaw(array $target, string $content, int $copies = 1): array
+    {
+        $name = $target['host'] . ':' . $target['port'];
+        $fp = @stream_socket_client('tcp://' . $name, $errno, $errstr, 3.0);
+        if (!is_resource($fp)) {
+            return ['ok' => false, 'printer' => $name, 'error' => 'El servidor no logra conectarse con la impresora ' . $name
+                . ' (' . trim((string)$errstr) . '). Revisa que esté encendida y en la red, y que el sistema esté abierto desde la red de la planta.'];
+        }
+        stream_set_timeout($fp, 15);
+        $ok = $this->writeAll($fp, str_repeat($content, max(1, $copies)));
+        @fclose($fp);
+        return $ok
+            ? ['ok' => true, 'printer' => $name, 'error' => null]
+            : ['ok' => false, 'printer' => $name, 'ambiguous' => true, 'error' => 'El envío a ' . $name . ' se cortó a mitad: revisa qué etiquetas salieron antes de reimprimir.'];
+    }
+
     private function getConfiguredTcpEndpoint(): ?array
     {
+        $clientNet = self::clientNetworkPrinter();
+        if ($clientNet !== null && empty($this->env['PRINT_IGNORE_CLIENT_LANGUAGE'])) {
+            return $clientNet;
+        }
         $profile = $this->getPrintProfile();
         $host = '';
         $port = (int)($this->env['PRINT_TCP_PORT'] ?? 9100);
