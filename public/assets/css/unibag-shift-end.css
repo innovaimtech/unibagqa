@@ -1,0 +1,76 @@
+/* Final del turno · Producción */
+.se-shell{--se-ink:#0f172a;--se-muted:#64748b;--se-line:#e2e8f0;--se-brand:#0f766e;max-width:1920px;margin:0 auto;padding:4px 0;color:var(--se-ink);font-size:14px}
+.se-shell *{box-sizing:border-box}
+.se-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:14px}
+.se-title{font-size:23px;font-weight:800;letter-spacing:-.02em}
+.se-stamp{font-size:12.5px;color:var(--se-muted);font-weight:600;margin-top:2px}
+.se-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0}
+.se-actions input[type=date]{min-height:38px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:9px;font:inherit;background:#fff;color:var(--se-ink)}
+.se-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:38px;padding:0 14px;border:1px solid transparent;border-radius:9px;background:var(--se-brand);color:#fff!important;font:inherit;font-weight:700;text-decoration:none;white-space:nowrap;cursor:pointer}
+.se-btn.sec{background:#fff;border-color:#cbd5e1;color:#334155!important}
+.se-btn.sec:hover{background:#f1f5f9}
+.se-alert{padding:12px 16px;border-radius:10px;margin-bottom:12px;font-weight:700;background:#fee2e2;color:#991b1b}
+.se-alert.warn{background:#fef3c7;color:#92400e}
+.se-empty{padding:28px;text-align:center;background:#fff;border:1px dashed #cbd5e1;border-radius:14px;color:var(--se-muted);font-weight:700;margin-top:10px}
+.se-kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin-bottom:14px}
+.se-kpi{padding:14px;background:#fff;border:1px solid var(--se-line);border-radius:14px;min-width:0}
+.se-kpi.total{background:#f0fdfa;border-color:#99f6e4}
+.se-kpi span{display:block;font-size:12px;font-weight:700;color:var(--se-muted)}
+.se-kpi b{display:block;font-size:22px;font-weight:800;font-variant-numeric:tabular-nums}
+.se-kpi small{display:block;font-size:11.5px;color:var(--se-muted)}
+.se-card{background:#fff;border:1px solid var(--se-line);border-radius:14px;padding:14px;margin-bottom:12px;min-width:0}
+.se-tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.se-table-wrap{overflow-x:auto;border:1px solid var(--se-line);border-radius:10px}
+.se-table{width:100%;border-collapse:collapse;font-size:13px}
+.se-table th{background:#f8fafc;text-align:left;font-size:12px;color:#475569;font-weight:800;padding:9px 10px;border-bottom:1px solid var(--se-line);white-space:nowrap}
+.se-table td{padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+.se-table .n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.se-table .strong{font-weight:800}
+.se-table tfoot td{font-weight:800;background:#f8fafc;border-top:2px solid var(--se-line)}
+.se-row:hover>td{background:#f8fafc}
+.se-plus{width:30px;height:30px;border-radius:8px;border:1px solid #99f6e4;background:#f0fdfa;color:var(--se-brand);font-size:18px;font-weight:800;line-height:1;cursor:pointer}
+.se-plus[aria-expanded=true]{background:var(--se-brand);color:#fff;border-color:var(--se-brand)}
+.se-detail>td{background:#f8fafc;padding:12px}
+.se-detail-box{display:flex;flex-direction:column;gap:6px}
+.se-sub{font-weight:800;font-size:13px;margin-top:6px}
+.se-table.inner{background:#fff;font-size:12.5px}
+.se-table.inner tr.semi td{color:var(--se-muted)}
+.se-table .obs{max-width:360px;color:#475569}
+.se-muted{color:var(--se-muted);font-size:12.5px}
+.se-tag{display:inline-block;padding:2px 7px;border-radius:99px;font-size:11px;font-weight:800;white-space:nowrap}
+.se-tag.open{background:#fef3c7;color:#92400e}
+.se-tag.bad{background:#fee2e2;color:#991b1b}
+.se-tag.semi{background:#e0e7ff;color:#3730a3}
+.se-foot{font-size:12px;color:var(--se-muted);margin-top:6px}
+@media (max-width:700px){.se-title{font-size:19px}.se-kpi b{font-size:19px}.se-detail>td{padding:8px}}
+/* Final del turno · Bodega (formato informe) */
+.se-doc{background:#fff;border:1px solid var(--se-line);border-radius:14px;padding:22px 24px;margin-bottom:14px}
+.se-doc-head{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;border-bottom:3px solid var(--se-brand);padding-bottom:12px;margin-bottom:16px}
+.se-doc-co{font-size:12px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--se-brand)}
+.se-doc-head h1{font-size:22px;margin:2px 0 4px;font-weight:800;letter-spacing:-.01em}
+.se-doc-date{font-size:13px;color:#334155}
+.se-doc-meta{font-size:12px;color:var(--se-muted);text-align:right;line-height:1.5}
+.se-sec{margin:0 0 20px}
+.se-sec h2{font-size:16px;font-weight:800;margin:0 0 10px;padding:7px 10px;background:#f0fdfa;border-left:4px solid var(--se-brand);border-radius:4px}
+.se-sec h3{font-size:13.5px;font-weight:800;margin:14px 0 8px;color:#334155}
+.se-none{padding:12px 14px;border:1px dashed #cbd5e1;border-radius:10px;color:var(--se-muted);font-size:13px}
+.se-small{font-size:11.5px;color:var(--se-muted);margin-top:2px}
+.se-table.doc td{vertical-align:top}
+.se-table tr.se-group td{background:#f8fafc;border-top:1px solid var(--se-line)}
+.se-table tr.se-item td{font-size:12px;color:#475569;padding-top:4px;padding-bottom:4px}
+.se-sign{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:60px;margin-top:46px;padding:0 30px}
+.se-sign div{text-align:center;font-size:12.5px;color:#334155;font-weight:700}
+.se-sign span{display:block;border-top:1px solid #334155;margin-bottom:6px}
+@media (max-width:700px){.se-doc{padding:14px}.se-doc-meta{text-align:left}.se-sign{gap:24px;padding:0}}
+@media print{
+  .topbar,.subbar,.se-noprint{display:none!important}
+  body{background:#fff!important}
+  .se-doc{border:0;padding:0;border-radius:0}
+  .se-table-wrap{overflow:visible;border:0}
+  .se-table{font-size:10.5px}
+  .se-table th,.se-table td{padding:4px 6px}
+  .se-sec{break-inside:auto}
+  .se-sec h2{break-after:avoid}
+  .se-table tr{break-inside:avoid}
+  .se-kpi{border:1px solid #cbd5e1}
+}

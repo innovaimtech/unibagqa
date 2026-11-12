@@ -60,6 +60,8 @@
             || str_starts_with($currentPath, '/cliches')
         ) {
             $activeModule = 'warehouses';
+        } elseif (str_starts_with($currentPath, '/turno')) {
+            $activeModule = 'shiftend';
         } elseif (str_starts_with($currentPath, '/reports')) {
             $activeModule = 'reports';
         } elseif (str_starts_with($currentPath, '/bonificaciones')) {
@@ -93,6 +95,7 @@
         echo $link('/stock', 'Bodega', $activeModule === 'warehouses');
         echo $link('/reports/inventory', 'Inventario', $activeModule === 'inventory');
         echo $link('/trazabilidad', 'Trazabilidad', $activeModule === 'traceability');
+        echo $link('/turno/produccion', 'Final del turno', $activeModule === 'shiftend');
     } elseif ($displayArea === 'RECEPTION') {
         echo $link('/purchase-orders?status=active&supplier_type=NATIONAL', 'Recepción', $activeModule === 'reception');
         echo $link('/stock', 'Bodega', $activeModule === 'warehouses');
@@ -208,6 +211,9 @@
         echo '<a class="subitem' . ($trzStage === 'produccion' ? ' active' : '') . '" href="/trazabilidad?stage=produccion"><span>⚙️ En Producción</span></a>';
         echo '<a class="subitem' . ($trzStage === 'despacho_pendiente' ? ' active' : '') . '" href="/trazabilidad?stage=despacho_pendiente"><span>🚚 Pendiente Despacho</span></a>';
         echo '<a class="subitem' . ($trzStage === 'entregado' ? ' active' : '') . '" href="/trazabilidad?stage=entregado"><span>✅ Finalizadas</span></a>';
+    } elseif ($activeModule === 'shiftend') {
+        echo '<a class="subitem' . (str_starts_with($currentPath, '/turno/produccion') ? ' active' : '') . '" href="/turno/produccion"><span>🏭 Producción</span></a>';
+        echo '<a class="subitem' . (str_starts_with($currentPath, '/turno/bodega') ? ' active' : '') . '" href="/turno/bodega"><span>📦 Bodega</span></a>';
     } elseif ($activeModule === 'scale') {
         echo '<a class="subitem" href="/scale/sealing-waste"><span>Merma Selladora</span></a>';
     } elseif ($activeModule === 'production') {
