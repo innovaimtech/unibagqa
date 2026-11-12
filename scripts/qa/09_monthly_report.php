@@ -211,7 +211,7 @@ PY;
 " . $raw . "
 ";
         }
-        checkMr('stock por cliente: serie al cierre del mes y serie al día de descarga', ($json['cli'] ?? [])
+        checkMr('stock por cliente: dos gráficos en la misma lámina (cierre del mes y día de descarga)',($json['cli'] ?? [])
             === [['Al cierre del mes (25-10-2026)', [1500.0, 300.0, 50.0]], ['Al día de descarga (11-11-2026)', [1200.0, 350.0, 40.0]]], json_encode($json['cli'] ?? null, JSON_UNESCAPED_UNICODE));
         checkMr('rotación: con movimiento 1.850 (400/1000/700) y sin rotación 110.405 (bodega 5000)', ($json['rot_chart'][0] ?? []) === [1850.0, 110405.0]
             && str_contains(implode(' ', (array)($json['rot'] ?? [])), 'Stock total considerado: 112.255'), json_encode([$json['rot'] ?? null, $json['rot_chart'] ?? null], JSON_UNESCAPED_UNICODE));

@@ -227,6 +227,34 @@ def replace_chart(chart, categories, series):
         pass
 
 
+def clone_chart_frame(slide, frame):
+    """Copia un gráfico de la diapositiva (mismo formato) con su propia parte de gráfico, para rellenarlo aparte."""
+    from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+    from pptx.oxml.ns import qn
+    from pptx.parts.chart import ChartPart
+    seed = CategoryChartData()
+    seed.categories = ['x']
+    seed.add_series('x', [1])
+    part = ChartPart.new(XL_CHART_TYPE.BAR_CLUSTERED, seed, slide.part.package)
+    xlsx_rid = part._element.xlsx_part_rId
+    el = copy.deepcopy(frame.chart_part._element)
+    ext = el.find(qn('c:externalData'))
+    if ext is not None and xlsx_rid:
+        ext.set(qn('r:id'), xlsx_rid)
+    elif ext is not None:
+        el.remove(ext)
+    part._element = el
+    rid = slide.part.relate_to(part, RT.CHART)
+    gf = copy.deepcopy(frame._element)
+    gf.xpath('.//c:chart')[0].set(qn('r:id'), rid)
+    ids = [int(x) for x in slide.shapes._spTree.xpath('//p:cNvPr/@id')]
+    c_nv = gf.xpath('./p:nvGraphicFramePr/p:cNvPr')[0]
+    c_nv.set('id', str(max(ids) + 1))
+    c_nv.set('name', frame.name + ' (día de descarga)')
+    frame._element.addnext(gf)
+    return [sh for sh in slide.shapes if sh._element is gf][0]
+
+
 def style_new_chart(chart, colors, title, number_format, legend=True, font_size=9):
     chart.has_title = True
     chart.chart_title.text_frame.text = title
@@ -530,44 +558,55 @@ class Builder:
             ])
 
     def bod_clientes(self, slide):
-        # Dos series: stock al cierre del mes y stock al día en que se descarga el archivo (mismo orden de clientes).
-        # Si el mes aún no termina, el cierre todavía no existe y se muestra solo el stock de hoy.
+        # Dos gráficos en la misma diapositiva: a la izquierda el stock al cierre del mes y a la derecha el stock
+        # al día en que se descarga el archivo (cada uno con sus 13 clientes mayores + Varios).
+        # Si el mes aún no termina, el cierre todavía no existe y queda un solo gráfico (stock de hoy).
         fg = self.data.get('finished_goods') or {}
-        by = list((fg.get('by_customer') or {}).items())
-        top = by[:13]
-        rest = sum(v for _, v in by[13:])
-        if rest > 0:
-            top.append(('Varios', rest))
         end_date = self.data.get('stock_date', '')
         today = self.data.get('stock_today') or {}
         two = bool(today.get('by_customer')) and bool(self.data.get('month_closed', True)) and today.get('date') != end_date
-        series = [(f"Al cierre del mes ({end_date})", [v for _, v in top])]
-        if two:
-            tb = today.get('by_customer') or {}
-            names = [k for k, _ in top if k != 'Varios']
-            vals = [float(tb.get(k) or 0) for k in names]
-            if rest > 0:
-                vals.append(max(0.0, float(today.get('total') or sum(tb.values())) - sum(vals)))
-            series.append((f"Al día de descarga ({today.get('date', '')})", vals))
         charts = shapes_of(slide, 'chart')
-        if self.need(charts, 'stock por cliente: gráfico') and top:
-            chart = charts[0].chart
-            replace_chart(chart, [k for k, _ in top], series)
+        if not self.need(charts, 'stock por cliente: gráfico'):
+            return
+        frame = charts[0]
+        panels = [(frame, fg.get('by_customer') or {}, f"Al cierre del mes ({end_date})", TEAL)]
+        if two:
+            gap = Emu(182880)
+            half = int((frame.width - gap) / 2)
+            right = clone_chart_frame(slide, frame)
+            frame.width = half
+            right.left = frame.left + half + gap
+            right.width = half
+            panels.append((right, today.get('by_customer') or {}, f"Al día de descarga ({today.get('date', '')})", ORANGE))
+        for shape, by_customer, title, color in panels:
+            by = sorted(((k, float(v or 0)) for k, v in by_customer.items()), key=lambda kv: -kv[1])
+            top = by[:13]
+            rest = sum(v for _, v in by[13:])
+            if rest > 0:
+                top.append(('Varios', rest))
+            if not top:
+                continue
+            chart = shape.chart
+            replace_chart(chart, [k for k, _ in top], [(title, [v for _, v in top])])
+            # Margen a la derecha para que la etiqueta de la barra más larga no se monte sobre ella.
+            try:
+                chart.value_axis.maximum_scale = max(v for _, v in top) * 1.3
+            except Exception:
+                pass
             plot = chart.plots[0]
-            for i, ser in enumerate(plot.series):
+            for ser in plot.series:
                 ser.format.fill.solid()
-                ser.format.fill.fore_color.rgb = TEAL if i == 0 else ORANGE
+                ser.format.fill.fore_color.rgb = color
             if two:
-                plot.gap_width = 60
-                plot.overlap = 0
-                chart.has_legend = True
-                chart.legend.position = XL_LEGEND_POSITION.BOTTOM
-                chart.legend.include_in_layout = False
-                chart.legend.font.size = Pt(9)
-            if chart.has_title:
-                title = (f"Stock consolidado por cliente (cierre {end_date} y día de descarga {today.get('date', '')})" if two
-                         else f"Stock consolidado por cliente (al {end_date})")
-                set_text(chart.chart_title, title)
+                chart.font.size = Pt(8)
+                if plot.has_data_labels:
+                    plot.data_labels.font.size = Pt(8)
+            chart.has_title = True
+            chart.chart_title.text_frame.text = title + f" · Total {fmt_int(sum(v for _, v in by))}"
+            for run in chart.chart_title.text_frame.paragraphs[0].runs:
+                run.font.size = Pt(11)
+                run.font.bold = True
+                run.font.color.rgb = TEXT
 
     def bod_rotacion(self, slide):
         # Como se publicó en septiembre: con movimiento = bodegas 400, 1000 y 700; sin rotación = bodega 5000
