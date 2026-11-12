@@ -42,3 +42,10 @@ SCALE_MODE=http
 SCALE_HTTP_URL=http://localhost:8765/weight
 ```
 
+
+## Puerto automático (`-ComPort AUTO`, el que usa `iniciar_proyecto.bat`)
+- Prueba cada puerto COM de **este** computador (primero los adaptadores USB-serie CH340/Prolific/FTDI/CP210; omite Bluetooth)
+  y se queda con el que envía una trama de peso válida. Antes abría siempre el primero (normalmente COM1) y no probaba los demás.
+- Si el cable se desconecta, o el puerto pasa 10 lecturas sin datos, vuelve a buscar (como máximo cada 5 s).
+- Diagnóstico: `http://localhost:8765/ports` (puertos con su nombre de Windows, puerto activo y resultado de la última búsqueda).
+- Un puerto COM lo puede usar un solo programa a la vez: si la balanza está vinculada en el navegador (Web Serial), el puente no puede abrirla, y al revés.

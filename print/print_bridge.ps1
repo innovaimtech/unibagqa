@@ -18,7 +18,9 @@
 #>
 param(
   [string]$Listen = 'http://localhost:8767/',
-  [string]$DefaultPrinter = ''
+  [string]$DefaultPrinter = '',
+  # Por defecto NO se usan impresoras compartidas desde otro computador (\\PC\Impresora).
+  [switch]$AllowNetworkPrinters
 )
 
 Set-StrictMode -Version Latest
@@ -105,7 +107,27 @@ public class RawPrinterHelper {
 }
 "@
 
-function Get-InstalledWindowsPrinters() {
+# Impresoras compartidas desde OTRO computador (\\PC\Impresora o marcadas como de red por Windows).
+# No se usan: cada computador imprime solo en la impresora conectada a él.
+function Get-NetworkWindowsPrinters() {
+  $net = New-Object System.Collections.Generic.List[string]
+  try {
+    foreach ($cp in (Get-CimInstance -ClassName Win32_Printer -ErrorAction SilentlyContinue)) {
+      $n = [string]$cp.Name
+      if ([string]::IsNullOrWhiteSpace($n)) { continue }
+      if ($n.StartsWith('\\') -or $cp.Network -eq $true -or $cp.Local -eq $false) { $net.Add($n) }
+    }
+  } catch {}
+  try {
+    foreach ($p in [System.Drawing.Printing.PrinterSettings]::InstalledPrinters) {
+      $n = [string]$p
+      if ($n.StartsWith('\\') -and -not $net.Contains($n)) { $net.Add($n) }
+    }
+  } catch {}
+  return @($net)
+}
+
+function Get-InstalledWindowsPrinters([switch]$IncludeNetwork) {
   $list = New-Object System.Collections.Generic.List[string]
   try {
     foreach ($p in [System.Drawing.Printing.PrinterSettings]::InstalledPrinters) {
@@ -125,7 +147,15 @@ function Get-InstalledWindowsPrinters() {
       }
     } catch {}
   }
-  return @($list)
+  if ($IncludeNetwork -or $AllowNetworkPrinters) {
+    return @($list)
+  }
+  $network = @(Get-NetworkWindowsPrinters)
+  return @($list | Where-Object { $network -notcontains $_ })
+}
+
+function Test-IsThermalPrinterName([string]$name) {
+  return ($name -match '(?i)(HPRT|HT100|HT300|Barpos|Zebra|ZDesigner|TSC|Argox|Godex|Bixolon|4BARCODE|Xprinter|Thermal|Label|EPL|ZPL|TSPL)')
 }
 
 function Get-DefaultWindowsPrinter() {
@@ -146,7 +176,8 @@ function Test-IsVirtualPrinter([string]$name) {
 function Resolve-ThermalPrinterName([string]$requested, [string]$lang) {
   $installed = @(Get-InstalledWindowsPrinters)
   if ($installed.Count -eq 0) {
-    return $requested
+    # Sin impresoras propias en este computador: no se imprime en una compartida de otro PC.
+    return $null
   }
   # Importante: cuando se pide un nombre concreto esta funcion devuelve $null si no existe.
 
@@ -199,7 +230,7 @@ function Resolve-ThermalPrinterName([string]$requested, [string]$lang) {
 
   # 4. Impresora predeterminada de Windows (si no es PDF/XPS/OneNote/Fax)
   $winDef = Get-DefaultWindowsPrinter
-  if (-not [string]::IsNullOrWhiteSpace($winDef) -and -not (Test-IsVirtualPrinter $winDef)) {
+  if (-not [string]::IsNullOrWhiteSpace($winDef) -and -not (Test-IsVirtualPrinter $winDef) -and ($installed -contains $winDef)) {
     return $winDef
   }
 
@@ -267,13 +298,20 @@ try {
 
     if ($path -eq '/' -or $path -eq '/health' -or $path -eq '/status' -or $path -eq '/printers') {
       $printersList = @(Get-InstalledWindowsPrinters)
+      $networkList = if ($AllowNetworkPrinters) { @() } else { @(Get-NetworkWindowsPrinters) }
+      $thermalList = @($printersList | Where-Object { Test-IsThermalPrinterName $_ })
       $defPrinter = Get-DefaultWindowsPrinter
+      if ($printersList -notcontains $defPrinter) { $defPrinter = '' }
       $res.StatusCode = 200
       $payload = New-JsonResponse @{
         ok = $true
         service = 'Unibag Print Bridge'
         status = 'running'
         printers = $printersList
+        thermal_printers = $thermalList
+        network_printers_ignored = $networkList
+        computer = $env:COMPUTERNAME
+        local_only = (-not $AllowNetworkPrinters)
         default_printer = $defPrinter
       }
       $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
@@ -362,9 +400,14 @@ try {
       $res.StatusCode = 422
       $installedNow = @(Get-InstalledWindowsPrinters) -join ', '
       $msg = if ([string]::IsNullOrWhiteSpace($requestedPrinter) -or $requestedPrinter -ieq 'DEFAULT' -or $requestedPrinter -ieq 'AUTO') {
-        'No se encontro ninguna impresora termica instalada en Windows.'
+        'No hay ninguna impresora termica conectada a este computador (' + $env:COMPUTERNAME + '). Las impresoras compartidas desde otro computador no se usan.'
       } else {
-        "No se encontro la impresora '$requestedPrinter' en Windows. Instaladas: $installedNow"
+        $isShared = @(Get-NetworkWindowsPrinters | Where-Object { $_ -like ('*' + $requestedPrinter + '*') }).Count -gt 0
+        if ($isShared) {
+          "La impresora '$requestedPrinter' esta conectada a otro computador (compartida por red): este computador solo imprime en su propia impresora. Conectadas aqui: $installedNow"
+        } else {
+          "No se encontro la impresora '$requestedPrinter' en este computador. Conectadas aqui: $installedNow"
+        }
       }
       $payload = New-JsonResponse @{ ok = $false; error = $msg }
       $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)

@@ -61,13 +61,145 @@ function New-JsonResponse([object]$obj) {
   return ($obj | ConvertTo-Json -Depth 5 -Compress)
 }
 
+$script:autoMode = ($ComPort -eq 'AUTO' -or [string]::IsNullOrWhiteSpace($ComPort))
+$script:emptyReads = 0
+$script:lastScanAt = [DateTime]::MinValue
+$script:lastScanReport = ''
+
+# Puertos COM de ESTE computador con su descripción de Windows (ej. "USB-SERIAL CH340 (COM4)").
+function Get-ComPortList() {
+  $list = @()
+  $seen = @{}
+  try {
+    $pnp = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\((COM\d+)\)' }
+    foreach ($d in $pnp) {
+      if ($d.Name -match '\((COM\d+)\)') {
+        $port = $Matches[1].ToUpperInvariant()
+        if (-not $seen.ContainsKey($port)) {
+          $seen[$port] = $true
+          $list += [pscustomobject]@{ port = $port; name = [string]$d.Name }
+        }
+      }
+    }
+  } catch {}
+  foreach ($p in [System.IO.Ports.SerialPort]::GetPortNames()) {
+    $port = ([string]$p).ToUpperInvariant()
+    if (-not $seen.ContainsKey($port)) {
+      $seen[$port] = $true
+      $list += [pscustomobject]@{ port = $port; name = $port }
+    }
+  }
+  return @($list)
+}
+
+# Orden de prueba en AUTO: adaptadores USB-serie primero (la balanza va por CH340/Prolific/FTDI), luego el resto.
+# Los puertos Bluetooth se omiten: abrirlos puede colgar varios segundos y nunca son la balanza.
+function Get-AutoPortCandidates() {
+  $all = @(Get-ComPortList | Where-Object { $_.name -notmatch '(?i)bluetooth|bthenum' })
+  $usb = @($all | Where-Object { $_.name -match '(?i)CH34|CH9102|Prolific|PL2303|FTDI|FT232|CP210|Silicon Labs|USB' })
+  $rest = @($all | Where-Object { $_.name -notmatch '(?i)CH34|CH9102|Prolific|PL2303|FTDI|FT232|CP210|Silicon Labs|USB' })
+  return @($usb + $rest)
+}
+
+function Close-Serial() {
+  try { if ($script:serial -ne $null) { $script:serial.Close() } } catch {}
+  $script:serial = $null
+  $script:serialType = 'none'
+}
+
+# Abre un puerto concreto (Win32 primero, .NET de respaldo). Lanza excepción si no se puede abrir.
+function Open-SerialPort([string]$targetPort) {
+  Close-Serial
+  try {
+    $win32 = New-Object Unibag.Serial.Win32Serial
+    if ($win32.Open($targetPort, $BaudRate)) {
+      $script:serial = $win32
+      $script:serialType = 'win32'
+      $script:activeComPort = $targetPort
+      return
+    }
+  } catch {
+    Write-Host ("[SERIAL] {0}: apertura Win32 falló ({1}), probando .NET..." -f $targetPort, $_.Exception.Message) -ForegroundColor DarkYellow
+  }
+  $p = [System.IO.Ports.Parity]::$Parity
+  $s = [System.IO.Ports.StopBits]::$StopBits
+  $sp = New-Object System.IO.Ports.SerialPort $targetPort, $BaudRate, $p, $DataBits, $s
+  $sp.NewLine = "`r`n"
+  $sp.ReadTimeout = $ReadTimeoutMs
+  $sp.WriteTimeout = 800
+  $sp.Open()
+  $script:serial = $sp
+  $script:serialType = 'dotnet'
+  $script:activeComPort = $targetPort
+}
+
+# Lee lo que haya llegado al puerto abierto (pidiendo peso con R si la balanza no transmite sola).
+function Read-SerialRaw([int]$waitMs) {
+  $raw = ''
+  if ($script:serialType -eq 'win32') {
+    if (-not [string]::IsNullOrWhiteSpace($RequestCommand)) {
+      [void]$script:serial.SendCommand($RequestCommand)
+      Start-Sleep -Milliseconds 40
+    }
+    $raw = $script:serial.ReadExisting()
+    if ([string]::IsNullOrWhiteSpace($raw)) { $raw = $script:serial.ReadBlock($waitMs) }
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+      [void]$script:serial.SendCommand("R`r`n")
+      Start-Sleep -Milliseconds 50
+      $raw = $script:serial.ReadBlock($waitMs + 30)
+    }
+  } else {
+    if (-not [string]::IsNullOrWhiteSpace($RequestCommand)) {
+      $script:serial.Write($RequestCommand)
+      Start-Sleep -Milliseconds 40
+    }
+    Start-Sleep -Milliseconds $waitMs
+    if ($script:serial.BytesToRead -gt 0) { $raw = $script:serial.ReadExisting() }
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+      try { $script:serial.Write("R`r`n") } catch {}
+      Start-Sleep -Milliseconds ($waitMs + 30)
+      if ($script:serial.BytesToRead -gt 0) { $raw = $script:serial.ReadExisting() }
+    }
+  }
+  return [string]$raw
+}
+
+# AUTO: prueba cada puerto COM y se queda con el primero que entrega una trama con peso.
+# Antes abría siempre el primero de la lista (normalmente COM1) y nunca probaba los demás.
+function Find-ScalePort() {
+  $tried = @()
+  foreach ($c in (Get-AutoPortCandidates)) {
+    try {
+      Open-SerialPort $c.port
+    } catch {
+      $tried += ("{0} (no se pudo abrir: {1})" -f $c.port, $_.Exception.Message)
+      continue
+    }
+    $found = $false
+    for ($i = 0; $i -lt 3 -and -not $found; $i++) {
+      $raw = ''
+      try { $raw = Read-SerialRaw 250 } catch { break }
+      if ($null -ne (Parse-WeightKg $raw)) { $found = $true }
+    }
+    if ($found) {
+      Write-Host ("[SERIAL] Balanza encontrada en {0} ({1})." -f $c.port, $c.name) -ForegroundColor Green
+      $script:lastScanReport = ''
+      return $true
+    }
+    $tried += ("{0} (sin datos de peso)" -f $c.port)
+    Close-Serial
+  }
+  $script:lastScanReport = if ($tried.Count -gt 0) { 'Puertos probados: ' + ($tried -join '; ') } else { 'No hay puertos COM en este computador.' }
+  return $false
+}
+
 function Resolve-ComPort() {
-  if ($ComPort -ne 'AUTO' -and -not [string]::IsNullOrWhiteSpace($ComPort)) {
+  if (-not $script:autoMode) {
     return $ComPort
   }
-  $ports = [System.IO.Ports.SerialPort]::GetPortNames()
+  $ports = @(Get-AutoPortCandidates)
   if ($ports.Count -gt 0) {
-    return $ports[0]
+    return $ports[0].port
   }
   return $null
 }
@@ -167,41 +299,29 @@ function Ensure-SerialOpen() {
   if ($Mode -ne 'serial') { return $true }
   if ($script:serial -ne $null -and $script:serial.IsOpen) { return $true }
 
-  $targetPort = Resolve-ComPort
-  if ([string]::IsNullOrWhiteSpace($targetPort)) {
-    throw "No se encontro ningun puerto COM conectado en Windows. Conecta el cable USB del conversor RS-232."
-  }
-  $script:activeComPort = $targetPort
-
-  # 1. Intentar con Win32Serial (diseñado para drivers CH340 sin DTR/RTS)
-  try {
-    $win32 = New-Object Unibag.Serial.Win32Serial
-    if ($win32.Open($targetPort, $BaudRate)) {
-      $script:serial = $win32
-      $script:serialType = 'win32'
-      Write-Host ("[SERIAL] Puerto {0} abierto correctamente vía Win32 API a {1} baudios." -f $targetPort, $BaudRate) -ForegroundColor Green
-      return $true
+  if ($script:autoMode) {
+    # Buscar de nuevo como máximo cada 5 s (probar todos los puertos tarda ~1 s por puerto).
+    if (([DateTime]::UtcNow - $script:lastScanAt).TotalSeconds -lt 5) {
+      throw ("Balanza no encontrada. " + $script:lastScanReport)
     }
-  } catch {
-    Write-Host ("[SERIAL] Falló apertura Win32 ({0}), intentando fallback .NET..." -f $_.Exception.Message) -ForegroundColor Yellow
+    $script:lastScanAt = [DateTime]::UtcNow
+    if (-not (Find-ScalePort)) {
+      throw ("Balanza no encontrada en este computador. " + $script:lastScanReport + ". Revisa el cable USB y que la balanza esté encendida en envío continuo (C18=4, 9600 bps).")
+    }
+    $script:emptyReads = 0
+    return $true
   }
 
-  # 2. Fallback con System.IO.Ports.SerialPort
+  $targetPort = $ComPort
   try {
-    $p = [System.IO.Ports.Parity]::$Parity
-    $s = [System.IO.Ports.StopBits]::$StopBits
-    $sp = New-Object System.IO.Ports.SerialPort $targetPort, $BaudRate, $p, $DataBits, $s
-    $sp.NewLine = "`r`n"
-    $sp.ReadTimeout = $ReadTimeoutMs
-    $sp.WriteTimeout = 800
-    $sp.Open()
-    $script:serial = $sp
-    $script:serialType = 'dotnet'
-    Write-Host ("[SERIAL] Puerto {0} abierto vía .NET SerialPort a {1} baudios." -f $targetPort, $BaudRate) -ForegroundColor Green
-    return $true
+    Open-SerialPort $targetPort
+    Write-Host ("[SERIAL] Puerto {0} abierto ({1}) a {2} baudios." -f $targetPort, $script:serialType, $BaudRate) -ForegroundColor Green
   } catch {
-    throw $_.Exception.Message
+    $known = @(Get-ComPortList | ForEach-Object { $_.port })
+    $hint = if ($known -notcontains $targetPort.ToUpperInvariant()) { " Ese puerto no existe en este computador (hay: " + ($known -join ', ') + "). Usa -ComPort AUTO." } else { " Puede estar ocupado por otro programa o por el navegador." }
+    throw ("No se pudo abrir " + $targetPort + ": " + $_.Exception.Message + $hint)
   }
+  return $true
 }
 
 function Read-WeightKgSerial() {
@@ -221,43 +341,17 @@ function Read-WeightKgSerial() {
 
   $raw = ''
   try {
-    if ($script:serialType -eq 'win32') {
-      if (-not [string]::IsNullOrWhiteSpace($RequestCommand)) {
-        [void]$script:serial.SendCommand($RequestCommand)
-        Start-Sleep -Milliseconds 40
-      }
-      # 1. Leer datos disponibles en cola del driver (0 ms si la balanza ya transmitió trama)
-      $raw = $script:serial.ReadExisting()
-      if ([string]::IsNullOrWhiteSpace($raw)) {
-        # 2. Si no había trama en cola, esperar una fracción corta (máx 120ms en vez de 500ms)
-        $raw = $script:serial.ReadBlock(120)
-      }
-      if ([string]::IsNullOrWhiteSpace($raw)) {
-        # 3. Si no hay trama continua, solicitar activamente con comando 'R\r\n' (protocolo LP-7516)
-        [void]$script:serial.SendCommand("R`r`n")
-        Start-Sleep -Milliseconds 50
-        $raw = $script:serial.ReadBlock(150)
-      }
-    } else {
-      if (-not [string]::IsNullOrWhiteSpace($RequestCommand)) {
-        $script:serial.Write($RequestCommand)
-        Start-Sleep -Milliseconds 40
-      }
-      if ($script:serial.BytesToRead -gt 0) {
-        $raw = $script:serial.ReadExisting()
-      } else {
-        $raw = $script:serial.ReadLine()
-      }
-    }
+    $raw = Read-SerialRaw 120
     $script:lastRawReading = $raw
   } catch {
-    try { if ($script:serial -ne $null) { $script:serial.Close() } } catch {}
-    $script:serial = $null
+    # Cable desconectado o puerto perdido: se cierra y la próxima lectura vuelve a buscar.
+    Close-Serial
+    $script:lastScanAt = [DateTime]::MinValue
     return @{
       ok = $false
       weight_kg = $null
       raw = $raw
-      error = $_.Exception.Message
+      error = ("Se perdió la conexión con " + $script:activeComPort + ": " + $_.Exception.Message)
       model = 'LP-7516'
       source = 'serial'
       com_port = $script:activeComPort
@@ -267,6 +361,16 @@ function Read-WeightKgSerial() {
   $parsed = Parse-WeightKg $raw
   $w = if ($null -ne $parsed) { $parsed.weight } else { $null }
   if ($w -eq $null) {
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+      $script:emptyReads++
+      # En AUTO, si el puerto deja de enviar datos (otra balanza, cable cambiado de USB) se vuelve a buscar.
+      if ($script:autoMode -and $script:emptyReads -ge 10) {
+        Write-Host ("[SERIAL] {0} sin datos en 10 lecturas: se buscará la balanza en los demás puertos." -f $script:activeComPort) -ForegroundColor Yellow
+        Close-Serial
+        $script:lastScanAt = [DateTime]::MinValue
+        $script:emptyReads = 0
+      }
+    }
     $msg = if ([string]::IsNullOrWhiteSpace($raw)) {
       "Puerto $script:activeComPort abierto pero sin datos transmitidos. En la balanza LP-7516 verifica: C18=4 (Envío continuo) y C19=3 (9600 baudios), o presiona PRINT si está en modo manual."
     } else {
@@ -283,6 +387,7 @@ function Read-WeightKgSerial() {
     }
   }
 
+  $script:emptyReads = 0
   $script:lastParsedWeight = $w
   return @{
     ok = $true
@@ -339,12 +444,15 @@ Write-Host "     PUENTE DE BALANZA RS-232 / USB (UNIBAG LP-7516)      " -Foregro
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ("Servidor HTTP activo en: {0}" -f $Listen) -ForegroundColor Green
 Write-Host ("Modo: {0} | Puerto COM: {1} | Baudios: {2}" -f $Mode, $ComPort, $BaudRate) -ForegroundColor Yellow
-$initialPorts = [System.IO.Ports.SerialPort]::GetPortNames()
+$initialPorts = @(Get-ComPortList)
 if ($initialPorts.Count -eq 0) {
     Write-Host "AVISO: No se detecta ningun puerto COM conectado en Windows todavia." -ForegroundColor Magenta
     Write-Host "Conecta el cable RS-232 a USB y el puente lo detectara automaticamente." -ForegroundColor Magenta
 } else {
-    Write-Host ("Puertos COM detectados: {0}" -f ($initialPorts -join ', ')) -ForegroundColor Green
+    Write-Host ("Puertos COM detectados: {0}" -f (($initialPorts | ForEach-Object { $_.name }) -join ', ')) -ForegroundColor Green
+    if ($script:autoMode) {
+        Write-Host "Modo AUTO: se probara cada puerto y se usara el que envie peso." -ForegroundColor Green
+    }
 }
 Write-Host "Esperando peticiones desde el sistema de recepcion..." -ForegroundColor Gray
 Write-Host "----------------------------------------------------------" -ForegroundColor DarkGray
@@ -369,10 +477,12 @@ try {
     }
 
     $path = $req.Url.AbsolutePath
-    if ($path -eq '/health') {
+    if ($path -eq '/health' -or $path -eq '/status' -or $path -eq '/ports') {
       $isOpen = ($script:serial -ne $null -and $script:serial.IsOpen)
-      $ports = [System.IO.Ports.SerialPort]::GetPortNames()
+      $ports = @(Get-ComPortList | ForEach-Object { $_.name })
       $healthObj = @{
+        last_scan = $script:lastScanReport
+        auto = $script:autoMode
         ok = $true
         status = 'running'
         service = 'Unibag Scale Bridge'

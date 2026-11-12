@@ -900,6 +900,10 @@
     bridgeOnline: lsGet(LS_KEYS.bridgeLastOnline, "") === "1" ? true : null,
     bridgeCheckedAt: 0,
     installedPrinters: [],
+    // null = puente antiguo que no informa; [] = sin impresora térmica conectada a este computador
+    thermalPrinters: null,
+    networkPrintersIgnored: [],
+    bridgeComputer: "",
     defaultWindowsPrinter: "",
     lastError: ""
   };
@@ -954,6 +958,10 @@
         if (Array.isArray(info.printers)) {
           printerState.installedPrinters = info.printers;
         }
+        // Puente nuevo: solo impresoras de ESTE computador (las compartidas desde otro PC se ignoran).
+        printerState.thermalPrinters = Array.isArray(info.thermal_printers) ? info.thermal_printers : null;
+        printerState.networkPrintersIgnored = Array.isArray(info.network_printers_ignored) ? info.network_printers_ignored : [];
+        printerState.bridgeComputer = info.computer ? String(info.computer) : "";
         if (info.default_printer) {
           printerState.defaultWindowsPrinter = String(info.default_printer);
         }
@@ -2016,14 +2024,17 @@
       printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Lista · USB (' + escapeHtml(printerState.usbDevice.productName || "USB") + ")</span>";
     } else if (printerState.serialPrinterPort) {
       printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Lista · Serial COM</span>';
+    } else if (printerState.bridgeOnline && Array.isArray(printerState.thermalPrinters) && printerState.thermalPrinters.length === 0) {
+      printStatusHtml = '<span style="color:#b45309;font-weight:800">🟠 Sin impresora térmica conectada a este computador</span>';
     } else if (printerState.bridgeOnline) {
-      printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Lista · Servicio Windows Local</span>';
+      var localNames = Array.isArray(printerState.thermalPrinters) && printerState.thermalPrinters.length ? " (" + escapeHtml(printerState.thermalPrinters.join(", ")) + ")" : "";
+      printStatusHtml = '<span style="color:#059669;font-weight:800">🟢 Lista · Conectada a este computador' + localNames + "</span>";
     } else {
       printStatusHtml = '<span style="color:#b45309;font-weight:800">🟠 Sin vincular</span>';
     }
 
     var savedDefaultPrinter = lsGet(LS_KEYS.printerDefault, "");
-    var printerOptionsHtml = '<option value="">Automática (' + (CFG.printerName || "Predeterminada Térmica") + ")</option>";
+    var printerOptionsHtml = '<option value="">Automática (térmica conectada a este computador)</option>';
     for (var i = 0; i < printerState.installedPrinters.length; i++) {
       var pName = String(printerState.installedPrinters[i]);
       var sel = pName === savedDefaultPrinter ? " selected" : "";
@@ -2101,7 +2112,11 @@
           '  <select class="unibag-hw-select" id="hw-sel-win-printer" style="flex:1;min-width:200px">' +
           printerOptionsHtml +
           "  </select>" +
-          "</div>"
+          "</div>" +
+          (printerState.networkPrintersIgnored.length
+            ? '<div style="margin-top:6px;font-size:11.5px;color:#475569">Este computador' + (printerState.bridgeComputer ? " (" + escapeHtml(printerState.bridgeComputer) + ")" : "") +
+              " solo imprime en sus propias impresoras. Se ignoran las compartidas desde otro computador: " + escapeHtml(printerState.networkPrintersIgnored.join(", ")) + ".</div>"
+            : "")
         : '<div style="margin-top:8px;padding:8px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;font-size:11.5px;color:#334155">' +
           "💡 Para imprimir sin instalar nada: pulsa <b>Vincular USB Directo</b> (impresora por cable USB) o <b>Impresora Serial (COM)</b> y elige la impresora. Se hace una sola vez por PC; el navegador la recuerda en todas las pantallas." +
           "</div>") +
