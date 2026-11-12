@@ -2204,6 +2204,17 @@
         : '<div style="margin-top:8px;padding:8px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;font-size:11.5px;color:#334155">' +
           "💡 Para imprimir sin instalar nada: pulsa <b>Vincular USB Directo</b> (impresora por cable USB) o <b>Impresora Serial (COM)</b> y elige la impresora. Se hace una sola vez por PC; el navegador la recuerda en todas las pantallas." +
           "</div>") +
+      '<div class="unibag-hw-row" style="align-items:flex-end">' +
+      '  <label style="font-size:12px;font-weight:700;color:#334155;flex:1;min-width:220px">Impresora en red de esta PC (IP, puerto 9100)' +
+      '    <input type="text" class="unibag-hw-select" id="hw-inp-printer-ip" placeholder="Ej: 192.168.1.177 o 192.168.1.177:9100" value="' + escapeHtml(lsGet(LS_KEYS.printerIp, "")) + '" style="display:block;margin-top:4px;width:100%">' +
+      "  </label>" +
+      '  <button type="button" class="unibag-hw-btn primary" id="hw-btn-ip-save">Guardar</button>' +
+      '  <button type="button" class="unibag-hw-btn" id="hw-btn-ip-check">Probar conexión</button>' +
+      (lsGet(LS_KEYS.printerIp, "") ? '<button type="button" class="unibag-hw-btn" id="hw-btn-ip-clear">Quitar</button>' : "") +
+      "</div>" +
+      (lsGet(LS_KEYS.printerIp, "")
+        ? '<div style="margin-top:6px;font-size:11.5px;color:#059669;font-weight:700">🟢 Esta PC imprime en la impresora de red ' + escapeHtml(lsGet(LS_KEYS.printerIp, "")) + " (la envía el sistema, sin programas en el PC).</div>"
+        : "") +
       tuningHtml +
       '  <div class="unibag-hw-row">' +
       (printerState.webUsbSupported
@@ -2258,6 +2269,46 @@
       selWinPrinter.onchange = function () {
         lsSet(LS_KEYS.printerDefault, selWinPrinter.value);
         showToast("🖨️ Impresora local fijada: " + (selWinPrinter.value || "Automática"), "ok", 2800);
+      };
+    }
+    var inpIp = document.getElementById("hw-inp-printer-ip");
+    var btnIpSave = document.getElementById("hw-btn-ip-save");
+    if (btnIpSave && inpIp) {
+      btnIpSave.onclick = function () {
+        var v = String(inpIp.value || "").trim();
+        if (v && !/^(?:tcp:\/\/)?\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?$/.test(v)) {
+          showToast("⚠️ Escribe la IP de la impresora, por ejemplo 192.168.1.177", "err", 4000);
+          return;
+        }
+        lsSet(LS_KEYS.printerIp, v);
+        syncClientPrinterIpCookie();
+        showToast(v ? "🖨️ Esta PC imprimirá en la impresora de red " + v + "." : "Impresora de red quitada.", "ok", 3500);
+        refreshModalContents();
+      };
+    }
+    var btnIpCheck = document.getElementById("hw-btn-ip-check");
+    if (btnIpCheck && inpIp) {
+      btnIpCheck.onclick = async function () {
+        var v = String(inpIp.value || "").trim();
+        if (!v) { showToast("⚠️ Escribe primero la IP de la impresora.", "err", 3500); return; }
+        btnIpCheck.disabled = true;
+        try {
+          var r = await postNetworkPrint({ printer_ip: v, check: "1" });
+          showToast(r.ok ? "✅ El sistema se conecta con la impresora " + (r.printer || v) + "." : "⚠️ " + (r.error || "Sin conexión.") + " Si el sistema está en internet (VPS), no llega a la red de la planta.", r.ok ? "ok" : "err", 7000);
+        } catch (err) {
+          showToast("⚠️ " + (err && err.message ? err.message : err), "err", 5000);
+        } finally {
+          btnIpCheck.disabled = false;
+        }
+      };
+    }
+    var btnIpClear = document.getElementById("hw-btn-ip-clear");
+    if (btnIpClear) {
+      btnIpClear.onclick = function () {
+        lsSet(LS_KEYS.printerIp, "");
+        syncClientPrinterIpCookie();
+        showToast("Impresora de red quitada de esta PC.", "ok", 3000);
+        refreshModalContents();
       };
     }
     var selPrinterType = document.getElementById("hw-sel-printer-type");
