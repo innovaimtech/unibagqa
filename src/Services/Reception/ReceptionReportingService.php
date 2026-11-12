@@ -3006,7 +3006,8 @@ trait ReceptionReportingServiceTrait
     /**
      * Fecha de despacho pactada a partir del texto del pedido (orders.req_despacho_desc). Entiende:
      * «19-11-2026» / «02/09/2026» / «DESPACHO 02-07-2026», «03-11» / «03/11», «01 octubre» / «1 de Octubre» / «11-Agosto»,
-     * y «10 días hábiles» / «10 ds, habiles» / «10/12 ds. habiles» (fecha del pedido + N días hábiles, lunes a viernes).
+     * y «10 días hábiles» / «10 ds, habiles» / «10/12 ds. habiles» ($orderTs + N días hábiles, lunes a viernes;
+     * el informe pasa la fecha de aprobación del pedido, o la de creación si no tiene).
      * Sin año se usa el del pedido (si queda más de 60 días antes del pedido, el año siguiente). Devuelve null si no se entiende.
      */
     public static function parseAgreedDispatchDate(string $text, int $orderTs): ?int
@@ -3152,6 +3153,7 @@ trait ReceptionReportingServiceTrait
                 o1.req_number AS cc_number,
                 o1.req_crtdat AS order_date,
                 o1.req_despacho_desc AS agreed_text,
+                o1.req_fecha_aprobacion AS approval_date,
                 od1.id AS orders_delivery_id,
                 od1.dlv_delivery_date AS committed_date,
                 od1.dlv_docnum AS guia_factura,
@@ -3177,8 +3179,12 @@ trait ReceptionReportingServiceTrait
 
         try {
             $stmt = $this->erpPdo->prepare($sql);
-            $stmt->execute($params);
-            $rawRows = $stmt->fetchAll() ?: [];
+            foreach ($params as $name => $value) {
+                // Las fechas van como enteros: así se comparan como números también fuera de MySQL.
+                $stmt->bindValue($name, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+            }
+            $stmt->execute();
+            $rawRows = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
         } catch (Throwable) {
             $rawRows = [];
         }
@@ -3211,7 +3217,10 @@ trait ReceptionReportingServiceTrait
             $fIngreso = $invoiceTs > 0 ? $invoiceTs : $truckTs;
             // Fecha comprometida: la pactada en el pedido (texto «03-11», «19-11-2026», «10 días hábiles», «01 octubre»).
             $agreedText = trim((string)($row['agreed_text'] ?? ''));
-            $orderTs = (int)($row['order_date'] ?? 0);
+            // Los plazos en días hábiles corren desde la aprobación del pedido (confirmación de compra aprobada);
+            // si el pedido no tiene fecha de aprobación, desde su creación.
+            $approvalTs = (int)($row['approval_date'] ?? 0);
+            $orderTs = $approvalTs > 0 ? $approvalTs : (int)($row['order_date'] ?? 0);
             $agreedKey = $agreedText . '|' . $orderTs;
             $agreedCache[$agreedKey] ??= self::parseAgreedDispatchDate($agreedText, $orderTs);
             $committed = (int)($agreedCache[$agreedKey] ?? 0);
@@ -3291,6 +3300,8 @@ trait ReceptionReportingServiceTrait
                 'product_code' => trim((string)($row['product_code'] ?? '')),
                 'committed_date' => $committed > 0 ? date('d/m/Y', $committed) : 'Sin fecha',
                 'agreed_text' => $agreedText,
+                'term_start' => $orderTs > 0 ? date('d/m/Y', $orderTs) : '',
+                'term_start_source' => $approvalTs > 0 ? 'aprobación' : 'creación',
                 'without_agreed_date' => $withoutAgreed,
                 'invoice_date' => $invoiceTs > 0 ? date('d/m/Y', $invoiceTs) : '',
                 'truck_date' => $truckTs > 0 ? date('d/m/Y', $truckTs) : '',

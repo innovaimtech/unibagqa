@@ -389,9 +389,10 @@ class MonthlyPresentationService
 
     /**
      * Versión del nivel de servicio guardado en el historial. 2 = fecha pactada del pedido vs fecha de la factura,
-     * solo despachos confirmados y C.C. distintas. Si cambia, los meses calculados se recalculan.
+     * solo despachos confirmados y C.C. distintas; 3 = los días hábiles corren desde la aprobación del pedido.
+     * Si cambia, los meses calculados se recalculan.
      */
-    private const SERVICE_LEVEL_VERSION = 2;
+    private const SERVICE_LEVEL_VERSION = 3;
 
     /** Versión del cálculo de bobinas guardado en el historial; si cambia, los meses calculados se recalculan. */
     private const ROLL_CALC_VERSION = 3;

@@ -305,7 +305,9 @@ function unibagRenderServiceLevelReportPage(ReceptionService $service): void
             }
             // Texto pactado en el pedido (de ahí sale la fecha comprometida) y fecha del registro del camión si es otra.
             $agreedText = trim((string)($r['agreed_text'] ?? ''));
-            $committedDateHtml .= '<br><span style="font-size:10px;color:#64748b">Pactado: «' . h($agreedText !== '' ? $agreedText : 'vacío') . '»</span>';
+            $relativeTerm = (bool)preg_match('~h[aá]biles~iu', $agreedText);
+            $committedDateHtml .= '<br><span style="font-size:10px;color:#64748b">Pactado: «' . h($agreedText !== '' ? $agreedText : 'vacío') . '»'
+                . ($relativeTerm && ($r['term_start'] ?? '') !== '' ? ' desde ' . h((string)$r['term_start_source']) . ' ' . h((string)$r['term_start']) : '') . '</span>';
 
             $driverInfo = h($r['transport_company']);
             if ($r['driver_name'] !== '') {
