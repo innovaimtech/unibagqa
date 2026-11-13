@@ -95,6 +95,9 @@ $check('quitar un CC del pallet deshace su traspaso', $stock(1, 8) === 5000.0 &&
 $view = (string)file_get_contents($root . '/src/Views/production/sealing/packaging_fields.php');
 $check('el formulario ya no ofrece «Misma bodega» a los CC secundarios', str_contains($view, 'Elegir bodega') && substr_count($view, 'Misma bodega') === 1);
 $check('en selladora el CC principal no tiene selector de origen', str_contains($view, 'Entra solo a la bodega de destino'));
+$check('en la máquina Embalaje el CC principal tampoco se traspasa (vista y servicio)',
+    str_contains($view, '[UNIBAG_CYS_EQUIPO_TYPE_ID, UNIBAG_PACKAGING_EQUIPO_TYPE_ID]')
+    && str_contains((string)file_get_contents($root . '/src/Services/Production/RewindAndPackagingService.php'), "in_array((int)(\$eventOrder['ag_equipotype_id'] ?? 0), [UNIBAG_CYS_EQUIPO_TYPE_ID, UNIBAG_PACKAGING_EQUIPO_TYPE_ID], true)"));
 
 echo $fail === 0 ? "CIERRE MIXTO OK\n" : "CIERRE MIXTO CON FALLOS: $fail\n";
 exit($fail === 0 ? 0 : 1);

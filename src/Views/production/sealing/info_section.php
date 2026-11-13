@@ -3,7 +3,12 @@
         <!-- ============================================================== -->
         <!-- RAMA D2: SELLADORA / CONFECCIÓN / REBOBINADORA (2050 - 2600)   -->
         <!-- ============================================================== -->
-        <?php if (!$isRebobinadora && !$isSelladora): ?>
+        <?php
+        // Embalaje y demás máquinas (no selladora ni rebobinadora) muestran «Información Cliente»: en ese caso
+        // «Información de Fabricación» no repite OT, cliente, CC, producto, materialidad ni las imágenes del diseño.
+        $clientSectionShown = !$isRebobinadora && !$isSelladora;
+        ?>
+        <?php if ($clientSectionShown): ?>
         <div style="background-color:#FFFFFF;border:1px solid #CCCCCC;border-radius:4px;overflow:hidden;margin-bottom:12px">
             <div class="unibag-collapse-header" onclick="toggleCollapseSection('sec_info_cliente', 'icon_info_cliente')">
                 <span><i class="fa fa-fw fa-user"></i> Información Cliente</span>
@@ -59,6 +64,7 @@
                 </span>
             </div>
             <div id="sec_info_fab">
+                <?php if (!$clientSectionShown): ?>
                 <!-- Encabezado exacto de editxid.php: N° OT, Cliente, N° CC -->
                 <table border="0" width="100%" cellpadding="6" cellspacing="0">
                 <colgroup>
@@ -79,6 +85,7 @@
                 </tr>
                 <?=renderDesignAndAttachmentsHtml($agenda, (int)($agenda['fab_med_width'] ?? 0) . ' x ' . (int)($agenda['fab_med_height'] ?? 0) . ' x ' . (int)($agenda['fab_med_fuelle'] ?? 0) . ' cm', (string)($agenda['fab_design_name'] ?? $agenda['item_title'] ?? ''), 1, 1, 'Imagen Diseño (lo que se está cortando / sellando)')?>
                 </table>
+                <?php endif; ?>
 
                 <!-- Tablas de Configuración e Insumos en 2 columnas (editxid.php 2170-2340) -->
                 <table border="0" width="100%" cellpadding="0" cellspacing="0">
@@ -94,10 +101,12 @@
                                 <i class="fa fa-fw fa-wrench"></i> Configuración
                             </td>
                         </tr>
+                        <?php if (!$clientSectionShown): ?>
                         <tr>
                             <td class="tdleft" style="background-color:#EEEEEE;">Producto</td>
                             <td class="tdnrm"><?=htmlspecialchars((string)$agenda['item_title'])?></td>
                         </tr>
+                        <?php endif; ?>
                         <?php if ($isSelladora): ?>
                             <tr>
                                 <td class="tdleft" style="background-color:#EEEEEE;">Corte de Bolsa</td>
@@ -168,10 +177,12 @@
                                 Características de tela
                             </td>
                         </tr>
+                        <?php if (!$clientSectionShown): ?>
                         <tr>
                             <td class="tdleft" style="background-color:#EEEEEE;">Materialidad</td>
                             <td class="tdnrm"><?=htmlspecialchars((string)$agenda['fab_type'])?></td>
                         </tr>
+                        <?php endif; ?>
                         <tr>
                             <td class="tdleft" style="background-color:#EEEEEE;">Color Tela</td>
                             <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fabric_color'] ?? '-'))?></td>

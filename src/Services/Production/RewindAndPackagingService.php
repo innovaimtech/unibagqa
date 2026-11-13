@@ -595,8 +595,10 @@ trait RewindAndPackagingServiceTrait
         if ($requestId <= 0) {
             throw new RuntimeException('No se encontro el pedido asociado al evento.');
         }
-        // En selladora, el CC del cierre entra por el stock automático: si además se traspasa, queda doble en destino.
-        $mainStockIsAutomatic = (int)($eventOrder['ag_equipotype_id'] ?? 0) === UNIBAG_CYS_EQUIPO_TYPE_ID || (int)($eventOrder['linked_ot'] ?? 0) > 0;
+        // En selladora (stock automático) y en la máquina Embalaje (lo carga el sistema al terminar la OT) el CC del cierre
+        // entra solo a la bodega de destino: si además se traspasa, queda doble en destino.
+        $mainStockIsAutomatic = in_array((int)($eventOrder['ag_equipotype_id'] ?? 0), [UNIBAG_CYS_EQUIPO_TYPE_ID, UNIBAG_PACKAGING_EQUIPO_TYPE_ID], true)
+            || (int)($eventOrder['linked_ot'] ?? 0) > 0;
         $mainReqNumber = trim((string)($eventOrder['req_number'] ?? ''));
         $user = $this->erpPdo->prepare('SELECT id FROM user WHERE user_login = :login AND user_status = 1 LIMIT 1');
         $user->execute([':login' => trim($supervisor)]);

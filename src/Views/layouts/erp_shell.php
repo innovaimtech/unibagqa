@@ -178,7 +178,8 @@
         $isDispatch = str_starts_with($currentPath, '/stock/dispatch');
         $isWarehouseBonus = str_starts_with($currentPath, '/stock/bonificacion');
         $isWhReport = str_starts_with($currentPath, '/stock/informe');
-        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry && !$isTrzTree && !$isTransfers && !$isMatRequests && !$isDispatch && !$isWarehouseBonus && !$isWhReport;
+        $isCodeAdjust = str_starts_with($currentPath, '/stock/ajuste-codigos');
+        $isStock = str_starts_with($currentPath, '/stock') && !str_starts_with($currentPath, '/stock/inventory-counts') && !$isTrzEntry && !$isTrzTree && !$isTransfers && !$isMatRequests && !$isDispatch && !$isWarehouseBonus && !$isWhReport && !$isCodeAdjust;
         $isWh = str_starts_with($currentPath, '/warehouses');
         echo '<a class="subitem' . ($isStock ? ' active' : '') . '" href="/stock"><span>Consulta de stock</span></a>';
         echo '<a class="subitem' . ($isMatRequests ? ' active' : '') . '" href="/stock/material-requests"><span>📋 Solicitudes MP (Bodega 3000)</span></a>';
@@ -186,6 +187,7 @@
         echo '<a class="subitem' . ($isDispatch ? ' active' : '') . '" href="/stock/dispatch"><span>🚚 Despacho</span></a>';
         echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso con Trazabilidad</span></a>';
         echo '<a class="subitem' . ($isTrzTree ? ' active' : '') . '" href="/stock/traceability"><span>🌳 Árbol Trazabilidad</span></a>';
+        echo '<a class="subitem' . ($isCodeAdjust ? ' active' : '') . '" href="/stock/ajuste-codigos"><span>🔧 Ajuste de códigos</span></a>';
         if (warehouseBonusCanAccess()) {
             echo '<a class="subitem' . ($isWarehouseBonus ? ' active' : '') . '" href="/stock/bonificacion"><span>🏅 Bonificación</span></a>';
         }

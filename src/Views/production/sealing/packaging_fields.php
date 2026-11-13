@@ -566,7 +566,9 @@
     }
 
     $rowIdx = 0;
-    $mainStockIsAutomatic = (int)($agenda['equipo_type_id'] ?? $agenda['ag_equipotype_id'] ?? 0) === UNIBAG_CYS_EQUIPO_TYPE_ID;
+    // Selladora y máquina Embalaje: el CC del cierre entra solo a la bodega de destino (selladora por el stock automático,
+    // Embalaje porque lo carga el sistema al terminar la OT). Si además se traspasa, queda doble.
+    $mainStockIsAutomatic = in_array((int)($agenda['equipo_type_id'] ?? $agenda['ag_equipotype_id'] ?? 0), [UNIBAG_CYS_EQUIPO_TYPE_ID, UNIBAG_PACKAGING_EQUIPO_TYPE_ID], true);
     $renderRow = static function(
         int $idx,
         array $ord,

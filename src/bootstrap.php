@@ -100,6 +100,7 @@ $unibagHttpModules = [
     __DIR__ . '/Http/DispatchModule.php',
     __DIR__ . '/Http/WarehouseBonusModule.php',
     __DIR__ . '/Http/WarehouseStockReportModule.php',
+    __DIR__ . '/Http/TraceabilityCodeAdjustModule.php',
     __DIR__ . '/Http/ShiftEndModule.php',
     __DIR__ . '/Http/ExpectedStockModule.php',
     __DIR__ . '/Http/StockAndOperationsModule.php',

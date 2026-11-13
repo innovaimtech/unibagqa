@@ -563,26 +563,26 @@
                 <tr>
                     <td class="tdleft">Desarrollo</td>
                     <td class="tdnrm"><b><?=$fmt($corte_m2, 4)?> mtrs</b></td>
-                    <td class="tdleft">Color N° 1</td>
-                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_1'] ?? 0) || (int)($agenda['fab_print_colors_back_1'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_1'] ?? '')) : ''?></td>
+                    <td class="tdleft">&nbsp;</td>
+                    <td class="tdnrm">&nbsp;</td>
                 </tr>
                 <tr>
                     <td class="tdleft">Pie de Imprenta</td>
                     <td class="tdnrm"><?=htmlspecialchars((string)($agenda['req_pie_imprenta'] ?? '-'))?></td>
-                    <td class="tdleft">Color N° 2</td>
-                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_2'] ?? 0) || (int)($agenda['fab_print_colors_back_2'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_2'] ?? '')) : ''?></td>
+                    <td class="tdleft">&nbsp;</td>
+                    <td class="tdnrm">&nbsp;</td>
                 </tr>
                 <tr>
                     <td class="tdleft">N° Código de Barra</td>
                     <td class="tdnrm"><?=htmlspecialchars((string)($agenda['item_sellprice_barcodenumber'] ?? '-'))?></td>
-                    <td class="tdleft">Color N° 3</td>
-                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_3'] ?? 0) || (int)($agenda['fab_print_colors_back_3'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_3'] ?? '')) : ''?></td>
+                    <td class="tdleft">&nbsp;</td>
+                    <td class="tdnrm">&nbsp;</td>
                 </tr>
                 <tr>
                     <td class="tdleft">Impresiones en cilindro</td>
                     <td class="tdnrm">&nbsp;</td>
-                    <td class="tdleft">Color N° 4</td>
-                    <td class="tdnrm"><?=((int)($agenda['fab_print_colors_front_4'] ?? 0) || (int)($agenda['fab_print_colors_back_4'] ?? 0)) ? htmlspecialchars((string)($agenda['fab_print_colordesc_4'] ?? '')) : ''?></td>
+                    <td class="tdleft">&nbsp;</td>
+                    <td class="tdnrm">&nbsp;</td>
                 </tr>
                 <tr>
                     <td class="tdleft">Impresiones por desarrollo</td>
@@ -594,8 +594,8 @@
                     <td colspan="4"><div style="height:10px"></div></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Materialidad</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)($agenda['fab_type'] ?? '-'))?></td>
+                    <td class="tdleft">&nbsp;</td>
+                    <td class="tdnrm">&nbsp;</td>
                     <td class="tdleft">Metros a imprimir</td>
                     <td class="tdnrm"><?=$fmt($seriMlinPrint)?></td>
                 </tr>
@@ -638,53 +638,7 @@
                         </form>
                     </td>
                 </tr>
-                <tr>
-                    <td class="tdleft" colspan="2" valign="middle">Imagen diseño</td>
-                    <td class="tdnrm" colspan="2" valign="middle">
-                        <?php if ($seriHasImg): ?>
-                            <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
-                                <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" title="Clic para ampliar diseño">
-                                    <img src="<?=$seriImgUrl?>" alt="Foto Diseño" style="max-height:65px;max-width:105px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
-                                </a>
-                                <a href="<?=$seriImgUrl?>" target="_blank" onclick="openDesignModal('<?=$seriImgUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', '<?=htmlspecialchars(addslashes($seriFullDesign))?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                    <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                                </a>
-                            </div>
-                        <?php else: ?>
-                            <span style="color:#999">Sin imagen cargada</span>
-                        <?php endif; ?>
-                    </td>
-                </tr>
-                <?php for ($x = 0; $x < 5; $x++): ?>
-                    <?php if (!empty($agenda["req_prod_adjfile_{$x}"])):
-                        $adjFile = (string)$agenda["req_prod_adjfile_{$x}"];
-                        $adjIsImage = unibagAttachmentIsImage($adjFile);
-                        $adjUrl = '/docs/prod/' . rawurlencode($adjFile);
-                    ?>
-                    <tr>
-                        <td class="tdleft" colspan="2" valign="middle">Imagen x #<?=($x + 1)?></td>
-                        <td class="tdnrm" colspan="2" valign="middle">
-                            <?php if ($adjIsImage): ?>
-                                <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap">
-                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" title="Clic para ampliar adjunto">
-                                        <img src="<?=$adjUrl?>" alt="Adjunto #<?=($x + 1)?>" style="max-height:55px;max-width:85px;object-fit:contain;border:1px solid #CBD5E1;border-radius:4px;background:#fff;vertical-align:middle;box-shadow:0 1px 3px rgba(0,0,0,0.1);cursor:pointer">
-                                    </a>
-                                    <a href="<?=$adjUrl?>" target="_blank" onclick="openDesignModal('<?=$adjUrl?>', '<?=htmlspecialchars((string)$agenda['prd_number'])?>', '<?=htmlspecialchars(addslashes((string)$agenda['cust_name']))?>', 'Adjunto #<?=($x + 1)?>', '<?=htmlspecialchars($seriMedidasStr)?>'); return false;" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                        <i class="fa fa-fw fa-image" style="color:white;"></i> Mostrar Imagen
-                                    </a>
-                                </div>
-                            <?php else: ?>
-                                <a href="<?=$adjUrl?>" target="_blank" class="btngrey" style="padding:4px 10px;font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
-                                    <i class="fa fa-fw fa-file" style="color:white;"></i> Mostrar Documento
-                                </a>
-                            <?php endif; ?>
-                            <?php if (!empty($agenda["req_prod_adjcomments_{$x}"])): ?>
-                                <span style="margin-left:8px;color:#64748B;font-size:11.5px"><?=htmlspecialchars((string)$agenda["req_prod_adjcomments_{$x}"])?></span>
-                            <?php endif; ?>
-                        </td>
-                    </tr>
-                    <?php endif; ?>
-                <?php endfor; ?>
+                <?php /* Imagen del diseño y adjuntos: se muestran una sola vez, en «Información Cliente». */ ?>
                 <?php renderInternalFabricationNoteRow($agenda, 2, 2); ?>
                 </table>
             </div>

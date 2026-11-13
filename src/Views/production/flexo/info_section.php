@@ -243,8 +243,9 @@
                     <td colspan="4" style="background:#EDF0F6;padding:4px"></td>
                 </tr>
                 <tr>
-                    <td class="tdleft">Materialidad</td>
-                    <td class="tdnrm"><?=htmlspecialchars((string)$agenda['fab_type'])?></td>
+                    <?php /* Materialidad ya va en «Información Cliente». */ ?>
+                    <td class="tdleft">&nbsp;</td>
+                    <td class="tdnrm">&nbsp;</td>
                     <td class="tdleft">Metros a imprimir</td>
                     <td class="tdnrm"><b><?=$fmt($metrosAImprimir, 2)?> mtrs</b></td>
                 </tr>
