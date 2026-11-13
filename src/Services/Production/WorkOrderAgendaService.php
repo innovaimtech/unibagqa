@@ -1946,6 +1946,42 @@ trait WorkOrderAgendaServiceTrait
     /**
      * Lista todas las OTs actualmente en ejecución en la planta (`wok_status = 1`).
      */
+    /**
+     * Operador que tiene abierta la OT (agenda) en un turno vigente, si no es $workerId. null si nadie más la tiene
+     * abierta o si $workerId también la tiene abierta. Un turno vigente es win_status 1 (activo) o 3 (pausado: el
+     * operador pasó a otra máquina y puede volver); si el turno ya se cerró (cambio de turno), la OT se puede tomar.
+     *
+     * @return array{worker_ot_id:int,worker_id:int,name:string,since:int,equipo:string}|null
+     */
+    public function findForeignOpenOwner(int $agId, int $workerId): ?array
+    {
+        if ($agId <= 0) {
+            return null;
+        }
+        $stmt = $this->erpPdo->prepare("SELECT t1.id AS worker_ot_id, t1.wok_crtdat, t2.win_wrkid, t9.wrk_firstname, t9.wrk_lastname, t7.equipo_name
+            FROM prod_worker_ot t1
+            INNER JOIN prod_worker_init t2 ON t1.wok_init_id = t2.id
+            LEFT OUTER JOIN workers t9 ON t2.win_wrkid = t9.id
+            LEFT OUTER JOIN equipo t7 ON t2.win_equipoid = t7.id
+            WHERE t1.wok_ag_id = :ag AND t1.wok_status = 1 AND t2.win_status IN (1, 3)
+            ORDER BY t1.wok_crtdat DESC");
+        $stmt->execute([':ag' => $agId]);
+        $foreign = null;
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            if ((int)$row['win_wrkid'] === $workerId) {
+                return null;
+            }
+            $foreign ??= [
+                'worker_ot_id' => (int)$row['worker_ot_id'],
+                'worker_id' => (int)$row['win_wrkid'],
+                'name' => trim((string)($row['wrk_firstname'] ?? '') . ' ' . (string)($row['wrk_lastname'] ?? '')) ?: ('Operador #' . (int)$row['win_wrkid']),
+                'since' => (int)$row['wok_crtdat'],
+                'equipo' => (string)($row['equipo_name'] ?? ''),
+            ];
+        }
+        return $foreign;
+    }
+
     public function listActiveOrdersInCourse(int $plantaId, int $equipoId = 0, ?string $dateFilter = null): array
     {
         $wherePlanta = $plantaId > 0 ? " AND t2.win_plantaid = :planta_id" : "";
@@ -1985,7 +2021,7 @@ trait WorkOrderAgendaServiceTrait
 
         $sql = "SELECT t1.id AS worker_ot_id, t1.wok_crtdat, t1.wok_status,
                        t2.win_equipoid, t7.equipo_name, t8.type_ant_title, t7.equipo_type_id, t7.equipo_prod_isprinter_flexo, t7.equipo_prod_isprinter_seri,
-                       t9.wrk_firstname, t9.wrk_lastname,
+                       t9.wrk_firstname, t9.wrk_lastname, t2.win_wrkid, t2.win_status,
                        t0.id AS ag_id, t0.ag_amount, t0.ag_active, t0.ag_date, t0.ag_date_stamp,
                        t3x.prd_number,
                        t5.id AS req_id, t5.req_number, t4.cust_name, t2x.item_title, t2x.item_number_prod, t2x.item_prodcalc_fuelle_act,

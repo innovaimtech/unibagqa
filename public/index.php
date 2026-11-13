@@ -135,6 +135,9 @@ if (handleWarehouseStockReportRoutes($path, $method, $currentOperatorName)) {
 if (handleTraceabilityCodeAdjustRoutes($path, $method, $currentOperatorName)) {
     exit;
 }
+if (handleStockTransferRoutes($path, $method, $currentOperatorName)) {
+    exit;
+}
 if (handleShiftEndRoutes($path, $method, $currentOperatorName)) {
     exit;
 }

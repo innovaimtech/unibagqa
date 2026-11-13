@@ -22,7 +22,7 @@ $prodPaths = ['/production/machines','/production/work-orders/new','/production/
     '/production/work-orders/operate','/production/work-orders/123/operate','/production/materials/request','/production/materials/bodega3000',
     '/production/traceability','/waste/management','/waste/molino','/waste/compactadora','/prodwrk.php','/prodwrk'];
 $prodSessionExtra = ['/work-orders','/work-orders/5/start','/work-orders/5/finish','/chemicals/weighings','/cliches','/cut','/rolls/10','/boxes/3','/pallets/2'];
-$erpPaths = ['/','/reports/operator-waste','/reports/inventory','/reports/graphics','/reports/colaciones','/bonificaciones','/stock','/stock/transfers',
+$erpPaths = ['/','/reports/operator-waste','/reports/inventory','/reports/graphics','/reports/colaciones','/bonificaciones','/stock','/stock/transfers','/stock/traspasos',
     '/warehouses','/trazabilidad','/purchase-orders','/import-containers','/reception','/stock/inventory-counts'];
 $scalePaths = ['/scale/sealing-waste'];
 

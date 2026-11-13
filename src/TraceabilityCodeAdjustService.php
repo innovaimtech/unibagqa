@@ -6,11 +6,12 @@ declare(strict_types=1);
  * Ajuste de códigos de trazabilidad por bodega (cajas, pallets y bultos con etiqueta).
  *
  *  - Juntar: pasa unidades de un código a otro del mismo artículo, bodega y CC (dos cajas con saldo → una).
- *  - Borrar: elimina códigos impresos de más que nunca se usaron (queda el registro en el historial).
+ *  - Borrar: elimina códigos impresos de más que nunca se usaron, también bobinas (queda el registro en el historial).
+ *  - Ajustar cantidad: corrige el saldo de una caja, pallet o bulto mal ingresado.
  *
- * Solo cambia los saldos de las etiquetas en trazabilidad (traceability_warehouse_entries y boxes). El stock del ERP no
- * se toca: el Ingreso con Trazabilidad solo etiqueta stock que ya existe, y juntar dos cajas no cambia el total.
- * Las bobinas (ROLL) y los códigos temporales del Pulpo (SALDO) no se ajustan aquí.
+ * Solo cambia los saldos de las etiquetas en trazabilidad (traceability_warehouse_entries, boxes y rolls). El stock del
+ * ERP no se toca: el Ingreso con Trazabilidad solo etiqueta stock que ya existe, y juntar dos cajas no cambia el total.
+ * Las bobinas solo se borran (sus kilos se ajustan en Recepción). Los códigos temporales del Pulpo (SALDO) no se tocan.
  */
 require_once __DIR__ . '/BagBoxService.php';
 
@@ -20,6 +21,12 @@ final class TraceabilityCodeAdjustService
         'IMPRESA_DE_MAS' => 'Etiqueta impresa de más',
         'DUPLICADA' => 'Etiqueta duplicada (mismo bulto con dos códigos)',
         'ERROR_INGRESO' => 'Error en el ingreso',
+        'OTRO' => 'Otro motivo',
+    ];
+
+    public const ADJUST_REASONS = [
+        'MAL_INGRESADA' => 'Cantidad mal ingresada',
+        'CONTEO' => 'Conteo físico',
         'OTRO' => 'Otro motivo',
     ];
 
@@ -97,20 +104,23 @@ final class TraceabilityCodeAdjustService
             $box = $this->one('SELECT * FROM boxes WHERE id = ?' . $lock, [(int)$entry['entity_id']]);
         }
         $box ??= $this->one('SELECT * FROM boxes WHERE UPPER(box_code) = ?' . $lock, [$code]);
-        return $this->describe($entry, $box);
+        $roll = null;
+        if (strtoupper((string)$entry['entity_type']) === 'ROLL' && $this->tableExists('rolls')) {
+            $roll = (int)($entry['entity_id'] ?? 0) > 0 ? $this->one('SELECT * FROM rolls WHERE id = ?' . $lock, [(int)$entry['entity_id']]) : null;
+            $roll ??= $this->one('SELECT * FROM rolls WHERE roll_code = ?' . $lock, [(string)$entry['traceability_code']]);
+        }
+        return $this->describe($entry, $box, $roll);
     }
 
     /** @return array<string,mixed> */
-    private function describe(array $entry, ?array $box): array
+    private function describe(array $entry, ?array $box, ?array $roll = null): array
     {
         $type = strtoupper((string)$entry['entity_type']);
         $status = strtoupper((string)($entry['status'] ?? ''));
         $boxStatus = $box !== null ? strtoupper((string)$box['status']) : null;
         $qty = round((float)($box['units_qty'] ?? $entry['quantity'] ?? 0), 3);
         $blocked = '';
-        if ($type === 'ROLL') {
-            $blocked = 'Es una bobina: sus kilos se ajustan en Recepción, no aquí.';
-        } elseif ($box !== null && strtoupper((string)($box['source_kind'] ?? '')) === BagBoxService::SOURCE_PARTIAL) {
+        if ($box !== null && strtoupper((string)($box['source_kind'] ?? '')) === BagBoxService::SOURCE_PARTIAL) {
             $blocked = 'Es un código temporal del Pulpo Serigráfico (no tiene etiqueta).';
         } elseif ($status === 'VOID' || $boxStatus === 'VOID') {
             $blocked = 'El código está anulado.';
@@ -144,6 +154,9 @@ final class TraceabilityCodeAdjustService
             'created_at' => (string)($entry['created_at'] ?? ''),
             'comments' => (string)($entry['comments'] ?? ''),
             'blocked' => $blocked,
+            'roll_id' => $roll !== null ? (int)$roll['id'] : null,
+            'roll_status' => $roll !== null ? strtoupper((string)$roll['status']) : null,
+            'roll_work_order' => $roll !== null ? (int)($roll['current_work_order_id'] ?? 0) : 0,
         ];
     }
 
@@ -156,6 +169,9 @@ final class TraceabilityCodeAdjustService
         foreach ([$from, $to] as $c) {
             if ($c['blocked'] !== '') {
                 return $c['code'] . ': ' . $c['blocked'];
+            }
+            if ($c['type'] === 'ROLL') {
+                return $c['code'] . ': es una bobina, no se junta.';
             }
         }
         if ($from['item_id'] !== $to['item_id']) {
@@ -302,7 +318,14 @@ final class TraceabilityCodeAdjustService
             foreach ($found as $c) {
                 $this->log('DELETE', $c, null, $c['qty'], 0.0, null, $reason, $note, $label, $now);
                 $this->trz->prepare('DELETE FROM traceability_warehouse_entries WHERE id = ?')->execute([$c['entry_id']]);
-                if ($c['box_id'] !== null) {
+                if ($c['type'] === 'ROLL') {
+                    if ($c['roll_id'] !== null) {
+                        $this->trz->prepare('DELETE FROM rolls WHERE id = ?')->execute([$c['roll_id']]);
+                        if ($this->tableExists('movements')) {
+                            $this->trz->prepare("DELETE FROM movements WHERE entity_type = 'ROLL' AND entity_id = ?")->execute([$c['roll_id']]);
+                        }
+                    }
+                } elseif ($c['box_id'] !== null) {
                     $this->trz->prepare('DELETE FROM boxes WHERE id = ?')->execute([$c['box_id']]);
                     if ($this->tableExists('movements')) {
                         $this->trz->prepare("DELETE FROM movements WHERE entity_type = 'BOX' AND entity_id = ?")->execute([$c['box_id']]);
@@ -327,6 +350,12 @@ final class TraceabilityCodeAdjustService
         if ($c['blocked'] !== '') {
             return $c['blocked'];
         }
+        if (($t = $this->pendingTransferOf((string)$c['code'])) !== '') {
+            return 'está en el traspaso N° ' . $t . ' sin terminar.';
+        }
+        if ($c['type'] === 'ROLL') {
+            return $this->rollDeleteProblem($c);
+        }
         if (abs((float)$c['qty'] - (float)$c['qty_initial']) > 0.0005) {
             return 'su saldo ya cambió (' . self::fmt((float)$c['qty']) . ' de ' . self::fmt((float)$c['qty_initial']) . '): ya se usó.';
         }
@@ -337,6 +366,108 @@ final class TraceabilityCodeAdjustService
             }
         }
         return '';
+    }
+
+    /** Por qué una bobina no se puede borrar ('' si se puede): solo bobinas en bodega que nunca se usaron. */
+    private function rollDeleteProblem(array $c): string
+    {
+        if ($c['roll_id'] === null) {
+            return '';
+        }
+        if ($c['roll_status'] !== 'RECEIVED') {
+            return $c['roll_status'] === 'CONSUMED' ? 'la bobina ya se consumió.' : 'la bobina está en proceso.';
+        }
+        if ($c['roll_work_order'] > 0) {
+            return 'la bobina está asignada a una OT.';
+        }
+        if ($this->one('SELECT id FROM rolls WHERE parent_roll_id = ? LIMIT 1', [$c['roll_id']]) !== null) {
+            return 'ya se usó: tiene bobinas que salieron de ella.';
+        }
+        if ($this->tableExists('movements')
+            && $this->one("SELECT id FROM movements WHERE entity_type = 'ROLL' AND entity_id = ? AND movement_type <> 'RECEIPT' LIMIT 1", [$c['roll_id']]) !== null) {
+            return 'la bobina ya tiene movimientos (traspaso, carga o baja).';
+        }
+        return '';
+    }
+
+    /** Número del traspaso sin terminar (por aceptar, enviándose o con error) en que está el código ('' si ninguno). */
+    private function pendingTransferOf(string $code): string
+    {
+        if (!$this->tableExists('stock_transfer_items') || !$this->tableExists('stock_transfers')) {
+            return '';
+        }
+        $row = $this->one("SELECT t.id FROM stock_transfer_items i JOIN stock_transfers t ON t.id = i.transfer_id
+                WHERE i.code = ? AND t.status IN ('PENDING', 'SENDING', 'ERROR') ORDER BY t.id DESC LIMIT 1", [strtoupper($code)]);
+        return $row !== null ? (string)$row['id'] : '';
+    }
+
+    /** Por qué no se puede ajustar la cantidad de un código ('' si se puede). */
+    public static function adjustProblem(array $c): string
+    {
+        if ($c['blocked'] !== '') {
+            return $c['blocked'];
+        }
+        if ($c['type'] === 'ROLL') {
+            return 'Es una bobina: sus kilos se ajustan en Recepción.';
+        }
+        return '';
+    }
+
+    /**
+     * Corrige el saldo de un código (caja, pallet o bulto). Solo trazabilidad; el ERP no se toca.
+     *
+     * @return array{code:array<string,mixed>,before:float,after:float}
+     */
+    public function adjustQty(string $code, float $newQty, string $reason, string $operator, string $note = ''): array
+    {
+        $this->ensureSchema();
+        $code = self::normalizeCode($code);
+        if ($code === '') {
+            throw new InvalidArgumentException('Escanea el código.');
+        }
+        $newQty = round($newQty, 3);
+        if ($newQty <= 0) {
+            throw new InvalidArgumentException('El saldo nuevo debe ser mayor que 0.');
+        }
+        if (!isset(self::ADJUST_REASONS[$reason])) {
+            throw new InvalidArgumentException('Elige el motivo.');
+        }
+        $note = trim($note);
+        if ($reason === 'OTRO' && $note === '') {
+            throw new InvalidArgumentException('Escribe el motivo.');
+        }
+        $this->trz->beginTransaction();
+        try {
+            $c = $this->find($code, true);
+            if ($c === null) {
+                throw new RuntimeException('No existe el código ' . $code . '.');
+            }
+            $problem = self::adjustProblem($c);
+            if ($problem !== '') {
+                throw new RuntimeException($c['code'] . ': ' . $problem);
+            }
+            if (($t = $this->pendingTransferOf((string)$c['code'])) !== '') {
+                throw new RuntimeException($c['code'] . ': está en el traspaso N° ' . $t . ' sin terminar.');
+            }
+            $before = (float)$c['qty'];
+            if (abs($newQty - $before) < 0.0005) {
+                throw new InvalidArgumentException('El código ya tiene ' . self::fmt($before) . ' unidades.');
+            }
+            $now = time();
+            $label = $operator !== '' ? $operator : 'Bodega';
+            $this->setCode($c, $newQty, 'IN_WAREHOUSE', $newQty,
+                'Saldo ajustado de ' . self::fmt($before) . ' a ' . self::fmt($newQty) . ' (' . self::ADJUST_REASONS[$reason] . ($note !== '' ? ': ' . $note : '')
+                . ') · ' . date('d-m-Y H:i', $now) . ' · ' . $label);
+            $this->boxMove($c, 'ADJUST', abs($newQty - $before), $before, $newQty, $label, 'Ajuste de saldo: ' . self::ADJUST_REASONS[$reason], $now);
+            $this->log('QTY', $c, null, round(abs($newQty - $before), 3), $newQty, null, $reason, $note, $label, $now);
+            $this->trz->commit();
+        } catch (Throwable $e) {
+            if ($this->trz->inTransaction()) {
+                $this->trz->rollBack();
+            }
+            throw $e;
+        }
+        return ['code' => $this->find($code) ?? $c, 'before' => $before, 'after' => $newQty];
     }
 
     /**

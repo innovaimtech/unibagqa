@@ -2387,40 +2387,12 @@ trait RewindAndPackagingServiceTrait
                 ]);
                 $childRollId = (int)$this->trzPdo->lastInsertId();
 
-                try {
-                    $stmtWhName = $this->trzPdo->prepare("SELECT name, erp_storehouse_id FROM warehouses WHERE id = :id LIMIT 1");
-                    $stmtWhName->execute([':id' => $wh3000Trz]);
-                    $whRow = $stmtWhName->fetch(PDO::FETCH_ASSOC) ?: [];
-                    $whNameStr = (string)($whRow['name'] ?? '') ?: '3000 INSUMOS EN PRODUCCION';
-                    // El código usa el id de bodega del ERP; la bobina (rolls) sigue con el id local.
-                    $whEntryId = (int)($whRow['erp_storehouse_id'] ?? 0) ?: $wh3000Trz;
-
-                    $stmtInsTwe = $this->trzPdo->prepare("
-                        INSERT INTO traceability_warehouse_entries
-                        (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name,
-                         item_id, item_code, item_description, quantity, unit_name,
-                         weight_kg, width_mm, meters, order_ref, operator_name, comments, status, created_at)
-                        VALUES
-                        (:code, 'ROLL', :eid, :wh_id, :wh_name,
-                         :item_id, :item_code, :item_desc, 1.000, 'UNID',
-                         :weight, :width, :meters, :order_ref, :op_name, :comments, 'IN_WAREHOUSE', NOW())
-                    ");
-                    $stmtInsTwe->execute([
-                        ':code' => $childRollCode,
-                        ':eid' => $childRollId,
-                        ':wh_id' => $whEntryId,
-                        ':wh_name' => $whNameStr,
-                        ':item_id' => (int)($primaryItem['id'] ?? 0) > 0 ? (int)$primaryItem['id'] : null,
-                        ':item_code' => $skuCode,
-                        ':item_desc' => 'Bobina Empalmada ' . ($primaryItem['item_title'] ?? ''),
-                        ':weight' => $destNetKg,
-                        ':width' => $widthMm > 0 ? $widthMm : null,
-                        ':meters' => $totalMeters > 0 ? $totalMeters : null,
-                        ':order_ref' => $workerOtId > 0 ? ('OT #' . $workerOtId) : null,
-                        ':op_name' => $operatorName !== '' ? $operatorName : 'Operador Rebobinadora',
-                        ':comments' => 'Empalme de bobinas: ' . implode(', ', array_column($inputRolls, 'roll_code')),
-                    ]);
-                } catch (Throwable) {}
+                RollTraceabilityEntry::syncSafe($this->trzPdo, $childRollId, $operatorName !== '' ? $operatorName : 'Operador Rebobinadora', [
+                    'item_id' => (int)($primaryItem['id'] ?? 0) > 0 ? (int)$primaryItem['id'] : null,
+                    'item_description' => 'Bobina Empalmada ' . ($primaryItem['item_title'] ?? ''),
+                    'order_ref' => $workerOtId > 0 ? ('OT #' . $workerOtId) : null,
+                    'comments' => 'Empalme de bobinas: ' . implode(', ', array_column($inputRolls, 'roll_code')),
+                ]);
 
                 $stmtEvt = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
                 $stmtEvt->execute([
@@ -3176,40 +3148,13 @@ trait RewindAndPackagingServiceTrait
                                 ]);
                                 $childRollId = (int)$this->trzPdo->lastInsertId();
 
-                                try {
-                                    $stmtWhName = $this->trzPdo->prepare("SELECT name, erp_storehouse_id FROM warehouses WHERE id = :id LIMIT 1");
-                                    $stmtWhName->execute([':id' => $wh3000Trz]);
-                                    $whRow = $stmtWhName->fetch(PDO::FETCH_ASSOC) ?: [];
-                                    $whNameStr = (string)($whRow['name'] ?? '') ?: '3000 INSUMOS EN PRODUCCION';
-                                    // El código usa el id de bodega del ERP; la bobina (rolls) sigue con el id local.
-                                    $whEntryId = (int)($whRow['erp_storehouse_id'] ?? 0) ?: $wh3000Trz;
-
-                                    $stmtInsTwe = $this->trzPdo->prepare("
-                                        INSERT INTO traceability_warehouse_entries
-                                        (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name,
-                                         item_id, item_code, item_description, quantity, unit_name,
-                                         weight_kg, width_mm, meters, order_ref, operator_name, comments, status, created_at)
-                                        VALUES
-                                        (:code, 'ROLL', :eid, :wh_id, :wh_name,
-                                         :item_id, :item_code, :item_desc, 1.000, 'UNID',
-                                         :weight, :width, :meters, :order_ref, :op_name, :comments, 'IN_WAREHOUSE', NOW())
-                                    ");
-                                    $stmtInsTwe->execute([
-                                        ':code' => $childRollCode,
-                                        ':eid' => $childRollId,
-                                        ':wh_id' => $whEntryId,
-                                        ':wh_name' => $whNameStr,
-                                        ':item_id' => $destItemId > 0 ? $destItemId : null,
-                                        ':item_code' => $skuCode,
-                                        ':item_desc' => $skuDesc ?? $destinoLabel,
-                                        ':weight' => $unitKg,
-                                        ':width' => $widthMm > 0 ? $widthMm : null,
-                                        ':meters' => $meters > 0 ? $meters : null,
-                                        ':order_ref' => $orderNum !== '' ? ('OT #' . $orderNum) : null,
-                                        ':op_name' => $operatorName !== '' ? $operatorName : 'Operador Rebobinadora',
-                                        ':comments' => 'Corte/Rebobinado desde ' . ($rollCodePost ?: ('Bobina #' . $rollIdPost)),
-                                    ]);
-                                } catch (Throwable) {}
+                                // Código de trazabilidad en la 3000 (si falla queda en el log, no se calla).
+                                RollTraceabilityEntry::syncSafe($this->trzPdo, $childRollId, $operatorName !== '' ? $operatorName : 'Operador Rebobinadora', [
+                                    'item_id' => $destItemId > 0 ? $destItemId : null,
+                                    'item_description' => $skuDesc ?? $destinoLabel,
+                                    'order_ref' => $orderNum !== '' ? ('OT #' . $orderNum) : null,
+                                    'comments' => 'Corte/Rebobinado desde ' . ($rollCodePost ?: ('Bobina #' . $rollIdPost)),
+                                ]);
 
                                 $stmtEvt = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");
                                 $stmtEvt->execute([

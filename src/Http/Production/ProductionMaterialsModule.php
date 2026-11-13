@@ -536,6 +536,10 @@ function handleProductionMaterialsRoutes(
         }
 
         if ($workerOtId <= 0 && $agId > 0) {
+            if (($foreignOwner = productionForeignOwnerBlocking($prodService, $agId, $workerId)) !== null) {
+                redirectResponse('/production/work-orders/active?err=' . rawurlencode(productionForeignOwnerMessage($foreignOwner)));
+                return true;
+            }
             // Si la OT aún no tiene registro en worker_ot, intentar iniciarla
             $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
             if ($activeInit !== null) {
@@ -914,6 +918,10 @@ function handleProductionMaterialsRoutes(
             ? $prodService->getOpenWorkerOtForInit((int)$activeInit['id'], $agId) : null;
         $workerOtId = $activeOt !== null ? (int)$activeOt['id'] : 0;
         if ($workerOtId <= 0 && $agId > 0 && $activeInit !== null) {
+            if (($foreignOwner = productionForeignOwnerBlocking($prodService, $agId, $workerId)) !== null) {
+                redirectResponse('/production/work-orders/active?err=' . rawurlencode(productionForeignOwnerMessage($foreignOwner)));
+                return true;
+            }
             $startRes = $prodService->startWorkerOt($agId, (int)$activeInit['id']);
             if ($startRes['ok']) {
                 $workerOtId = (int)$startRes['worker_ot_id'];

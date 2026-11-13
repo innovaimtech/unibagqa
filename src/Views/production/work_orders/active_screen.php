@@ -1,13 +1,18 @@
 <?php
     ?>
+    <?php if (trim((string)($_GET['err'] ?? '')) !== ''): ?>
+        <div style="background:#FEF2F2;border:1px solid #FECACA;border-left:5px solid #DC2626;padding:12px 18px;border-radius:6px;margin-bottom:14px;color:#991B1B;font-weight:bold">
+            🔒 <?=htmlspecialchars((string)$_GET['err'], ENT_QUOTES, 'UTF-8')?>
+        </div>
+    <?php endif; ?>
     <?php if (isset($_GET['closed'])): ?>
         <?php if (!empty($_GET['noprod'])): ?>
             <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-left:5px solid #059669;padding:12px 18px;border-radius:6px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.05)">
                 <div style="font-size:14px;font-weight:bold;color:#065F46;display:flex;align-items:center;gap:7px">
-                    <i class="fa fa-check-circle" style="font-size:16px;color:#059669"></i> Orden de trabajo terminada exitosamente
+                    <i class="fa fa-check-circle" style="font-size:16px;color:#059669"></i> <?=!empty($_GET['discarded']) ? 'OT descartada: no registró producción' : 'Orden de trabajo terminada exitosamente'?>
                 </div>
                 <div style="font-size:12.5px;color:#047857;margin-top:4px">
-                    La OT no registraba producción iniciada y fue terminada directamente por el operador sin requerir autorización de supervisor.
+                    <?=!empty($_GET['discarded']) ? 'No quedará en los informes de producción.' : 'La OT no registraba producción iniciada y fue terminada directamente por el operador sin requerir autorización de supervisor.'?>
                 </div>
             </div>
         <?php else: ?>
@@ -33,8 +38,8 @@
                         <b>En cursos</b> (OTs actualmente abiertas en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Rebobinadora'))?></b>)
                     </div>
                     <div>
-                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
-                            <i class="fa fa-dolly"></i> Solicitar Bobinas
+                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar materiales a la máquina">
+                            <i class="fa fa-dolly"></i> Solicitar Materiales
                         </a>
                     </div>
                 </div>
@@ -115,11 +120,15 @@
                         <td class="tdnrm" align="right"><b><?=number_format($metros, 0, ',', '.')?></b> m</td>
                         <td class="tdnrm" align="center">
                             <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                <?php if (!empty($row['locked_by'])): ?>
+                                    <?=productionLockedOperateBadge((string)$row['locked_by'])?>
+                                <?php else: ?>
                                 <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 12px;text-decoration:none">
                                     <i class="fa fa-desktop"></i> Operar
                                 </a>
-                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar bobinas para esta OT">
-                                    <i class="fa fa-dolly"></i> Bobinas
+                                <?php endif; ?>
+                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar materiales para esta OT">
+                                    <i class="fa fa-dolly"></i> Materiales
                                 </a>
                             </div>
                         </td>
@@ -144,8 +153,8 @@
                         <b>En cursos</b> (OTs actualmente abiertas en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Flexografía'))?></b>)
                     </div>
                     <div>
-                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
-                            <i class="fa fa-dolly"></i> Solicitar Bobinas
+                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar materiales a la máquina">
+                            <i class="fa fa-dolly"></i> Solicitar Materiales
                         </a>
                     </div>
                 </div>
@@ -341,11 +350,15 @@
                         </td>
                         <td class="tdnrm" align="center">
                             <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                <?php if (!empty($row['locked_by'])): ?>
+                                    <?=productionLockedOperateBadge((string)$row['locked_by'])?>
+                                <?php else: ?>
                                 <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 12px;text-decoration:none">
                                     <i class="fa fa-desktop"></i> Operar
                                 </a>
-                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar bobinas para esta OT">
-                                    <i class="fa fa-dolly"></i> Bobinas
+                                <?php endif; ?>
+                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar materiales para esta OT">
+                                    <i class="fa fa-dolly"></i> Materiales
                                 </a>
                             </div>
                         </td>
@@ -370,8 +383,8 @@
                         <b>En curso</b> en máquina <b><?=htmlspecialchars((string)($activeInit['equipo_name'] ?? 'Serigrafía'))?></b>
                     </div>
                     <div>
-                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
-                            <i class="fa fa-dolly"></i> Solicitar Bobinas
+                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar materiales a la máquina">
+                            <i class="fa fa-dolly"></i> Solicitar Materiales
                         </a>
                     </div>
                 </div>
@@ -511,11 +524,15 @@
                         </td>
                         <td class="tdnrm" align="center">
                             <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                                <?php if (!empty($row['locked_by'])): ?>
+                                    <?=productionLockedOperateBadge((string)$row['locked_by'])?>
+                                <?php else: ?>
                                 <a href="/production/work-orders/operate?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 12px;text-decoration:none">
                                     <i class="fa fa-desktop"></i> Operar
                                 </a>
-                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar bobinas para esta OT">
-                                    <i class="fa fa-dolly"></i> Bobinas
+                                <?php endif; ?>
+                                <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btngreen" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar materiales para esta OT">
+                                    <i class="fa fa-dolly"></i> Materiales
                                 </a>
                             </div>
                         </td>
@@ -541,8 +558,8 @@
                         En cursos
                     </div>
                     <div>
-                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
-                            <i class="fa fa-dolly"></i> Solicitar Bobinas
+                        <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar materiales a la máquina">
+                            <i class="fa fa-dolly"></i> Solicitar Materiales
                         </a>
                     </div>
                 </div>
@@ -684,11 +701,15 @@
                     </td>
                     <td class="tdnrm" align="center">
                         <div style="display:flex;gap:6px;justify-content:center;align-items:center;flex-wrap:wrap">
+                            <?php if (!empty($row['locked_by'])): ?>
+                                <?=productionLockedOperateBadge((string)$row['locked_by'])?>
+                            <?php else: ?>
                             <div class="btngreen" style="cursor:pointer;display:inline-block" onclick="location.href='/production/work-orders/operate?agid=<?=$row['ag_id']?>'">
                                 <nobr><i class="fa fa-fw fa-edit" style="color:white;"></i> Ingresar a OT&nbsp;</nobr>
                             </div>
-                            <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar bobinas para esta OT">
-                                <nobr><i class="fa fa-dolly"></i> Bobinas</nobr>
+                            <?php endif; ?>
+                            <a href="/production/materials/request?agid=<?=$row['ag_id']?>" class="btnblue" style="padding:6px 10px;text-decoration:none;font-size:11px" title="Solicitar o cargar materiales para esta OT">
+                                <nobr><i class="fa fa-dolly"></i> Materiales</nobr>
                             </a>
                         </div>
                     </td>

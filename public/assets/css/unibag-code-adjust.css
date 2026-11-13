@@ -101,3 +101,13 @@ a.ca-x { display: inline-grid; place-items: center; text-decoration: none; }
 .ca-table tr.bad td { background: #FEF2F2; }
 .ca-bad { color: #991B1B; font-weight: 700; }
 .ca-ok { color: #047857; font-weight: 800; }
+
+/* Ajustar cantidad */
+.ca-adjust { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.ca-adjust-form { display: flex; flex-direction: column; gap: 12px; }
+.ca-adjust-form .ca-btn.wide { margin-top: 2px; }
+.ca-shell .ca-adjust-form input[name=qty] { height: 56px; font-size: 24px; font-weight: 800; text-align: right; }
+@media (max-width: 900px) {
+    .ca-adjust { grid-template-columns: minmax(0, 1fr); }
+    .ca-scan1 { grid-template-columns: minmax(0, 1fr); }
+}

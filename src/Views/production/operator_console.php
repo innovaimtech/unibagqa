@@ -279,6 +279,8 @@ echo renderView('production/partials/operator_flash_banners', ['agenda' => $agen
         <?php renderFlexoConsoleInfoSection(get_defined_vars()); ?>
     <?php elseif ($isSeriPulpo || $isSeriPlana): ?>
         <?php renderSerigrafiaConsoleInfoSection(get_defined_vars()); ?>
+    <?php elseif (!empty($isEmbalaje) && !$isSelladora && !$isRebobinadora): ?>
+        <?php renderPackagingConsoleInfoSection(get_defined_vars()); ?>
     <?php else: ?>
         <?php renderSealingConsoleInfoSection(get_defined_vars()); ?>
     <?php endif; ?>
@@ -998,7 +1000,7 @@ echo renderView('production/partials/operator_flash_banners', ['agenda' => $agen
                         </tr>
                     <?php endif; ?>
 
-                    <?php if ($isSelladora || $overrideEmbalaje === 1): ?>
+                    <?php if ($isSelladora && $overrideEmbalaje !== 1): ?>
                         <?php renderProductionReceiverField($phaseReceivers, $phaseResponsibilities[$refId] ?? []); ?>
                     <?php endif; ?>
                     <?php if ($isSelladora && $overrideEmbalaje !== 1): ?>

@@ -10,6 +10,8 @@ declare(strict_types=1);
  *  - GET  /stock/ajuste-codigos?tab=borrar .... Borrar: se cargan varias etiquetas en una lista y se borran juntas.
  *  - GET  /stock/ajuste-codigos/info?code=X ... JSON con los datos de un código (para la lista de borrado).
  *  - POST /stock/ajuste-codigos/borrar ........ Borra todos los códigos de la lista (todo o nada; solo códigos sin uso).
+ *  - GET  /stock/ajuste-codigos?tab=ajustar ... Ajustar cantidad: se escanea un código y se corrige su saldo.
+ *  - POST /stock/ajuste-codigos/ajustar ....... Guarda el saldo nuevo (solo trazabilidad).
  *
  * Solo cambia saldos de etiquetas en trazabilidad; el stock del ERP no se toca (ver TraceabilityCodeAdjustService).
  * Pantallas sin subtítulos ni textos de ayuda (pedido del usuario).
@@ -17,7 +19,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../TraceabilityCodeAdjustService.php';
 
-const CODE_ADJUST_ASSET_VERSION = '20261113c';
+const CODE_ADJUST_ASSET_VERSION = '20261113e';
 
 function handleTraceabilityCodeAdjustRoutes(string $path, string $method, string $operator): bool
 {
@@ -92,11 +94,27 @@ function handleTraceabilityCodeAdjustRoutes(string $path, string $method, string
         }
         return true;
     }
+    if ($method === 'POST' && $path === '/stock/ajuste-codigos/ajustar') {
+        requireCsrf();
+        $code = TraceabilityCodeAdjustService::normalizeCode((string)($_POST['code'] ?? ''));
+        $qtyRaw = str_replace(',', '.', trim((string)($_POST['qty'] ?? '')));
+        try {
+            if (!is_numeric($qtyRaw)) {
+                throw new InvalidArgumentException('Escribe el saldo nuevo.');
+            }
+            $res = $service->adjustQty($code, (float)$qtyRaw, (string)($_POST['reason'] ?? ''), $operator, (string)($_POST['note'] ?? ''));
+            $msg = $res['code']['code'] . ': ' . TraceabilityCodeAdjustService::fmt($res['before']) . ' → ' . TraceabilityCodeAdjustService::fmt($res['after']) . ' unid.';
+            redirectResponse('/stock/ajuste-codigos?tab=ajustar&ok=' . rawurlencode($msg) . '&done=' . rawurlencode($res['code']['code']) . '&wh=' . (int)$res['code']['warehouse_id']);
+        } catch (Throwable $e) {
+            redirectResponse('/stock/ajuste-codigos?tab=ajustar&code=' . rawurlencode($code) . '&err=' . rawurlencode($e->getMessage()));
+        }
+        return true;
+    }
     if ($method !== 'GET' || $path !== '/stock/ajuste-codigos') {
         return false;
     }
 
-    $tab = (string)($_GET['tab'] ?? '') === 'borrar' ? 'borrar' : 'juntar';
+    $tab = in_array((string)($_GET['tab'] ?? ''), ['borrar', 'ajustar'], true) ? (string)$_GET['tab'] : 'juntar';
     $error = (string)($_GET['err'] ?? '');
     $ok = (string)($_GET['ok'] ?? '');
     try {
@@ -115,6 +133,13 @@ function handleTraceabilityCodeAdjustRoutes(string $path, string $method, string
                 }
             }
             $body = codeAdjustMergePage($a, $b, $aQ, $bQ, (string)($_GET['done'] ?? ''), $service->history(30, '', 'MERGE'), (int)($_GET['wh'] ?? 0));
+        } elseif ($tab === 'ajustar') {
+            $q = TraceabilityCodeAdjustService::normalizeCode((string)($_GET['code'] ?? ''));
+            $c = $q !== '' ? $service->find($q) : null;
+            if ($error === '' && $q !== '') {
+                $error = $c === null ? 'No existe el código ' . $q . '.' : TraceabilityCodeAdjustService::adjustProblem($c);
+            }
+            $body = codeAdjustQtyPage($c, $q, (string)($_GET['done'] ?? ''), (int)($_GET['wh'] ?? 0), $service->history(30, '', 'QTY'));
         } else {
             // Códigos cargados: vienen de las casillas (codes[]) o de la lista ya cargada (codes=A,B,C).
             $raw = $_GET['codes'] ?? [];
@@ -158,6 +183,7 @@ function codeAdjustLayout(string $tab, string $ok, string $error, string $body):
 {
     $html = '<div class="ca-shell"><div class="ca-head"><div class="ca-title">Ajuste de códigos</div>'
         . '<nav class="ca-tabs"><a class="' . ($tab === 'juntar' ? 'on' : '') . '" href="/stock/ajuste-codigos">⇄ Juntar</a>'
+        . '<a class="' . ($tab === 'ajustar' ? 'on' : '') . '" href="/stock/ajuste-codigos?tab=ajustar">± Ajustar cantidad</a>'
         . '<a class="' . ($tab === 'borrar' ? 'on danger' : '') . '" href="/stock/ajuste-codigos?tab=borrar">🗑 Borrar</a></nav></div>';
     if ($ok !== '') {
         $html .= '<div class="ca-alert ok">✔ ' . h($ok) . '</div>';
@@ -206,11 +232,8 @@ function codeAdjustMergePage(?array $a, ?array $b, string $aQ, string $bQ, strin
     } elseif ($a !== null || $b !== null) {
         $html .= '<div class="ca-pair solo">' . ($a !== null ? codeAdjustBoxCard($a, 'a', false) : '') . ($b !== null ? codeAdjustBoxCard($b, 'b', false) : '') . '</div>';
     }
-    if ($done !== '') {
-        $html .= '<div class="ca-reprint"><b class="mono">' . h($done) . '</b>'
-            . '<a class="ca-btn sec" href="/stock/traceability-entry?' . ($doneWarehouse > 0 ? 'bodega=' . $doneWarehouse . '&amp;' : '') . 'q=' . rawurlencode($done) . '">🖨 Reimprimir etiqueta</a></div>';
-    }
-    $html .= codeAdjustHistory($history, true);
+    $html .= codeAdjustReprint($done, $doneWarehouse);
+    $html .= codeAdjustHistory($history, 'MERGE');
     $html .= '<script>
 (function () {
   var a = document.getElementById("ca_a"), b = document.getElementById("ca_b");
@@ -286,87 +309,11 @@ function codeAdjustDeletePage(array $rows, array $history): string
             . '<label>Detalle<input name="note" maxlength="200"></label>'
             . '<button type="submit" class="ca-btn danger"' . ($valid === [] ? ' disabled' : '') . ' data-n="' . count($valid) . '">Borrar (' . count($valid) . ')</button></form>';
     }
-    $html .= codeAdjustHistory($history, false);
+    $html .= codeAdjustHistory($history, 'DELETE');
+    $html .= '<script src="/assets/js/unibag-scan-slots.js?v=' . CODE_ADJUST_ASSET_VERSION . '"></script>';
     $html .= <<<'JS'
 <script>
 (function () {
-  var form = document.querySelector(".ca-slots"); if (!form) return;
-  var list = form.querySelector(".ca-slot-list"),
-      summary = form.querySelector(".ca-slot-summary"), loadBtn = form.querySelector(".ca-load-btn");
-  var existing = {};
-  try { JSON.parse(form.getAttribute("data-existing") || "[]").forEach(function (c) { existing[String(c).toUpperCase()] = true; }); } catch (e) {}
-  function norm(v) { return String(v || "").replace(/['`´’‘‛]/g, "-").replace(/\s+/g, "").toUpperCase(); }
-  function split(raw) { return String(raw || "").replace(/['`´’‘‛]/g, "-").split(/[\s,;]+/).map(norm).filter(Boolean); }
-  function inputs() { return [].slice.call(list.querySelectorAll(".ca-slot-input")); }
-  function row(n, val) {
-    var r = document.createElement("div"); r.className = "ca-slot-row";
-    r.innerHTML = '<span class="ca-slot-idx">#' + n + '</span><input type="text" name="codes[]" class="ca-slot-input" maxlength="80" autocomplete="off">'
-      + '<span class="ca-slot-tag"></span><button type="button" class="ca-slot-rm">✕</button>';
-    if (val) r.querySelector("input").value = val;
-    return r;
-  }
-  function refresh() {
-    var seen = {}, ok = 0, dup = 0;
-    Object.keys(existing).forEach(function (k) { seen[k] = true; });
-    inputs().forEach(function (inp, i) {
-      var r = inp.closest(".ca-slot-row"), tag = r.querySelector(".ca-slot-tag"), v = norm(inp.value);
-      r.querySelector(".ca-slot-idx").textContent = "#" + (i + 1);
-      r.classList.remove("filled", "dup"); tag.textContent = "";
-      if (!v) return;
-      if (seen[v]) { r.classList.add("dup"); tag.textContent = "Repetido"; dup++; }
-      else { seen[v] = true; r.classList.add("filled"); tag.textContent = "✓"; ok++; }
-    });
-    summary.textContent = ok + " código(s)" + (dup ? " · " + dup + " repetido(s)" : "");
-    loadBtn.disabled = ok === 0 || dup > 0;
-    loadBtn.textContent = "Cargar (" + ok + ")";
-  }
-  // Siempre hay una casilla vacía al final: se parte con 1 y cada código leído agrega la siguiente.
-  function ensureEmpty() {
-    var all = inputs();
-    if (!all.length || norm(all[all.length - 1].value)) list.appendChild(row(all.length + 1, ""));
-    refresh();
-  }
-  function nextEmpty(from) {
-    var all = inputs();
-    for (var i = from + 1; i < all.length; i++) if (!norm(all[i].value)) return all[i];
-    for (var k = 0; k < all.length; k++) if (!norm(all[k].value)) return all[k];
-    var r = row(all.length + 1, ""); list.appendChild(r); return r.querySelector("input");
-  }
-  // Reparte lo escrito en la casilla (la pistola puede juntar dos códigos) y pasa a la siguiente casilla vacía.
-  function distribute(inp) {
-    var parts = split(inp.value), all = inputs(), idx = all.indexOf(inp);
-    var taken = {};
-    Object.keys(existing).forEach(function (k) { taken[k] = true; });
-    all.forEach(function (o, j) { if (j !== idx && norm(o.value)) taken[norm(o.value)] = true; });
-    var unique = parts.filter(function (p) { if (taken[p]) return false; taken[p] = true; return true; });
-    if (parts.length && !unique.length) { inp.value = ""; refresh(); inp.focus(); return; }
-    inp.value = unique.length ? unique[0] : "";
-    var cur = idx;
-    for (var k = 1; k < unique.length; k++) { var t = nextEmpty(cur); t.value = unique[k]; cur = inputs().indexOf(t); }
-    if (unique.length) nextEmpty(cur).focus(); else inp.focus();
-    refresh();
-  }
-  document.addEventListener("keydown", function (e) {
-    var t = e.target; if (!t || !t.classList) return;
-    if (t.classList.contains("ca-slot-input") && (e.key === "Enter" || e.keyCode === 13)) { e.preventDefault(); e.stopPropagation(); distribute(t); }
-  }, true);
-  document.addEventListener("input", function (e) {
-    var t = e.target; if (!t || !t.classList || !t.classList.contains("ca-slot-input")) return;
-    if (/[\s,;]/.test(t.value)) distribute(t); else ensureEmpty();
-  });
-  list.addEventListener("click", function (e) {
-    var b = e.target.closest(".ca-slot-rm"); if (!b) return;
-    var r = b.closest(".ca-slot-row"), inp = r.querySelector("input");
-    if (inputs().length > 1) r.remove(); else inp.value = "";
-    ensureEmpty();
-    var all = inputs(); all[all.length - 1].focus();
-  });
-  form.addEventListener("submit", function () {
-    inputs().forEach(function (i) { i.value = norm(i.value); if (!i.value) i.disabled = true; });
-    loadBtn.disabled = true; loadBtn.textContent = "Cargando…";
-  });
-  ensureEmpty();
-  inputs()[0].focus();
   var del = document.getElementById("ca_void");
   if (del) del.addEventListener("submit", function (e) {
     var b = del.querySelector("button[type=submit]");
@@ -379,23 +326,84 @@ JS;
     return $html;
 }
 
-/** @param list<array<string,mixed>> $history */
-function codeAdjustHistory(array $history, bool $merge): string
+function codeAdjustReprint(string $done, int $warehouse): string
 {
+    if ($done === '') {
+        return '';
+    }
+    return '<div class="ca-reprint"><b class="mono">' . h($done) . '</b>'
+        . '<a class="ca-btn sec" href="/stock/traceability-entry?' . ($warehouse > 0 ? 'bodega=' . $warehouse . '&amp;' : '') . 'q=' . rawurlencode($done) . '">🖨 Reimprimir etiqueta</a></div>';
+}
+
+/**
+ * Ajustar cantidad: se escanea un código, se ve su saldo y se escribe el saldo nuevo con el motivo.
+ *
+ * @param array<string,mixed>|null $c
+ * @param list<array<string,mixed>> $history
+ */
+function codeAdjustQtyPage(?array $c, string $q, string $done, int $doneWarehouse, array $history): string
+{
+    $html = '<form class="ca-card ca-scan1" method="get" action="/stock/ajuste-codigos" autocomplete="off">'
+        . '<input type="hidden" name="tab" value="ajustar">'
+        . '<label>Código<input id="ca_q" name="code" value="' . h($q) . '"' . ($c === null ? ' autofocus' : '') . '></label>'
+        . '<div class="ca-scan2-btns"><button type="submit" class="ca-btn">Buscar</button>'
+        . ($q !== '' ? '<a class="ca-btn sec" href="/stock/ajuste-codigos?tab=ajustar">Limpiar</a>' : '') . '</div></form>';
+    if ($c !== null) {
+        if (TraceabilityCodeAdjustService::adjustProblem($c) === '') {
+            $options = '<option value=""></option>';
+            foreach (TraceabilityCodeAdjustService::ADJUST_REASONS as $k => $label) {
+                $options .= '<option value="' . h($k) . '">' . h($label) . '</option>';
+            }
+            $html .= '<form class="ca-card" method="post" action="/stock/ajuste-codigos/ajustar" data-ca-confirm="¿Ajustar el saldo de ' . h((string)$c['code']) . '?">'
+                . '<input type="hidden" name="_csrf" value="' . h(csrfToken()) . '">'
+                . '<input type="hidden" name="code" value="' . h((string)$c['code']) . '">'
+                . '<div class="ca-adjust">' . codeAdjustBoxCard($c, 'a', false)
+                . '<div class="ca-adjust-form">'
+                . '<label>Saldo nuevo<input type="number" name="qty" min="0.001" step="any" inputmode="decimal" required autofocus></label>'
+                . '<label>Motivo<select name="reason" required>' . $options . '</select></label>'
+                . '<label>Detalle<input name="note" maxlength="200"></label>'
+                . '<button type="submit" class="ca-btn wide">Ajustar</button></div></div></form>';
+        } else {
+            $html .= '<div class="ca-pair solo">' . codeAdjustBoxCard($c, 'a', false) . '</div>';
+        }
+    }
+    $html .= codeAdjustReprint($done, $doneWarehouse);
+    $html .= codeAdjustHistory($history, 'QTY');
+    $html .= '<script>
+(function () {
+  var q = document.getElementById("ca_q");
+  if (q) q.addEventListener("change", function () { q.value = String(q.value || "").replace(/[\'`´’‘‛]/g, "-").replace(/\\s+/g, "").toUpperCase(); });
+  document.querySelectorAll("form[data-ca-confirm]").forEach(function (f) {
+    f.addEventListener("submit", function (ev) {
+      if (!window.confirm(f.getAttribute("data-ca-confirm"))) { ev.preventDefault(); return; }
+      f.querySelectorAll("button[type=submit]").forEach(function (x) { x.disabled = true; });
+    });
+  });
+})();
+</script>';
+    return $html;
+}
+
+/** @param list<array<string,mixed>> $history */
+function codeAdjustHistory(array $history, string $action): string
+{
+    $merge = $action === 'MERGE';
+    $qty = $action === 'QTY';
     $html = '<div class="ca-card"><div class="ca-card-title">Historial</div>';
     if ($history === []) {
         return $html . '<div class="ca-empty">—</div></div>';
     }
     $html .= '<div class="ca-table-wrap"><table class="ca-table"><thead><tr><th>Fecha</th>'
         . ($merge ? '<th>Pasa</th><th>Queda</th>' : '<th>Código</th>')
-        . '<th>Artículo</th><th class="num">Unidades</th>' . ($merge ? '' : '<th>Motivo</th>') . '<th>Usuario</th></tr></thead><tbody>';
+        . '<th>Artículo</th><th class="num">' . ($qty ? 'Saldo' : 'Unidades') . '</th>' . ($merge ? '' : '<th>Motivo</th>') . '<th>Usuario</th></tr></thead><tbody>';
     foreach ($history as $r) {
-        $reason = TraceabilityCodeAdjustService::DELETE_REASONS[(string)($r['reason'] ?? '')] ?? '';
+        $reasons = $qty ? TraceabilityCodeAdjustService::ADJUST_REASONS : TraceabilityCodeAdjustService::DELETE_REASONS;
+        $reason = $reasons[(string)($r['reason'] ?? '')] ?? '';
         $html .= '<tr><td>' . h(date('d-m-Y H:i', (int)$r['created_at'])) . '</td>'
             . '<td class="mono">' . h((string)$r['from_code']) . '</td>'
             . ($merge ? '<td class="mono">' . h((string)$r['to_code']) . ' <span class="ca-muted">' . caN((float)$r['to_before']) . ' → ' . caN((float)$r['to_after']) . '</span></td>' : '')
             . '<td>' . h((string)$r['item_code']) . ($r['order_ref'] ? ' <span class="ca-muted">CC ' . h((string)$r['order_ref']) . '</span>' : '') . '</td>'
-            . '<td class="num">' . caN((float)$r['qty']) . '</td>'
+            . '<td class="num">' . ($qty ? caN((float)$r['from_before']) . ' → <b>' . caN((float)$r['from_after']) . '</b>' : caN((float)$r['qty'])) . '</td>'
             . ($merge ? '' : '<td>' . h(trim($reason . ($r['note'] ? ' — ' . $r['note'] : ''))) . '</td>')
             . '<td>' . h((string)$r['operator_name']) . '</td></tr>';
     }

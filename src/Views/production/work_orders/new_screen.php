@@ -37,8 +37,8 @@
                     <b>Iniciar nueva OT</b> en máquina <b><?=htmlspecialchars($machineName)?></b>
                 </div>
                 <div style="display:flex;align-items:center;gap:8px">
-                    <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar bobinas a la máquina">
-                        <i class="fa fa-dolly"></i> Solicitar Bobinas
+                    <a href="/production/materials/request" class="btngreen" style="padding:5px 12px;font-size:12px;text-decoration:none;border-radius:4px;display:inline-flex;align-items:center;gap:6px" title="Solicitar o cargar materiales a la máquina">
+                        <i class="fa fa-dolly"></i> Solicitar Materiales
                     </a>
                     <?php if (!empty($activeLunch)): ?>
                         <button type="button" class="btnorange" style="background:#D97706;padding:5px 12px;font-size:12px;cursor:pointer;border:none;border-radius:4px;font-weight:bold" onclick="openLunchModal()" title="Colación activa">
@@ -312,8 +312,8 @@
                                         <i class="fa fa-play"></i> Iniciar OT
                                     </button>
                                 </form>
-                                <a href="/production/materials/request?prd_id=<?=$uo['prd_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas para esta OT no planificada">
-                                    <i class="fa fa-dolly"></i> Solicitar Bobina
+                                <a href="/production/materials/request?prd_id=<?=$uo['prd_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar materiales para esta OT no planificada">
+                                    <i class="fa fa-dolly"></i> Solicitar Materiales
                                 </a>
                             </div>
                         </td>
@@ -447,8 +447,8 @@
                                         <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
                                         <button type="submit" class="btngreen" style="padding:6px 12px"><i class="fa fa-play"></i> Iniciar OT</button>
                                     </form>
-                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas antes de iniciar la OT">
-                                        <i class="fa fa-dolly"></i> Solicitar Bobina
+                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar materiales antes de iniciar la OT">
+                                        <i class="fa fa-dolly"></i> Solicitar Materiales
                                     </a>
                                 </div>
                             </td>
@@ -640,8 +640,8 @@
                                         <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
                                         <button type="submit" class="btngreen" style="padding:6px 12px"><i class="fa fa-play"></i> Iniciar OT</button>
                                     </form>
-                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas antes de iniciar la OT">
-                                        <i class="fa fa-dolly"></i> Solicitar Bobina
+                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar materiales antes de iniciar la OT">
+                                        <i class="fa fa-dolly"></i> Solicitar Materiales
                                     </a>
                                 </div>
                             </td>
@@ -789,8 +789,8 @@
                                         <input type="hidden" name="ag_id" value="<?=$so['ag_id']?>">
                                         <button type="submit" class="btngreen" style="padding:6px 12px"><i class="fa fa-play"></i> Iniciar OT</button>
                                     </form>
-                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas antes de iniciar la OT">
-                                        <i class="fa fa-dolly"></i> Solicitar Bobina
+                                    <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar materiales antes de iniciar la OT">
+                                        <i class="fa fa-dolly"></i> Solicitar Materiales
                                     </a>
                                 </div>
                             </td>
@@ -899,8 +899,8 @@
                                         <nobr><i class="fa fa-fw fa-play" style="color:white;"></i> Iniciar OT&nbsp;</nobr>
                                     </div>
                                 </form>
-                                <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar bobinas antes de iniciar la OT">
-                                    <nobr><i class="fa fa-dolly"></i> Solicitar Bobina</nobr>
+                                <a href="/production/materials/request?agid=<?=$so['ag_id']?>" class="btnblue" style="padding:6px 10px;font-size:11px;text-decoration:none" title="Solicitar o cargar materiales antes de iniciar la OT">
+                                    <nobr><i class="fa fa-dolly"></i> Solicitar Materiales</nobr>
                                 </a>
                             </div>
                         </td>

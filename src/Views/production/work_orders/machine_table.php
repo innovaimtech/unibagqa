@@ -117,7 +117,9 @@
         }
         echo '</td><td class="tdnrm"><div style="display:flex;gap:6px;flex-wrap:wrap">';
         if ($view === 'active') {
-            echo '<a class="btngreen" style="padding:6px 12px;text-decoration:none" href="/production/work-orders/operate?agid=' . $agId . '">Operar OT</a>';
+            echo !empty($order['locked_by'])
+                ? productionLockedOperateBadge((string)$order['locked_by'])
+                : '<a class="btngreen" style="padding:6px 12px;text-decoration:none" href="/production/work-orders/operate?agid=' . $agId . '">Operar OT</a>';
         } else {
             $unscheduled = $view === 'unscheduled';
             echo '<form method="post" action="/production/work-orders/' . ($unscheduled ? 'init-unscheduled' : 'init') . '" style="margin:0">'
@@ -126,7 +128,7 @@
                 . '<button type="submit" class="btngreen" style="padding:6px 12px"' . ($unscheduled ? ' onclick="return confirm(\'¿Confirmas iniciar esta OT fuera de planificación?\')"' : '') . '>Iniciar OT</button></form>';
         }
         echo '<a class="btnblue" style="padding:6px 10px;text-decoration:none;font-size:11px" href="/production/materials/request?'
-            . ($view === 'unscheduled' ? 'prd_id=' . $prdId : 'agid=' . $agId) . '">Bobinas</a></div></td></tr>';
+            . ($view === 'unscheduled' ? 'prd_id=' . $prdId : 'agid=' . $agId) . '">Materiales</a></div></td></tr>';
     }
     echo '</tbody></table></div>';
 

@@ -332,8 +332,17 @@ trait ProductionEventsServiceTrait
             ? ($this->getProductionPhaseResponsibilities($workerOtId)[$refId] ?? null)
             : null;
         $receiverId = (int)($actor['receiver_worker_id'] ?? 0);
+        $supervisorLogin = trim((string)($actor['receiver_supervisor_login'] ?? ''));
+        unset($actor['receiver_supervisor_login']);
 
-        if ($receiverId > 0) {
+        if ($supervisorLogin !== '') {
+            // Embalaje: recibe la producción el supervisor que autoriza el cierre (no se pregunta «Quién recibe»).
+            $stmt = $this->erpPdo->prepare('SELECT user_firstname, user_lastname FROM user WHERE user_login = ? LIMIT 1');
+            $stmt->execute([$supervisorLogin]);
+            $sup = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $actor['receiver_worker_id'] = 0;
+            $actor['receiver_name'] = trim((string)($sup['user_firstname'] ?? '') . ' ' . (string)($sup['user_lastname'] ?? '')) ?: $supervisorLogin;
+        } elseif ($receiverId > 0) {
             $stmt = $this->erpPdo->prepare('SELECT wrk_firstname, wrk_lastname FROM workers WHERE id=? AND wrk_status>0');
             $stmt->execute([$receiverId]);
             $receiver = $stmt->fetch(PDO::FETCH_ASSOC);

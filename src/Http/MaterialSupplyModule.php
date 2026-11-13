@@ -940,7 +940,7 @@ function renderSupplyRequestHistory(MaterialSupplyService $service, array $reque
     ?>
     <div class="<?=$warehouse?'sp':''?>">
     <div class="sp-h3"><h3><?=$warehouse?'📋 Solicitudes de materiales':'📋 Mis solicitudes'?> <small style="color:#64748b;font-weight:600">(<?=count($requests)?>)</small></h3>
-    <?php if ($warehouse): ?><div><a href="/stock/transfers" class="sp-btn ghost" style="text-decoration:none;display:inline-block">Traspasos</a> <a href="/stock/material-supply/reports" class="sp-btn ghost" style="text-decoration:none;display:inline-block">Reportes</a></div><?php endif; ?></div>
+    <?php if ($warehouse): ?><div><a href="/stock/traspasos" class="sp-btn ghost" style="text-decoration:none;display:inline-block">Traspasos</a> <a href="/stock/material-supply/reports" class="sp-btn ghost" style="text-decoration:none;display:inline-block">Reportes</a></div><?php endif; ?></div>
     <?php
     $stepFlow = ['PENDING'=>1,'ACCEPTED'=>2,'DISPATCHED'=>3,'RECEIVED'=>4];
     $stepNames = [1=>'Solicitada',2=>'En preparación',3=>'Despachada',4=>'Recibida'];

@@ -127,6 +127,12 @@ function renderSealingConsoleInfoSection(array $__vars): void
     echo renderView('production/sealing/info_section', $__vars);
 }
 
+/** Máquina Embalaje: solo cliente, datos de embalaje y entregas (sin la configuración ni insumos de Corte y Sellado). */
+function renderPackagingConsoleInfoSection(array $__vars): void
+{
+    echo renderView('production/packaging/info_section', $__vars);
+}
+
 function renderSealingPackagingSubformSection(array $__vars): void
 {
     echo renderView('production/sealing/packaging_subform', $__vars);

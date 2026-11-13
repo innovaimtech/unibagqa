@@ -363,7 +363,7 @@ final class FabricationDossierService
              LEFT JOIN prod_worker_init pwi ON pwi.id = pwo.wok_init_id
              LEFT JOIN workers w ON w.id = pwi.win_wrkid
              LEFT JOIN workers wa ON wa.id = evt.evt_idayudante
-             WHERE pwo.wok_ag_id = :ag AND evt.evt_type = 'apertura'
+             WHERE pwo.wok_ag_id = :ag AND evt.evt_type = 'apertura' AND pwo.wok_status <> -1
              ORDER BY evt.evt_crtdat ASC"
         );
         $stmt->execute([':ag' => $agId]);

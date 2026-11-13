@@ -691,6 +691,7 @@ class TraceabilityService
             LEFT JOIN user u ON (pwo.wok_idusuario > 0 AND pwo.wok_idusuario = u.id)
             LEFT JOIN workers w_ay ON evt.evt_idayudante = w_ay.id
             WHERE ph.prd_reqid = :order_id
+              AND pwo.wok_status <> -1
             ORDER BY evt.id DESC
         ";
         $stmt = $this->pdo->prepare($sql);

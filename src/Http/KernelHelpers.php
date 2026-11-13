@@ -2084,6 +2084,19 @@ function sessionAreaPermissions(): array
 }
 
 /**
+ * Usuario de la sesión con rango de supervisor de producción: administrador (user_type 1) o grupo 31 (Supervisores),
+ * la misma regla que validateSupervisor() usa con usuario y clave.
+ */
+function sessionIsProductionSupervisor(): bool
+{
+    if ((string)($_SESSION['user_type'] ?? '') === '1') {
+        return true;
+    }
+    $groups = $_SESSION['user_groups'] ?? [];
+    return is_array($groups) && in_array(31, array_map('intval', $groups), true);
+}
+
+/**
  * Indica si un set de permisos permite acceder a un área.
  *
  * ---
@@ -2142,6 +2155,10 @@ function detectRequestedArea(string $path): string
     }
     if ($path === '/stock/inventory-counts') {
         return userCanAccessArea('ERP',sessionAreaPermissions()) ? 'ERP' : 'RECEPTION';
+    }
+    // Aceptar traspasos a la 3000: lo hace un supervisor con usuario y clave desde cualquier sesión (también Producción).
+    if (in_array($path, ['/stock/traspasos/aceptar', '/stock/traspasos/rechazar'], true)) {
+        return currentSessionArea();
     }
     if (str_starts_with($path, '/scale')) {
         return 'SCALE';

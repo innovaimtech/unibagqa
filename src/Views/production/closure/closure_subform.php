@@ -4,6 +4,7 @@
         <?php 
         $useCloseSupervisorModal = true; 
         $prodStarted = $prodService->hasWorkOrderProductionStarted($workerOtId);
+        $willDiscard = !$prodStarted && $prodService->isWorkOrderEmpty($workerOtId);
         ?>
         <?php if (!$useCloseSupervisorModal): ?>
             <div style="margin-bottom:15px">
@@ -218,8 +219,13 @@
                                 <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:6px;padding:12px 16px;color:#065F46;font-size:13px;display:flex;align-items:center;gap:10px">
                                     <i class="fa fa-info-circle" style="font-size:20px;color:#059669;flex-shrink:0"></i>
                                     <div>
+                                        <?php if ($willDiscard): ?>
+                                        <b>Esta OT no registra producción y será descartada.</b><br>
+                                        No quedará en los informes de producción.
+                                        <?php else: ?>
                                         <b>Esta orden de trabajo no registra producción iniciada</b> (0 unidades/metros/kg y sin mermas).<br>
                                         Puede terminarla directamente para liberar la máquina sin necesidad de llamar al supervisor.
+                                        <?php endif; ?>
                                     </div>
                                 </div>
                             <?php else: ?>
@@ -532,7 +538,7 @@
                         <tr>
                             <td class="tdnrm" colspan="2">
                                 <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:6px;padding:12px 16px;color:#065F46;font-size:13px">
-                                    <i class="fa fa-check-circle" style="color:#059669"></i> Esta OT no registra producción. Puede terminarla directamente sin clave de supervisor.
+                                    <i class="fa fa-check-circle" style="color:#059669"></i> <?=$willDiscard ? 'Esta OT no registra producción y será descartada.' : 'Esta OT no registra producción. Puede terminarla directamente sin clave de supervisor.'?>
                                 </div>
                             </td>
                         </tr>

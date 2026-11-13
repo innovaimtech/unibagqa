@@ -47,7 +47,7 @@ function handleProductionClosureRoutes(
             !empty($_REQUEST['confirm_bag_difference']), (string)($_REQUEST['bag_difference_reason'] ?? ''));
         if ($res['ok']) {
             $prodService->syncPulpoAgendaStats($agId);
-            $closedParam = !empty($res['without_supervisor']) ? 'closed=1&noprod=1' : 'closed=1';
+            $closedParam = !empty($res['discarded']) ? 'closed=1&noprod=1&discarded=1' : (!empty($res['without_supervisor']) ? 'closed=1&noprod=1' : 'closed=1');
             redirectResponse('/production/work-orders/active?' . $closedParam);
         } else {
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&mode=terminarot&error=' . rawurlencode((string)($res['error'] ?? 'Error al cerrar OT.')));

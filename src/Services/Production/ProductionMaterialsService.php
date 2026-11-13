@@ -1436,6 +1436,12 @@ trait ProductionMaterialsServiceTrait
                 ]);
                 $newRollId = (int)$this->trzPdo->lastInsertId();
 
+                // Código de trazabilidad en bodega para la etiqueta del sobrante.
+                RollTraceabilityEntry::syncSafe($this->trzPdo, $newRollId, $operatorName ?? '', [
+                    'order_ref' => $workerOtId > 0 ? 'OT #' . $workerOtId : null,
+                    'comments' => 'Sobrante de ' . $rollCode,
+                ]);
+
                 // Reintegrar la fracción sobrante al inventario de Bodega 3000 en ERP
                 // ya que cuando la bobina fue tomada para la OT se descontó 1 bobina completa de Bodega 3000
                 if ($leftoverUnits > 0.0) {
@@ -2826,6 +2832,12 @@ trait ProductionMaterialsServiceTrait
             ]);
 
             $childId = (int)$this->trzPdo->lastInsertId();
+
+            // Código de trazabilidad en bodega: sin esta fila la bobina impresa «no existe» para Bodega, Traspasos y Ajuste de códigos.
+            RollTraceabilityEntry::syncSafe($this->trzPdo, $childId, $operatorName, [
+                'order_ref' => 'OT #' . $workerOtId,
+                'comments' => 'Impresa desde ' . ($sourceRollCodes !== [] ? implode(', ', $sourceRollCodes) : 'OT #' . $workerOtId),
+            ]);
 
             // Evento en TRZ
             $stmtEvent = $this->trzPdo->prepare("INSERT INTO events (type, payload) VALUES (:type, :payload)");

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-// QA · Bodega → Ajuste de códigos de trazabilidad (juntar saldos y borrar). Solo SQLite en memoria.
+// QA · Bodega → Ajuste de códigos de trazabilidad (juntar saldos, borrar y ajustar cantidad). Solo SQLite en memoria.
 
 require_once __DIR__ . '/../../src/bootstrap.php';
 
@@ -21,6 +21,9 @@ $trz->exec("
 CREATE TABLE boxes (id INTEGER PRIMARY KEY AUTOINCREMENT, box_code TEXT UNIQUE, work_order_id INT, source_roll_id INT, pallet_id INT, final_sku TEXT NOT NULL, units_qty REAL NOT NULL, destination_mode TEXT NOT NULL DEFAULT 'BODEGA', customer_order_ref TEXT, warehouse_id INT, operator_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'CREATED', created_at TEXT);
 CREATE TABLE traceability_warehouse_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, traceability_code TEXT UNIQUE, batch_id TEXT, entity_type TEXT, entity_id INT, warehouse_id INT NOT NULL, warehouse_name TEXT NOT NULL, item_id INT, item_code TEXT NOT NULL, item_description TEXT NOT NULL, quantity REAL, quantity_initial REAL, unit_name TEXT, box_count INT, order_ref TEXT, operator_name TEXT NOT NULL, comments TEXT, status TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE movements (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT, entity_id INT, movement_type TEXT, from_warehouse_id INT, to_warehouse_id INT, payload TEXT);
+CREATE TABLE rolls (id INTEGER PRIMARY KEY AUTOINCREMENT, roll_code TEXT UNIQUE, sku_id INT, warehouse_id INT, weight_kg REAL, received_qty REAL, status TEXT, current_work_order_id INT, parent_roll_id INT);
+CREATE TABLE stock_transfers (id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT);
+CREATE TABLE stock_transfer_items (id INTEGER PRIMARY KEY AUTOINCREMENT, transfer_id INT, code TEXT);
 ");
 $erp = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $svc = new TraceabilityCodeAdjustService($trz, $erp);
@@ -66,7 +69,7 @@ $check('no junta CC distintos', str_contains($err(fn() => $svc->merge('BXAAAA000
 $check('no junta bodegas distintas', str_contains($err(fn() => $svc->merge('BXAAAA0001', 'BXAAAA0004', null, 'Gabriel')), 'bodegas distintas'));
 $check('no toca una caja cargada en máquina', str_contains($err(fn() => $svc->merge('BXAAAA0005', 'BXAAAA0001', null, 'Gabriel')), 'máquina'));
 $check('no toca códigos temporales del Pulpo', str_contains($err(fn() => $svc->merge('BXAAAA0006', 'BXAAAA0001', null, 'Gabriel')), 'temporal'));
-$check('no toca bobinas', str_contains($err(fn() => $svc->deleteMany(['TEL-ROLL-1'], 'IMPRESA_DE_MAS', 'Gabriel')), 'bobina'));
+$check('no junta bobinas', str_contains(TraceabilityCodeAdjustService::mergeProblem($svc->find('TEL-ROLL-1'), $a), 'bobina'));
 $check('no pasa más de lo que tiene', str_contains($err(fn() => $svc->merge('BXAAAA0001', 'BXAAAA0002', 500, 'Gabriel')), 'tiene 120'));
 $check('mismo código en origen y destino no se permite', str_contains($err(fn() => $svc->merge('BXAAAA0001', 'bxaaaa0001', null, 'Gabriel')), 'mismo'));
 $check('un error no deja nada a medias', $svc->find('BXAAAA0001')['qty'] === 120.0 && $svc->find('BXAAAA0002')['qty'] === 380.0);
@@ -114,6 +117,70 @@ $check('historial filtrado por código', count($svc->history(40, 'BXAAAA0002')) 
 $moves = (int)$trz->query("SELECT COUNT(*) FROM box_unit_moves WHERE state = 'DONE' AND worker_ot_id IS NULL")->fetchColumn();
 $check('diario de cajas: movimientos hechos y sin OT (el Pulpo no los toma)', $moves === 4, (string)$moves);
 
+// Borrar bobinas: solo las que están en bodega y nunca se usaron.
+$roll = function (string $code, string $status = 'RECEIVED', ?int $ot = null, ?int $parent = null) use ($trz): int {
+    $trz->prepare('INSERT INTO rolls (roll_code, sku_id, warehouse_id, weight_kg, received_qty, status, current_work_order_id, parent_roll_id) VALUES (?, 1, 18, 25, 1, ?, ?, ?)')
+        ->execute([$code, $status, $ot, $parent]);
+    $id = (int)$trz->lastInsertId();
+    $trz->prepare("INSERT INTO traceability_warehouse_entries (traceability_code, entity_type, entity_id, warehouse_id, warehouse_name, item_code, item_description, quantity, unit_name, operator_name, status)
+        VALUES (?, 'ROLL', ?, 16, '3000 INSUMOS', 'CUT-MAN-1', 'MANILLA', 1, 'BOB', 'QA', 'IN_WAREHOUSE')")->execute([$code, $id]);
+    $trz->prepare("INSERT INTO movements (entity_type, entity_id, movement_type, payload) VALUES ('ROLL', ?, 'RECEIPT', '{}')")->execute([$id]);
+    return $id;
+};
+$freeId = $roll('ROLL-MAN-00001');
+$roll('ROLL-MAN-00002', 'RECEIVED', 55);
+$parentId = $roll('ROLL-SE-00003');
+$roll('ROLL-MAN-00004', 'RECEIVED', null, $parentId);
+$movedId = $roll('ROLL-SE-00005');
+$trz->prepare("INSERT INTO movements (entity_type, entity_id, movement_type, payload) VALUES ('ROLL', ?, 'TRANSFER', '{}')")->execute([$movedId]);
+$roll('ROLL-SE-00006', 'CONSUMED');
+$roll('ROLL-SE-00007');
+$trz->exec("INSERT INTO stock_transfers (status) VALUES ('PENDING')");
+$trz->exec("INSERT INTO stock_transfer_items (transfer_id, code) VALUES (1, 'ROLL-SE-00007')");
+$rp = static fn(string $c): string => $svc->deleteProblem($svc->find($c));
+$check('borrar: una bobina libre en bodega se puede borrar', $rp('ROLL-MAN-00001') === '', $rp('ROLL-MAN-00001'));
+$check('borrar: no borra una bobina asignada a una OT', str_contains($rp('ROLL-MAN-00002'), 'OT'));
+$check('borrar: no borra una bobina de la que salieron otras', str_contains($rp('ROLL-SE-00003'), 'salieron'));
+$check('borrar: no borra una bobina con traspasos o cargas', str_contains($rp('ROLL-SE-00005'), 'movimientos'));
+$check('borrar: no borra una bobina consumida', $rp('ROLL-SE-00006') !== '');
+$check('borrar: no borra un código que está en un traspaso por aceptar', str_contains($rp('ROLL-SE-00007'), 'traspaso N° 1'));
+$gone = $svc->deleteMany(['roll-man-00001', 'TEL-ROLL-1'], 'IMPRESA_DE_MAS', 'Gabriel');
+$check('borrar bobinas: se borran el código, la bobina y sus movimientos', count($gone) === 2 && $svc->find('ROLL-MAN-00001') === null
+    && (int)$trz->query("SELECT COUNT(*) FROM rolls WHERE id = $freeId")->fetchColumn() === 0
+    && (int)$trz->query("SELECT COUNT(*) FROM movements WHERE entity_type = 'ROLL' AND entity_id = $freeId")->fetchColumn() === 0
+    && in_array('ROLL-MAN-00001', array_column($svc->history(10, '', 'DELETE'), 'from_code'), true));
+
+// Ajustar cantidad (solo trazabilidad).
+$box('BXEEEE0001', 100);
+$box('BXEEEE0002', 40);
+$trz->exec("INSERT INTO stock_transfer_items (transfer_id, code) VALUES (1, 'BXEEEE0002')");
+$check('ajustar: pide motivo', str_contains($err(fn() => $svc->adjustQty('BXEEEE0001', 96, '', 'Gabriel')), 'motivo'));
+$check('ajustar: «Otro» pide detalle', str_contains($err(fn() => $svc->adjustQty('BXEEEE0001', 96, 'OTRO', 'Gabriel')), 'Escribe'));
+$check('ajustar: el saldo nuevo debe ser mayor que 0', str_contains($err(fn() => $svc->adjustQty('BXEEEE0001', 0, 'CONTEO', 'Gabriel')), 'mayor que 0'));
+$check('ajustar: el mismo saldo no se guarda', str_contains($err(fn() => $svc->adjustQty('BXEEEE0001', 100, 'CONTEO', 'Gabriel')), 'ya tiene 100'));
+$check('ajustar: no toca una caja en máquina', str_contains($err(fn() => $svc->adjustQty('BXAAAA0005', 50, 'CONTEO', 'Gabriel')), 'máquina'));
+$check('ajustar: no toca códigos temporales del Pulpo', str_contains($err(fn() => $svc->adjustQty('BXAAAA0006', 5, 'CONTEO', 'Gabriel')), 'temporal'));
+$check('ajustar: no toca bobinas', str_contains($err(fn() => $svc->adjustQty('ROLL-SE-00003', 2, 'CONTEO', 'Gabriel')), 'bobina'));
+$check('ajustar: no toca un código en un traspaso por aceptar', str_contains($err(fn() => $svc->adjustQty('BXEEEE0002', 30, 'CONTEO', 'Gabriel')), 'traspaso'));
+$adj = $svc->adjustQty('bxeeee0001', 96, 'MAL_INGRESADA', 'Gabriel', 'eran 96');
+$boxE = $trz->query("SELECT * FROM boxes WHERE box_code = 'BXEEEE0001'")->fetch();
+$entE = $trz->query("SELECT * FROM traceability_warehouse_entries WHERE traceability_code = 'BXEEEE0001'")->fetch();
+$check('ajustar: etiqueta y caja quedan con el saldo nuevo (también para reimprimir)', $adj['before'] === 100.0 && $adj['after'] === 96.0
+    && (float)$entE['quantity'] === 96.0 && (float)$entE['quantity_initial'] === 96.0 && (float)$boxE['units_qty'] === 96.0 && (float)$boxE['units_initial'] === 96.0
+    && $entE['status'] === 'IN_WAREHOUSE' && str_contains((string)$entE['comments'], 'Saldo ajustado de 100 a 96'));
+$mv = $trz->query("SELECT * FROM box_unit_moves WHERE box_id = " . (int)$boxE['id'] . " ORDER BY id DESC")->fetch();
+$check('ajustar: queda en el diario de la caja', $mv !== false && $mv['kind'] === 'ADJUST' && (float)$mv['units_before'] === 100.0 && (float)$mv['units_after'] === 96.0 && $mv['state'] === 'DONE');
+$hq = $svc->history(10, '', 'QTY');
+$check('ajustar: historial con antes, después, motivo y usuario', count($hq) === 1 && (float)$hq[0]['from_before'] === 100.0 && (float)$hq[0]['from_after'] === 96.0
+    && $hq[0]['reason'] === 'MAL_INGRESADA' && $hq[0]['note'] === 'eran 96' && $hq[0]['operator_name'] === 'Gabriel');
+$check('ajustar: también sube el saldo (conteo físico)', $svc->adjustQty('BXEEEE0001', 110, 'CONTEO', 'Gabriel')['code']['qty'] === 110.0);
+$check('ajustar: no se tocó el ERP', (int)$erp->query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")->fetchColumn() === 0);
+$qtyPage = codeAdjustLayout('ajustar', '', '', codeAdjustQtyPage($svc->find('BXEEEE0001'), 'BXEEEE0001', '', 0, $svc->history(30, '', 'QTY')));
+$check('pantalla ajustar: código, saldo nuevo, motivo y botón Ajustar', str_contains($qtyPage, 'name="qty"') && str_contains($qtyPage, '>Ajustar</button>')
+    && str_contains($qtyPage, 'Cantidad mal ingresada') && str_contains($qtyPage, '100 → <b>96</b>') && str_contains($qtyPage, 'class="on" href="/stock/ajuste-codigos?tab=ajustar"'));
+$rollPage = codeAdjustQtyPage($svc->find('ROLL-SE-00003'), 'ROLL-SE-00003', '', 0, []);
+$check('pantalla ajustar: con una bobina no ofrece el formulario', !str_contains($rollPage, 'name="qty"'));
+
 // Pantallas (HTML) sin servidor.
 $box('BXCCCC0001', 15);
 $box('BXCCCC0002', 25);
@@ -123,7 +190,7 @@ $check('juntar: dos cajas escaneadas, el operador elige cuál queda', substr_cou
 $check('juntar y borrar en pestañas separadas', str_contains($merge, '?tab=borrar') && str_contains($merge, '🗑 Borrar'));
 $empty = codeAdjustLayout('borrar', '', '', codeAdjustDeletePage([], $svc->history(30, '', 'DELETE')));
 $check('borrar: casillas para escanear como Solicitudes MP (sin consultar al servidor por cada código)', str_contains($empty, 'class="ca-card ca-slots"')
-    && !str_contains($empty, 'ca-slot-count') && str_contains($empty, 'ensureEmpty()') && str_contains($empty, 'Cargar (0)') && !str_contains($empty, 'fetch(') && !str_contains($empty, 'id="ca_void"'));
+    && !str_contains($empty, 'ca-slot-count') && str_contains($empty, 'unibag-scan-slots.js') && str_contains($empty, 'Cargar (0)') && !str_contains($empty, 'fetch(') && !str_contains($empty, 'id="ca_void"'));
 $c1 = $svc->find('BXCCCC0001');
 $rowsLoaded = [['code' => 'BXCCCC0001', 'info' => $c1, 'problem' => $svc->deleteProblem($c1)],
     ['code' => 'BXAAAA0002', 'info' => $svc->find('BXAAAA0002'), 'problem' => $svc->deleteProblem($svc->find('BXAAAA0002'))],
@@ -133,7 +200,8 @@ $check('borrar: lista cargada con los que se pueden borrar y los que no (en rojo
     && str_contains($void, 'No existe.') && str_contains($void, 'Borrar (1)') && str_contains($void, 'name="codes" value="BXCCCC0001"')
     && str_contains($void, 'name="codes[]" value="BXNOEXISTE"') && !str_contains($void, 'Anular'));
 $noHelp = static fn(string $h): bool => !str_contains($h, 'placeholder=') && !str_contains($h, 'ca-sub') && !str_contains($h, 'ca-help') && !str_contains($h, 'ca-step');
-$check('sin subtítulos, textos de ayuda ni placeholders', $noHelp($merge) && $noHelp($void));
+$check('sin subtítulos, textos de ayuda ni placeholders', $noHelp($merge) && $noHelp($void) && $noHelp($qtyPage));
+$check('tres pestañas: juntar, ajustar cantidad y borrar', str_contains($merge, '⇄ Juntar') && str_contains($merge, '± Ajustar cantidad') && str_contains($merge, '🗑 Borrar'));
 $bad = codeAdjustMergePage($svc->find('BXAAAA0001'), $svc->find('BXCCCC0002'), 'BXAAAA0001', 'BXCCCC0002', '', []);
 $check('juntar: si no se pueden juntar no ofrece el botón', !str_contains($bad, 'name="keep"'));
 

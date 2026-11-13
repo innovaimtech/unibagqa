@@ -264,6 +264,10 @@ function handleWorkOrderLifecycleRoutes(
             return true;
         }
 
+        if (($foreignOwner = productionForeignOwnerBlocking($prodService, $agId, $workerId)) !== null) {
+            redirectResponse('/production/work-orders/active?err=' . rawurlencode(productionForeignOwnerMessage($foreignOwner)));
+            return true;
+        }
         $res = $prodService->startWorkerOt($agId, (int)$activeInit['id']);
         if ($res['ok']) {
             redirectResponse('/production/work-orders/operate?agid=' . $agId . '&started=1');
@@ -426,7 +430,7 @@ function handleWorkOrderLifecycleRoutes(
             $dateFilter = date('d.m.Y');
         }
 
-        $activeList = $prodService->listActiveOrdersInCourse($plantaId, $filterEquipoId, $dateFilter);
+        $activeList = productionMarkForeignActiveRows($prodService->listActiveOrdersInCourse($plantaId, $filterEquipoId, $dateFilter), $workerId);
         $activeStandby = ($activeInit !== null) ? $prodService->getActiveMachineStandby((int)$activeInit['win_equipoid'], (int)$activeInit['id']) : null;
         $activeLunch = $receptionService->getActiveOperatorLunchBreak($workerId, (int)($activeInit['id'] ?? 0), $currentOperatorName);
         renderProductionActiveOrdersScreen($activeList, $currentOperatorName, $plantaName, $activeInit, $activeStandby, $dateFilter, $activeLunch);

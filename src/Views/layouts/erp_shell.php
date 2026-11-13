@@ -183,7 +183,7 @@
         $isWh = str_starts_with($currentPath, '/warehouses');
         echo '<a class="subitem' . ($isStock ? ' active' : '') . '" href="/stock"><span>Consulta de stock</span></a>';
         echo '<a class="subitem' . ($isMatRequests ? ' active' : '') . '" href="/stock/material-requests"><span>📋 Solicitudes MP (Bodega 3000)</span></a>';
-        echo '<a class="subitem' . ($isTransfers ? ' active' : '') . '" href="/stock/transfers"><span>🔄 Traspasos a Producción</span></a>';
+        echo '<a class="subitem' . ($isTransfers ? ' active' : '') . '" href="/stock/traspasos"><span>🔄 Traspasos</span></a>';
         echo '<a class="subitem' . ($isDispatch ? ' active' : '') . '" href="/stock/dispatch"><span>🚚 Despacho</span></a>';
         echo '<a class="subitem' . ($isTrzEntry ? ' active' : '') . '" href="/stock/traceability-entry"><span>📦 Ingreso con Trazabilidad</span></a>';
         echo '<a class="subitem' . ($isTrzTree ? ' active' : '') . '" href="/stock/traceability"><span>🌳 Árbol Trazabilidad</span></a>';
@@ -225,6 +225,7 @@
         echo '<a class="subitem" href="/production/work-orders/history"><span>Histórico OTs</span></a>';
         echo '<a class="subitem" href="/cut"><span>Proceso de corte</span></a>';
         echo '<a class="subitem" href="/chemicals/weighings"><span>Pesajes de tintas</span></a>';
+        echo '<a class="subitem" href="/stock/traspasos/aceptar"><span>✅ Traspasos por aceptar</span></a>';
     }
     echo '</div>';
     echo '</div></div>';

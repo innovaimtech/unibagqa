@@ -11,6 +11,11 @@ require_once dirname(__DIR__, 2) . '/MachineKind.php';
 require_once dirname(__DIR__, 2) . '/StockLedgerService.php';
 require_once dirname(__DIR__, 2) . '/BagBoxService.php';
 require_once dirname(__DIR__, 2) . '/PulpoBagService.php';
+
+/** Estado de prod_worker_ot para una OT abierta por error y cerrada sin ninguna actividad (los informes filtran estado > 0). */
+if (!defined('UNIBAG_WORK_ORDER_DISCARDED')) {
+    define('UNIBAG_WORK_ORDER_DISCARDED', -1);
+}
 trait ProductionClosureServiceTrait
 {
     /**
@@ -211,8 +216,43 @@ trait ProductionClosureServiceTrait
     }
 
     /**
+     * OT abierta sin ninguna actividad: sin producción (hasWorkOrderProductionStarted), sin eventos aparte de la apertura
+     * (pausas, colación, mantención, mermas…), sin autocontrol, sin embalajes y sin clasificación. Al cerrarla se descarta
+     * (wok_status = UNIBAG_WORK_ORDER_DISCARDED) para que no ensucie los informes. Ante cualquier duda (error de consulta)
+     * se considera con actividad.
+     */
+    public function isWorkOrderEmpty(int $workerOtId): bool
+    {
+        if ($workerOtId <= 0 || $this->hasWorkOrderProductionStarted($workerOtId)) {
+            return false;
+        }
+        $checks = [
+            "SELECT COUNT(*) FROM prod_worker_ot_events WHERE evt_prod_worker_otid = ? AND evt_status > 0 AND evt_type <> 'apertura'",
+            'SELECT COUNT(*) FROM prod_worker_ot_autocontrol WHERE ctr_init_id = ?',
+            'SELECT COUNT(*) FROM prod_worker_embalajes WHERE evt_prod_worker_otid = ?',
+            'SELECT COUNT(*) FROM orders_classify_subproducts_inputweights WHERE prod_worker_ot_id = ?',
+        ];
+        foreach ($checks as $i => $sql) {
+            try {
+                $stmt = $this->erpPdo->prepare($sql);
+                $stmt->execute([$workerOtId]);
+                if ((int)$stmt->fetchColumn() > 0) {
+                    return false;
+                }
+            } catch (Throwable) {
+                // Los eventos son obligatorios; las demás tablas pueden no existir en algunas bases.
+                if ($i === 0) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
      * Finaliza la OT. Si ya se inició producción, requiere validación positiva de supervisor (`wok_status = 2`, `wok_enddat = time()`).
      * Si no se ha iniciado producción (p. ej. apertura por error), permite el término directo sin supervisor.
+     * Si además no tiene ninguna actividad (isWorkOrderEmpty), queda descartada (`wok_status = -1`) y su apertura anulada.
      */
     public function closeWorkOrder(int $workerOtId, string $supervisorUser = '', string $supervisorPass = '',
         bool $confirmBagDifference = false, string $bagDifferenceReason = ''): array
@@ -256,6 +296,14 @@ trait ProductionClosureServiceTrait
         }
 
         $now = time();
+        if (!$prodStarted && $this->isWorkOrderEmpty($workerOtId)) {
+            $this->erpPdo->prepare('UPDATE prod_worker_ot SET wok_status = :st, wok_enddat = :enddat WHERE id = :id')
+                ->execute([':st' => UNIBAG_WORK_ORDER_DISCARDED, ':enddat' => $now, ':id' => $workerOtId]);
+            $this->erpPdo->prepare("UPDATE prod_worker_ot_events SET evt_status = 0, evt_enddat = CASE WHEN evt_enddat > 0 THEN evt_enddat ELSE :enddat END
+                WHERE evt_prod_worker_otid = :id AND evt_type = 'apertura'")
+                ->execute([':enddat' => $now, ':id' => $workerOtId]);
+            return ['ok' => true, 'without_supervisor' => true, 'discarded' => true];
+        }
         $stmt = $this->erpPdo->prepare(
             "UPDATE prod_worker_ot
              SET wok_status = 2, wok_enddat = :enddat

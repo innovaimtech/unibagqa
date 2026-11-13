@@ -159,6 +159,12 @@ function handleProductionEventsRoutes(
             $overrideEmbalaje = (int)($machine['type_createstock_act'] ?? 0) === 1
                 ? 1 : (int)($event['overrideembalaje_act'] ?? 0);
         }
+        if ($overrideEmbalaje === 1) {
+            // Embalaje no pregunta «Quién recibe»: recibe el supervisor que autoriza el cierre.
+            $phaseActor = $phaseActor !== [] ? $phaseActor : ['worker_id' => $workerId, 'name' => $currentOperatorName];
+            $phaseActor['receiver_worker_id'] = 0;
+            $phaseActor['receiver_supervisor_login'] = trim((string)($_POST['pack_supervisor_user'] ?? ''));
+        }
 
         // Caso 1: Inicio de Tiraje de Producción (arranque de máquina)
         if ($actionType === 'start' || $submode === 'start' || ($eventId <= 0 && $submode !== 'end' && empty($_REQUEST['prod_amount']))) {
@@ -502,6 +508,10 @@ function handleProductionEventsRoutes(
         }
 
         if ($workerOtId <= 0) {
+            if (($foreignOwner = productionForeignOwnerBlocking($prodService, $agId, $workerId)) !== null) {
+                redirectResponse('/production/work-orders/active?err=' . rawurlencode(productionForeignOwnerMessage($foreignOwner)));
+                return true;
+            }
             $activeInit = $prodService->getOpenWorkerInit($workerId, $plantaId);
             if ($activeInit !== null && $agId > 0) {
                 $startRes = $prodService->startWorkerOt($agId, (int)$activeInit['id']);
@@ -618,6 +628,59 @@ function handleProductionEventsRoutes(
     return false;
 }
 
+/**
+ * Dueño de la OT en curso que impide al operador de la sesión entrar a ella (null si puede entrar).
+ *
+ * @return array{worker_ot_id:int,worker_id:int,name:string,since:int,equipo:string}|null
+ */
+function productionForeignOwnerBlocking(ProductionService $prodService, int $agId, int $workerId): ?array
+{
+    if ($agId <= 0 || sessionIsProductionSupervisor()) {
+        return null;
+    }
+    try {
+        return $prodService->findForeignOpenOwner($agId, $workerId);
+    } catch (Throwable) {
+        return null;
+    }
+}
+
+/**
+ * Marca las filas de «En Curso» que el operador de la sesión no puede abrir: OT abierta por otro operador con su turno
+ * vigente (win_status 1 o 3). El supervisor puede abrir todas. Deja en cada fila 'locked_by' (nombre) o ''.
+ *
+ * @param list<array<string,mixed>> $rows
+ * @return list<array<string,mixed>>
+ */
+function productionMarkForeignActiveRows(array $rows, int $workerId): array
+{
+    $supervisor = sessionIsProductionSupervisor();
+    foreach ($rows as &$row) {
+        $owner = (int)($row['win_wrkid'] ?? 0);
+        $foreign = !$supervisor && $owner > 0 && $owner !== $workerId && in_array((int)($row['win_status'] ?? 1), [1, 3], true);
+        $row['locked_by'] = $foreign
+            ? (trim((string)($row['wrk_firstname'] ?? '') . ' ' . (string)($row['wrk_lastname'] ?? '')) ?: ('Operador #' . $owner))
+            : '';
+    }
+    unset($row);
+    return $rows;
+}
+
+/** Botón deshabilitado en lugar de «Operar» para una OT en curso de otro operador. */
+function productionLockedOperateBadge(string $ownerName): string
+{
+    return '<span title="Solo ese operador o un supervisor pueden ingresar" style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:4px;'
+        . 'background:#E2E8F0;color:#475569;font-weight:600;font-size:12px;cursor:not-allowed;white-space:nowrap">🔒 En curso por '
+        . htmlspecialchars($ownerName, ENT_QUOTES, 'UTF-8') . '</span>';
+}
+
+/** @param array{name:string,since:int,equipo:string} $owner */
+function productionForeignOwnerMessage(array $owner): string
+{
+    return 'Esta OT está en curso por ' . $owner['name'] . ($owner['equipo'] !== '' ? ' en ' . $owner['equipo'] : '')
+        . ($owner['since'] > 0 ? ' desde las ' . date('H:i', $owner['since']) : '') . '. Solo ese operador o un supervisor pueden ingresar.';
+}
+
 function handleProductionOperateRoutes(
     string $path,
     string $method,
@@ -647,6 +710,13 @@ function handleProductionOperateRoutes(
 
         if ($agId <= 0) {
             redirectResponse('/production/work-orders/new');
+            return true;
+        }
+
+        // Una OT en curso de otro operador (con su turno vigente) solo la abre él o un supervisor.
+        $foreignOwner = productionForeignOwnerBlocking($prodService, $agId, $workerId);
+        if ($foreignOwner !== null) {
+            redirectResponse('/production/work-orders/active?err=' . rawurlencode(productionForeignOwnerMessage($foreignOwner)));
             return true;
         }
 
