@@ -721,7 +721,9 @@ function unibagRenderLegacyErpHomePage(ReceptionService $service): void
     $body .= '<div class="erp-prod-muted">Sesión: <strong>' . h($userLabel) . '</strong></div>';
     $body .= '<div class="row" style="margin-top:12px;gap:10px;flex-wrap:wrap">';
     $body .= '<a class="btn secondary" href="/reports/production-dashboard">Dashboard Producción</a>';
-    $body .= '<a class="btn secondary" href="/bonificaciones?view=bonoflexo">Bonoflexo</a>';
+    if (canViewProductionBonuses()) {
+        $body .= '<a class="btn secondary" href="/bonificaciones?view=bonoflexo">Bonoflexo</a>';
+    }
     $body .= '<a class="btn secondary" href="/reception">Recepción de Bobinas</a>';
     $body .= '</div>';
     $body .= '</div>';

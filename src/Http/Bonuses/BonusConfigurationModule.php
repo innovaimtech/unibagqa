@@ -23,6 +23,16 @@ function bonusFilterStyles(): string
     return '';
 }
 
+/**
+ * Quién ve el botón y las pantallas de Bonificaciones (bonos de producción): solo Javier Perozo (4129) y Héctor Matus
+ * (4077), por su usuario exacto del ERP (no por nombre: otro trabajador puede llamarse igual). Misma regla que el bono
+ * de mantención.
+ */
+function canViewProductionBonuses(): bool
+{
+    return canManageMaintenanceBonus();
+}
+
 function canEditBonusConfiguration(): bool
 {
     return unibagIsAuthenticated() && unibagCanUserPerformModifications();

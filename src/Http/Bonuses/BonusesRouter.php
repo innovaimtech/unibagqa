@@ -39,6 +39,12 @@ function handleBonusesRoutes(string $path, string $method, PDO $erpPdo, ?PDO $tr
 // Nota: el cálculo de período 26–25 y la consulta ERP para Flexo están encapsulados en
 // ReceptionService (getBonusPeriodByMonthFinal / listErpFlexoProductionForBonusPeriod).
 // =============================================================================
+// Los bonos de producción solo los ven Javier y Héctor (misma identidad que unibagCanUserPerformModifications).
+if (str_starts_with($path, '/bonificaciones') && !canViewProductionBonuses()) {
+    http_response_code(403);
+    render('Bonificaciones', '<div class="card"><b>Sin acceso</b><p>Los bonos de producción solo están disponibles para Javier y Héctor.</p></div>');
+    exit;
+}
 if (handleMaintenanceBonusRoutes($path, $method, $erpPdo, $trzPdo)) {
     exit;
 }

@@ -91,7 +91,9 @@
         echo $link('/', 'Dashboard', $activeModule === 'dashboard');
         echo $link('/reception', 'Recepción', $activeModule === 'reception');
         echo $link('/reports/operator-waste', 'Informes', $activeModule === 'reports');
-        echo $link('/bonificaciones', 'Bonificaciones', $activeModule === 'bonificaciones');
+        if (function_exists('canViewProductionBonuses') && canViewProductionBonuses()) {
+            echo $link('/bonificaciones', 'Bonificaciones', $activeModule === 'bonificaciones');
+        }
         echo $link('/stock', 'Bodega', $activeModule === 'warehouses');
         echo $link('/reports/inventory', 'Inventario', $activeModule === 'inventory');
         echo $link('/trazabilidad', 'Trazabilidad', $activeModule === 'traceability');
